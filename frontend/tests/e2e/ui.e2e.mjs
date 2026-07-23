@@ -68,16 +68,28 @@ check('변환 완료', done, `${Math.round((Date.now() - t0) / 1000)}s`);
 if (!done) { await page.screenshot({ path: path.join(OUT, 'fail-not-done.png') }); }
 
 // ── 1.5) 읽기 탭 — 완료된 잡의 기본 뷰 ──────────────────────────────────
-await page.waitForTimeout(800);
+await page.waitForTimeout(1200);
 const reader = await page.evaluate(() => ({
   active: !!document.querySelector('button[data-tab="reader"].active'),
   textLen: (document.getElementById('reader-content')?.innerText || '').length,
   img: !!document.getElementById('reader-image')?.getAttribute('src'),
   total: document.getElementById('reader-total')?.textContent || '',
+  cards: document.querySelectorAll('#reader-content .reader-map-card').length,
+  boxes: document.querySelectorAll('#reader-map-overlay .reader-map-box').length,
 }));
 check('읽기 탭: 완료 시 기본 활성', reader.active, JSON.stringify(reader));
 check('읽기 탭: 현재 페이지 본문 렌더', reader.textLen > 20);
 check('읽기 탭: 페이지 이미지 로드', reader.img);
+if (layoutCap !== 'figure_only') {
+  check('읽기 탭: 원문 bbox와 텍스트 블록 수 일치',
+    reader.cards > 0 && reader.cards === reader.boxes, JSON.stringify(reader));
+  await page.locator('#reader-content .reader-map-card').first().click();
+  check('읽기 탭: 번역/본문 클릭 → 원문 bbox 활성', await page.evaluate(() => {
+    const card = document.querySelector('#reader-content .reader-map-card.is-active');
+    const box = document.querySelector('#reader-map-overlay .reader-map-box.is-active');
+    return !!card && !!box && card.dataset.blockId === box.dataset.blockId;
+  }));
+}
 await page.screenshot({ path: path.join(OUT, 'reader.png') });
 
 // ── 2) 미리보기 렌더 ────────────────────────────────────────────────────
@@ -123,10 +135,10 @@ const layout = await page.evaluate(() => ({
 }));
 if (layoutCap === 'figure_only') {
   check('레이아웃 탭: figure_only 안내 카드(캔버스 없음)', layout.card && !layout.canvas, JSON.stringify(layout));
-  check('레이아웃 HTML 버튼 숨김(figure_only)', await page.evaluate(() => document.getElementById('dl-layout').hidden));
 } else {
   check('레이아웃 탭: 좌표 캔버스', layout.canvas && !layout.card, JSON.stringify(layout));
 }
+check('중복 레이아웃 HTML 버튼 제거', await page.evaluate(() => !document.getElementById('dl-layout')));
 await page.screenshot({ path: path.join(OUT, 'layout-tab.png') });
 
 // ── 5) Markdown 탭 + 다크 테마 ──────────────────────────────────────────
@@ -169,6 +181,14 @@ if (VERIFY_MOCK_LLM) {
       && link.getAttribute('download')?.endsWith('.ko.html');
   }));
   check('mock 번역: PDF 버튼 노출', await page.evaluate(() => !document.getElementById('dl-pdf').hidden));
+  await page.click('button[data-tab="reader"]');
+  await page.waitForFunction(() =>
+    document.querySelectorAll('#reader-content .reader-map-card').length > 0);
+  check('mock 번역: 오른쪽 한국어 rail + 왼쪽 원문 고정', await page.evaluate(() => {
+    const text = document.getElementById('reader-content')?.innerText || '';
+    const image = document.getElementById('reader-image')?.getAttribute('src') || '';
+    return /[가-힣]/.test(text) && !image.includes('lang=ko');
+  }));
 
   const htmlDownloadPromise = page.waitForEvent('download');
   await page.click('#dl-doc-ko');

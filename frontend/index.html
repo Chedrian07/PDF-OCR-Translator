@@ -242,14 +242,14 @@
         <!-- Result -->
         <section id="result-section" class="result-section" hidden>
           <div class="result-actions">
-            <a id="dl-md" class="btn btn-primary" download>Markdown 다운로드</a>
-            <a id="dl-zip" class="btn btn-secondary" download>ZIP 다운로드 (이미지 포함)</a>
-            <a id="dl-doc" class="btn btn-secondary" download>HTML (원문)</a>
+            <span class="result-actions-label">EXPORT</span>
+            <a id="dl-doc" class="btn btn-primary" download>원본 HTML</a>
             <!-- 번역 완료 잡에만 노출 — 현재 보기 언어와 무관하게 한국어 파일을 명시 제공 -->
-            <a id="dl-doc-ko" class="btn btn-secondary" download hidden>HTML (한국어)</a>
-            <a id="dl-layout" class="btn btn-secondary" download>레이아웃 HTML</a>
+            <a id="dl-doc-ko" class="btn btn-primary" download hidden>한국어 HTML</a>
             <!-- 번역 완료(+레이아웃 있음) 잡에만 노출 — JS(applyPdfExport)가 표시/숨김 -->
-            <a id="dl-pdf" class="btn btn-secondary" download hidden>PDF (한국어)</a>
+            <a id="dl-pdf" class="btn btn-primary" download hidden>한국어 PDF</a>
+            <a id="dl-md" class="btn btn-secondary" download>Markdown</a>
+            <a id="dl-zip" class="btn btn-secondary" download>전체 ZIP</a>
 
             <!-- 한국어 번역 컨트롤 (완료된 잡에만 노출; JS가 버튼/진행/토글을 교체) -->
             <div id="translate-controls" class="translate-controls">
@@ -284,9 +284,10 @@
           </div>
 
           <div class="tab-panels">
-            <!-- 읽기(리더) — 완료된 잡의 기본 뷰: 좌측 원본 페이지 + 우측 해당 페이지 본문 -->
+            <!-- 읽기(리더) — 좌측 원문 좌표 기준면 + 우측 페이지별 번역 블록 -->
             <div class="tab-panel" role="tabpanel" data-panel="reader">
               <div class="reader-bar">
+                <span class="reader-bar-label">PAGE</span>
                 <button id="reader-prev" class="pager-btn" type="button" aria-label="이전 페이지" disabled>◀</button>
                 <label class="reader-page-field">
                   <input id="reader-page" type="number" min="1" step="1" value="1" inputmode="numeric" aria-label="페이지 번호">
@@ -298,7 +299,6 @@
                 <button id="reader-zoom-out" class="btn btn-small" type="button" aria-label="페이지 축소">−</button>
                 <button id="reader-zoom-in" class="btn btn-small" type="button" aria-label="페이지 확대">＋</button>
                 <button id="reader-fit-width" class="btn btn-small" type="button">너비 맞춤</button>
-                <button id="reader-open-qa" class="btn btn-small" type="button">AI 질문</button>
                 <!-- 번역 전 CTA — 기존 번역 시작 경로(startTranslate)로 위임 (JS가 표시/숨김) -->
                 <button id="reader-translate-btn" class="btn btn-primary reader-cta" type="button" hidden>한국어로 읽기</button>
               </div>
@@ -306,37 +306,47 @@
                 <div class="reader-document">
                   <div class="reader-document-head">
                     <div>
-                      <span class="reader-eyebrow">PDF FACSIMILE</span>
-                      <strong id="reader-visual-label">원본 페이지 그대로</strong>
+                      <span class="reader-eyebrow">SOURCE COORDINATES</span>
+                      <strong id="reader-visual-label">원문 PDF · 좌표 기준면</strong>
                     </div>
-                    <span class="reader-fidelity-badge">레이아웃 보존</span>
+                    <span class="reader-fidelity-badge">원문 고정</span>
                   </div>
                   <div id="reader-page-pane" class="reader-page-pane">
-                    <img id="reader-image" alt="현재 PDF 페이지" draggable="false">
+                    <div id="reader-page-stage" class="reader-page-stage">
+                      <img id="reader-image" alt="현재 원문 PDF 페이지" draggable="false">
+                      <div id="reader-map-overlay" class="reader-map-overlay" aria-label="원문 블록 위치"></div>
+                    </div>
                   </div>
                 </div>
-                <aside class="reader-research" aria-label="논문 연구 도구">
+                <aside class="reader-research" aria-label="번역문과 원문 위치 매핑">
                   <div class="reader-research-head">
-                    <span class="reader-eyebrow">RESEARCH TOOLS</span>
-                    <h3>읽으면서 바로 이해하기</h3>
-                    <p>텍스트를 선택해 설명·하이라이트·인용으로 연결할 수 있습니다.</p>
+                    <span class="reader-eyebrow">TRANSLATION RAIL</span>
+                    <h3 id="reader-rail-title">원문 위치와 연결된 한국어</h3>
+                    <p>문단을 가리키거나 누르면 왼쪽 원문의 정확한 OCR 영역을 표시합니다.</p>
+                    <div class="reader-map-legend" aria-hidden="true">
+                      <span><i class="legend-dot"></i> 좌표 연결</span>
+                      <span><i class="legend-dot legend-dot-active"></i> 현재 블록</span>
+                    </div>
                   </div>
-                  <div class="reader-tool-grid">
-                    <button id="reader-summary" class="reader-tool" type="button">페이지 요약</button>
-                    <button id="reader-explain" class="reader-tool" type="button" disabled>선택 설명</button>
-                    <button id="reader-highlight" class="reader-tool" type="button" disabled>하이라이트</button>
-                    <button id="reader-cite" class="reader-tool" type="button" disabled>인용 저장</button>
-                  </div>
-                  <p id="reader-selection" class="reader-selection">오른쪽 텍스트에서 문장을 선택하세요.</p>
                   <details class="reader-outline-wrap" open>
                     <summary>문서 개요</summary>
                     <nav id="reader-outline" class="reader-outline" aria-label="문서 개요"></nav>
                   </details>
                   <div class="reader-text-head">
-                    <strong>현재 페이지 텍스트</strong>
-                    <span id="reader-activity">하이라이트 0 · 인용 0</span>
+                    <strong id="reader-map-status">좌표 연결 준비 중</strong>
+                    <span id="reader-activity">0개 블록</span>
                   </div>
                   <div id="reader-content" class="markdown-body reader-content"></div>
+                  <details class="reader-tools-wrap">
+                    <summary>선택 문장 도구</summary>
+                    <div class="reader-tool-grid">
+                      <button id="reader-summary" class="reader-tool" type="button">페이지 요약</button>
+                      <button id="reader-explain" class="reader-tool" type="button" disabled>선택 설명</button>
+                      <button id="reader-highlight" class="reader-tool" type="button" disabled>하이라이트</button>
+                      <button id="reader-cite" class="reader-tool" type="button" disabled>인용 저장</button>
+                    </div>
+                    <p id="reader-selection" class="reader-selection">오른쪽 텍스트에서 문장을 선택하세요.</p>
+                  </details>
                 </aside>
               </div>
             </div>

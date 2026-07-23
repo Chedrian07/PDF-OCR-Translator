@@ -19,6 +19,7 @@ from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
     PlainTextResponse,
+    RedirectResponse,
     Response,
     StreamingResponse,
 )
@@ -585,32 +586,21 @@ def _try_facsimile_pages(job, pages: list, lang: str | None, settings) -> Path |
 
 
 @router.get("/jobs/{job_id}/layout.html")
-def job_layout_download(request: Request, job_id: str, lang: str | None = None) -> HTMLResponse:
-    """PDF facsimile standalone HTML — 완성 페이지와 검색용 OCR 텍스트를 인라인.
-
-    원문은 source.pdf 렌더 페이지, 번역본은 export.{lang}.pdf 렌더 페이지를
-    기준면으로 사용하므로 브라우저 폰트가 원본 좌표를 다시 조판하지 않는다.
-    """
-    from urllib.parse import quote
-
-    job = _get_job(request, job_id)
+def job_layout_download(
+    request: Request,
+    job_id: str,
+    lang: str | None = None,
+) -> RedirectResponse:
+    """구버전 레이아웃 HTML URL을 정식 document.html 내보내기로 통합한다."""
+    _get_job(request, job_id)
+    suffix = ""
     if lang is not None:
         _check_lang(lang)
-    pages = _load_layout_pages(job, lang)
-    st = _state(request)
-    pages_dir = _try_facsimile_pages(job, pages, lang, st.settings)
-    stem = Path(job.filename).stem or "document"
-    html = render_layout_standalone(
-        pages, job.dir, stem, st.settings.resolve_frontend_dir(), lang=lang,
-        pages_dir=pages_dir,
-        facsimile=pages_dir is not None,
+        suffix = f"?lang={lang}"
+    return RedirectResponse(
+        url=f"/api/jobs/{job_id}/document.html{suffix}",
+        status_code=307,
     )
-    suffix = f".{lang}" if lang else ""
-    fname = f"{stem}{suffix}.layout.html"
-    return HTMLResponse(html, headers={
-        "Content-Disposition":
-            f"attachment; filename=\"document{suffix}.layout.html\"; filename*=UTF-8''{quote(fname)}",
-    })
 
 
 @router.get("/jobs/{job_id}/document.html")
@@ -729,6 +719,110 @@ def job_page_image(
     if not path.is_file():
         raise HTTPException(404, "페이지 이미지를 찾을 수 없습니다")
     return FileResponse(path, media_type="image/png")
+
+
+def _alignment_bbox(value) -> list[float] | None:
+    """Unlimited-OCR의 0..999 bbox를 안전한 클라이언트 좌표로 정규화한다."""
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        coords = [float(v) for v in value]
+    except (TypeError, ValueError):
+        return None
+    if not all(v == v and abs(v) != float("inf") for v in coords):
+        return None
+    x1, y1, x2, y2 = (min(1000.0, max(0.0, v)) for v in coords)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _layout_page(pages: list, page_number: int) -> dict | None:
+    for page in pages:
+        if isinstance(page, dict) and page.get("page") == page_number:
+            return page
+    return None
+
+
+@router.get("/jobs/{job_id}/alignment")
+def job_alignment(
+    request: Request,
+    job_id: str,
+    page: int = 1,
+    lang: str | None = None,
+) -> dict:
+    """원문 PDF bbox와 같은 인덱스의 번역 블록을 리더용으로 연결한다.
+
+    번역 파이프라인은 layout.json을 깊은 복사한 뒤 content만 교체한다. 이 계약을
+    요청 시 다시 검증해, 순서가 어긋난 번역을 잘못된 원문 위치에 표시하지 않는다.
+    """
+    if page < 1:
+        raise HTTPException(422, "페이지 번호는 1 이상이어야 합니다")
+    job = _get_job(request, job_id)
+    if lang is not None:
+        _check_lang(lang)
+
+    source_pages = _load_layout_pages(job)
+    source_page = _layout_page(source_pages, page)
+    if source_page is None:
+        raise HTTPException(404, "페이지를 찾을 수 없습니다")
+
+    target_page = source_page
+    if lang is not None:
+        target_pages = _load_layout_pages(job, lang)
+        target_page = _layout_page(target_pages, page)
+        if target_page is None:
+            raise HTTPException(409, "번역 레이아웃의 페이지 대응이 올바르지 않습니다")
+
+    source_blocks = source_page.get("blocks")
+    target_blocks = target_page.get("blocks")
+    if not isinstance(source_blocks, list) or not isinstance(target_blocks, list):
+        raise HTTPException(500, "레이아웃 블록 데이터가 올바르지 않습니다")
+    if len(source_blocks) != len(target_blocks):
+        raise HTTPException(409, "원문과 번역 레이아웃의 블록 대응이 올바르지 않습니다")
+
+    aligned = []
+    for index, (source, target) in enumerate(zip(source_blocks, target_blocks)):
+        if not isinstance(source, dict) or not isinstance(target, dict):
+            continue
+        bbox = _alignment_bbox(source.get("bbox"))
+        if bbox is None:
+            continue
+        source_type = str(source.get("type") or "text")
+        target_type = str(target.get("type") or "text")
+        if source_type != target_type or target.get("bbox") != source.get("bbox"):
+            if lang is not None:
+                raise HTTPException(
+                    409,
+                    "원문과 번역 레이아웃의 좌표 대응이 올바르지 않습니다",
+                )
+            continue
+        source_text = str(source.get("content") or "").strip()
+        target_text = str(target.get("content") or "").strip()
+        if not source_text and not target_text:
+            continue
+        visibly_translated = (
+            lang is not None
+            and " ".join(target_text.split()) != " ".join(source_text.split())
+        )
+        aligned.append({
+            "id": f"p{page}-b{index}",
+            "index": index,
+            "type": source_type,
+            "bbox": bbox,
+            "source": source_text,
+            "target": target_text or source_text,
+            "translated": visibly_translated,
+        })
+
+    return {
+        "page": page,
+        "width": source_page.get("width"),
+        "height": source_page.get("height"),
+        "bbox_space": 1000,
+        "lang": lang or "orig",
+        "blocks": aligned,
+    }
 
 
 @router.get("/jobs/{job_id}/outline")

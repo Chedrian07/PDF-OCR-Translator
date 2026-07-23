@@ -540,9 +540,13 @@ OCR로 얻은 **데이터 레이어**(`result.md` + `layout.json`)를 OpenAI 호
 - API 레이어는 `run_translation`만 안다. 진행률은 `progress(current,total)` 콜백,
   중단은 `threading.Event` cancel로 통신(OCR 워커와 동일 패턴).
 - `/html?lang=ko`는 흐름형 읽기 텍스트를 제공한다. `/document.html`,
-  `/layout?lang=ko`, `/layout.html?lang=ko`, `/page/{n}?lang=ko`는 동일한 번역
-  PDF 페이지를 기준면으로 사용한다. `lang="ko"`는 흐름형 텍스트의 CJK 줄바꿈과
-  투명 OCR 텍스트 레이어의 접근성 언어를 지정한다.
+  `/layout?lang=ko`, `/page/{n}?lang=ko`는 동일한 번역 PDF 페이지를 기준면으로
+  사용한다. 정식 standalone 내보내기는 `/document.html` 하나이며, 구버전
+  `/layout.html`은 이 경로로 307 리다이렉트한다.
+- 읽기 탭은 왼쪽 `/page/{n}` 원문을 고정하고
+  `/alignment?page={n}&lang=ko`의 블록 인덱스와 bbox로 오른쪽 한국어 문단을
+  양방향 연결한다. 따라서 번역 PDF 재조판 결과가 아니라 OCR 원문의 실제 위치를
+  항상 가리킨다.
 
 ### 13.2 파일 계약 (`{job_dir}/`)
 
@@ -586,8 +590,11 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
 - **기존 라우트의 `?lang=` 쿼리** (미지정이면 원본 동작 그대로, 지원 외 언어는 400):
   - `/markdown?lang=ko`·`/html?lang=ko` → `result.{lang}.md` 사용(없으면 404 "한국어 번역본이
     없습니다 — 먼저 번역을 실행하세요"), `X-Partial` 헤더 없음.
-  - `/layout?lang=ko`·`/layout.html?lang=ko` → `layout.{lang}.json` 로드(없으면 동일 404).
-    `layout.html?lang=ko` 파일명은 `{stem}.ko.layout.html`.
+  - `/layout?lang=ko` → `layout.{lang}.json` 로드(없으면 동일 404).
+  - `/layout.html?lang=ko` → `/document.html?lang=ko`로 307 리다이렉트(레거시 호환).
+  - `/alignment?page=1&lang=ko` → 원문/번역 페이지·블록 수, type, bbox 불변식을
+    검증한 뒤 `{id,index,type,bbox,source,target,translated}` 배열 반환. 대응이
+    손상된 번역 레이아웃은 잘못 표시하지 않고 409.
   - `/archive` → `result.md`와 함께 `result.*.md`(예: `result.ko.md`)를 zip에 포함.
 
 ### 13.4 불변식

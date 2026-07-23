@@ -27,12 +27,6 @@ def _make_fake(*, gate: threading.Event | None = None, wait_cancel: bool = False
     wait_cancel: True면 cancel 이벤트를 기다렸다가 취소로 종료.
     """
     md = "# 번역본\n\n안녕하세요. 번역된 문서입니다.\n"
-    layout = [{
-        "page": 1, "width": 1000, "height": 1414,
-        "blocks": [{"type": "text", "bbox": [20, 20, 980, 120],
-                    "content": "안녕하세요", "fs": 1.8, "fonts_v": 9999}],
-    }]
-
     def fake(job_dir, lang, cfg, *, page_separator="\n\n---\n\n",
              progress=None, cancel=None, force=False, client=None):
         job_dir = Path(job_dir)
@@ -69,6 +63,16 @@ def _make_fake(*, gate: threading.Event | None = None, wait_cancel: bool = False
             progress(total, total)
 
         (job_dir / f"result.{lang}.md").write_text(md, encoding="utf-8")
+        # 실제 번역 계약처럼 원문 레이아웃을 깊은 복사하고 content만 바꾼다.
+        layout = json.loads((job_dir / "layout.json").read_text(encoding="utf-8"))
+        first = True
+        for page in layout:
+            for block in page.get("blocks", []):
+                content = str(block.get("content") or "").strip()
+                if not content:
+                    continue
+                block["content"] = "안녕하세요" if first else f"번역본 {content}"
+                first = False
         (job_dir / f"layout.{lang}.json").write_text(
             json.dumps(layout, ensure_ascii=False), encoding="utf-8")
         write_state(status="done", current=total, total=total,
@@ -231,11 +235,12 @@ def test_translated_output_routes(client, sample_pdf, provider_env, monkeypatch)
     assert 'lang="ko"' in layout.text
     assert 'class="doclayout-body"' in layout.text
 
-    dl = client.get(f"/api/jobs/{jid}/layout.html?lang=ko")
-    assert dl.status_code == 200
-    assert dl.text.startswith("<!doctype html>")
-    assert 'lang="ko"' in dl.text
-    assert ".ko.layout.html" in dl.headers["content-disposition"]
+    legacy = client.get(
+        f"/api/jobs/{jid}/layout.html?lang=ko",
+        follow_redirects=False,
+    )
+    assert legacy.status_code == 307
+    assert legacy.headers["location"] == f"/api/jobs/{jid}/document.html?lang=ko"
 
     document = client.get(f"/api/jobs/{jid}/document.html?lang=ko")
     assert document.status_code == 200
@@ -244,6 +249,27 @@ def test_translated_output_routes(client, sample_pdf, provider_env, monkeypatch)
     assert "번역본" in document.text
     assert ".ko.html" in document.headers["content-disposition"]
     assert f"/api/jobs/{jid}" not in document.text
+
+    alignment = client.get(f"/api/jobs/{jid}/alignment?page=1&lang=ko")
+    assert alignment.status_code == 200
+    blocks = alignment.json()["blocks"]
+    assert blocks
+    assert any(block["translated"] for block in blocks)
+    assert all(block["source"] for block in blocks)
+    assert all(block["target"] for block in blocks)
+
+    # 좌표가 달라진 손상 번역 레이아웃은 잘못 매핑하지 않고 명시적으로 거부한다.
+    job = client.app.state.store.get(jid)
+    translated_layout = json.loads(
+        (job.dir / "layout.ko.json").read_text(encoding="utf-8")
+    )
+    translated_layout[0]["blocks"][0]["bbox"][0] += 1
+    (job.dir / "layout.ko.json").write_text(
+        json.dumps(translated_layout, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    broken = client.get(f"/api/jobs/{jid}/alignment?page=1&lang=ko")
+    assert broken.status_code == 409
 
 
 # ── 4. 400 잘못된 lang / 409 미완료 잡 / 503 env 미설정 ────────────────────

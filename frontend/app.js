@@ -402,12 +402,64 @@ export function clampReaderPage(n, total) {
   return clampQaPage(n, total);
 }
 
-// 리더 페이지 이미지 URL — 서버가 원문/번역 PDF와 동일한 최종 페이지를 보장한다.
-export function readerImageUrl(jobId, page, lang = 'orig') {
+// 리더 왼쪽은 번역 언어와 무관하게 원문 PDF를 좌표 기준면으로 고정한다.
+// 한국어는 오른쪽 alignment rail에 표시하므로 bbox가 가리키는 대상이 바뀌지 않는다.
+export function readerImageUrl(jobId, page, _lang = 'orig') {
   let n = Math.floor(Number(page));
   if (!Number.isFinite(n) || n < 1) n = 1;
-  const suffix = lang === 'ko' ? '?lang=ko' : '';
-  return `/api/jobs/${jobId}/page/${n}${suffix}`;
+  return `/api/jobs/${jobId}/page/${n}`;
+}
+
+// 서버 alignment 응답의 bbox(0..bbox_space)를 퍼센트 좌표로 변환한다.
+// 잘못된 값은 null로 제거해 DOM style 주입과 화면 밖 오버레이를 함께 차단한다.
+export function alignmentRect(bbox, bboxSpace = 1000) {
+  if (!Array.isArray(bbox) || bbox.length !== 4) return null;
+  const space = Number(bboxSpace);
+  if (!Number.isFinite(space) || space <= 0) return null;
+  const values = bbox.map(Number);
+  if (!values.every(Number.isFinite)) return null;
+  const [rawX1, rawY1, rawX2, rawY2] = values;
+  const clamp = (v) => Math.min(space, Math.max(0, v));
+  const x1 = clamp(rawX1);
+  const y1 = clamp(rawY1);
+  const x2 = clamp(rawX2);
+  const y2 = clamp(rawY2);
+  if (x2 <= x1 || y2 <= y1) return null;
+  const pct = (v) => Math.round(((v / space) * 100) * 1_000_000) / 1_000_000;
+  return {
+    left: pct(x1),
+    top: pct(y1),
+    width: pct(x2 - x1),
+    height: pct(y2 - y1),
+  };
+}
+
+export function normalizeAlignmentPayload(payload) {
+  const data = payload && typeof payload === 'object' ? payload : {};
+  const space = Number(data.bbox_space) || 1000;
+  const blocks = [];
+  for (const raw of Array.isArray(data.blocks) ? data.blocks : []) {
+    if (!raw || typeof raw !== 'object') continue;
+    const rect = alignmentRect(raw.bbox, space);
+    const id = String(raw.id || '');
+    const source = String(raw.source || '').trim();
+    const target = String(raw.target || '').trim();
+    if (!id || !rect || (!source && !target)) continue;
+    blocks.push({
+      id,
+      index: Number.isFinite(Number(raw.index)) ? Number(raw.index) : blocks.length,
+      type: String(raw.type || 'text'),
+      source,
+      target: target || source,
+      translated: raw.translated === true,
+      rect,
+    });
+  }
+  return {
+    page: Math.max(1, Math.floor(Number(data.page) || 1)),
+    lang: data.lang === 'ko' ? 'ko' : 'orig',
+    blocks,
+  };
 }
 
 // PDF(한국어) 내보내기 버튼 노출 판정.
@@ -573,7 +625,7 @@ const state = {
   translateEs: null,        // 번역 진행 EventSource
   translatePollTimer: 0,    // SSE 불가/실패 시 state 폴링 폴백
   translateSseErrors: 0,
-  resultUrls: null,         // { markdown, archive, layoutHtml, pdf } — 언어별 다운로드 빌드용
+  resultUrls: null,         // { markdown, archive, documentHtml, pdf } — 다운로드 빌드용
   currentBaseName: 'document',
   resultHasLayout: undefined, // r.has_layout(+figure_only 판정 반영) — PDF 내보내기 가드
   // 읽기(리더) 탭 (완료 잡 기본 뷰 — 잡 전환 시 resetReaderForJob)
@@ -581,6 +633,9 @@ const state = {
   readerTotalHint: 0,       // 잡의 총 페이지 힌트 (result.pages → progress.total_pages, 0 = 미상)
   readerPages: { orig: null, ko: null }, // 언어별 페이지 섹션 캐시 [{page, html}]
   readerOutline: { orig: null, ko: null }, // layout title 블록 기반 목차
+  readerAlignments: { orig: new Map(), ko: new Map() }, // page -> 정규화된 bbox/본문 연결
+  readerAlignmentPending: new Set(), // `${lang}:${page}` 중복 fetch 방지
+  readerActiveBlock: '',    // 클릭으로 고정한 현재 대응 블록 id
   readerSelection: '',      // 현재 페이지 텍스트에서 선택한 문장
   readerHighlights: [],     // 세션 내 하이라이트 [{page,lang,text}]
   readerCitations: [],      // 세션 내 인용 [{page,lang,text}]
@@ -666,7 +721,6 @@ const EL_IDS = {
   dlZip: 'dl-zip',
   dlDoc: 'dl-doc',
   dlDocKo: 'dl-doc-ko',
-  dlLayout: 'dl-layout',
   dlPdf: 'dl-pdf',
   readerPrev: 'reader-prev',
   readerNext: 'reader-next',
@@ -675,11 +729,14 @@ const EL_IDS = {
   readerZoomOut: 'reader-zoom-out',
   readerZoomIn: 'reader-zoom-in',
   readerFitWidth: 'reader-fit-width',
-  readerOpenQa: 'reader-open-qa',
   readerTranslateBtn: 'reader-translate-btn',
   readerPagePane: 'reader-page-pane',
+  readerPageStage: 'reader-page-stage',
   readerImage: 'reader-image',
+  readerMapOverlay: 'reader-map-overlay',
   readerVisualLabel: 'reader-visual-label',
+  readerRailTitle: 'reader-rail-title',
+  readerMapStatus: 'reader-map-status',
   readerSummary: 'reader-summary',
   readerExplain: 'reader-explain',
   readerHighlight: 'reader-highlight',
@@ -2127,11 +2184,9 @@ async function onJobDone(id, data) {
       markdown: data.markdown_url,
       archive: data.archive_url,
       documentHtml: `/api/jobs/${id}/document.html`,
-      layoutHtml: `/api/jobs/${id}/layout.html`,
       pdf: `/api/jobs/${id}/pdf?lang=ko`,
     };
     applyDownloadLangs();
-    el.dlLayout.hidden = false; // 엔진 메타 없는 최소 경로 — 이전 잡의 숨김 상태 잔류 방지
     renderThumbGrid(el.layoutsGrid, [], '레이아웃 이미지를 불러오지 못했습니다.');
     renderThumbGrid(el.pagesGrid, [], '페이지 이미지를 불러오지 못했습니다.');
     state.previewLoaded = false;
@@ -2203,9 +2258,6 @@ function renderResult(job) {
   // 리더 총 페이지 힌트 — 결과의 원본 페이지 목록 우선, 없으면 진행 스냅샷 (0 = 미상)
   state.readerTotalHint = (Array.isArray(r.pages) && r.pages.length) ||
     Number((job.progress || {}).total_pages) || 0;
-  // figure_only 엔진의 standalone layout.html은 본문 없는 빈 캔버스라 내보내기 구실을
-  // 못 한다 — HTML 내보내기는 모든 엔진에서 동작하는 document.html(HTML 다운로드)이
-  // 담당하고, 레이아웃 버튼은 이 엔진에선 숨긴다(기능이 완전히 대체됨).
   const figOnlyLayout = docLayoutIsFigureOnly(
     state.layoutCapability, state.currentJobEngine, state.healthEngine,
   );
@@ -2217,19 +2269,10 @@ function renderResult(job) {
     markdown: r.markdown_url,
     archive: r.archive_url,
     documentHtml: `/api/jobs/${job.job_id}/document.html`,
-    // 레이아웃 기능 이전에 변환된 옛 잡(layout.json 없음)은 /layout.html이 404 —
-    // 눌러도 조용히 실패하는 버튼 대신 비활성화한다 (has_layout 미제공 구버전 응답은 허용)
-    layoutHtml: (noLayoutData || figOnlyLayout) ? null : `/api/jobs/${job.job_id}/layout.html`,
     pdf: `/api/jobs/${job.job_id}/pdf?lang=ko`,
   };
   applyDownloadLangs(); // currentLang='orig' → 원문 URL로 세팅
   applyPdfExport();     // 번역 상태가 확인되기 전까지는 숨김 (initTranslateForJob이 갱신)
-  el.dlLayout.hidden = figOnlyLayout;
-  if (noLayoutData) {
-    el.dlLayout.title = '이 작업은 구버전 변환이라 레이아웃 데이터가 없습니다 — PDF를 다시 변환하면 생깁니다';
-  } else {
-    el.dlLayout.removeAttribute('title');
-  }
 
   renderThumbGrid(el.layoutsGrid, r.layouts, '레이아웃 이미지가 없습니다.');
   renderThumbGrid(el.pagesGrid, r.pages, '원본 페이지 이미지가 없습니다.');
@@ -2265,11 +2308,6 @@ function renderPartialResult(job) {
   setDownload(el.dlMd, `/api/jobs/${id}/markdown`, `${base}.partial.md`);
   setDownload(el.dlZip, null); // archive returns 409 for unfinished jobs
   setDownload(el.dlDoc, `/api/jobs/${id}/document.html`, `${base}.partial.html`); // 부분 문서도 유효
-  const figOnly = docLayoutIsFigureOnly(
-    state.layoutCapability, state.currentJobEngine, state.healthEngine,
-  );
-  el.dlLayout.hidden = figOnly; // figure_only의 layout.html은 빈 캔버스 — 문서 HTML이 대체
-  setDownload(el.dlLayout, `/api/jobs/${id}/layout.html`, `${base}.layout.html`); // 부분 레이아웃도 유효
 
   renderThumbGrid(el.layoutsGrid, [], '취소된 작업에는 레이아웃 이미지가 제공되지 않습니다.');
   renderThumbGrid(el.pagesGrid, [], '취소된 작업에는 원본 페이지 목록이 제공되지 않습니다.');
@@ -2413,7 +2451,7 @@ function setResultLangAttr() {
   }
 }
 
-// 현재 언어에 맞춰 markdown·layout.html을 다시 세팅한다. 문서 HTML은 현재
+// 현재 언어에 맞춰 Markdown을 다시 세팅한다. 문서 HTML은 현재
 // 보기 토글과 분리해 원문/한국어 버튼을 각각 고정하므로 잘못된 언어 파일을
 // 조용히 받지 않는다. 아카이브는 ko 파일이 자동 포함되므로 원본 URL 그대로 둔다.
 function applyDownloadLangs() {
@@ -2423,7 +2461,6 @@ function applyDownloadLangs() {
   setDownload(el.dlMd, u.markdown ? withLangUrl(u.markdown, state.currentLang) : null, `${base}${suffix}.md`);
   setDownload(el.dlZip, u.archive || null, `${base}.md.zip`);
   setDownload(el.dlDoc, u.documentHtml || null, `${base}.html`);
-  setDownload(el.dlLayout, u.layoutHtml ? withLangUrl(u.layoutHtml, state.currentLang) : null, `${base}${suffix}.layout.html`);
 }
 
 // 결과 뷰 진입 시 번역 상태를 조회해 알맞은 컨트롤을 노출한다 (done 잡에서만 호출).
@@ -2588,6 +2625,7 @@ function setLang(lang) {
   setLangSegActive(next);
   if (state.currentLang === next) return;
   state.currentLang = next;
+  state.readerActiveBlock = '';
   setResultLangAttr();
   state.previewLoaded = false;
   state.markdownLoaded = false;
@@ -2930,11 +2968,17 @@ function resetReaderForJob() {
   state.readerTotalHint = 0;
   state.readerPages = { orig: null, ko: null };
   state.readerOutline = { orig: null, ko: null };
+  state.readerAlignments = { orig: new Map(), ko: new Map() };
+  state.readerAlignmentPending = new Set();
+  state.readerActiveBlock = '';
   state.readerSelection = '';
   state.readerHighlights = [];
   state.readerCitations = [];
   state.qaPageTouched = false;
   el.readerContent.innerHTML = '';
+  el.readerMapOverlay.textContent = '';
+  el.readerMapStatus.textContent = '좌표 연결 준비 중';
+  el.readerActivity.textContent = '0개 블록';
   el.readerPagePane.classList.remove('failed');
   el.readerImage.removeAttribute('src');
   delete el.readerImage.dataset.url;
@@ -2974,6 +3018,24 @@ async function loadReader() {
   renderReaderPage();
 }
 
+async function loadReaderAlignment(id, lang, page) {
+  const key = lang === 'ko' ? 'ko' : 'orig';
+  const cache = state.readerAlignments[key];
+  const requestKey = `${key}:${page}`;
+  if (cache.has(page) || state.readerAlignmentPending.has(requestKey)) return;
+  state.readerAlignmentPending.add(requestKey);
+  let alignment = null;
+  try {
+    const url = withLangUrl(`/api/jobs/${id}/alignment?page=${page}`, lang);
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (res.ok) alignment = normalizeAlignmentPayload(await res.json());
+  } catch (_) { /* 좌표가 없는 구버전/figure_only 잡은 semantic 본문으로 정상 폴백 */ }
+  state.readerAlignmentPending.delete(requestKey);
+  if (state.currentJobId !== id || state.currentLang !== lang) return;
+  cache.set(page, alignment);
+  if (state.readerPage === page) renderReaderPage();
+}
+
 async function loadReaderOutline(id, lang) {
   const key = lang === 'ko' ? 'ko' : 'orig';
   if (state.readerOutline[key]) { renderReaderOutline(); return; }
@@ -3010,10 +3072,132 @@ function renderReaderOutline() {
   }
 }
 
-// 현재 페이지를 리더에 반영: 컨트롤 바 + 좌측 이미지 + 우측 해당 섹션.
+function alignmentTypeLabel(type) {
+  const labels = {
+    title: '제목',
+    text: '본문',
+    list: '목록',
+    table: '표',
+    equation: '수식',
+    caption: '캡션',
+    footnote: '각주',
+    reference: '참고문헌',
+  };
+  return labels[type] || '텍스트';
+}
+
+function renderReaderFallback(pages, n, loading) {
+  el.readerMapOverlay.textContent = '';
+  el.readerContent.innerHTML = '';
+  const entry = pages.find((p) => p.page === n) || (pages.length === 1 ? pages[0] : null);
+  if (entry) {
+    // Trusted server-rendered fragment (/html — 미리보기 탭과 동일한 신뢰 경계).
+    el.readerContent.innerHTML = entry.html;
+    typesetMath(el.readerContent);
+  } else {
+    el.readerContent.appendChild(h('p', { class: 'muted', text: '이 페이지에는 표시할 본문이 없습니다.' }));
+  }
+  el.readerMapStatus.textContent = loading ? '원문 좌표 연결 중…' : '흐름형 본문';
+  el.readerActivity.textContent = loading ? '불러오는 중' : '좌표 정보 없음';
+}
+
+function renderReaderAlignment(alignment) {
+  const blocks = alignment.blocks;
+  el.readerContent.textContent = '';
+  el.readerMapOverlay.textContent = '';
+  state.readerActiveBlock = blocks.some((block) => block.id === state.readerActiveBlock)
+    ? state.readerActiveBlock
+    : '';
+
+  for (const [displayIndex, block] of blocks.entries()) {
+    const number = String(displayIndex + 1).padStart(2, '0');
+    const mainText = readerLangKey() === 'ko' ? block.target : block.source;
+    const status = readerLangKey() === 'ko'
+      ? (block.translated ? '번역됨' : '원문 유지')
+      : '원문';
+    const card = h('article', {
+      class: `reader-map-card type-${block.type.replace(/[^a-z0-9_-]/gi, '')}`,
+      tabindex: '0',
+      role: 'button',
+      'data-block-id': block.id,
+      'aria-label': `${number}번 ${alignmentTypeLabel(block.type)} 블록의 원문 위치 표시`,
+    },
+    h('div', { class: 'reader-map-card-head' },
+      h('span', { class: 'reader-map-number', text: number }),
+      h('span', { class: 'reader-map-type', text: alignmentTypeLabel(block.type) }),
+      h('span', {
+        class: `reader-map-state${block.translated ? ' is-translated' : ''}`,
+        text: status,
+      }),
+    ),
+    h('p', { class: 'reader-map-target', text: mainText }));
+    if (readerLangKey() === 'ko' && block.source && block.source !== mainText) {
+      card.appendChild(h('div', { class: 'reader-map-source' },
+        h('span', { text: 'ORIGINAL' }),
+        h('p', { text: block.source }),
+      ));
+    }
+    el.readerContent.appendChild(card);
+
+    const box = h('button', {
+      class: 'reader-map-box',
+      type: 'button',
+      'data-block-id': block.id,
+      'aria-label': `${number}번 ${alignmentTypeLabel(block.type)}: ${block.source.slice(0, 90)}`,
+      title: `${number} · ${block.source.slice(0, 120)}`,
+    });
+    box.style.left = `${block.rect.left}%`;
+    box.style.top = `${block.rect.top}%`;
+    box.style.width = `${block.rect.width}%`;
+    box.style.height = `${block.rect.height}%`;
+    el.readerMapOverlay.appendChild(box);
+  }
+
+  el.readerMapStatus.textContent = readerLangKey() === 'ko'
+    ? '한국어 ↔ 원문 좌표'
+    : '원문 텍스트 ↔ 원문 좌표';
+  el.readerActivity.textContent = `${blocks.length}개 블록`;
+  if (state.readerActiveBlock) setReaderActiveBlock(state.readerActiveBlock);
+}
+
+function readerMappingNodes(id) {
+  const safeId = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/["\\]/g, '\\$&');
+  return {
+    card: el.readerContent.querySelector(`[data-block-id="${safeId}"]`),
+    box: el.readerMapOverlay.querySelector(`[data-block-id="${safeId}"]`),
+  };
+}
+
+function setReaderActiveBlock(id, scrollTarget) {
+  state.readerActiveBlock = id || '';
+  for (const node of el.readerContent.querySelectorAll('[data-block-id]')) {
+    const active = node.dataset.blockId === state.readerActiveBlock;
+    node.classList.toggle('is-active', active);
+    node.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+  for (const node of el.readerMapOverlay.querySelectorAll('[data-block-id]')) {
+    const active = node.dataset.blockId === state.readerActiveBlock;
+    node.classList.toggle('is-active', active);
+    node.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+  if (!id || !scrollTarget) return;
+  const nodes = readerMappingNodes(id);
+  const target = scrollTarget === 'card' ? nodes.card : nodes.box;
+  if (target) target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+}
+
+function previewReaderBlock(id, on) {
+  if (!id) return;
+  const nodes = readerMappingNodes(id);
+  if (nodes.card) nodes.card.classList.toggle('is-hovered', on);
+  if (nodes.box) nodes.box.classList.toggle('is-hovered', on);
+}
+
+// 현재 페이지를 리더에 반영: 컨트롤 바 + 원문 이미지 + 좌표 연결 번역 레일.
 function renderReaderPage() {
   const id = state.currentJobId;
   if (!id) return;
+  const lang = state.currentLang;
   const pages = state.readerPages[readerLangKey()];
   if (!pages) return;
   const total = readerTotal();
@@ -3027,19 +3211,21 @@ function renderReaderPage() {
   el.readerNext.disabled = n >= total;
 
   setReaderImage(id, n);
-  el.readerVisualLabel.textContent = state.currentLang === 'ko'
-    ? '한국어 번역 PDF 그대로'
-    : '원본 PDF 그대로';
+  el.readerVisualLabel.textContent = lang === 'ko'
+    ? '원문 PDF · 한국어 대조'
+    : '원문 PDF · 좌표 기준면';
+  el.readerRailTitle.textContent = lang === 'ko'
+    ? '원문 위치와 연결된 한국어'
+    : '원문 위치와 연결된 텍스트';
 
-  // 섹션 페이지 번호 우선 매칭 — 섹션이 하나뿐(구버전 렌더 폴백)이면 전체 본문 유지.
-  const entry = pages.find((p) => p.page === n) || (pages.length === 1 ? pages[0] : null);
-  el.readerContent.innerHTML = '';
-  if (entry) {
-    // Trusted server-rendered fragment (/html — 미리보기 탭과 동일한 신뢰 경계).
-    el.readerContent.innerHTML = entry.html;
-    typesetMath(el.readerContent);
+  const cache = state.readerAlignments[readerLangKey()];
+  if (cache.has(n)) {
+    const alignment = cache.get(n);
+    if (alignment && alignment.blocks.length) renderReaderAlignment(alignment);
+    else renderReaderFallback(pages, n, false);
   } else {
-    el.readerContent.appendChild(h('p', { class: 'muted', text: '이 페이지에는 표시할 본문이 없습니다.' }));
+    renderReaderFallback(pages, n, true);
+    loadReaderAlignment(id, lang, n);
   }
   el.readerContent.scrollTop = 0;
   state.readerSelection = '';
@@ -3056,7 +3242,7 @@ function setReaderPage(n) {
 }
 
 function setReaderImage(id, n) {
-  const url = readerImageUrl(id, n, state.currentLang);
+  const url = readerImageUrl(id, n);
   if (el.readerImage.dataset.url === url) return;
   teardownReader(); // 이전 페이지의 재시도 타이머 취소
   delete el.readerImage.dataset.retried;
@@ -3089,7 +3275,8 @@ function onReaderImgError() {
 
 /* ── 줌 (좌측 이미지 폭 % — localStorage 'uocr-reader-zoom' 유지) ── */
 function applyReaderZoom() {
-  el.readerImage.style.width = `${state.readerZoom}%`;
+  el.readerPageStage.style.width = `${state.readerZoom}%`;
+  el.readerImage.style.width = '100%';
   el.readerZoomOut.title = `페이지 축소 (현재 ${state.readerZoom}%)`;
   el.readerZoomIn.title = `페이지 확대 (현재 ${state.readerZoom}%)`;
 }
@@ -3110,8 +3297,6 @@ function updateReaderResearchTools() {
   el.readerSelection.textContent = hasSelection
     ? `“${selected.slice(0, 180)}${selected.length > 180 ? '…' : ''}”`
     : '오른쪽 텍스트에서 문장을 선택하세요.';
-  el.readerActivity.textContent =
-    `하이라이트 ${state.readerHighlights.length} · 인용 ${state.readerCitations.length}`;
 }
 
 function captureReaderSelection() {
@@ -3319,7 +3504,7 @@ async function loadDocLayout() {
     return;
   }
   if (html == null) {
-    const noLayout = state.resultUrls && state.resultUrls.layoutHtml === null;
+    const noLayout = state.resultHasLayout === false;
     el.doclayoutBody.appendChild(h('p', {
       class: 'muted',
       text: noLayout
@@ -3812,7 +3997,6 @@ function init() {
     localSet(READER_ZOOM_KEY, '100');
     applyReaderZoom();
   });
-  el.readerOpenQa.addEventListener('click', () => openReaderQa('현재 페이지에서 가장 중요한 내용을 설명해줘.'));
   el.readerSummary.addEventListener('click', () => openReaderQa('이 페이지를 핵심 주장, 근거, 결론으로 나눠 요약해줘.'));
   el.readerExplain.addEventListener('click', () => {
     if (state.readerSelection) {
@@ -3826,6 +4010,51 @@ function init() {
   el.readerImage.addEventListener('error', onReaderImgError);
   el.readerContent.addEventListener('mouseup', captureReaderSelection);
   el.readerContent.addEventListener('keyup', captureReaderSelection);
+  el.readerContent.addEventListener('click', (ev) => {
+    const block = ev.target.closest && ev.target.closest('[data-block-id]');
+    if (!block || !el.readerContent.contains(block)) return;
+    setReaderActiveBlock(block.dataset.blockId, 'box');
+  });
+  el.readerContent.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    const block = ev.target.closest && ev.target.closest('[data-block-id]');
+    if (!block || !el.readerContent.contains(block)) return;
+    ev.preventDefault();
+    setReaderActiveBlock(block.dataset.blockId, 'box');
+  });
+  el.readerMapOverlay.addEventListener('click', (ev) => {
+    const block = ev.target.closest && ev.target.closest('[data-block-id]');
+    if (!block || !el.readerMapOverlay.contains(block)) return;
+    setReaderActiveBlock(block.dataset.blockId, 'card');
+  });
+  for (const container of [el.readerContent, el.readerMapOverlay]) {
+    container.addEventListener('pointerover', (ev) => {
+      const block = ev.target.closest && ev.target.closest('[data-block-id]');
+      if (!block || !container.contains(block)) return;
+      const from = ev.relatedTarget && ev.relatedTarget.closest
+        ? ev.relatedTarget.closest('[data-block-id]')
+        : null;
+      if (from === block) return;
+      previewReaderBlock(block.dataset.blockId, true);
+    });
+    container.addEventListener('pointerout', (ev) => {
+      const block = ev.target.closest && ev.target.closest('[data-block-id]');
+      if (!block || !container.contains(block)) return;
+      const to = ev.relatedTarget && ev.relatedTarget.closest
+        ? ev.relatedTarget.closest('[data-block-id]')
+        : null;
+      if (to === block) return;
+      previewReaderBlock(block.dataset.blockId, false);
+    });
+    container.addEventListener('focusin', (ev) => {
+      const block = ev.target.closest && ev.target.closest('[data-block-id]');
+      if (block && container.contains(block)) previewReaderBlock(block.dataset.blockId, true);
+    });
+    container.addEventListener('focusout', (ev) => {
+      const block = ev.target.closest && ev.target.closest('[data-block-id]');
+      if (block && container.contains(block)) previewReaderBlock(block.dataset.blockId, false);
+    });
+  }
   // ←/→ 페이지 이동 — 리더 탭이 보일 때만, 입력 요소 포커스 시 제외 (copy-moonlight 가드)
   window.addEventListener('keydown', (ev) => {
     if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;

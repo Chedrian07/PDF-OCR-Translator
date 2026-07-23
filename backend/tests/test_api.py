@@ -113,16 +113,10 @@ def test_full_flow_multi(client, sample_pdf):
     # 투명 선택 레이어에도 원본 좌표·폰트 메타는 유지된다.
     assert "font-size:" in layout.text and "cqw" in layout.text
 
-    # standalone HTML 다운로드: PDF 페이지 PNG base64 + 텍스트 레이어
-    dl = client.get(f"/api/jobs/{jid}/layout.html")
-    assert dl.status_code == 200
-    assert "attachment" in dl.headers["content-disposition"]
-    assert dl.text.startswith("<!doctype html>")
-    assert "data:image/png;base64," in dl.text
-    assert "layout-page-image" in dl.text
-    # (uocrFitLayout/KaTeX 인라인은 frontend_dir 자산 필요 — client 픽스처는
-    #  no-frontend로 비활성화하므로 여기서 단언 안 함. E2E/test_layout에서 검증.)
-    assert f"/api/jobs/{jid}" not in dl.text  # 서버 참조 없는 완전 자립 파일
+    # 구 레이아웃 HTML URL은 중복 파일을 만들지 않고 정식 document.html로 통합한다.
+    legacy = client.get(f"/api/jobs/{jid}/layout.html", follow_redirects=False)
+    assert legacy.status_code == 307
+    assert legacy.headers["location"] == f"/api/jobs/{jid}/document.html"
 
     # 주 HTML도 좌표 레이아웃 잡에서는 같은 facsimile renderer를 사용한다.
     doc = client.get(f"/api/jobs/{jid}/document.html")
@@ -140,6 +134,16 @@ def test_full_flow_multi(client, sample_pdf):
     page = client.get(f"/api/jobs/{jid}/page/1")
     assert page.status_code == 200
     assert page.headers["content-type"].startswith("image/png")
+
+    alignment = client.get(f"/api/jobs/{jid}/alignment?page=1")
+    assert alignment.status_code == 200
+    aligned = alignment.json()
+    assert aligned["page"] == 1
+    assert aligned["lang"] == "orig"
+    assert aligned["bbox_space"] == 1000
+    assert aligned["blocks"]
+    assert all(len(block["bbox"]) == 4 for block in aligned["blocks"])
+    assert all(block["target"] == block["source"] for block in aligned["blocks"])
 
     outline = client.get(f"/api/jobs/{jid}/outline")
     assert outline.status_code == 200

@@ -933,6 +933,8 @@ import {
   extractDocPages,
   clampReaderPage,
   readerImageUrl,
+  alignmentRect,
+  normalizeAlignmentPayload,
   pdfExportState,
   translatedHtmlExportState,
   pdfReportMessage,
@@ -990,12 +992,48 @@ test('clampReaderPage: 1..total 보정 — 경계/NaN/문자열/소수, total �
   assert.equal(clampReaderPage(42, 0), 42, '총 페이지 미상(0)이면 하한만');
 });
 
-test('readerImageUrl: 원문/번역 PDF와 같은 최종 페이지 endpoint', () => {
+test('readerImageUrl: 언어와 무관하게 원문 좌표 기준면 endpoint', () => {
   assert.equal(readerImageUrl('j_abc', 1), '/api/jobs/j_abc/page/1');
   assert.equal(readerImageUrl('j_abc', 12), '/api/jobs/j_abc/page/12');
   assert.equal(readerImageUrl('j_abc', '7'), '/api/jobs/j_abc/page/7', '문자열 페이지 허용');
   assert.equal(readerImageUrl('j_abc', 0), '/api/jobs/j_abc/page/1', '방어: 1 미만은 1');
-  assert.equal(readerImageUrl('j_abc', 3, 'ko'), '/api/jobs/j_abc/page/3?lang=ko');
+  assert.equal(readerImageUrl('j_abc', 3, 'ko'), '/api/jobs/j_abc/page/3',
+    '한국어 rail에서도 왼쪽 이미지는 원문으로 고정');
+});
+
+test('alignmentRect: 0..1000 bbox를 안전한 퍼센트 좌표로 변환', () => {
+  assert.deepEqual(alignmentRect([100, 200, 600, 700]), {
+    left: 10, top: 20, width: 50, height: 50,
+  });
+  assert.deepEqual(alignmentRect([-5, 0, 1200, 1000]), {
+    left: 0, top: 0, width: 100, height: 100,
+  }, '범위 밖 좌표는 기준면으로 클램프');
+  assert.equal(alignmentRect([10, 20, 10, 30]), null, '폭 0 bbox 제거');
+  assert.equal(alignmentRect(['x', 0, 10, 20]), null, '비수치 bbox 제거');
+  assert.equal(alignmentRect([0, 0, 1]), null, '길이 불일치 제거');
+});
+
+test('normalizeAlignmentPayload: 유효 블록만 보존하고 target/source를 정규화', () => {
+  const data = normalizeAlignmentPayload({
+    page: 2,
+    lang: 'ko',
+    bbox_space: 1000,
+    blocks: [
+      { id: 'p2-b0', index: 0, type: 'title', bbox: [50, 20, 950, 90],
+        source: 'Title', target: '제목', translated: true },
+      { id: 'p2-b1', index: 1, type: 'text', bbox: [50, 100, 950, 300],
+        source: 'Preserved', target: '', translated: false },
+      { id: '', bbox: [0, 0, 10, 10], source: 'invalid id' },
+      { id: 'bad-box', bbox: [0, 0, 0, 10], source: 'invalid box' },
+    ],
+  });
+  assert.equal(data.page, 2);
+  assert.equal(data.lang, 'ko');
+  assert.equal(data.blocks.length, 2);
+  assert.equal(data.blocks[0].target, '제목');
+  assert.equal(data.blocks[0].translated, true);
+  assert.equal(data.blocks[1].target, 'Preserved', '빈 번역은 원문으로 폴백');
+  assert.deepEqual(data.blocks[0].rect, { left: 5, top: 2, width: 90, height: 7 });
 });
 
 test('pdfExportState: 진리표 — 잡 done ∧ 번역 done ∧ 레이아웃 있음일 때만 보임', () => {

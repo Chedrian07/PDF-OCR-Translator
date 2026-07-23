@@ -15,6 +15,7 @@ from conftest import make_pdf_bytes, wait_done
 
 from app.pipeline.pdf_export import (
     PdfExportError,
+    _free_growth_rect,
     _plain_text,
     build_translated_pdf,
 )
@@ -210,6 +211,17 @@ def test_build_preserves_vector_graphics_inside_replaced_block(tmp_path):
         assert len(exported[0].get_drawings()) == 1
 
 
+def test_growth_stops_when_next_column_block_touches_current_bbox():
+    """연속 문단(y1 == next.y0)은 확장 공간이 아니다 — 겹침 회귀 방지."""
+    import fitz
+
+    page = type("PageStub", (), {"mediabox": fitz.Rect(0, 0, 600, 800)})()
+    current = fitz.Rect(50, 100, 280, 200)
+    touching = fitz.Rect(50, 200, 280, 310)
+    grown = _free_growth_rect(page, current, [touching])
+    assert grown == current
+
+
 def test_build_skips_unfittable_block_without_redacting_original(tmp_path):
     """번역문이 최소 글자 크기에도 안 들어가면 원문을 지우지 않고 보존한다."""
     job_dir = _unit_job(tmp_path)
@@ -278,7 +290,7 @@ def test_build_keeps_unreplaceable_types(tmp_path):
     assert KO_TEXT not in text
 
 
-def test_build_translates_reference_text_without_damaging_url(tmp_path):
+def test_build_preserves_reference_entry_and_url(tmp_path):
     job_dir = _unit_job(
         tmp_path,
         block_type="ref_text",
@@ -294,10 +306,11 @@ def test_build_translates_reference_text_without_damaging_url(tmp_path):
 
     result = build_translated_pdf(job_dir, "ko")
     text = _pdf_text(result.path.read_bytes())
-    assert result.replaced == 1
-    assert "번역된 논문 제목" in text
+    assert result.replaced == 0
+    assert result.specialist_kept["reference"] == 1
     assert "https://example.test/paper." in text
-    assert "Original Paper Title" not in text
+    assert "Original Paper Title" in text
+    assert "번역된 논문 제목" not in text
 
 
 def test_build_redaction_includes_source_glyphs_past_ocr_bbox(tmp_path):
@@ -315,7 +328,7 @@ def test_build_redaction_includes_source_glyphs_past_ocr_bbox(tmp_path):
 
     # 실제 span은 x≈250pt까지 가지만 OCR bbox는 x=210pt에서 끝나는 상황.
     original = [{"page": 1, "width": 595, "height": 842, "blocks": [{
-        "type": "ref_text",
+        "type": "text",
         "bbox": [round(60 / 595 * 999), round(84 / 842 * 999),
                  round(210 / 595 * 999), round(104 / 842 * 999)],
         "content": original_text,

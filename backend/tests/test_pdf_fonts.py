@@ -9,7 +9,7 @@ det bbox는 0–999 정규화 = (x/612×999, y/792×999).
 
 from pathlib import Path
 
-from app.pipeline.pdf_fonts import enrich_layout_fonts
+from app.pipeline.pdf_fonts import _font_style, enrich_layout_fonts
 
 
 def _make_pdf(tmp_path: Path) -> Path:
@@ -17,7 +17,7 @@ def _make_pdf(tmp_path: Path) -> Path:
 
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)
-    page.insert_text((100, 200), "body text ..." * 10, fontsize=11)
+    page.insert_text((100, 200), "body text ..." * 10, fontsize=11, fontname="tiro")
     page.insert_text((100, 100), "Bold Title", fontsize=16, fontname="hebo")  # Helvetica-Bold
     p = tmp_path / "source.pdf"
     doc.save(str(p))
@@ -27,6 +27,11 @@ def _make_pdf(tmp_path: Path) -> Path:
 
 def _norm(x_pt: float, y_pt: float) -> tuple[int, int]:
     return round(x_pt / 612 * 999), round(y_pt / 792 * 999)
+
+
+def test_font_style_recognizes_urw_nimbus_sans_alias():
+    """실제 샘플의 대표 제목 폰트명(NimbusSanL)을 sans로 보존한다."""
+    assert _font_style("HIYFFY+NimbusSanL-Bold") == "sans"
 
 
 def test_enrich_injects_measured_font_sizes(tmp_path):
@@ -58,11 +63,13 @@ def test_enrich_injects_measured_font_sizes(tmp_path):
     # 본문 11pt → 11/612×100 = 1.80cqw ±0.15
     assert "fs" in body
     assert abs(body["fs"] - 11 / 612 * 100) < 0.15, body["fs"]
+    assert body.get("font_style") == "serif"
 
     # 제목 16pt → 16/612×100 = 2.61cqw ±0.2, 볼드
     assert "fs" in title
     assert abs(title["fs"] - 16 / 612 * 100) < 0.2, title["fs"]
     assert title.get("bold") is True
+    assert title.get("font_style") == "sans"
 
     # 이미지 블록은 손대지 않는다
     assert "fs" not in image and "bold" not in image

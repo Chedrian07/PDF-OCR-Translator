@@ -9,6 +9,7 @@ import threading
 import pytest
 
 from app.translate.engine import run_translation
+from app.translate.prompts import build_unit_prompt
 from app.translate.types import TranslateConfig, TranslateResult
 
 SEP = "\n\n---\n\n"
@@ -176,6 +177,18 @@ def _run_md(tmp_path, cfg, md, client):
     (tmp_path / "result.md").write_text(md, encoding="utf-8")
     res = run_translation(tmp_path, "ko", cfg, client=client)
     return res, _report(tmp_path), (tmp_path / "result.ko.md").read_text(encoding="utf-8")
+
+
+def test_title_prompt_prevents_ui_label_style_abbreviation():
+    prompt = build_unit_prompt(
+        "How to Read a Paper",
+        [],
+        [],
+        unit_kind="title",
+    )
+    assert "[블록 유형 — 제목]" in prompt
+    assert "지나치게 짧은 명사구" in prompt
+    assert prompt.endswith("[번역할 원문]\nHow to Read a Paper")
 
 
 def test_echo_결과_바이트동일_및_레이아웃_content동일(job, cfg):

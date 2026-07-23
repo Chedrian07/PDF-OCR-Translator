@@ -4,6 +4,7 @@ from app.translate.segment import (
     apply_layout,
     assemble_markdown,
     layout_units,
+    reconcile_markdown_with_layout,
     split_markdown,
 )
 
@@ -115,6 +116,14 @@ def test_layout_units_필터():
     assert units[0].page == 3
 
 
+def test_layout_reference_unit은_원문_유지():
+    pages = [{"page": 1, "blocks": [
+        {"type": "ref_text", "content": "[1] Author, Paper, https://example.com"},
+    ]}]
+    unit = layout_units(pages)[0]
+    assert unit.skip_reason == "references"
+
+
 def test_apply_layout_content외_필드_불변():
     pages = [{
         "page": 1, "width": 612, "height": 792, "fonts_v": "2", "blocks": [
@@ -133,3 +142,44 @@ def test_apply_layout_content외_필드_불변():
     # 이미지 블록·원본은 손대지 않음
     assert b[2]["content"] == "" and b[2]["image"] == "p0001_0.jpg"
     assert pages[0]["blocks"][0]["content"] == "Title"  # 원본 불변(deep copy)
+
+
+def test_markdown과_layout_번역을_단일_표기로_정렬():
+    md = "How to Read a Paper\nBody sentence.\nAnother sentence.\n\n---\n\n[1] Author, Paper."
+    source = [
+        {"page": 1, "blocks": [
+            {"type": "title", "content": "How to Read a Paper"},
+            {"type": "text", "content": "Body sentence."},
+            {"type": "text", "content": "Another sentence."},
+        ]},
+        {"page": 2, "blocks": [
+            {"type": "ref_text", "content": "[1] Author, Paper."},
+        ]},
+    ]
+    translated = [
+        {"page": 1, "blocks": [
+            {"type": "title", "content": "논문을 읽는 방법"},
+            {"type": "text", "content": "본문 문장."},
+            {"type": "text", "content": "다른 문장."},
+        ]},
+        {"page": 2, "blocks": [
+            {"type": "ref_text", "content": "[1] 저자, 논문."},
+        ]},
+    ]
+    independently_translated = (
+        "논문 읽기\n별도 본문 번역.\n별도 다른 번역.\n\n---\n\n[1] Author, Paper."
+    )
+    out = reconcile_markdown_with_layout(
+        md, independently_translated, source, translated, "\n\n---\n\n",
+    )
+    assert out == "논문을 읽는 방법\n본문 문장.\n다른 문장.\n\n---\n\n[1] Author, Paper."
+
+
+def test_markdown_layout_대응률이_낮으면_기존_번역_유지():
+    md = "Unmatched one.\nUnmatched two.\nMatched."
+    source = [{"page": 1, "blocks": [{"type": "text", "content": "Matched."}]}]
+    translated = [{"page": 1, "blocks": [{"type": "text", "content": "일치."}]}]
+    assembled = "번역 하나.\n번역 둘.\n기존 일치."
+    assert reconcile_markdown_with_layout(
+        md, assembled, source, translated, "\n\n---\n\n",
+    ) == assembled

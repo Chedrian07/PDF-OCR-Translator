@@ -31,9 +31,13 @@ logger = logging.getLogger(__name__)
 # 밀어 넣으면 오히려 품질이 나빠진다.
 _REPLACEABLE_TYPES = frozenset({
     "text", "title", "list", "caption", "image_caption", "table_caption",
-    "page_footnote", "footnote", "aside_text", "header", "footer", "ref_text",
+    "page_footnote", "footnote", "aside_text", "header", "footer",
 })
 _SPECIALIST_TYPES = frozenset({"table", "equation", "algorithm"})
+# 참고문헌은 제목을 억지로 번역하면 저자명·학술지명·URL 사이에 서로 다른 문자 폭이
+# 섞여 원문보다 훨씬 불안정하게 줄바꿈된다. 학술 번역 관례대로 서지 항목은 원문
+# 조판을 그대로 보존한다(본문의 인용 번호와 참고문헌 제목은 계속 검색 가능).
+_PRESERVE_TYPES = frozenset({"ref_text"})
 
 # 세로쓰기 블록은 회전 조합이 페이지 회전과 얽혀 배치가 어긋나기 쉽다 — 원본 유지.
 _VERTICAL_SKIP = ("up", "down")
@@ -56,12 +60,25 @@ _SYSTEM_FONT_CANDIDATES = (
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
 )
+_SYSTEM_SANS_FONT_CANDIDATES = (
+    "/System/Library/Fonts/AppleSDGothicNeo.ttc",          # macOS
+    "/System/Library/Fonts/Supplemental/AppleGothic.ttf",  # macOS
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-KR-Regular.otf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+    # sans가 없으면 한글 누락보다 명조 폴백이 낫다.
+    "/System/Library/Fonts/Supplemental/AppleMyungjo.ttf",
+)
 
 # insert_textbox 축소 사다리 — layout-fit.js와 같은 정신: 최대 45%까지 줄여 본다.
 _SHRINK_STEPS = (1.0, 0.9, 0.8, 0.7, 0.62, 0.55)
+_SINGLE_LINE_SCALES = (1.0, 0.96, 0.92)
 _MIN_FONT_PT = 4.0
 _MAX_FONT_PT = 72.0
 _MAX_TABLE_CELLS = 500  # search_for 셀별 탐색의 CPU 상한 + 비정상 HTML 표 방어
+_BODY_LINEHEIGHTS = (1.36, 1.28, 1.20)
+_CAPTION_LINEHEIGHTS = (1.30, 1.22, 1.16)
+_TITLE_LINEHEIGHTS = (1.18, 1.12)
 
 
 class PdfExportError(RuntimeError):
@@ -104,6 +121,8 @@ class _TextFitPlan:
     expanded: bool = False
     align: int = 0
     bold: bool = False
+    lineheight: float | None = None
+    origin: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +131,8 @@ class _Replacement:
     text: str
     kind: str = "text"
     redact_rect: object | None = None
+    fontname: str = "korea"
+    fontfile: str | None = None
 
 
 class _TableParser(HTMLParser):
@@ -148,11 +169,14 @@ class _TableParser(HTMLParser):
             self._cell.append(data)
 
 
-def _resolve_font(explicit: str = "") -> tuple[str | None, str]:
+def _resolve_font(
+    explicit: str = "",
+    candidates: tuple[str, ...] = _SYSTEM_FONT_CANDIDATES,
+) -> tuple[str | None, str]:
     """(fontfile|None, fontname) 반환. 파일 폰트는 로드 검증 후 채택한다."""
     fitz = quiet_fitz()
-    candidates = ([explicit] if explicit else []) + list(_SYSTEM_FONT_CANDIDATES)
-    for path in candidates:
+    paths = ([explicit] if explicit else []) + list(candidates)
+    for path in paths:
         p = Path(path)
         if not p.is_file():
             if path == explicit:
@@ -220,11 +244,17 @@ def _free_growth_rect(page, rect, obstacles: list[object]) -> object:
     """
     limit = page.mediabox.y1
     for other in obstacles:
-        if other is rect or other.y0 < rect.y1 + 0.5:
+        if other is rect or other.y1 <= rect.y1 + 0.5:
             continue
         overlap = _rect_horizontal_overlap(rect, other)
         if overlap < min(rect.width, other.width) * 0.15:
             continue
+        # OCR 문단 bbox는 연속 문단에서 y1 == 다음 y0인 경우가 흔하고 반올림
+        # 때문에 1pt 안팎 겹치기도 한다. 이런 장애물을 "현재 bbox보다 위"로
+        # 간주해 건너뛰면 그 다음 문단까지 확장되어 번역문끼리 겹친다.
+        # 같은 단의 다음 블록이 현재 하단에 닿거나 걸치면 확장을 금지한다.
+        if other.y0 <= rect.y1 + 0.5:
+            return +rect
         limit = min(limit, other.y0 - 2.0)
     grown = +rect
     grown.y1 = max(rect.y1, limit)
@@ -362,6 +392,7 @@ def _source_text_rect(page, rect, source_spans: list[object]):
 def _plan_shrink_to_fit(
     page, rect, text: str, base_pt: float, fontname: str, fontfile: str | None,
     *, max_rect=None, align: int = 0, bold: bool = False,
+    lineheights: tuple[float | None, ...] = (None,),
 ) -> _TextFitPlan | None:
     """Shape로 실제 삽입과 동일한 조판을 dry-run해 안전한 계획만 반환한다.
 
@@ -379,33 +410,97 @@ def _plan_shrink_to_fit(
     # 그렇지 않으면 18pt 제목이 원래 상자의 12.6pt에 먼저 들어가 계층이 무너진다.
     for scale in _SHRINK_STEPS:
         size = max(_MIN_FONT_PT, base_pt * scale)
-        kwargs = {
-            "fontsize": size,
-            "fontname": fontname,
-            "fontfile": fontfile,
-            "align": align,
-            "rotate": rot,
-            "color": (0, 0, 0),
-        }
-        if bold:
-            # CJK 시스템 폰트가 단일 TTC/regular 파일인 환경에서도 제목 계층을
-            # 보존한다. fill+stroke는 글자 외곽만 약하게 굵게 하며 조판 폭은 같다.
-            kwargs.update({
-                "render_mode": 2,
-                "fill": (0, 0, 0),
-                # border_width는 pt가 아니라 fontsize 비율이다. 2%만 더해
-                # CJK 획이 서로 붙지 않는 얇은 합성 볼드를 만든다.
-                "border_width": 0.02,
-            })
-        for candidate, expanded in (
-            (rect, False),
-            (grown, True),
-        ):
-            if expanded and grown.y1 <= rect.y1 + 0.5:
-                continue
-            shape = page.new_shape()
-            if shape.insert_textbox(candidate, text, **kwargs) >= 0:
-                return _TextFitPlan(+candidate, size, expanded, align, bold)
+        # 한국어 본문은 영문 기본 leading보다 넓은 1.3대 행간이 자연스럽다.
+        # 같은 글자 크기에서 자연 행간 → 조밀한 행간 순으로 먼저 시도하고,
+        # 그 뒤에만 폰트를 축소한다. 이 순서가 짧은 번역문 사이의 큰 흰 구멍과
+        # 긴 번역문만 유난히 작아지는 현상을 동시에 줄인다.
+        for lineheight in lineheights:
+            kwargs = {
+                "fontsize": size,
+                "fontname": fontname,
+                "fontfile": fontfile,
+                "align": align,
+                "rotate": rot,
+                "color": (0, 0, 0),
+                "lineheight": lineheight,
+            }
+            if bold:
+                # CJK 시스템 폰트가 단일 TTC/regular 파일인 환경에서도 제목 계층을
+                # 보존한다. fill+stroke는 글자 외곽만 약하게 굵게 하며 조판 폭은 같다.
+                kwargs.update({
+                    "render_mode": 2,
+                    "fill": (0, 0, 0),
+                    # border_width는 pt가 아니라 fontsize 비율이다. 2%만 더해
+                    # CJK 획이 서로 붙지 않는 얇은 합성 볼드를 만든다.
+                    "border_width": 0.02,
+                })
+            for candidate, expanded in (
+                (rect, False),
+                (grown, True),
+            ):
+                if expanded and grown.y1 <= rect.y1 + 0.5:
+                    continue
+                shape = page.new_shape()
+                if shape.insert_textbox(candidate, text, **kwargs) >= 0:
+                    return _TextFitPlan(
+                        +candidate, size, expanded, align, bold, lineheight,
+                    )
+    return None
+
+
+def _plan_single_line(
+    page,
+    rect,
+    text: str,
+    base_pt: float,
+    fontname: str,
+    fontfile: str | None,
+    *,
+    max_rect=None,
+    align: int = 0,
+    bold: bool = False,
+) -> _TextFitPlan | None:
+    """한 줄 번역을 원문 baseline 크기로 배치한다.
+
+    `insert_textbox()`는 CJK ascender/descender 전체가 얕은 OCR bbox 안에 들어가야
+    성공으로 판정하므로, 실제로는 한 줄이 넉넉히 들어가는 제목·목록 항목도 60~70%로
+    축소하는 문제가 있다. 줄바꿈이 필요 없고 가로 폭이 맞는 경우에는 폰트 메트릭으로
+    baseline을 계산해 `insert_text()` 경로를 사용한다.
+    """
+    if not text or "\n" in text:
+        return None
+    fitz = quiet_fitz()
+    try:
+        font = fitz.Font(fontfile=fontfile) if fontfile else fitz.Font(fontname=fontname)
+    except Exception:  # noqa: BLE001 — textbox 폴백이 있으므로 품질 경로만 포기
+        return None
+    vertical = max_rect if max_rect is not None else rect
+    for scale in _SINGLE_LINE_SCALES:
+        size = max(_MIN_FONT_PT, base_pt * scale)
+        width = font.text_length(text, fontsize=size)
+        if width > rect.width + 0.25:
+            continue
+        if align == 1:
+            x = rect.x0 + (rect.width - width) / 2
+        elif align == 2:
+            x = rect.x1 - width
+        else:
+            x = rect.x0
+        baseline = rect.y0 + size * font.ascender
+        glyph_bottom = baseline - size * font.descender
+        # max_rect은 다음 블록 앞 2pt에서 끝난다. 폰트 bbox의 descender는 한글
+        # 글리프가 실제로 쓰지 않는 하단까지 포함하므로 그 안전 여백만 허용한다.
+        if glyph_bottom > vertical.y1 + 2.5:
+            continue
+        return _TextFitPlan(
+            +rect,
+            size,
+            False,
+            align,
+            bold,
+            None,
+            (float(x), float(baseline)),
+        )
     return None
 
 
@@ -420,6 +515,7 @@ def _insert_fitted_text(
         "align": plan.align,
         "rotate": page.rotation,
         "color": (0, 0, 0),
+        "lineheight": plan.lineheight,
     }
     if plan.bold:
         kwargs.update({
@@ -427,6 +523,12 @@ def _insert_fitted_text(
             "fill": (0, 0, 0),
             "border_width": 0.02,
         })
+    if plan.origin is not None:
+        fitz = quiet_fitz()
+        single_kwargs = dict(kwargs)
+        single_kwargs.pop("align", None)
+        page.insert_text(fitz.Point(*plan.origin), text, **single_kwargs)
+        return
     leftover = page.insert_textbox(plan.rect, text, **kwargs)
     if leftover < 0:
         raise PdfExportError("번역 텍스트 조판 결과가 사전 검증과 달라 PDF 생성을 중단했습니다")
@@ -463,7 +565,8 @@ def build_translated_pdf(
         logger.warning("PDF 내보내기용 원본 폰트 메타 추출 실패 — 면적 휴리스틱 사용")
 
     orig_pages = {p.get("page"): p for p in orig_page_list}
-    ff, fname = _resolve_font(fontfile)
+    serif_ff, serif_name = _resolve_font(fontfile)
+    sans_ff, sans_name = _resolve_font(fontfile, _SYSTEM_SANS_FONT_CANDIDATES)
 
     result = PdfExportResult(path=job_dir / f"export.{lang}.pdf")
     try:
@@ -521,7 +624,14 @@ def build_translated_pdf(
                             cell = cell_rects[ri][ci]
                             base_pt = min(12.0, max(_MIN_FONT_PT, cell.height * 0.45))
                             plan = _plan_shrink_to_fit(
-                                page, cell, new_text, base_pt, fname, ff, max_rect=cell,
+                                page,
+                                cell,
+                                new_text,
+                                base_pt,
+                                serif_name,
+                                serif_ff,
+                                max_rect=cell,
+                                lineheights=_CAPTION_LINEHEIGHTS,
                             )
                             if plan is None:
                                 result.kept += 1
@@ -531,11 +641,24 @@ def build_translated_pdf(
                                     " — 원문 셀 보존"
                                 )
                                 continue
-                            targets.append(_Replacement(plan, new_text, "table", cell))
+                            targets.append(_Replacement(
+                                plan,
+                                new_text,
+                                "table",
+                                cell,
+                                serif_name,
+                                serif_ff,
+                            ))
                     if table_failed:
                         result.specialist_kept["table"] = result.specialist_kept.get("table", 0) + 1
                     continue
 
+                if block_type in _PRESERVE_TYPES:
+                    result.kept += 1
+                    result.specialist_kept["reference"] = (
+                        result.specialist_kept.get("reference", 0) + 1
+                    )
+                    continue
                 if block_type not in _REPLACEABLE_TYPES:
                     if block_type in _SPECIALIST_TYPES:
                         result.specialist_kept[block_type] = (
@@ -560,16 +683,64 @@ def build_translated_pdf(
                 ) or 1.8
                 base_pt = min(_MAX_FONT_PT, max(
                     _MIN_FONT_PT, fs_cqw / 100 * page.rect.width))
-                obstacles = [r for i, r in enumerate(block_rects)
-                             if i != block_index and r is not None]
+                # 같은 pt에서 AppleMyungjo/Noto Serif CJK는 Times 계열 영문보다
+                # 시각적 몸통이 조금 작다. 제목은 계층을 잃지 않도록 더 보정하고,
+                # 본문은 3%만 보정해 원문과 비슷한 잉크 밀도를 유지한다.
+                base_pt *= 1.06 if block_type == "title" else 1.03
+                obstacles = [
+                    r
+                    for i, (r, block) in enumerate(zip(block_rects, oblocks))
+                    if (
+                        i != block_index
+                        and r is not None
+                        and (
+                            str(block.get("content") or "").strip()
+                            or block.get("image")
+                        )
+                    )
+                ]
                 max_rect = _free_growth_rect(page, rect, obstacles)
-                plan = _plan_shrink_to_fit(
-                    page, rect, new, base_pt, fname, ff, max_rect=max_rect,
-                    align={"center": 1, "right": 2, "justify": 3}.get(
-                        str(ob.get("align") or ""), 0,
-                    ),
-                    bold=bool(ob.get("bold")),
+                if ob.get("font_style") == "sans":
+                    block_fontfile, block_fontname = sans_ff, sans_name
+                else:
+                    block_fontfile, block_fontname = serif_ff, serif_name
+                if block_type == "title":
+                    lineheights = _TITLE_LINEHEIGHTS
+                elif block_type in {
+                    "caption", "image_caption", "table_caption",
+                    "page_footnote", "footnote", "aside_text",
+                }:
+                    lineheights = _CAPTION_LINEHEIGHTS
+                else:
+                    lineheights = _BODY_LINEHEIGHTS
+                align = {"center": 1, "right": 2, "justify": 3}.get(
+                    str(ob.get("align") or ""), 0,
                 )
+                bold = bool(ob.get("bold"))
+                plan = _plan_single_line(
+                    page,
+                    rect,
+                    new,
+                    base_pt,
+                    block_fontname,
+                    block_fontfile,
+                    max_rect=max_rect,
+                    align=align,
+                    bold=bold,
+                )
+                if plan is None:
+                    plan = _plan_shrink_to_fit(
+                        page,
+                        rect,
+                        new,
+                        base_pt,
+                        block_fontname,
+                        block_fontfile,
+                        max_rect=max_rect,
+                        align=align,
+                        bold=bold,
+                        lineheights=lineheights,
+                    )
                 if plan is None:
                     result.kept += 1
                     result.warnings.append(
@@ -577,7 +748,12 @@ def build_translated_pdf(
                     )
                     continue
                 targets.append(_Replacement(
-                    plan, new, "text", _source_text_rect(page, rect, source_spans),
+                    plan,
+                    new,
+                    "text",
+                    _source_text_rect(page, rect, source_spans),
+                    block_fontname,
+                    block_fontfile,
                 ))
 
             if not targets:
@@ -600,7 +776,13 @@ def build_translated_pdf(
 
             # 3) 번역 텍스트 삽입
             for target in targets:
-                _insert_fitted_text(page, target.plan, target.text, fname, ff)
+                _insert_fitted_text(
+                    page,
+                    target.plan,
+                    target.text,
+                    target.fontname,
+                    target.fontfile,
+                )
                 result.replaced += 1
                 if target.plan.expanded:
                     result.relocated += 1

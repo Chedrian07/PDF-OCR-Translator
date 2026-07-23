@@ -24,7 +24,8 @@ from dataclasses import dataclass, field
 # v2: 문체 few-shot 예시 추가 (4B급 모델 합쇼체 이탈 실측 → 예시로 0건)
 # v3: 신뢰도 래더(sanitize+repair+분할) + 규칙5 인명 음차 금지 강화 → kept_original 감소
 # v4: [원문 유지] 유닛별 A-용어 목록(MSE 풀어쓰기 실측 차단) + 용어 매칭 수식 제외 + 스톱워드
-PROMPT_V = "4"
+# v5: 제목 유닛의 의미·정보량 보존 지시(짧은 UI 라벨식 축약 방지)
+PROMPT_V = "5"
 
 SUPPORTED_LANGS = ("ko",)
 MAX_TRANSLATE_CONCURRENCY = 8

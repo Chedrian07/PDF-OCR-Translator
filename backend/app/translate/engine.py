@@ -25,7 +25,13 @@ from . import prompts
 from .client import OpenAICompatClient
 from .glossary import Glossary, build_glossary
 from .masking import _TOKEN_RE, mask, sanitize_translation, should_skip, unmask
-from .segment import apply_layout, assemble_markdown, layout_units, split_markdown
+from .segment import (
+    apply_layout,
+    assemble_markdown,
+    layout_units,
+    reconcile_markdown_with_layout,
+    split_markdown,
+)
 from .types import PROMPT_V, TranslateConfig, TranslateError, TranslateResult, cache_key
 
 logger = logging.getLogger(__name__)
@@ -252,7 +258,9 @@ def run_translation(
             restored, missing, dup = unmask(clean, mapping)
             return restored, missing, dup, sc, clean
 
-        def _translate_fragment(src, pairs, first, ctx, stats, keep=None) -> str | None:
+        def _translate_fragment(
+            src, pairs, first, ctx, stats, keep=None, unit_kind: str = "",
+        ) -> str | None:
             """분할된 반쪽 하나를 독립 번역 — mask→complete→sanitize→unmask + repair 1회(추가 분할 없음).
 
             성공 시 복원문, 실패 시 None. sanitize 건수만 stats에 누적한다. 반쪽 단계의
@@ -263,7 +271,14 @@ def run_translation(
                 return None
             masked, mapping = mask(src)
             max_toks = _max_toks(masked)
-            prompt = prompts.build_unit_prompt(masked, pairs, first, context_tail=ctx, keep_terms=keep)
+            prompt = prompts.build_unit_prompt(
+                masked,
+                pairs,
+                first,
+                context_tail=ctx,
+                keep_terms=keep,
+                unit_kind=unit_kind,
+            )
             try:
                 restored, missing, dup, sc, clean = _run_pass(prompt, max_toks, mapping)
             except TranslateError:
@@ -299,7 +314,14 @@ def run_translation(
                 return u, cache[key], "cached", key, stats
             ctx = context_map.get(u.id) if cfg.context else None
             max_toks = _max_toks(masked)
-            prompt = prompts.build_unit_prompt(masked, pairs, first, context_tail=ctx, keep_terms=keep)
+            prompt = prompts.build_unit_prompt(
+                masked,
+                pairs,
+                first,
+                context_tail=ctx,
+                keep_terms=keep,
+                unit_kind=u.kind,
+            )
 
             # 0) 최초 패스 — complete→sanitize→unmask. 태그 완전하면 즉시 성공.
             #    (step 0의 API 오류는 잡 전체 실패로 전파 — 기존 계약 유지)
@@ -330,7 +352,9 @@ def run_translation(
             #     초대형 표는 반쪽도 실패할 수 있어 재귀 한 단계를 더 허용한다.
             if _is_table_unit(u.src):
                 def _table_part(src: str, depth: int) -> str | None:
-                    got = _translate_fragment(src, pairs, first, None, stats, keep)
+                    got = _translate_fragment(
+                        src, pairs, first, None, stats, keep, u.kind,
+                    )
                     if got is not None or depth <= 0:
                         return got
                     sub = _split_table(src)
@@ -355,11 +379,15 @@ def run_translation(
                 halves = _split_two(u.src)
                 if halves is not None:
                     left_src, right_src = halves
-                    left = _translate_fragment(left_src, pairs, first, ctx, stats, keep)
+                    left = _translate_fragment(
+                        left_src, pairs, first, ctx, stats, keep, u.kind,
+                    )
                     if left is not None:
                         # 뒷반 컨텍스트: 앞반 src의 꼬리 200자 (컨텍스트 비활성 시 생략)
                         right_ctx = left_src[-200:] if cfg.context else None
-                        right = _translate_fragment(right_src, pairs, first, right_ctx, stats, keep)
+                        right = _translate_fragment(
+                            right_src, pairs, first, right_ctx, stats, keep, u.kind,
+                        )
                         if right is not None:
                             stats["split"] = 1
                             return u, left + " " + right, "translated", key, stats
@@ -451,12 +479,19 @@ def run_translation(
         # 조립 — 번역된 유닛만 교체(나머지 원문 보존)
         md_trans = {u.id: results[u.id] for u in md_units if u.id in results}
         assembled = assemble_markdown(md_text, page_separator, md_trans)
-        _atomic_write(job_dir / f"result.{lang}.md", assembled)
-
+        new_pages = None
         if layout_pages is not None:
             lay_trans = {u.id: results[u.id] for u in lay_units if u.id in results}
             new_pages = apply_layout(layout_pages, lay_trans)
+            assembled = reconcile_markdown_with_layout(
+                md_text,
+                assembled,
+                layout_pages,
+                new_pages,
+                page_separator,
+            )
             _atomic_write(job_dir / f"layout.{lang}.json", json.dumps(new_pages, ensure_ascii=False))
+        _atomic_write(job_dir / f"result.{lang}.md", assembled)
 
         api_mode = getattr(client, "api_mode_used", "") or cfg.api_mode
         _atomic_write_json(tdir / "report.json", {

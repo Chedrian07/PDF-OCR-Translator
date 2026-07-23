@@ -159,8 +159,17 @@ def layout_units(pages: list) -> list[Unit]:
             content = block.get("content")
             if not content or not str(content).strip():
                 continue
+            kind = str(block.get("type") or "text")
             units.append(
-                Unit(id=f"lay:{pno}:{i}", kind=str(block.get("type") or "text"), page=pno, src=content)
+                Unit(
+                    id=f"lay:{pno}:{i}",
+                    kind=kind,
+                    page=pno,
+                    src=content,
+                    # 서지 항목은 저자명·학술지명·URL의 원문 표기를 유지한다.
+                    # Markdown references 정책 및 PDF 내보내기 정책과 동일한 계약이다.
+                    skip_reason="references" if kind == "ref_text" else "",
+                )
             )
     return units
 
@@ -175,3 +184,79 @@ def apply_layout(pages: list, translations: dict[str, str]) -> list:
             if uid in translations:
                 block["content"] = translations[uid]
     return out
+
+
+def reconcile_markdown_with_layout(
+    md_text: str,
+    assembled: str,
+    source_pages: list,
+    translated_pages: list,
+    page_separator: str,
+    *,
+    min_coverage: float = 0.7,
+) -> str:
+    """레이아웃과 Markdown의 동일 원문 줄을 하나의 번역으로 맞춘다.
+
+    OCR merge 결과는 보통 각 layout 블록을 result.md의 한 줄로도 기록한다. 이때
+    Markdown 유닛과 layout 유닛을 각각 LLM에 보내면 같은 문장이 서로 다르게 번역돼
+    PDF·개요·읽기 텍스트가 어색하게 갈라질 수 있다. 원문 한 줄과 layout 블록이
+    정확히 대응하고, 같은 원문이 항상 같은 번역으로 귀결될 때 layout 번역을 단일
+    기준으로 사용한다.
+
+    대응률이 낮은 비정형 Markdown은 기존 assembled 결과를 그대로 반환한다. 복수
+    줄 블록·중복 원문의 상충 번역·ref_text는 보수적으로 매핑에서 제외한다.
+    """
+    if not isinstance(source_pages, list) or not isinstance(translated_pages, list):
+        return assembled
+
+    candidates: dict[str, set[str]] = {}
+    for source_page, translated_page in zip(source_pages, translated_pages):
+        source_blocks = source_page.get("blocks", []) if isinstance(source_page, dict) else []
+        translated_blocks = (
+            translated_page.get("blocks", []) if isinstance(translated_page, dict) else []
+        )
+        for source_block, translated_block in zip(source_blocks, translated_blocks):
+            if not isinstance(source_block, dict) or not isinstance(translated_block, dict):
+                continue
+            if str(source_block.get("type") or "") == "ref_text":
+                continue
+            source = str(source_block.get("content") or "").strip()
+            translated = str(translated_block.get("content") or "").strip()
+            if not source or not translated or "\n" in source or "\n" in translated:
+                continue
+            candidates.setdefault(source, set()).add(translated)
+
+    mapping = {
+        source: next(iter(values))
+        for source, values in candidates.items()
+        if len(values) == 1
+    }
+    if not mapping:
+        return assembled
+
+    lines = md_text.splitlines(keepends=True)
+    eligible = 0
+    matched = 0
+    out: list[str] = []
+    separator_line = page_separator.strip()
+    for line in lines:
+        ending = "\n" if line.endswith("\n") else ""
+        body = line[:-1] if ending else line
+        stripped = body.strip()
+        if stripped and stripped != separator_line:
+            eligible += 1
+        translated = mapping.get(stripped)
+        if translated is None:
+            out.append(line)
+            continue
+        matched += 1
+        leading = body[:len(body) - len(body.lstrip())]
+        trailing = body[len(body.rstrip()):]
+        out.append(f"{leading}{translated}{trailing}{ending}")
+
+    if eligible <= 0 or matched / eligible < min_coverage:
+        return assembled
+    reconciled = "".join(out)
+    if page_separator and len(reconciled.split(page_separator)) != len(md_text.split(page_separator)):
+        return assembled
+    return reconciled

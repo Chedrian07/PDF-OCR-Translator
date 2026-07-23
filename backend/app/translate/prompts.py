@@ -47,6 +47,7 @@ def build_unit_prompt(
     first_terms: list[tuple[str, str]],
     context_tail: str | None = None,
     keep_terms: list[str] | None = None,
+    unit_kind: str = "",
 ) -> str:
     """유닛 하나의 user 메시지. glossary_pairs/first_terms/keep_terms는 이 유닛에
     실제로 등장하는 용어만 추려서 넘긴다 (프롬프트 비대화 방지).
@@ -54,6 +55,12 @@ def build_unit_prompt(
     keep_terms(policy A 원형): 규칙 5만으로는 산문 속 약어를 풀어쓰는 사례가
     실측됨(MSE→"평균 제곱 오차") — 유닛별 명시 목록이 강제력을 만든다."""
     parts: list[str] = []
+    if unit_kind == "title":
+        parts.append(
+            "[블록 유형 — 제목]\n"
+            "제목의 의미와 정보량을 유지한다. UI 메뉴처럼 지나치게 짧은 명사구로 "
+            "축약하지 말고, 원문의 수식 관계와 동작 의미를 자연스러운 한국어 제목으로 옮긴다."
+        )
     if keep_terms:
         lines = "\n".join(f"- {t}" for t in keep_terms)
         parts.append(f"[원문 유지 — 다음 표기는 번역·풀어쓰기·음차 없이 그대로 쓴다]\n{lines}")

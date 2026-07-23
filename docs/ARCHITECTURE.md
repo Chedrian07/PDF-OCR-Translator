@@ -286,11 +286,15 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   리댁션은 `images=NONE`, `graphics=NONE`, `text=REMOVE`를 명시해 블록 안의
   그림·밑줄·차트 선을 제거하지 않는다. 원래 bbox에 들어가지 않으면 같은 단의
   다음 블록·표·그림·푸터 앞까지만 아래 빈 영역을 사용하며, 그래도 부족하면
-  원문을 보존한다.
-- 폰트: `PDF_EXPORT_FONT`(파일 경로) → 시스템 한글 명조(macOS AppleMyungjo,
-  Linux Noto Serif CJK) → 시스템 고딕 → PyMuPDF 내장 CJK(`korea`) 순 폴백.
-  PDF 요청 자체가 원본 텍스트 레이어의 실측 폰트 크기·세로쓰기 메타를 읽으므로
-  사용자가 먼저 레이아웃 탭을 열지 않아도 원본 타이포를 기준으로 조판한다.
+  원문을 보존한다. 빈 `list` 컨테이너는 장애물에서 제외하고, y 경계가 맞닿는
+  다음 문단은 확장 공간으로 오인하지 않아 번역 블록 중첩을 막는다.
+- 폰트: 원본 span의 실측 크기·굵기·정렬과 `font_style=serif|sans`를 추출한다.
+  serif 블록은 시스템 한글 명조(macOS AppleMyungjo, Linux Noto Serif CJK),
+  sans 블록은 시스템 한글 고딕에 대응하고 PyMuPDF 내장 CJK(`korea`)로 폴백한다.
+  한 줄 번역은 CJK textbox 높이 판정 때문에 축소하지 않고 원문 baseline에 직접
+  삽입하며, 여러 줄 본문만 자연 행간→조밀 행간→폰트 축소 순서로 dry-run한다.
+  `PDF_EXPORT_FONT`를 지정하면 명시 폰트를 우선한다. PDF 요청 자체가 이 메타를
+  읽으므로 사용자가 먼저 레이아웃 탭을 열지 않아도 원본 타이포를 기준으로 조판한다.
 - 상태코드: 400 미지원 lang · 404 번역본 없음 · 409 미완료 잡 또는
   좌표 레이아웃 없음(figure_only 엔진 — document.html 사용 안내).
 - 응답 헤더: `X-UOCR-PDF-Replaced`, `-Preserved`, `-Relocated`, `-Table-Cells`,
@@ -521,11 +525,18 @@ OCR로 얻은 **데이터 레이어**(`result.md` + `layout.json`)를 OpenAI 호
   run_translation(job_dir, lang, cfg, *, page_separator, progress, cancel, force)
     1. result.md(+layout.json)를 번역 유닛으로 분해, 마스킹(<m1 .../> 플레이스홀더)
     2. 유닛 캐시(units.json)·용어집(glossary.json) 활용해 API 호출 (Chat/Responses)
-    3. 플레이스홀더 복원 → result.{lang}.md / layout.{lang}.json 기록
-    4. state.json에 running(current/total) → done|error|canceled 기록, report.json 저장
+       - `title` 유닛은 의미·정보량을 유지하고 UI 라벨식 축약을 금지한다
+    3. 플레이스홀더 복원 → layout 블록과 정확히 대응하는 Markdown 줄은 동일 번역으로 정렬
+       (PDF·개요·읽기 텍스트의 제목/용어 SSOT, ref_text는 양쪽 모두 원문 유지)
+    4. result.{lang}.md / layout.{lang}.json 기록
+    5. state.json에 running(current/total) → done|error|canceled 기록, report.json 저장
 ```
 
 - 번역 코어(`app/translate/`)는 **OCR 엔진·torch에 의존하지 않는다**(requests + 표준 라이브러리).
+- 원본 Markdown의 비어 있지 않은 줄 중 70% 이상이 layout 블록과 정확히 대응하면
+  `layout.{lang}.json`의 블록 번역을 `result.{lang}.md`에도 재사용한다. 대응률이
+  낮은 비정형 Markdown은 독립 Markdown 번역을 유지하며, 중복 원문의 번역이 서로
+  다르거나 여러 줄인 블록은 보수적으로 정렬 대상에서 제외한다.
 - API 레이어는 `run_translation`만 안다. 진행률은 `progress(current,total)` 콜백,
   중단은 `threading.Event` cancel로 통신(OCR 워커와 동일 패턴).
 - `/html?lang=ko`는 흐름형 읽기 텍스트를 제공한다. `/document.html`,

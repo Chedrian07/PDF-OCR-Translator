@@ -10,6 +10,8 @@ PDF에 텍스트 레이어가 있으면 그 안의 span 크기를 그대로 읽�
 - 그 사각형 안에 **중심점**이 드는 span들을 모아 글자수 가중 중앙값 크기를 구하고
   block["fs"] = size_pt / page_width_pt × 100 (cqw = 페이지 폭의 1%)로 심는다.
 - 볼드 글자가 과반이면 block["bold"] = True.
+- 원문 span의 주 글꼴 계열을 block["font_style"] = "serif"|"sans"로 심어,
+  번역 PDF의 대표 제목이 원문 sans인데 한글만 명조로 바뀌는 현상을 막는다.
 - 원문 줄의 폭과 중심을 비교해 block["align"] = "center"|"justify"를 심는다.
   PDF 번역 내보내기가 모든 블록을 좌측 정렬로 평탄화하지 않게 하기 위함이다.
 - 줄 방향(dir)이 세로인 글자가 과반이면 block["vertical"] = "up"|"down"
@@ -30,7 +32,7 @@ from statistics import median
 _BOLD_FLAG = 16  # fitz span flags: bit 4 == bold
 
 # enrichment 스키마 버전 — 필드 추가 시 올리면 기존 잡이 /layout 요청 때 재백필된다
-ENRICH_VERSION = 3
+ENRICH_VERSION = 5
 
 
 def _weighted_median(pairs: list[tuple[float, int]]) -> float:
@@ -52,6 +54,21 @@ def _span_is_bold(span: dict) -> bool:
     if int(span.get("flags", 0)) & _BOLD_FLAG:
         return True
     return "bold" in str(span.get("font", "")).lower()
+
+
+def _font_style(font_name: str) -> str | None:
+    """PDF 내장/subset 폰트 이름을 큰 serif/sans 계열로만 보수적으로 분류한다."""
+    name = font_name.lower().replace("-", "").replace("_", "")
+    # URW의 Helvetica 호환 글꼴은 PDF에 ``NimbusSanL``로 들어오기도 한다.
+    # 일반적인 ``Sans`` 철자와 달라 대표 제목이 serif 폴백으로 빠지지 않게
+    # 별도 토큰으로 분류한다.
+    if any(token in name for token in ("sans", "nimbussan", "helv", "arial", "cmss")):
+        return "sans"
+    if any(token in name for token in (
+        "serif", "times", "roman", "nimbusrom", "cmr", "cmbx", "cmti", "cmmi",
+    )):
+        return "serif"
+    return None
 
 
 def _infer_alignment(
@@ -165,6 +182,8 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
                 pairs: list[tuple[float, int]] = []
                 bold_chars = 0
                 total_chars = 0
+                serif_chars = 0
+                sans_chars = 0
                 vert_up = vert_down = 0
                 matched_lines: dict[int, list[float]] = {}
                 for sp, ldir, source_line_no in spans:
@@ -192,6 +211,11 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
                     bounds[3] = max(bounds[3], float(sb[3]))
                     if _span_is_bold(sp):
                         bold_chars += n
+                    style = _font_style(str(sp.get("font") or ""))
+                    if style == "serif":
+                        serif_chars += n
+                    elif style == "sans":
+                        sans_chars += n
                     if abs(ldir[1]) > 0.7:  # 세로쓰기 줄 (y축 진행)
                         if ldir[1] < 0:
                             vert_up += n    # 아래→위 (arXiv 스탬프 방향)
@@ -205,6 +229,12 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
                     block["bold"] = True
                 else:
                     block.pop("bold", None)
+                if sans_chars > serif_chars and sans_chars > 0:
+                    block["font_style"] = "sans"
+                elif serif_chars > 0:
+                    block["font_style"] = "serif"
+                else:
+                    block.pop("font_style", None)
                 align = _infer_alignment(
                     block,
                     (rx1 + 3, ry1 + 3, rx2 - 3, ry2 - 3),

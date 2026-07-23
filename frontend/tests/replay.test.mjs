@@ -42,6 +42,9 @@ import {
   jobModelChip,
   docLayoutIsFigureOnly,
   progressPhaseText,
+  parseViewerSearch,
+  buildViewerSearch,
+  viewerThumbnailWindow,
 } from '../app.js';
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
@@ -999,6 +1002,36 @@ test('readerImageUrl: 언어와 무관하게 원문 좌표 기준면 endpoint', 
   assert.equal(readerImageUrl('j_abc', 0), '/api/jobs/j_abc/page/1', '방어: 1 미만은 1');
   assert.equal(readerImageUrl('j_abc', 3, 'ko'), '/api/jobs/j_abc/page/3',
     '한국어 rail에서도 왼쪽 이미지는 원문으로 고정');
+});
+
+test('production viewer search: 열림·페이지·언어를 파싱하고 비정상값을 안전하게 보정', () => {
+  assert.deepEqual(parseViewerSearch('?viewer=1&page=7&lang=ko'), {
+    open: true, page: 7, lang: 'ko',
+  });
+  assert.deepEqual(parseViewerSearch('?viewer=0&page=-3&lang=evil'), {
+    open: false, page: 1, lang: 'orig',
+  });
+  assert.deepEqual(parseViewerSearch(''), {
+    open: false, page: 1, lang: 'orig',
+  });
+});
+
+test('production viewer search: 상태 변경 시 무관한 query를 보존하고 닫으면 viewer만 제거', () => {
+  const opened = buildViewerSearch('?utm=test&foo=1', { open: true, page: 3, lang: 'ko' });
+  assert.equal(opened, '?utm=test&foo=1&viewer=1&page=3&lang=ko');
+  assert.deepEqual(parseViewerSearch(opened), { open: true, page: 3, lang: 'ko' });
+
+  const closed = buildViewerSearch(opened, { open: false, page: 3, lang: 'ko' });
+  assert.equal(closed, '?utm=test&foo=1');
+  assert.deepEqual(parseViewerSearch(closed), { open: false, page: 1, lang: 'orig' });
+});
+
+test('viewerThumbnailWindow: 현재 페이지 주변을 정렬·클램프하고 문서 양끝을 포함', () => {
+  assert.deepEqual(viewerThumbnailWindow(1, 1), [1]);
+  assert.deepEqual(viewerThumbnailWindow(10, 1, 2), [1, 2, 3, 10]);
+  assert.deepEqual(viewerThumbnailWindow(10, 5, 2), [1, 3, 4, 5, 6, 7, 10]);
+  assert.deepEqual(viewerThumbnailWindow(10, 10, 2), [1, 8, 9, 10]);
+  assert.deepEqual(viewerThumbnailWindow(0, 1), []);
 });
 
 test('alignmentRect: 0..1000 bbox를 안전한 퍼센트 좌표로 변환', () => {

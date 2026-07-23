@@ -169,7 +169,7 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 
 ### POST /api/jobs — PDF 업로드
 - `multipart/form-data`: `file`(필수, PDF), `mode`(`multi`|`per_page`, 기본 `multi`),
-  `dpi`(72–400, 기본 200), `max_pages`(선택)
+  `dpi`(72–400, 기본 200). 페이지 상한은 서버의 `MAX_PAGES`로 일괄 적용한다.
 - 202 → `{"job_id": "j_1a2b3c4d5e6f", "status": "queued"}`
 - 400(비PDF/손상), 413(MAX_UPLOAD_MB 초과)
 
@@ -203,6 +203,7 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
     "markdown_url": "/api/jobs/{id}/markdown",
     "html_url": "/api/jobs/{id}/html",
     "archive_url": "/api/jobs/{id}/archive",
+    "viewer_manifest_url": "/api/jobs/{id}/viewer-manifest",
     "images": ["/api/jobs/{id}/files/images/p0001_0.jpg"],
     "layouts": ["/api/jobs/{id}/files/layout/page_0001.jpg"],
     "pages": ["/api/jobs/{id}/files/pages/page_0001.png"]
@@ -263,6 +264,24 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 
 ### GET /api/jobs/{id}/outline?lang=ko
 - layout의 `title` 블록을 페이지·레벨·텍스트 목록으로 반환한다.
+
+### GET /api/jobs/{id}/alignment?page=N&lang=ko
+- 원문 bbox와 같은 인덱스의 원문/번역 블록을 연결한다. 번역 페이지·블록 수,
+  type, bbox 대응이 어긋나면 잘못된 매핑을 내보내지 않고 409를 반환한다.
+
+### GET /api/jobs/{id}/viewer-manifest?lang=ko
+- 전체 화면 논문 뷰어의 부트스트랩 계약. schema/artifact revision, 페이지 수,
+  원문 이미지·번역 이미지·alignment·outline capability, 품질 경고와 URL 템플릿을
+  작은 JSON으로 반환한다.
+- 좌측 뷰어 기준면은 `source_page_template`을 사용해 항상 원문으로 고정한다.
+  `translated_page_image`는 번역 PDF raster 캐시가 실제 준비된 경우에만 true다.
+- `Cache-Control: private, no-cache`, `ETag`, `Vary: Authorization`을 제공하며
+  일치하는 `If-None-Match`에는 304로 응답한다.
+
+### GET /api/jobs/{id}/viewer/pages?start=N&limit=4&lang=ko&include=alignment
+- 긴 문서의 인접 페이지 메타/좌표를 한 번의 layout 파싱으로 반환하는 제한 배치.
+  `limit`은 1–16이며, 각 item은 원문 이미지 URL과 선택적 alignment를 포함한다.
+  잘못된 범위/include는 422, 원문-번역 대응 불변식 위반은 409다.
 
 ### GET /api/jobs/{id}/files/{path}
 - 잡 디렉터리 하위 정적 파일 (pages/, images/, layout/, rendered/ 만 허용, 경로 탈출 차단)

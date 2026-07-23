@@ -84,6 +84,7 @@ def test_full_flow_multi(client, sample_pdf):
     assert len(res["pages"]) == 3
     assert len(res["layouts"]) == 3
     assert len(res["images"]) == 3  # FakeEngine: 페이지당 figure 1개
+    assert res["viewer_manifest_url"] == f"/api/jobs/{jid}/viewer-manifest"
 
     md = client.get(f"/api/jobs/{jid}/markdown")
     assert md.status_code == 200
@@ -148,6 +149,39 @@ def test_full_flow_multi(client, sample_pdf):
     outline = client.get(f"/api/jobs/{jid}/outline")
     assert outline.status_code == 200
     assert any(item["text"].startswith("페이지 1") for item in outline.json()["items"])
+
+    manifest = client.get(f"/api/jobs/{jid}/viewer-manifest")
+    assert manifest.status_code == 200
+    viewer = manifest.json()
+    assert viewer["schema_version"] == 1
+    assert viewer["document"]["page_count"] == 3
+    assert viewer["document"]["ready_page_count"] == 3
+    assert viewer["capabilities"]["source_page_image"] is True
+    assert viewer["capabilities"]["alignment"] is True
+    assert viewer["links"]["source_page_template"].startswith(
+        f"/api/jobs/{jid}/page/{{page}}"
+    )
+    assert manifest.headers["cache-control"] == "private, no-cache"
+    assert client.get(
+        f"/api/jobs/{jid}/viewer-manifest",
+        headers={"if-none-match": manifest.headers["etag"]},
+    ).status_code == 304
+
+    batch = client.get(
+        f"/api/jobs/{jid}/viewer/pages?start=1&limit=2&include=alignment"
+    )
+    assert batch.status_code == 200
+    viewer_pages = batch.json()
+    assert viewer_pages["total"] == 3
+    assert viewer_pages["next_start"] == 3
+    assert [item["page"] for item in viewer_pages["items"]] == [1, 2]
+    assert all(item["alignment"]["blocks"] for item in viewer_pages["items"])
+    assert client.get(
+        f"/api/jobs/{jid}/viewer/pages?start=0&limit=2"
+    ).status_code == 422
+    assert client.get(
+        f"/api/jobs/{jid}/viewer/pages?start=1&limit=17"
+    ).status_code == 422
 
     img = client.get(res["images"][0])
     assert img.status_code == 200

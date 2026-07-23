@@ -80,6 +80,7 @@ class Job:
             "markdown_url": f"{base}/markdown",
             "html_url": f"{base}/html",
             "archive_url": f"{base}/archive",
+            "viewer_manifest_url": f"{base}/viewer-manifest",
             "images": _urls("images"),
             "layouts": _urls("layout"),
             "pages": _urls("pages"),

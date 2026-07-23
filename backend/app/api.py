@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -744,36 +745,13 @@ def _layout_page(pages: list, page_number: int) -> dict | None:
     return None
 
 
-@router.get("/jobs/{job_id}/alignment")
-def job_alignment(
-    request: Request,
-    job_id: str,
-    page: int = 1,
-    lang: str | None = None,
+def _alignment_payload(
+    source_page: dict,
+    target_page: dict,
+    page: int,
+    lang: str | None,
 ) -> dict:
-    """원문 PDF bbox와 같은 인덱스의 번역 블록을 리더용으로 연결한다.
-
-    번역 파이프라인은 layout.json을 깊은 복사한 뒤 content만 교체한다. 이 계약을
-    요청 시 다시 검증해, 순서가 어긋난 번역을 잘못된 원문 위치에 표시하지 않는다.
-    """
-    if page < 1:
-        raise HTTPException(422, "페이지 번호는 1 이상이어야 합니다")
-    job = _get_job(request, job_id)
-    if lang is not None:
-        _check_lang(lang)
-
-    source_pages = _load_layout_pages(job)
-    source_page = _layout_page(source_pages, page)
-    if source_page is None:
-        raise HTTPException(404, "페이지를 찾을 수 없습니다")
-
-    target_page = source_page
-    if lang is not None:
-        target_pages = _load_layout_pages(job, lang)
-        target_page = _layout_page(target_pages, page)
-        if target_page is None:
-            raise HTTPException(409, "번역 레이아웃의 페이지 대응이 올바르지 않습니다")
-
+    """이미 한 번 로드한 페이지 쌍을 viewer alignment 계약으로 변환한다."""
     source_blocks = source_page.get("blocks")
     target_blocks = target_page.get("blocks")
     if not isinstance(source_blocks, list) or not isinstance(target_blocks, list):
@@ -823,6 +801,213 @@ def job_alignment(
         "lang": lang or "orig",
         "blocks": aligned,
     }
+
+
+@router.get("/jobs/{job_id}/alignment")
+def job_alignment(
+    request: Request,
+    job_id: str,
+    page: int = 1,
+    lang: str | None = None,
+) -> dict:
+    """원문 PDF bbox와 같은 인덱스의 번역 블록을 리더용으로 연결한다.
+
+    번역 파이프라인은 layout.json을 깊은 복사한 뒤 content만 교체한다. 이 계약을
+    요청 시 다시 검증해, 순서가 어긋난 번역을 잘못된 원문 위치에 표시하지 않는다.
+    """
+    if page < 1:
+        raise HTTPException(422, "페이지 번호는 1 이상이어야 합니다")
+    job = _get_job(request, job_id)
+    if lang is not None:
+        _check_lang(lang)
+
+    source_pages = _load_layout_pages(job)
+    source_page = _layout_page(source_pages, page)
+    if source_page is None:
+        raise HTTPException(404, "페이지를 찾을 수 없습니다")
+
+    target_page = source_page
+    if lang is not None:
+        target_pages = _load_layout_pages(job, lang)
+        target_page = _layout_page(target_pages, page)
+        if target_page is None:
+            raise HTTPException(409, "번역 레이아웃의 페이지 대응이 올바르지 않습니다")
+
+    return _alignment_payload(source_page, target_page, page, lang)
+
+
+def _viewer_artifact_revision(job, lang: str | None) -> str:
+    """뷰어 계약 캐시 키. 내용 전체를 재해시하지 않고 원자적으로 교체되는 산출물의
+    파일명·크기·mtime을 묶는다. 강제 재번역/재병합 시 URL 계약이 즉시 바뀐다."""
+    names = ["meta.json", "layout.json", "result.md"]
+    if lang is not None:
+        names.extend([
+            f"layout.{lang}.json",
+            f"result.{lang}.md",
+            f"translations/{lang}/state.json",
+        ])
+    parts = []
+    for name in names:
+        path = job.dir / name
+        try:
+            stat = path.stat()
+        except OSError:
+            parts.append(f"{name}:missing")
+        else:
+            parts.append(f"{name}:{stat.st_size}:{stat.st_mtime_ns}")
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:20]
+
+
+def _viewer_cache_headers(revision: str) -> dict[str, str]:
+    return {
+        "Cache-Control": "private, no-cache",
+        "ETag": f'"viewer-{revision}"',
+        "Vary": "Authorization",
+    }
+
+
+@router.get("/jobs/{job_id}/viewer-manifest")
+def job_viewer_manifest(
+    request: Request,
+    job_id: str,
+    lang: str | None = None,
+) -> Response:
+    """전체 화면 reader의 작고 명시적인 부트스트랩 계약.
+
+    페이지 GET에서 번역 PDF 전체를 지연 생성하지 않도록 source 이미지 URL과
+    번역/좌표 capability를 분리한다. 변경 가능한 로컬 산출물이므로 조건부 재검증을
+    강제하고, ETag가 일치하면 본문 없이 304를 반환한다.
+    """
+    job = _get_job(request, job_id)
+    if lang is not None:
+        _check_lang(lang)
+    revision = _viewer_artifact_revision(job, lang)
+    headers = _viewer_cache_headers(revision)
+    if request.headers.get("if-none-match") == headers["ETag"]:
+        return Response(status_code=304, headers=headers)
+
+    source_layout = job.dir / "layout.json"
+    target_layout = job.dir / f"layout.{lang}.json" if lang else source_layout
+    source_images = sorted((job.dir / "pages").glob("page_*.png"))
+    page_count = 0
+    try:
+        page_count = int(job.progress.get("total_pages") or 0)
+    except (TypeError, ValueError):
+        page_count = 0
+    page_count = max(page_count, len(source_images))
+
+    translate_state = _read_translate_state(job, lang) if lang else None
+    language_status = (
+        str((translate_state or {}).get("status") or "missing")
+        if lang else "ready"
+    )
+    warnings = list(job.warnings)
+    body = {
+        "schema_version": 1,
+        "artifact_revision": revision,
+        "job_id": job.id,
+        "status": job.status,
+        "partial": job.status != "done",
+        "document": {
+            "filename": job.filename,
+            "page_count": page_count,
+            "ready_page_count": len(source_images),
+        },
+        "language": {
+            "requested": lang or "orig",
+            "status": language_status,
+        },
+        "capabilities": {
+            "source_page_image": bool(source_images),
+            # 뷰어 좌측 기준면은 항상 source다. 번역 PDF raster 준비 여부는 별도 표기해
+            # 원문 이미지를 한국어 이미지로 잘못 라벨링하는 200 fallback을 막는다.
+            "translated_page_image": bool(
+                lang
+                and target_layout.is_file()
+                and (job.dir / "rendered" / lang / ".source.json").is_file()
+            ),
+            "alignment": source_layout.is_file() and target_layout.is_file(),
+            "outline": target_layout.is_file(),
+        },
+        "quality": {
+            "state": "degraded" if warnings else "ok",
+            "warning_count": len(warnings),
+            "warnings": warnings[:20],
+        },
+        "links": {
+            "source_page_template": f"/api/jobs/{job.id}/page/{{page}}?revision={revision}",
+            "pages": f"/api/jobs/{job.id}/viewer/pages",
+            "alignment_template": f"/api/jobs/{job.id}/alignment?page={{page}}",
+            "outline": f"/api/jobs/{job.id}/outline",
+            "html": f"/api/jobs/{job.id}/html",
+            "events": f"/api/jobs/{job.id}/events",
+        },
+        "limits": {"max_page_batch": 16},
+    }
+    return JSONResponse(body, headers=headers)
+
+
+@router.get("/jobs/{job_id}/viewer/pages")
+def job_viewer_pages(
+    request: Request,
+    job_id: str,
+    start: int = 1,
+    limit: int = 4,
+    lang: str | None = None,
+    include: str = "alignment",
+) -> JSONResponse:
+    """인접 페이지 메타/좌표를 한 번의 layout 파싱으로 돌려주는 제한된 배치."""
+    if start < 1:
+        raise HTTPException(422, "시작 페이지는 1 이상이어야 합니다")
+    if limit < 1 or limit > 16:
+        raise HTTPException(422, "페이지 배치 크기는 1에서 16 사이여야 합니다")
+    if include not in ("none", "alignment"):
+        raise HTTPException(422, "include는 none 또는 alignment여야 합니다")
+    job = _get_job(request, job_id)
+    if lang is not None:
+        _check_lang(lang)
+
+    source_pages = _load_layout_pages(job)
+    target_pages = _load_layout_pages(job, lang) if lang else source_pages
+    source_by_number = {
+        page.get("page"): page
+        for page in source_pages
+        if isinstance(page, dict) and isinstance(page.get("page"), int)
+    }
+    target_by_number = {
+        page.get("page"): page
+        for page in target_pages
+        if isinstance(page, dict) and isinstance(page.get("page"), int)
+    }
+    page_numbers = sorted(number for number in source_by_number if number >= start)
+    selected = page_numbers[:limit]
+    items = []
+    revision = _viewer_artifact_revision(job, lang)
+    for page_number in selected:
+        source_page = source_by_number[page_number]
+        target_page = target_by_number.get(page_number)
+        if target_page is None:
+            raise HTTPException(409, "번역 레이아웃의 페이지 대응이 올바르지 않습니다")
+        item = {
+            "page": page_number,
+            "width": source_page.get("width"),
+            "height": source_page.get("height"),
+            "source_image_url":
+                f"/api/jobs/{job.id}/page/{page_number}?revision={revision}",
+        }
+        if include == "alignment":
+            item["alignment"] = _alignment_payload(
+                source_page, target_page, page_number, lang,
+            )
+        items.append(item)
+    next_start = selected[-1] + 1 if selected and len(page_numbers) > len(selected) else None
+    return JSONResponse({
+        "schema_version": 1,
+        "artifact_revision": revision,
+        "total": len(source_by_number),
+        "next_start": next_start,
+        "items": items,
+    }, headers=_viewer_cache_headers(revision))
 
 
 @router.get("/jobs/{job_id}/outline")

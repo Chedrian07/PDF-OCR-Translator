@@ -3,10 +3,11 @@
 //   E2E_BASE_URL=http://127.0.0.1:8002 npm run test:e2e   (기본 8000)
 //
 // 검증 플로우 (엔진 불문 — health capability로 분기):
-//   1) 업로드 → 변환 완료 → 미리보기에 텍스트·표·이미지·KaTeX 수식 렌더
-//   2) HTML 다운로드(document.html) — 자립형(base64 이미지·서버 참조 없음)
-//   3) 레이아웃 탭 — figure_only 엔진이면 안내 카드, full이면 캔버스
-//   4) Markdown 탭 본문 존재, 다크 테마 렌더
+//   1) 업로드 → 변환 완료 → 프로덕션 뷰어 열기/닫기·3열·페이지 탐색
+//   2) 미리보기에 텍스트·표·이미지·KaTeX 수식 렌더
+//   3) HTML 다운로드(document.html) — 자립형(base64 이미지·서버 참조 없음)
+//   4) 레이아웃 탭 — figure_only 엔진이면 안내 카드, full이면 캔버스
+//   5) Markdown 탭 본문 존재, 다크 테마 렌더
 // 실패 시 exit 1. 스크린샷은 shots/(git 무시)에 남는다.
 import { chromium } from 'playwright';
 import { mkdirSync, readFileSync } from 'node:fs';
@@ -15,7 +16,9 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BASE = process.env.E2E_BASE_URL || 'http://127.0.0.1:8000';
-const PDF = path.join(HERE, 'fixtures', 'sample.pdf');
+// 썸네일/키보드 페이지 이동은 최소 2페이지가 필요하다. 저장소의 경량 제품
+// 샘플은 표·그림·수식 검증도 그대로 만족한다.
+const PDF = process.env.E2E_PDF || path.resolve(HERE, '../../../sample/sample.pdf');
 const OUT = path.join(HERE, 'shots');
 const TIMEOUT_S = Number(process.env.E2E_TIMEOUT_S || 300); // 콜드 모델 로딩 감안
 const VERIFY_MOCK_LLM = process.env.E2E_VERIFY_MOCK_LLM === '1';
@@ -67,30 +70,114 @@ while ((Date.now() - t0) / 1000 < TIMEOUT_S) {
 check('변환 완료', done, `${Math.round((Date.now() - t0) / 1000)}s`);
 if (!done) { await page.screenshot({ path: path.join(OUT, 'fail-not-done.png') }); }
 
-// ── 1.5) 읽기 탭 — 완료된 잡의 기본 뷰 ──────────────────────────────────
+// ── 1.5) 프로덕션 뷰어 — 명시적 진입 + 3열 제품 구조 ────────────────────
+await page.waitForSelector('#viewer-open:not([hidden])');
+check('프로덕션 뷰어: 완료 직후 닫힌 상태', await page.evaluate(() => {
+  const viewer = document.getElementById('production-viewer');
+  return !!viewer && !viewer.classList.contains('is-open')
+    && !document.body.classList.contains('viewer-mode');
+}));
+await page.click('#viewer-open');
+await page.waitForSelector('#production-viewer.is-open');
+await page.waitForFunction(() =>
+  document.querySelectorAll('#production-viewer [data-viewer-page]').length >= 2
+  && Number(document.getElementById('reader-total')?.textContent || 0) >= 2);
+const viewerStructure = await page.evaluate(() => {
+  const root = document.getElementById('production-viewer');
+  const visible = (selector) => {
+    const node = root?.querySelector(selector);
+    return !!node && !node.hidden && getComputedStyle(node).display !== 'none';
+  };
+  return {
+    open: !!root?.classList.contains('is-open'),
+    bodyMode: document.body.classList.contains('viewer-mode'),
+    nav: visible('.viewer-column-nav'),
+    source: visible('.viewer-column-source'),
+    translation: visible('.viewer-column-translation'),
+    thumbnails: root?.querySelectorAll('[data-viewer-page]').length || 0,
+    backgroundInert: document.querySelector('.sidebar')?.inert === true
+      && document.querySelector('.sidebar')?.getAttribute('aria-hidden') === 'true',
+  };
+});
+check('프로덕션 뷰어: 명시적 열기 + body 모드', viewerStructure.open && viewerStructure.bodyMode,
+  JSON.stringify(viewerStructure));
+check('프로덕션 뷰어: 배경 앱 포커스·접근성 격리', viewerStructure.backgroundInert,
+  JSON.stringify(viewerStructure));
+check('프로덕션 뷰어: navigator/source/translation 3열',
+  viewerStructure.nav && viewerStructure.source && viewerStructure.translation,
+  JSON.stringify(viewerStructure));
+check('프로덕션 뷰어: 다중 페이지 썸네일', viewerStructure.thumbnails >= 2,
+  JSON.stringify(viewerStructure));
+
+// 열린 뷰어 안에서만 원문/본문/좌표 매핑을 로드한다.
 await page.waitForTimeout(1200);
 const reader = await page.evaluate(() => ({
-  active: !!document.querySelector('button[data-tab="reader"].active'),
   textLen: (document.getElementById('reader-content')?.innerText || '').length,
   img: !!document.getElementById('reader-image')?.getAttribute('src'),
   total: document.getElementById('reader-total')?.textContent || '',
   cards: document.querySelectorAll('#reader-content .reader-map-card').length,
   boxes: document.querySelectorAll('#reader-map-overlay .reader-map-box').length,
 }));
-check('읽기 탭: 완료 시 기본 활성', reader.active, JSON.stringify(reader));
-check('읽기 탭: 현재 페이지 본문 렌더', reader.textLen > 20);
-check('읽기 탭: 페이지 이미지 로드', reader.img);
+check('프로덕션 뷰어: 현재 페이지 본문 렌더', reader.textLen > 20);
+check('프로덕션 뷰어: 원문 페이지 이미지 로드', reader.img);
+check('프로덕션 뷰어: 다중 페이지 결과', Number(reader.total) >= 2, JSON.stringify(reader));
 if (layoutCap !== 'figure_only') {
-  check('읽기 탭: 원문 bbox와 텍스트 블록 수 일치',
+  check('프로덕션 뷰어: 원문 bbox와 텍스트 블록 1:1',
     reader.cards > 0 && reader.cards === reader.boxes, JSON.stringify(reader));
   await page.locator('#reader-content .reader-map-card').first().click();
-  check('읽기 탭: 번역/본문 클릭 → 원문 bbox 활성', await page.evaluate(() => {
+  check('프로덕션 뷰어: 번역/본문 클릭 → 원문 bbox 활성', await page.evaluate(() => {
     const card = document.querySelector('#reader-content .reader-map-card.is-active');
     const box = document.querySelector('#reader-map-overlay .reader-map-box.is-active');
     return !!card && !!box && card.dataset.blockId === box.dataset.blockId;
   }));
 }
+
+await page.click('#production-viewer [data-viewer-page="2"]');
+await page.waitForFunction(() =>
+  document.getElementById('reader-page')?.value === '2'
+  && /\/page\/2(?:[?#]|$)/.test(document.getElementById('reader-image')?.src || ''));
+check('프로덕션 뷰어: 썸네일 클릭으로 페이지 2 이동', await page.evaluate(() =>
+  document.getElementById('reader-page')?.value === '2'));
+
+await page.keyboard.press('ArrowLeft');
+await page.waitForFunction(() => document.getElementById('reader-page')?.value === '1');
+check('프로덕션 뷰어: ArrowLeft 이전 페이지', true);
+await page.keyboard.press('ArrowRight');
+await page.waitForFunction(() => document.getElementById('reader-page')?.value === '2');
+check('프로덕션 뷰어: ArrowRight 다음 페이지', true);
+
+await page.click('#viewer-toggle-nav');
+check('프로덕션 뷰어: navigator 접힘 상태', await page.evaluate(() => {
+  const root = document.getElementById('production-viewer');
+  const toggle = document.getElementById('viewer-toggle-nav');
+  return root?.classList.contains('nav-collapsed')
+    && toggle?.getAttribute('aria-pressed') === 'false';
+}));
+await page.click('#viewer-toggle-rail');
+check('프로덕션 뷰어: translation rail 접힘 상태', await page.evaluate(() => {
+  const root = document.getElementById('production-viewer');
+  const toggle = document.getElementById('viewer-toggle-rail');
+  return root?.classList.contains('rail-collapsed')
+    && toggle?.getAttribute('aria-pressed') === 'false';
+}));
+// 후속 검증과 스크린샷은 전체 3열 상태로 남긴다.
+await page.click('#viewer-toggle-nav');
+await page.click('#viewer-toggle-rail');
 await page.screenshot({ path: path.join(OUT, 'reader.png') });
+
+await page.keyboard.press('Escape');
+await page.waitForFunction(() => !document.getElementById('production-viewer')?.classList.contains('is-open'));
+check('프로덕션 뷰어: Escape 닫기 + body 모드 해제', await page.evaluate(() =>
+  !document.body.classList.contains('viewer-mode')
+  && document.querySelector('.sidebar')?.inert === false
+  && !document.querySelector('.sidebar')?.hasAttribute('aria-hidden')));
+
+await page.click('#viewer-open');
+await page.waitForSelector('#production-viewer.is-open');
+await page.click('#viewer-close');
+await page.waitForFunction(() => !document.getElementById('production-viewer')?.classList.contains('is-open'));
+check('프로덕션 뷰어: 닫기 버튼', await page.evaluate(() =>
+  !document.body.classList.contains('viewer-mode')));
 
 // ── 2) 미리보기 렌더 ────────────────────────────────────────────────────
 await page.click('button[data-tab="preview"]'); // 읽기 탭이 기본이므로 명시 전환
@@ -181,14 +268,26 @@ if (VERIFY_MOCK_LLM) {
       && link.getAttribute('download')?.endsWith('.ko.html');
   }));
   check('mock 번역: PDF 버튼 노출', await page.evaluate(() => !document.getElementById('dl-pdf').hidden));
-  await page.click('button[data-tab="reader"]');
+  await page.click('#viewer-open');
+  await page.waitForSelector('#production-viewer.is-open');
   await page.waitForFunction(() =>
     document.querySelectorAll('#reader-content .reader-map-card').length > 0);
-  check('mock 번역: 오른쪽 한국어 rail + 왼쪽 원문 고정', await page.evaluate(() => {
+  check('mock 번역 뷰어: 오른쪽 한국어 rail + 왼쪽 원문 고정', await page.evaluate(() => {
     const text = document.getElementById('reader-content')?.innerText || '';
     const image = document.getElementById('reader-image')?.getAttribute('src') || '';
     return /[가-힣]/.test(text) && !image.includes('lang=ko');
   }));
+  check('mock 번역 뷰어: source/translation 블록 ID 1:1', await page.evaluate(() => {
+    const ids = (selector) => [...document.querySelectorAll(selector)]
+      .map((node) => node.dataset.blockId).filter(Boolean).sort();
+    const source = ids('#reader-map-overlay .reader-map-box');
+    const translated = ids('#reader-content .reader-map-card');
+    return source.length > 0 && source.length === new Set(source).size
+      && translated.length === new Set(translated).size
+      && JSON.stringify(source) === JSON.stringify(translated);
+  }));
+  await page.click('#viewer-close');
+  await page.waitForFunction(() => !document.getElementById('production-viewer')?.classList.contains('is-open'));
 
   const htmlDownloadPromise = page.waitForEvent('download');
   await page.click('#dl-doc-ko');
@@ -225,7 +324,8 @@ if (VERIFY_MOCK_LLM) {
   await page.screenshot({ path: path.join(OUT, 'mock-translation-qa.png') });
 }
 
-check('콘솔 에러/4xx 없음', errors.length === 0, errors.slice(0, 5).join(' | '));
+check('프로덕션 뷰어 포함 콘솔 에러/HTTP 4xx·5xx 없음',
+  errors.length === 0, errors.slice(0, 5).join(' | '));
 await browser.close();
 
 console.log(failures.length ? `\n${failures.length}개 실패` : '\n전부 통과');

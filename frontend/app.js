@@ -367,6 +367,47 @@ export function clampQaPage(value, totalPages) {
   return v;
 }
 
+// 전체 화면 논문 뷰어의 공유 가능한 query 계약. 잡 식별자는 기존 hash가 담당하고
+// query는 뷰어 표시 상태만 담당하므로 서로 독립적으로 갱신할 수 있다.
+export function parseViewerSearch(search) {
+  const params = new URLSearchParams(String(search || '').replace(/^\?/, ''));
+  const rawPage = Math.floor(Number(params.get('page')));
+  return {
+    open: params.get('viewer') === '1',
+    page: Number.isFinite(rawPage) && rawPage >= 1 ? rawPage : 1,
+    lang: params.get('lang') === 'ko' ? 'ko' : 'orig',
+  };
+}
+
+export function buildViewerSearch(search, viewer) {
+  const params = new URLSearchParams(String(search || '').replace(/^\?/, ''));
+  params.delete('viewer');
+  params.delete('page');
+  params.delete('lang');
+  if (viewer && viewer.open) {
+    const page = Math.max(1, Math.floor(Number(viewer.page)) || 1);
+    params.set('viewer', '1');
+    params.set('page', String(page));
+    params.set('lang', viewer.lang === 'ko' ? 'ko' : 'orig');
+  }
+  const result = params.toString();
+  return result ? `?${result}` : '';
+}
+
+// 긴 논문에서도 모든 페이지 이미지를 한꺼번에 다운로드하지 않는다. 현재 페이지
+// 주변과 양 끝만 미리보기로 유지해 탐색성은 보존하고 네트워크/메모리는 제한한다.
+export function viewerThumbnailWindow(total, current, radius = 2) {
+  const count = Math.max(0, Math.floor(Number(total)) || 0);
+  if (!count) return [];
+  const active = Math.min(count, Math.max(1, Math.floor(Number(current)) || 1));
+  const span = Math.max(0, Math.floor(Number(radius)) || 0);
+  const pages = new Set([1, count]);
+  for (let page = active - span; page <= active + span; page += 1) {
+    if (page >= 1 && page <= count) pages.add(page);
+  }
+  return [...pages].sort((a, b) => a - b);
+}
+
 /* ── 읽기(리더) 탭 + PDF 내보내기 순수 코어 (DOM 없음 — frontend/tests/에서 직접 검증) ──
  * 리더 탭은 /html 응답을 페이지 섹션 단위로 나눠 현재 페이지 본문만 보여준다.
  * PDF 내보내기는 GET /api/jobs/{id}/pdf?lang=ko 계약(200 pdf | 400 | 404 | 409)을
@@ -641,6 +682,12 @@ const state = {
   readerCitations: [],      // 세션 내 인용 [{page,lang,text}]
   readerZoom: 100,          // PDF 페이지 이미지 폭 % (60–220, localStorage 'uocr-reader-zoom')
   readerImgTimer: 0,        // 이미지 조용한 재시도(1회) 타이머
+  viewerOpen: false,        // 전체 화면 3열 논문 뷰어 표시 상태
+  viewerIntent: { open: false, page: 1, lang: 'orig' }, // 주소창에서 복원할 초기 상태
+  viewerManifest: null,     // viewer bootstrap/capability snapshot
+  viewerNavCollapsed: false,
+  viewerRailCollapsed: false,
+  viewerReturnFocus: null,  // 닫을 때 원래 진입 버튼으로 포커스 복귀
   qaPageTouched: false,     // 이 잡에서 사용자가 질문 페이지를 직접 수정했는지 (리더 프리필 가드)
   // 질문(Q&A — 완료된 잡 전용 탭. 잡 전환 시 teardownQa가 로그/진행을 초기화)
   qaCatalog: null,          // /api/providers 스냅샷 — 질문 탭 최초 활성화 시 1회 로드
@@ -722,6 +769,20 @@ const EL_IDS = {
   dlDoc: 'dl-doc',
   dlDocKo: 'dl-doc-ko',
   dlPdf: 'dl-pdf',
+  viewerRoot: 'production-viewer',
+  viewerOpen: 'viewer-open',
+  viewerClose: 'viewer-close',
+  viewerFilename: 'viewer-filename',
+  viewerToggleNav: 'viewer-toggle-nav',
+  viewerToggleRail: 'viewer-toggle-rail',
+  viewerNavigation: 'viewer-navigation',
+  viewerTranslation: 'viewer-translation',
+  viewerThumbnails: 'viewer-thumbnails',
+  viewerLangToggle: 'viewer-lang-toggle',
+  viewerLangOrig: 'viewer-lang-orig',
+  viewerLangKo: 'viewer-lang-ko',
+  viewerDlHtml: 'viewer-dl-html',
+  viewerDlPdf: 'viewer-dl-pdf',
   readerPrev: 'reader-prev',
   readerNext: 'reader-next',
   readerPageInput: 'reader-page',
@@ -1220,6 +1281,7 @@ async function deleteJob(id) {
 /* ============================ View switching ============================ */
 
 function showEmptyState() {
+  closeViewer({ sync: false, restoreFocus: false });
   el.jobView.hidden = true;
   el.emptyState.hidden = false;
 }
@@ -1261,11 +1323,28 @@ function syncJobHash(id) {
   } catch (_) { /* ignore */ }
 }
 
+function syncViewerSearch() {
+  try {
+    const search = buildViewerSearch(location.search, {
+      open: state.viewerOpen,
+      page: state.readerPage,
+      lang: state.viewerOpen && state.viewerIntent && state.viewerIntent.lang === 'ko'
+        ? 'ko'
+        : state.currentLang,
+    });
+    history.replaceState(null, '', location.pathname + search + location.hash);
+  } catch (_) { /* local file / restricted history contexts */ }
+}
+
 /* ============================ Open / render a job ============================ */
 
 async function openJob(id) {
   if (!id || id === state.currentJobId) return;
 
+  closeViewer({ sync: false, restoreFocus: false });
+  state.viewerIntent = typeof location !== 'undefined'
+    ? parseViewerSearch(location.search)
+    : { open: false, page: 1, lang: 'orig' };
   teardownConnections();
   state.currentJobId = id;
   // 잡 전환 시 이전 잡의 헤더 삭제 무장 잔상 제거 — 기능상 armTransition이 키
@@ -1338,6 +1417,7 @@ function renderJob(job) {
 
   el.jobFilename.textContent = job.filename || '(이름 없음)';
   el.jobFilename.title = job.filename || '';
+  el.viewerFilename.textContent = job.filename || '논문';
   el.jobTime.textContent = job.created_at ? fmtTime(job.created_at) : '';
   updateHeaderChip(job.status);
 
@@ -2185,6 +2265,7 @@ async function onJobDone(id, data) {
       archive: data.archive_url,
       documentHtml: `/api/jobs/${id}/document.html`,
       pdf: `/api/jobs/${id}/pdf?lang=ko`,
+      viewerManifest: `/api/jobs/${id}/viewer-manifest`,
     };
     applyDownloadLangs();
     renderThumbGrid(el.layoutsGrid, [], '레이아웃 이미지를 불러오지 못했습니다.');
@@ -2196,8 +2277,10 @@ async function onJobDone(id, data) {
     el.doclayoutBody.innerHTML = '';
     el.mdCode.textContent = '';
     activateTab('reader'); // 완료 잡의 기본 뷰 (renderResult와 동일 규칙)
+    el.viewerOpen.hidden = false;
     initTranslateForJob();
     initQaForJob(job); // job=null 허용 — 총 페이지 미상으로 폼만 연다
+    applyViewerIntent();
   }
   refreshJobs();
 }
@@ -2270,6 +2353,7 @@ function renderResult(job) {
     archive: r.archive_url,
     documentHtml: `/api/jobs/${job.job_id}/document.html`,
     pdf: `/api/jobs/${job.job_id}/pdf?lang=ko`,
+    viewerManifest: r.viewer_manifest_url || `/api/jobs/${job.job_id}/viewer-manifest`,
   };
   applyDownloadLangs(); // currentLang='orig' → 원문 URL로 세팅
   applyPdfExport();     // 번역 상태가 확인되기 전까지는 숨김 (initTranslateForJob이 갱신)
@@ -2287,11 +2371,13 @@ function renderResult(job) {
 
   // 완료된 잡은 읽기(리더) 뷰가 기본 — 취소·부분 결과는 기존 동작 유지.
   activateTab(job.status === 'done' ? 'reader' : 'preview');
+  el.viewerOpen.hidden = job.status !== 'done';
 
   // 번역 컨트롤·질문 폼은 완료(done) 잡에만 붙는다 (취소본은 플레이스홀더 유지).
   if (job.status === 'done') {
     initTranslateForJob();
     initQaForJob(job);
+    applyViewerIntent();
   } else {
     showQaPlaceholder();
   }
@@ -2302,6 +2388,7 @@ function renderPartialResult(job) {
   const id = job.job_id;
   const base = baseName(job.filename);
   resetTranslateUI(); // 취소본은 번역 대상이 아니다 (컨트롤 숨김 + PDF 내보내기 숨김)
+  el.viewerOpen.hidden = true;
   showQaPlaceholder(); // 질문도 완료(done) 잡 전용 — 플레이스홀더 안내
   // 리더 탭을 열어 보는 경우를 위한 총 페이지 힌트 (부분 결과에는 pages 목록이 없다)
   state.readerTotalHint = Number((job.progress || {}).total_pages) || 0;
@@ -2372,6 +2459,7 @@ function resetTranslateUI() {
   el.translateBtn.hidden = true;
   el.translateProgress.hidden = true;
   el.langToggle.hidden = true;
+  el.viewerLangToggle.hidden = true;
   setLangSegActive('orig');
   setResultLangAttr();
   applyReaderTranslateCta(); // 번역 상태 확인 전에는 리더 CTA도 숨김
@@ -2403,6 +2491,7 @@ function showTranslateButton() {
   el.translateBtn.hidden = false;
   el.translateProgress.hidden = true;
   el.langToggle.hidden = true;
+  el.viewerLangToggle.hidden = true;
   el.translateBtn.disabled = false;
   el.readerTranslateBtn.disabled = false; // 리더 CTA도 같은 시작 경로 — 함께 복원
   applyTranslateAvailability(); // 프로바이더 미설정이면 비활성 + 안내 title (CTA 노출도 갱신)
@@ -2411,6 +2500,7 @@ function showTranslateProgress(current, total) {
   el.translateBtn.hidden = true;
   el.translateProgress.hidden = false;
   el.langToggle.hidden = true;
+  el.viewerLangToggle.hidden = true;
   el.translateCancel.disabled = false;
   updateTranslateProgress(current, total);
   applyReaderTranslateCta(); // 번역 중에는 리더 CTA 숨김
@@ -2419,6 +2509,7 @@ function showLangToggle() {
   el.translateBtn.hidden = true;
   el.translateProgress.hidden = true;
   el.langToggle.hidden = false;
+  el.viewerLangToggle.hidden = false;
   applyReaderTranslateCta(); // 번역 완료 — 리더 CTA 숨김
 }
 
@@ -2435,10 +2526,15 @@ function updateTranslateProgress(current, total) {
 
 function setLangSegActive(lang) {
   const ko = lang === 'ko';
-  el.langOrig.classList.toggle('active', !ko);
-  el.langKo.classList.toggle('active', ko);
-  el.langOrig.setAttribute('aria-pressed', ko ? 'false' : 'true');
-  el.langKo.setAttribute('aria-pressed', ko ? 'true' : 'false');
+  for (const [button, active] of [
+    [el.langOrig, !ko],
+    [el.langKo, ko],
+    [el.viewerLangOrig, !ko],
+    [el.viewerLangKo, ko],
+  ]) {
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
 }
 
 // 문서/레이아웃/리더 뷰 컨테이너의 lang="ko" 속성 토글 (CJK 조판 CSS 적용용).
@@ -2461,6 +2557,11 @@ function applyDownloadLangs() {
   setDownload(el.dlMd, u.markdown ? withLangUrl(u.markdown, state.currentLang) : null, `${base}${suffix}.md`);
   setDownload(el.dlZip, u.archive || null, `${base}.md.zip`);
   setDownload(el.dlDoc, u.documentHtml || null, `${base}.html`);
+  setDownload(
+    el.viewerDlHtml,
+    u.documentHtml ? withLangUrl(u.documentHtml, state.currentLang) : null,
+    `${base}${suffix}.html`,
+  );
 }
 
 // 결과 뷰 진입 시 번역 상태를 조회해 알맞은 컨트롤을 노출한다 (done 잡에서만 호출).
@@ -2484,6 +2585,7 @@ async function initTranslateForJob() {
     showTranslateButton();
   }
   applyPdfExport(); // 이미 번역된 잡을 열면 이 시점에 PDF(한국어) 버튼이 나타난다
+  if (state.viewerOpen && state.viewerIntent.lang === 'ko' && status === 'done') setLang('ko');
 }
 
 // [한국어 번역] / 리더 [한국어로 읽기] 클릭 → 번역 시작 (공용 경로).
@@ -2623,7 +2725,11 @@ async function cancelTranslate() {
 function setLang(lang) {
   const next = lang === 'ko' ? 'ko' : 'orig';
   setLangSegActive(next);
-  if (state.currentLang === next) return;
+  if (state.viewerOpen) state.viewerIntent = { open: true, page: state.readerPage, lang: next };
+  if (state.currentLang === next) {
+    if (state.viewerOpen) syncViewerSearch();
+    return;
+  }
   state.currentLang = next;
   state.readerActiveBlock = '';
   setResultLangAttr();
@@ -2635,6 +2741,11 @@ function setLang(lang) {
   el.mdCode.textContent = '';
   applyDownloadLangs();
   reloadActiveResultTab();
+  if (state.viewerOpen) {
+    renderViewerThumbnails();
+    loadViewerManifest();
+    syncViewerSearch();
+  }
 }
 
 // 번역본 fetch가 404/실패일 때 조용히 원문으로 되돌린다 (호출부가 재로드).
@@ -2956,6 +3067,152 @@ function readerTotal() {
   return state.readerTotalHint || (pages ? pages.length : 0) || 1;
 }
 
+function applyViewerPanelState() {
+  el.viewerRoot.classList.toggle('nav-collapsed', state.viewerNavCollapsed);
+  el.viewerRoot.classList.toggle('rail-collapsed', state.viewerRailCollapsed);
+  el.viewerToggleNav.setAttribute('aria-expanded', state.viewerNavCollapsed ? 'false' : 'true');
+  el.viewerToggleNav.setAttribute('aria-pressed', state.viewerNavCollapsed ? 'false' : 'true');
+  el.viewerToggleRail.setAttribute('aria-expanded', state.viewerRailCollapsed ? 'false' : 'true');
+  el.viewerToggleRail.setAttribute('aria-pressed', state.viewerRailCollapsed ? 'false' : 'true');
+}
+
+function renderViewerThumbnails() {
+  const total = readerTotal();
+  const pages = viewerThumbnailWindow(total, state.readerPage, 2);
+  el.viewerThumbnails.textContent = '';
+  let previous = 0;
+  for (const page of pages) {
+    if (previous && page - previous > 1) {
+      el.viewerThumbnails.appendChild(h('span', {
+        class: 'viewer-thumb-gap',
+        text: '•••',
+        'aria-hidden': 'true',
+      }));
+    }
+    const image = h('img', {
+      src: readerImageUrl(state.currentJobId, page),
+      alt: '',
+      loading: page === state.readerPage ? 'eager' : 'lazy',
+      decoding: 'async',
+    });
+    image.addEventListener('error', () => image.classList.add('is-failed'), { once: true });
+    const button = h('button', {
+      class: `viewer-thumbnail${page === state.readerPage ? ' is-current' : ''}`,
+      type: 'button',
+      'data-viewer-page': String(page),
+      'aria-label': `${page}페이지로 이동`,
+      title: `${page}페이지`,
+    }, image, h('span', { text: String(page) }));
+    if (page === state.readerPage) button.setAttribute('aria-current', 'page');
+    button.addEventListener('click', () => {
+      setReaderPage(page);
+      el.viewerRoot.focus({ preventScroll: true });
+    });
+    el.viewerThumbnails.appendChild(button);
+    previous = page;
+  }
+}
+
+async function loadViewerManifest() {
+  const id = state.currentJobId;
+  if (!id) return;
+  const lang = state.currentLang;
+  const base = (state.resultUrls || {}).viewerManifest ||
+    `/api/jobs/${id}/viewer-manifest`;
+  try {
+    const response = await fetch(withLangUrl(base, lang), {
+      headers: { Accept: 'application/json' },
+    });
+    if (!response.ok) return; // 구버전 서버는 기존 result/pages 힌트로 폴백
+    const manifest = await response.json();
+    if (state.currentJobId !== id || state.currentLang !== lang) return;
+    state.viewerManifest = manifest;
+    const count = Number(manifest && manifest.document && manifest.document.page_count) || 0;
+    if (count > state.readerTotalHint) state.readerTotalHint = count;
+    el.viewerRoot.dataset.quality = String(
+      (manifest && manifest.quality && manifest.quality.state) || 'unknown',
+    );
+    renderViewerThumbnails();
+  } catch (_) { /* manifest는 additive 최적화 — legacy reader 경로 유지 */ }
+}
+
+function applyViewerIntent() {
+  const intent = state.viewerIntent || { open: false, page: 1, lang: 'orig' };
+  if (!intent.open || state.displayedStatus !== 'done') return;
+  state.readerPage = clampReaderPage(intent.page, state.readerTotalHint || 0);
+  openViewer({ restore: true });
+}
+
+function setViewerBackgroundInert(on) {
+  for (const node of document.querySelectorAll([
+    '.app-header',
+    '.sidebar',
+    '.job-head',
+    '.progress-section',
+    '.live-details',
+    '.error-section',
+    '.result-actions',
+    '.tabs',
+    '.tab-panel:not(#production-viewer)',
+  ].join(','))) {
+    node.inert = on;
+    if (on) {
+      if (!node.hasAttribute('aria-hidden')) node.dataset.viewerAriaHidden = '1';
+      node.setAttribute('aria-hidden', 'true');
+    } else if (node.dataset.viewerAriaHidden) {
+      node.removeAttribute('aria-hidden');
+      delete node.dataset.viewerAriaHidden;
+    }
+  }
+}
+
+function openViewer(options = {}) {
+  if (!state.currentJobId || state.displayedStatus !== 'done') return;
+  state.viewerReturnFocus = options.restore ? null : document.activeElement;
+  const intent = state.viewerIntent || { open: false, page: state.readerPage, lang: 'orig' };
+  state.viewerOpen = true;
+  state.viewerIntent = { open: true, page: state.readerPage, lang: intent.lang };
+  activateTab('reader');
+  document.body.classList.add('viewer-mode');
+  setViewerBackgroundInert(true);
+  el.viewerRoot.classList.add('is-open');
+  el.viewerRoot.setAttribute('role', 'dialog');
+  el.viewerRoot.setAttribute('aria-modal', 'true');
+  el.viewerRoot.setAttribute('aria-label', `${el.viewerFilename.textContent || '논문'} 읽기`);
+  el.viewerRoot.tabIndex = -1;
+  el.viewerOpen.setAttribute('aria-expanded', 'true');
+  applyViewerPanelState();
+  renderViewerThumbnails();
+  loadViewerManifest();
+  if (intent.lang === 'ko' && state.translateState === 'done') setLang('ko');
+  syncViewerSearch();
+  requestAnimationFrame(() => el.viewerClose.focus());
+}
+
+function closeViewer(options = {}) {
+  const wasOpen = state.viewerOpen;
+  state.viewerOpen = false;
+  state.viewerIntent = { open: false, page: 1, lang: 'orig' };
+  if (typeof document !== 'undefined') document.body.classList.remove('viewer-mode');
+  if (typeof document !== 'undefined') setViewerBackgroundInert(false);
+  if (el.viewerRoot) {
+    el.viewerRoot.classList.remove('is-open');
+    el.viewerRoot.setAttribute('role', 'tabpanel');
+    el.viewerRoot.removeAttribute('aria-modal');
+    el.viewerRoot.removeAttribute('aria-label');
+    el.viewerRoot.removeAttribute('tabindex');
+  }
+  if (el.viewerOpen) el.viewerOpen.setAttribute('aria-expanded', 'false');
+  if (options.sync !== false && typeof location !== 'undefined') syncViewerSearch();
+  if (wasOpen && options.restoreFocus !== false) {
+    const target = state.viewerReturnFocus && state.viewerReturnFocus.isConnected
+      ? state.viewerReturnFocus
+      : el.viewerOpen;
+    requestAnimationFrame(() => target && target.focus());
+  }
+  state.viewerReturnFocus = null;
+}
+
 function teardownReader() {
   clearTimeout(state.readerImgTimer);
   state.readerImgTimer = 0;
@@ -2974,6 +3231,9 @@ function resetReaderForJob() {
   state.readerSelection = '';
   state.readerHighlights = [];
   state.readerCitations = [];
+  state.viewerManifest = null;
+  state.viewerNavCollapsed = localGet('uocr-viewer-nav-collapsed') === '1';
+  state.viewerRailCollapsed = localGet('uocr-viewer-rail-collapsed') === '1';
   state.qaPageTouched = false;
   el.readerContent.innerHTML = '';
   el.readerMapOverlay.textContent = '';
@@ -2988,6 +3248,8 @@ function resetReaderForJob() {
   el.readerPrev.disabled = true;
   el.readerNext.disabled = true;
   el.readerOutline.textContent = '';
+  el.viewerThumbnails.textContent = '';
+  applyViewerPanelState();
   updateReaderResearchTools();
 }
 
@@ -2999,19 +3261,32 @@ async function loadReader() {
   const lang = state.currentLang;
   loadReaderOutline(id, lang);
   if (state.readerPages[readerLangKey()]) { renderReaderPage(); return; }
+  el.viewerRoot.setAttribute('aria-busy', 'true');
+  el.readerPageInput.disabled = true;
   el.readerContent.innerHTML = '';
-  el.readerContent.appendChild(h('p', { class: 'muted', text: '본문을 불러오는 중…' }));
+  el.readerContent.appendChild(h('div', { class: 'reader-loading', role: 'status' },
+    h('span', { class: 'spinner', 'aria-hidden': 'true' }),
+    h('p', { text: '논문 본문과 페이지 구조를 불러오는 중…' }),
+  ));
   let html = null;
   try {
     const res = await fetch(withLangUrl(`/api/jobs/${id}/html`, lang), { headers: { Accept: 'text/html' } });
     if (res.ok) html = await res.text();
   } catch (_) { /* 아래 공통 실패 처리 */ }
   if (state.currentJobId !== id || state.currentLang !== lang) return; // 잡/언어 전환 → 최신 로더에 위임
+  el.viewerRoot.removeAttribute('aria-busy');
+  el.readerPageInput.disabled = false;
   if (html == null) {
     // 한국어 뷰에서 번역본을 못 받으면 조용히 원문으로 폴백 (다른 탭과 동일 규칙).
     if (lang === 'ko' && revertToOriginal('한국어 본문을 불러오지 못해 원문을 표시합니다.')) { loadReader(); return; }
     el.readerContent.innerHTML = '';
-    el.readerContent.appendChild(h('p', { class: 'muted', text: '본문을 불러오지 못했습니다.' }));
+    const retry = h('button', { class: 'btn btn-small', type: 'button', text: '다시 시도' });
+    retry.addEventListener('click', loadReader);
+    el.readerContent.appendChild(h('div', { class: 'reader-load-error', role: 'alert' },
+      h('strong', { text: '본문을 불러오지 못했습니다.' }),
+      h('p', { text: '네트워크 연결과 작업 상태를 확인한 뒤 다시 시도해 주세요.' }),
+      retry,
+    ));
     return;
   }
   state.readerPages[lang === 'ko' ? 'ko' : 'orig'] = extractDocPages(html);
@@ -3026,9 +3301,29 @@ async function loadReaderAlignment(id, lang, page) {
   state.readerAlignmentPending.add(requestKey);
   let alignment = null;
   try {
+    if (state.viewerOpen) {
+      const start = Math.max(1, page - 1);
+      const batchUrl = withLangUrl(
+        `/api/jobs/${id}/viewer/pages?start=${start}&limit=3&include=alignment`,
+        lang,
+      );
+      const batchRes = await fetch(batchUrl, { headers: { Accept: 'application/json' } });
+      if (batchRes.ok) {
+        const batch = await batchRes.json();
+        for (const item of Array.isArray(batch && batch.items) ? batch.items : []) {
+          const itemPage = Math.floor(Number(item && item.page));
+          if (itemPage >= 1 && item.alignment) {
+            cache.set(itemPage, normalizeAlignmentPayload(item.alignment));
+          }
+        }
+        alignment = cache.get(page) || null;
+      }
+    }
+    if (!alignment) {
     const url = withLangUrl(`/api/jobs/${id}/alignment?page=${page}`, lang);
     const res = await fetch(url, { headers: { Accept: 'application/json' } });
     if (res.ok) alignment = normalizeAlignmentPayload(await res.json());
+    }
   } catch (_) { /* 좌표가 없는 구버전/figure_only 잡은 semantic 본문으로 정상 폴백 */ }
   state.readerAlignmentPending.delete(requestKey);
   if (state.currentJobId !== id || state.currentLang !== lang) return;
@@ -3067,6 +3362,7 @@ function renderReaderOutline() {
       title: `${item.page || 1}페이지로 이동`,
     });
     button.classList.toggle('active', Number(item.page) === state.readerPage);
+    if (Number(item.page) === state.readerPage) button.setAttribute('aria-current', 'location');
     button.addEventListener('click', () => setReaderPage(item.page));
     el.readerOutline.appendChild(button);
   }
@@ -3115,12 +3411,16 @@ function renderReaderAlignment(alignment) {
     const status = readerLangKey() === 'ko'
       ? (block.translated ? '번역됨' : '원문 유지')
       : '원문';
+    const locate = h('button', {
+      class: 'reader-map-locate',
+      type: 'button',
+      'aria-label': `${number}번 ${alignmentTypeLabel(block.type)} 블록의 원문 위치 표시`,
+      title: '원문 위치 표시',
+      text: '원문 보기',
+    });
     const card = h('article', {
       class: `reader-map-card type-${block.type.replace(/[^a-z0-9_-]/gi, '')}`,
-      tabindex: '0',
-      role: 'button',
       'data-block-id': block.id,
-      'aria-label': `${number}번 ${alignmentTypeLabel(block.type)} 블록의 원문 위치 표시`,
     },
     h('div', { class: 'reader-map-card-head' },
       h('span', { class: 'reader-map-number', text: number }),
@@ -3129,6 +3429,7 @@ function renderReaderAlignment(alignment) {
         class: `reader-map-state${block.translated ? ' is-translated' : ''}`,
         text: status,
       }),
+      locate,
     ),
     h('p', { class: 'reader-map-target', text: mainText }));
     if (readerLangKey() === 'ko' && block.source && block.source !== mainText) {
@@ -3170,10 +3471,11 @@ function readerMappingNodes(id) {
 
 function setReaderActiveBlock(id, scrollTarget) {
   state.readerActiveBlock = id || '';
-  for (const node of el.readerContent.querySelectorAll('[data-block-id]')) {
+  for (const node of el.readerContent.querySelectorAll('.reader-map-card[data-block-id]')) {
     const active = node.dataset.blockId === state.readerActiveBlock;
     node.classList.toggle('is-active', active);
-    node.setAttribute('aria-pressed', active ? 'true' : 'false');
+    if (active) node.setAttribute('aria-current', 'true');
+    else node.removeAttribute('aria-current');
   }
   for (const node of el.readerMapOverlay.querySelectorAll('[data-block-id]')) {
     const active = node.dataset.blockId === state.readerActiveBlock;
@@ -3209,6 +3511,7 @@ function renderReaderPage() {
   el.readerTotal.textContent = String(total);
   el.readerPrev.disabled = n <= 1;
   el.readerNext.disabled = n >= total;
+  el.readerImage.alt = `${n}/${total}페이지 원문 PDF`;
 
   setReaderImage(id, n);
   el.readerVisualLabel.textContent = lang === 'ko'
@@ -3230,15 +3533,22 @@ function renderReaderPage() {
   el.readerContent.scrollTop = 0;
   state.readerSelection = '';
   renderReaderOutline();
+  renderViewerThumbnails();
   updateReaderResearchTools();
 }
 
 function setReaderPage(n) {
   if (!state.readerPages[readerLangKey()]) return; // 본문 로드 전 — 컨트롤 비활성 상태
   const next = clampReaderPage(n, readerTotal());
-  if (next === state.readerPage) { el.readerPageInput.value = String(next); return; }
+  if (next === state.readerPage) {
+    el.readerPageInput.value = String(next);
+    if (state.viewerOpen) syncViewerSearch();
+    return;
+  }
   state.readerPage = next;
+  if (state.viewerOpen) state.viewerIntent.page = next;
   renderReaderPage();
+  if (state.viewerOpen) syncViewerSearch();
 }
 
 function setReaderImage(id, n) {
@@ -3377,9 +3687,11 @@ function applyPdfExport() {
 
   const ps = pdfExportState(state.displayedStatus, state.translateState, state.resultHasLayout);
   el.dlPdf.hidden = !ps.visible;
+  el.viewerDlPdf.hidden = !ps.visible;
   if (ps.visible) {
     const u = state.resultUrls || {};
     setDownload(el.dlPdf, u.pdf || null, `${state.currentBaseName || 'document'}.ko.pdf`);
+    setDownload(el.viewerDlPdf, u.pdf || null, `${state.currentBaseName || 'document'}.ko.pdf`);
   }
 }
 
@@ -3883,11 +4195,16 @@ function setupTabs() {
   const tablist = el.tabs.length ? el.tabs[0].parentElement : null;
   if (tablist) {
     tablist.addEventListener('keydown', (ev) => {
-      if (ev.key !== 'ArrowRight' && ev.key !== 'ArrowLeft') return;
+      if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(ev.key)) return;
       const idx = el.tabs.findIndex((t) => t.classList.contains('active'));
       if (idx === -1) return;
-      const dir = ev.key === 'ArrowRight' ? 1 : -1;
-      const next = el.tabs[(idx + dir + el.tabs.length) % el.tabs.length];
+      let next;
+      if (ev.key === 'Home') next = el.tabs[0];
+      else if (ev.key === 'End') next = el.tabs[el.tabs.length - 1];
+      else {
+        const dir = ev.key === 'ArrowRight' ? 1 : -1;
+        next = el.tabs[(idx + dir + el.tabs.length) % el.tabs.length];
+      }
       ev.preventDefault();
       activateTab(next.dataset.tab);
       next.focus();
@@ -3936,6 +4253,21 @@ function init() {
   el.dlPdf.addEventListener('click', downloadPdfWithReport);
   el.langOrig.addEventListener('click', () => setLang('orig'));
   el.langKo.addEventListener('click', () => setLang('ko'));
+  el.viewerLangOrig.addEventListener('click', () => setLang('orig'));
+  el.viewerLangKo.addEventListener('click', () => setLang('ko'));
+  el.viewerOpen.addEventListener('click', () => openViewer());
+  el.viewerClose.addEventListener('click', () => closeViewer());
+  el.viewerToggleNav.addEventListener('click', () => {
+    state.viewerNavCollapsed = !state.viewerNavCollapsed;
+    localSet('uocr-viewer-nav-collapsed', state.viewerNavCollapsed ? '1' : '0');
+    applyViewerPanelState();
+  });
+  el.viewerToggleRail.addEventListener('click', () => {
+    state.viewerRailCollapsed = !state.viewerRailCollapsed;
+    localSet('uocr-viewer-rail-collapsed', state.viewerRailCollapsed ? '1' : '0');
+    applyViewerPanelState();
+  });
+  el.viewerDlPdf.addEventListener('click', downloadPdfWithReport);
 
   // 질문(Q&A) 컨트롤 — 선택은 localStorage에 기억 (공급자별 모델 포함)
   el.qaProvider.addEventListener('change', () => {
@@ -4055,15 +4387,43 @@ function init() {
       if (block && container.contains(block)) previewReaderBlock(block.dataset.blockId, false);
     });
   }
-  // ←/→ 페이지 이동 — 리더 탭이 보일 때만, 입력 요소 포커스 시 제외 (copy-moonlight 가드)
+  // 전체 화면 뷰어: Escape 닫기, 포커스 순환, 비대화형 표면에서 페이지/줌 단축키.
   window.addEventListener('keydown', (ev) => {
-    if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+    if (state.viewerOpen && ev.key === 'Escape') {
+      ev.preventDefault();
+      closeViewer();
+      return;
+    }
+    if (state.viewerOpen && ev.key === 'Tab') {
+      const focusable = [...el.viewerRoot.querySelectorAll(
+        'a[href]:not([hidden]),button:not([disabled]):not([hidden]),input:not([disabled]),[tabindex]:not([tabindex="-1"])',
+      )].filter((node) => node.offsetParent !== null);
+      if (focusable.length) {
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (ev.shiftKey && document.activeElement === first) {
+          ev.preventDefault();
+          last.focus();
+        } else if (!ev.shiftKey && document.activeElement === last) {
+          ev.preventDefault();
+          first.focus();
+        }
+      }
+      return;
+    }
+    if (!['ArrowLeft', 'ArrowRight', '+', '=', '-'].includes(ev.key)) return;
     if (ev.defaultPrevented) return; // 탭 줄 roving 포커스 등 선행 핸들러 존중
     const active = document.activeElement;
     const tag = active ? active.tagName : '';
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (active && (active.isContentEditable ||
+      ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'A', 'SUMMARY'].includes(tag))) return;
     if (!readerIsActive()) return;
-    setReaderPage(state.readerPage + (ev.key === 'ArrowRight' ? 1 : -1));
+    ev.preventDefault();
+    if (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') {
+      setReaderPage(state.readerPage + (ev.key === 'ArrowRight' ? 1 : -1));
+    } else {
+      readerZoomBy(ev.key === '-' ? -READER_ZOOM_STEP : READER_ZOOM_STEP);
+    }
   });
   // 저장된 리더 줌 복원 (60–220% 클램프)
   const savedZoom = parseInt(localGet(READER_ZOOM_KEY) || '', 10);
@@ -4077,6 +4437,18 @@ function init() {
   window.addEventListener('hashchange', () => {
     const id = jobIdFromHash(location.hash);
     if (id && id !== state.currentJobId) openJob(id);
+  });
+  window.addEventListener('popstate', () => {
+    const next = parseViewerSearch(location.search);
+    state.viewerIntent = next;
+    if (next.open && state.displayedStatus === 'done') {
+      state.readerPage = clampReaderPage(next.page, readerTotal());
+      if (next.lang === 'ko' && state.translateState === 'done') setLang('ko');
+      openViewer({ restore: true });
+      renderReaderPage();
+    } else if (!next.open && state.viewerOpen) {
+      closeViewer({ sync: false });
+    }
   });
 
   showEmptyState();

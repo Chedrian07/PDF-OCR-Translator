@@ -242,6 +242,13 @@
         <!-- Result -->
         <section id="result-section" class="result-section" hidden>
           <div class="result-actions">
+            <button id="viewer-open" class="btn btn-viewer-open" type="button" aria-expanded="false" aria-controls="production-viewer">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/>
+                <rect x="7" y="6" width="10" height="12" rx="1"/>
+              </svg>
+              논문 뷰어 열기
+            </button>
             <span class="result-actions-label">EXPORT</span>
             <a id="dl-doc" class="btn btn-primary" download>원본 HTML</a>
             <!-- 번역 완료 잡에만 노출 — 현재 보기 언어와 무관하게 한국어 파일을 명시 제공 -->
@@ -285,25 +292,49 @@
 
           <div class="tab-panels">
             <!-- 읽기(리더) — 좌측 원문 좌표 기준면 + 우측 페이지별 번역 블록 -->
-            <div class="tab-panel" role="tabpanel" data-panel="reader">
-              <div class="reader-bar">
+            <div id="production-viewer" class="tab-panel production-viewer" role="tabpanel" data-panel="reader">
+              <div class="reader-bar viewer-toolbar">
+                <button id="viewer-close" class="btn btn-small viewer-only viewer-close" type="button" aria-label="전체 화면 논문 뷰어 닫기">← 작업으로</button>
+                <div class="viewer-document-meta viewer-only">
+                  <strong id="viewer-filename">논문</strong>
+                  <span>원문과 번역을 좌표로 연결해 읽습니다</span>
+                </div>
+                <button id="viewer-toggle-nav" class="btn btn-small viewer-only viewer-panel-toggle" type="button" aria-pressed="true" aria-controls="viewer-navigation">목차</button>
                 <span class="reader-bar-label">PAGE</span>
                 <button id="reader-prev" class="pager-btn" type="button" aria-label="이전 페이지" disabled>◀</button>
                 <label class="reader-page-field">
                   <input id="reader-page" type="number" min="1" step="1" value="1" inputmode="numeric" aria-label="페이지 번호">
                   <span class="reader-page-sep muted" aria-hidden="true">/</span>
-                  <span id="reader-total" class="reader-total">–</span>
+                  <span id="reader-total" class="reader-total" aria-live="polite">–</span>
                 </label>
                 <button id="reader-next" class="pager-btn" type="button" aria-label="다음 페이지" disabled>▶</button>
                 <span class="reader-divider" aria-hidden="true"></span>
                 <button id="reader-zoom-out" class="btn btn-small" type="button" aria-label="페이지 축소">−</button>
                 <button id="reader-zoom-in" class="btn btn-small" type="button" aria-label="페이지 확대">＋</button>
                 <button id="reader-fit-width" class="btn btn-small" type="button">너비 맞춤</button>
+                <div id="viewer-lang-toggle" class="lang-toggle viewer-only" role="group" aria-label="뷰어 문서 언어 선택" hidden>
+                  <button id="viewer-lang-orig" class="lang-seg active" type="button" aria-pressed="true">원문</button>
+                  <button id="viewer-lang-ko" class="lang-seg" type="button" aria-pressed="false">한국어</button>
+                </div>
+                <a id="viewer-dl-html" class="btn btn-small viewer-only" download>HTML</a>
+                <a id="viewer-dl-pdf" class="btn btn-small viewer-only" download hidden>PDF</a>
+                <button id="viewer-toggle-rail" class="btn btn-small viewer-only viewer-panel-toggle" type="button" aria-pressed="true" aria-controls="viewer-translation">번역문</button>
                 <!-- 번역 전 CTA — 기존 번역 시작 경로(startTranslate)로 위임 (JS가 표시/숨김) -->
                 <button id="reader-translate-btn" class="btn btn-primary reader-cta" type="button" hidden>한국어로 읽기</button>
               </div>
               <div class="reader-grid">
-                <div class="reader-document">
+                <aside id="viewer-navigation" class="viewer-column-nav reader-navigation" aria-label="페이지 탐색과 문서 개요">
+                  <div class="reader-navigation-head">
+                    <span class="reader-eyebrow">NAVIGATE</span>
+                    <strong>페이지와 목차</strong>
+                  </div>
+                  <div id="viewer-thumbnails" class="viewer-thumbnails" aria-label="페이지 미리보기"></div>
+                  <details class="reader-outline-wrap" open>
+                    <summary>문서 개요</summary>
+                    <nav id="reader-outline" class="reader-outline" aria-label="문서 개요"></nav>
+                  </details>
+                </aside>
+                <div class="viewer-column-source reader-document">
                   <div class="reader-document-head">
                     <div>
                       <span class="reader-eyebrow">SOURCE COORDINATES</span>
@@ -318,7 +349,7 @@
                     </div>
                   </div>
                 </div>
-                <aside class="reader-research" aria-label="번역문과 원문 위치 매핑">
+                <aside id="viewer-translation" class="viewer-column-translation reader-research" aria-label="번역문과 원문 위치 매핑">
                   <div class="reader-research-head">
                     <span class="reader-eyebrow">TRANSLATION RAIL</span>
                     <h3 id="reader-rail-title">원문 위치와 연결된 한국어</h3>
@@ -328,10 +359,6 @@
                       <span><i class="legend-dot legend-dot-active"></i> 현재 블록</span>
                     </div>
                   </div>
-                  <details class="reader-outline-wrap" open>
-                    <summary>문서 개요</summary>
-                    <nav id="reader-outline" class="reader-outline" aria-label="문서 개요"></nav>
-                  </details>
                   <div class="reader-text-head">
                     <strong id="reader-map-status">좌표 연결 준비 중</strong>
                     <span id="reader-activity">0개 블록</span>

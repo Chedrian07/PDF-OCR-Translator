@@ -250,14 +250,22 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 - `<img src="images/...">` → `src="/api/jobs/{id}/files/images/..."`로 재작성됨
 
 ### GET /api/jobs/{id}/layout
-- **좌표 기반 레이아웃 뷰**(Phase B): 벤더 P14의 raw_pages.json →
+- **PDF facsimile 레이아웃 뷰**: 벤더 P14의 raw_pages.json →
   pipeline/layout.py가 파싱한 layout.json(페이지별 type/bbox 0–999/content)을
-  절대 배치 HTML로 재구성. 다단·사이드바 위치를 best-effort 근사 (폰트 차이로
-  텍스트 오버플로 가능 — 의도된 한계, 정확한 텍스트는 마크다운 뷰 담당).
+  사용하되, 화면은 원본/번역 PDF 페이지 이미지를 기준면으로 표시한다. OCR
+  블록은 같은 좌표의 투명 텍스트 레이어로 남아 검색·선택·복사가 가능하다.
+  페이지 이미지를 만들 수 없을 때만 좌표 텍스트 재조판으로 폴백한다.
   layout.json 없으면 404 (프론트는 탭에서 안내 문구 표시)
 
+### GET /api/jobs/{id}/page/{page}?lang=ko
+- 리더용 최종 페이지 PNG. 원문은 `pages/`, 번역은 `export.{lang}.pdf`를 잡 DPI로
+  렌더한 `rendered/{lang}/` 캐시를 반환한다.
+
+### GET /api/jobs/{id}/outline?lang=ko
+- layout의 `title` 블록을 페이지·레벨·텍스트 목록으로 반환한다.
+
 ### GET /api/jobs/{id}/files/{path}
-- 잡 디렉터리 하위 정적 파일 (pages/, images/, layout/ 만 허용, 경로 탈출 차단)
+- 잡 디렉터리 하위 정적 파일 (pages/, images/, layout/, rendered/ 만 허용, 경로 탈출 차단)
 
 ### GET /api/jobs/{id}/archive
 - `result.md` + `images/`를 담은 zip (`{원본이름}.md.zip`). 미완료 시 409
@@ -279,8 +287,8 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   그림·밑줄·차트 선을 제거하지 않는다. 원래 bbox에 들어가지 않으면 같은 단의
   다음 블록·표·그림·푸터 앞까지만 아래 빈 영역을 사용하며, 그래도 부족하면
   원문을 보존한다.
-- 폰트: `PDF_EXPORT_FONT`(파일 경로) → 시스템 한글 폰트(macOS
-  AppleSDGothicNeo, Linux Noto CJK) → PyMuPDF 내장 CJK(`korea`) 순 폴백.
+- 폰트: `PDF_EXPORT_FONT`(파일 경로) → 시스템 한글 명조(macOS AppleMyungjo,
+  Linux Noto Serif CJK) → 시스템 고딕 → PyMuPDF 내장 CJK(`korea`) 순 폴백.
   PDF 요청 자체가 원본 텍스트 레이어의 실측 폰트 크기·세로쓰기 메타를 읽으므로
   사용자가 먼저 레이아웃 탭을 열지 않아도 원본 타이포를 기준으로 조판한다.
 - 상태코드: 400 미지원 lang · 404 번역본 없음 · 409 미완료 잡 또는
@@ -379,7 +387,7 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
 | `OPENAI_MODEL` | (없음) | 번역 모델 ID. `OPENAI_BASE_URL`과 함께 있어야 번역 활성화 |
 | `TRANSLATE_MODEL` | `OPENAI_MODEL` | 번역 전용 모델 오버라이드 |
 | `TRANSLATE_API_MODE` | `auto` | `auto`\|`chat`\|`responses` (auto: responses 시도 → 미지원 시 chat) |
-| `TRANSLATE_CONCURRENCY` | `4` | 동시 번역 요청 수 |
+| `TRANSLATE_CONCURRENCY` | `8` | 동시 번역 요청 수 (1–8, API 서버 상한 8) |
 | `TRANSLATE_TIMEOUT_S` | `180` | 요청 타임아웃(초) |
 | `TRANSLATE_MAX_RETRIES` | `3` | 429/5xx 재시도 횟수 |
 | `TRANSLATE_TEMPERATURE` | `0` | `none`이면 temperature 파라미터 자체 생략 |
@@ -503,8 +511,8 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
 ## 13. 한국어 번역 (Translation)
 
 OCR로 얻은 **데이터 레이어**(`result.md` + `layout.json`)를 OpenAI 호환 API로 번역해
-`result.{lang}.md` / `layout.{lang}.json`을 만들고, **기존 렌더러를 그대로 재사용**해
-번역본 미리보기/레이아웃/다운로드를 제공한다. 지원 언어: `ko` (`SUPPORTED_LANGS`).
+`result.{lang}.md` / `layout.{lang}.json`을 만들고, 공통 facsimile 페이지 모델로
+번역본 미리보기/HTML/PDF를 제공한다. 지원 언어: `ko` (`SUPPORTED_LANGS`).
 
 ### 13.1 파이프라인 개요
 
@@ -520,10 +528,10 @@ OCR로 얻은 **데이터 레이어**(`result.md` + `layout.json`)를 OpenAI 호
 - 번역 코어(`app/translate/`)는 **OCR 엔진·torch에 의존하지 않는다**(requests + 표준 라이브러리).
 - API 레이어는 `run_translation`만 안다. 진행률은 `progress(current,total)` 콜백,
   중단은 `threading.Event` cancel로 통신(OCR 워커와 동일 패턴).
-- 렌더링은 신규 코드가 없다: `/html?lang=ko`는 `render_document_html`,
-  `/layout?lang=ko`·`/layout.html?lang=ko`는 `render_layout_html`/`render_layout_standalone`에
-  `lang`을 넘겨 컨테이너에 `lang="ko"`를 부여 → `[lang="ko"] .layout-block`(한글 서리프·
-  `word-break:keep-all`) 규칙이 적용된다. 원본 뷰(lang 미지정)에는 `lang`을 붙이지 않는다.
+- `/html?lang=ko`는 흐름형 읽기 텍스트를 제공한다. `/document.html`,
+  `/layout?lang=ko`, `/layout.html?lang=ko`, `/page/{n}?lang=ko`는 동일한 번역
+  PDF 페이지를 기준면으로 사용한다. `lang="ko"`는 흐름형 텍스트의 CJK 줄바꿈과
+  투명 OCR 텍스트 레이어의 접근성 언어를 지정한다.
 
 ### 13.2 파일 계약 (`{job_dir}/`)
 

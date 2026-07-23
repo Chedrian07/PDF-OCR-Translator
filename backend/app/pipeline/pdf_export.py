@@ -45,6 +45,11 @@ _LATEX_SUP_RE = re.compile(r"\^\{([0-9+\-=()n]+)\}")
 _SUPERSCRIPT = str.maketrans("0123456789+-=()n", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿ")
 
 _SYSTEM_FONT_CANDIDATES = (
+    # 논문 원본의 Times 계열 질감에 맞는 명조/serif를 우선한다. 고딕을 먼저
+    # 쓰면 같은 pt라도 x-height와 폭이 커져 한국어 본문만 유난히 크고 빽빽해진다.
+    "/System/Library/Fonts/Supplemental/AppleMyungjo.ttf",  # macOS
+    "/usr/share/fonts/opentype/noto/NotoSerifCJK-KR.otf",
+    "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
     "/System/Library/Fonts/AppleSDGothicNeo.ttc",          # macOS
     "/System/Library/Fonts/Supplemental/AppleGothic.ttf",  # macOS
     "/usr/share/fonts/opentype/noto/NotoSansCJK-KR-Regular.otf",

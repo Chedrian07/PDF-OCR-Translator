@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 PROMPT_V = "4"
 
 SUPPORTED_LANGS = ("ko",)
+MAX_TRANSLATE_CONCURRENCY = 8
 
 # TRANSLATE_REASONING effort별 요청당 max_tokens 예산 (사용자 확정, 2026-07-08).
 # thinking 모델은 reasoning 토큰이 같은 예산에서 차감되므로 effort에 비례해 키운다.
@@ -59,7 +60,7 @@ class TranslateConfig:
     api_key: str
     model: str
     api_mode: str = "auto"  # auto | chat | responses
-    concurrency: int = 4
+    concurrency: int = MAX_TRANSLATE_CONCURRENCY
     timeout_s: float = 180.0
     max_retries: int = 3
     temperature: str = "0"  # "none"이면 파라미터 생략
@@ -104,7 +105,18 @@ class TranslateConfig:
             api_key=_clean(e.get("OPENAI_API_KEY")),
             model=model,
             api_mode=mode,
-            concurrency=max(1, int(_clean(e.get("TRANSLATE_CONCURRENCY")) or 4)),
+            # 현재 번역 API 서버의 병렬 처리 상한은 8. 잘못 큰 값을 넣어도
+            # 업스트림을 과부하시키지 않도록 설정 경계에서 1..8로 고정한다.
+            concurrency=min(
+                MAX_TRANSLATE_CONCURRENCY,
+                max(
+                    1,
+                    int(
+                        _clean(e.get("TRANSLATE_CONCURRENCY"))
+                        or MAX_TRANSLATE_CONCURRENCY
+                    ),
+                ),
+            ),
             timeout_s=max(5.0, float(_clean(e.get("TRANSLATE_TIMEOUT_S")) or 180)),
             max_retries=max(0, int(_clean(e.get("TRANSLATE_MAX_RETRIES")) or 3)),
             temperature=(_clean(e.get("TRANSLATE_TEMPERATURE")) or "0").lower(),

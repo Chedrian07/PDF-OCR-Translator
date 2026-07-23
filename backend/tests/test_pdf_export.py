@@ -91,6 +91,16 @@ def test_pdf_export_e2e(client):
     assert (_job_dir(client, job_id) / "export.ko.pdf").is_file()
     assert (_job_dir(client, job_id) / "export.ko.report.json").is_file()
 
+    # 같은 PDF를 기준면으로 쓰는 한국어 HTML/리더 페이지도 생성된다.
+    page = client.get(f"/api/jobs/{job_id}/page/1?lang=ko")
+    assert page.status_code == 200
+    assert page.headers["content-type"].startswith("image/png")
+    document = client.get(f"/api/jobs/{job_id}/document.html?lang=ko")
+    assert document.status_code == 200
+    assert "data:image/png;base64," in document.text
+    assert "facsimile-text-block" in document.text
+    assert (_job_dir(client, job_id) / "rendered" / "ko" / ".source.json").is_file()
+
 
 def test_pdf_409_before_done(client):
     job_id = _make_done_job(client)

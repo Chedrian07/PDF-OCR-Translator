@@ -363,3 +363,14 @@ def test_reasoning_effort별_max_tokens_예산():
     from app.translate.client import OpenAICompatClient
     p = OpenAICompatClient(cfg)._build_payload("chat", "s", "u", cfg.max_output_tokens)
     assert p["reasoning"] == {"effort": "xhigh"} and p["max_tokens"] == 81920
+
+
+def test_translate_concurrency_default_and_server_cap():
+    from app.translate.types import MAX_TRANSLATE_CONCURRENCY, TranslateConfig
+
+    base = {"OPENAI_BASE_URL": "https://h/v1", "OPENAI_MODEL": "m"}
+    assert MAX_TRANSLATE_CONCURRENCY == 8
+    assert TranslateConfig.from_env(base).concurrency == 8
+    assert TranslateConfig.from_env({**base, "TRANSLATE_CONCURRENCY": "3"}).concurrency == 3
+    assert TranslateConfig.from_env({**base, "TRANSLATE_CONCURRENCY": "99"}).concurrency == 8
+    assert TranslateConfig.from_env({**base, "TRANSLATE_CONCURRENCY": "0"}).concurrency == 1

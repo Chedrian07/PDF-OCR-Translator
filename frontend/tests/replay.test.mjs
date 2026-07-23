@@ -990,13 +990,12 @@ test('clampReaderPage: 1..total 보정 — 경계/NaN/문자열/소수, total �
   assert.equal(clampReaderPage(42, 0), 42, '총 페이지 미상(0)이면 하한만');
 });
 
-test('readerImageUrl: 0패딩 4자리 페이지 이미지 경로 (백엔드 파일명 계약)', () => {
-  assert.equal(readerImageUrl('j_abc', 1), '/api/jobs/j_abc/files/pages/page_0001.png');
-  assert.equal(readerImageUrl('j_abc', 12), '/api/jobs/j_abc/files/pages/page_0012.png');
-  assert.equal(readerImageUrl('j_abc', 123), '/api/jobs/j_abc/files/pages/page_0123.png');
-  assert.equal(readerImageUrl('j_abc', 1234), '/api/jobs/j_abc/files/pages/page_1234.png');
-  assert.equal(readerImageUrl('j_abc', '7'), '/api/jobs/j_abc/files/pages/page_0007.png', '문자열 페이지 허용');
-  assert.equal(readerImageUrl('j_abc', 0), '/api/jobs/j_abc/files/pages/page_0001.png', '방어: 1 미만은 1');
+test('readerImageUrl: 원문/번역 PDF와 같은 최종 페이지 endpoint', () => {
+  assert.equal(readerImageUrl('j_abc', 1), '/api/jobs/j_abc/page/1');
+  assert.equal(readerImageUrl('j_abc', 12), '/api/jobs/j_abc/page/12');
+  assert.equal(readerImageUrl('j_abc', '7'), '/api/jobs/j_abc/page/7', '문자열 페이지 허용');
+  assert.equal(readerImageUrl('j_abc', 0), '/api/jobs/j_abc/page/1', '방어: 1 미만은 1');
+  assert.equal(readerImageUrl('j_abc', 3, 'ko'), '/api/jobs/j_abc/page/3?lang=ko');
 });
 
 test('pdfExportState: 진리표 — 잡 done ∧ 번역 done ∧ 레이아웃 있음일 때만 보임', () => {

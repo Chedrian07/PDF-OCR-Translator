@@ -146,7 +146,12 @@ def estimate_font_size_cqw(bbox, content: str, page_aspect: float) -> float | No
 
 
 def render_layout_html(
-    pages: list[dict], files_base_url: str, image_src=None, lang: str | None = None
+    pages: list[dict],
+    files_base_url: str,
+    image_src=None,
+    lang: str | None = None,
+    page_src=None,
+    facsimile: bool = False,
 ) -> str:
     """layout.json(merge가 통합한 페이지 블록들) → 절대 배치 HTML 프래그먼트.
     image_src(name)->str 을 주면 이미지 src를 그 값으로 (standalone의 data URI용).
@@ -160,6 +165,13 @@ def render_layout_html(
         aspect_pct = height / width * 100 if width else 141.4
         page_aspect = height / width if width else 1.414
         blocks_html: list[str] = []
+        page_number = int(p.get("page", 0))
+        if facsimile and page_src is not None:
+            src = escapeHtml(str(page_src(page_number)))
+            blocks_html.append(
+                f'<img class="layout-page-image" src="{src}" '
+                f'alt="{page_number}페이지" draggable="false">'
+            )
         for b in p.get("blocks", ()):
             bbox = b.get("bbox") or []
             if len(bbox) != 4:
@@ -174,6 +186,10 @@ def render_layout_html(
                 btype = "text"
             image_name = b.get("image")
             if image_name and re.fullmatch(r"[\w.-]+", str(image_name)):
+                # facsimile은 완성된 페이지 이미지가 그림·표·수식까지 이미 포함한다.
+                # 크롭을 다시 얹으면 원본과 다른 크기/좌표로 중복 렌더되므로 생략한다.
+                if facsimile:
+                    continue
                 src = image_src(image_name) if image_src else f"{files_base_url}/images/{image_name}"
                 blocks_html.append(
                     f'<img class="layout-block layout-image" '
@@ -212,13 +228,16 @@ def render_layout_html(
                     fs_css += "font-weight:600;"
             else:
                 fs_css = ""
+            facsimile_cls = " facsimile-text-block" if facsimile else ""
             blocks_html.append(
-                f'<div class="layout-block layout-{btype}{vcls}" style="{style}{fs_css}" '
+                f'<div class="layout-block layout-{btype}{vcls}{facsimile_cls}" '
+                f'style="{style}{fs_css}" '
                 f'title="{btype}">{content}</div>'
             )
+        canvas_cls = "layout-canvas facsimile-canvas" if facsimile else "layout-canvas"
         sections.append(
-            f'<section class="layout-page" data-page="{int(p.get("page", 0))}">'
-            f'<div class="layout-canvas" style="padding-top:{aspect_pct:.2f}%">'
+            f'<section class="layout-page" data-page="{page_number}">'
+            f'<div class="{canvas_cls}" style="padding-top:{aspect_pct:.2f}%">'
             + "".join(blocks_html)
             + "</div></section>"
         )
@@ -241,6 +260,14 @@ body { background: #eceef2; font-family: system-ui, -apple-system, 'Apple SD Got
 .layout-page::before { content: "페이지 " attr(data-page); display: block; font-size: 11px; color: #666; margin-bottom: 4px; }
 .layout-canvas { position: relative; width: 100%; height: 0; background: #fff; border: 1px solid #d5d7dd; border-radius: 6px; box-shadow: 0 1px 5px rgba(0,0,0,.1); overflow: hidden; container-type: inline-size; }
 .layout-block { position: absolute; overflow: hidden; font-size: 11px; line-height: 1.35; color: #1a1c22; padding: 1px 3px; white-space: pre-wrap; text-align: justify; hyphens: auto; font-family: Georgia, 'Times New Roman', 'Noto Serif KR', serif; }
+.layout-page-image { position: absolute; inset: 0; z-index: 0; display: block; width: 100%; height: 100%; object-fit: fill; background: #fff; user-select: none; -webkit-user-drag: none; }
+/* PDF 페이지가 시각 기준면이다. OCR 블록은 검색·복사·접근성을 위한 투명 텍스트
+   레이어로만 남겨 웹 폰트가 원본 조판을 두 번 그리지 않게 한다. */
+.facsimile-canvas .facsimile-text-block { z-index: 1; color: transparent !important; background: transparent !important; padding: 0; cursor: text; text-shadow: none !important; }
+.facsimile-canvas .facsimile-text-block * { color: transparent !important; background: transparent !important; border-color: transparent !important; }
+.facsimile-canvas .facsimile-text-block::selection,
+.facsimile-canvas .facsimile-text-block *::selection { color: transparent; background: rgba(74, 95, 230, .24); }
+.facsimile-document-title { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .layout-title { font-weight: 700; font-size: 14px; color: #b0262c; }
 .layout-image { object-fit: contain; padding: 0; }
 .layout-table { font-size: 9px; }
@@ -254,7 +281,13 @@ body { background: #eceef2; font-family: system-ui, -apple-system, 'Apple SD Got
 .doclayout-body[lang="ko"] .layout-block { font-family: "Noto Serif KR", "Source Han Serif K", "Apple SD Gothic Neo", "Malgun Gothic", serif; word-break: keep-all; }
 .layout-vertical-up { writing-mode: sideways-lr; white-space: nowrap; text-align: center; }
 .layout-vertical-down { writing-mode: vertical-rl; white-space: nowrap; text-align: center; }
-@media print { body { background: #fff; padding: 0; } .layout-page { break-inside: avoid; } }
+@media print {
+  body { background: #fff; padding: 0; }
+  .doclayout-body { display: block; max-width: none; }
+  .layout-page { break-inside: avoid; break-after: page; margin: 0; }
+  .layout-page::before { display: none; }
+  .layout-canvas { border: 0; border-radius: 0; box-shadow: none; }
+}
 """
 
 _TYPESET_JS = (
@@ -319,17 +352,37 @@ def _image_data_uri(job_dir: Path, name: str) -> str:
         return "data:,"  # 결측 크롭 — 빈 이미지로 폴백
 
 
+def _page_image_data_uri(pages_dir: Path, page_number: int) -> str:
+    """pages_dir/page_NNNN.png을 standalone용 data URI로 인라인한다."""
+    p = pages_dir / f"page_{page_number:04d}.png"
+    try:
+        b64 = base64.b64encode(p.read_bytes()).decode()
+        return f"data:image/png;base64,{b64}"
+    except OSError:
+        return "data:,"
+
+
 def render_layout_standalone(
     pages: list[dict], job_dir: Path, title: str, frontend_dir: Path | None,
     lang: str | None = None,
+    pages_dir: Path | None = None,
+    facsimile: bool = False,
 ) -> str:
     """이미지 base64·KaTeX 인라인의 완전 자립형 HTML 문서 — 오프라인에서 그대로 열림.
     lang을 주면 <html>·<main>에 lang 속성을 부여해 번역본에 `[lang="ko"] .layout-block`
     (한글 서리프·word-break) 규칙이 적용된다. 원본(lang=None)에는 lang을 붙이지 않아
     비한국어 문서에 한글 타이포가 잘못 적용되는 것을 막는다."""
     # body에는 lang을 전달하지 않는다 — 컨테이너(<main>)에서 한 번만 부여.
+    page_source = None
+    if facsimile and pages_dir is not None:
+        def page_source(page_number):
+            return _page_image_data_uri(pages_dir, page_number)
     body = render_layout_html(
-        pages, files_base_url="", image_src=lambda name: _image_data_uri(job_dir, name),
+        pages,
+        files_base_url="",
+        image_src=lambda name: _image_data_uri(job_dir, name),
+        page_src=page_source,
+        facsimile=facsimile,
     )
     katex = _katex_inline_bundle(str(frontend_dir)) if frontend_dir else ""
     fitter = _layout_fit_script(frontend_dir)  # katex 뒤에 배치 → 타이포셋 후 실행
@@ -339,7 +392,9 @@ def render_layout_standalone(
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"<title>{escapeHtml(title)}</title>\n"
         f"<style>{_STANDALONE_CSS}</style>\n{katex}\n{fitter}\n</head>\n"
-        f'<body><main class="doclayout-body"{lang_attr}>\n{body}\n</main></body>\n</html>\n'
+        f'<body><main class="doclayout-body"{lang_attr}>\n'
+        f'<h1 class="facsimile-document-title">{escapeHtml(title)}</h1>\n'
+        f"{body}\n</main></body>\n</html>\n"
     )
 
 

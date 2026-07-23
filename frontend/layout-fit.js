@@ -70,6 +70,10 @@
   function fitBlock(block) {
     try {
       if (block.classList.contains('layout-image')) return;
+      // PDF facsimile 모드에서는 완성된 페이지 이미지가 시각 기준면이고 블록은
+      // 검색·복사용 투명 텍스트 레이어다. 웹 폰트 기준으로 다시 축소하면 선택
+      // 영역만 원본 좌표와 달라지므로 피팅하지 않는다.
+      if (block.classList.contains('facsimile-text-block')) return;
       // 세로쓰기 블록(writing-mode)은 scrollHeight 축이 달라 피팅 제외 —
       // 실측 폰트 크기가 정확하고 단일 줄 스탬프라 축소가 필요 없다.
       if (/layout-vertical-/.test(block.className)) return;

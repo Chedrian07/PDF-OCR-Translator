@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Unlimited-OCR — PDF → Markdown</title>
+  <title>PDF OCR Translator — PDF 그대로 읽고 번역하기</title>
   <link rel="stylesheet" href="./styles.css">
   <link rel="stylesheet" href="./vendor/katex/katex.min.css">
   <script>
@@ -33,7 +33,7 @@
           <path d="M9 13h6M9 17h4"/>
         </svg>
       </span>
-      <h1 class="app-title">Unlimited-OCR <span class="title-sep" aria-hidden="true">—</span> <span class="title-sub">PDF → Markdown</span></h1>
+      <h1 class="app-title">PDF OCR Translator <span class="title-sep" aria-hidden="true">—</span> <span class="title-sub">PDF → HTML · 한국어</span></h1>
     </div>
     <div class="header-right">
       <div id="health-badges" class="badges" aria-live="polite" aria-label="서버 상태"></div>
@@ -136,8 +136,8 @@
             <path d="M9 13h6M9 17h4"/>
           </svg>
         </span>
-        <h2>PDF를 Markdown으로 변환하세요</h2>
-        <p class="es-desc">업로드한 PDF를 <strong>baidu/Unlimited-OCR</strong> 비전-언어 모델이 분석하여, 표와 그림(figure)까지 포함된 Markdown으로 변환합니다. 변환 과정은 아래에서 토큰 단위로 실시간 스트리밍됩니다.</p>
+        <h2>PDF 구조를 그대로 읽고 번역하세요</h2>
+        <p class="es-desc">로컬 <strong>baidu/Unlimited-OCR</strong> 모델이 PDF를 실시간으로 분석하고, 원본 레이아웃을 보존한 HTML과 선택적 한국어 PDF까지 만듭니다.</p>
         <ul class="es-features">
           <li>
             <span class="esf-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h7l-1 8 10-12h-7z"/></svg></span>
@@ -295,16 +295,49 @@
                 </label>
                 <button id="reader-next" class="pager-btn" type="button" aria-label="다음 페이지" disabled>▶</button>
                 <span class="reader-divider" aria-hidden="true"></span>
-                <button id="reader-zoom-out" class="btn btn-small" type="button" aria-label="원본 페이지 축소">A−</button>
-                <button id="reader-zoom-in" class="btn btn-small" type="button" aria-label="원본 페이지 확대">A+</button>
+                <button id="reader-zoom-out" class="btn btn-small" type="button" aria-label="페이지 축소">−</button>
+                <button id="reader-zoom-in" class="btn btn-small" type="button" aria-label="페이지 확대">＋</button>
+                <button id="reader-fit-width" class="btn btn-small" type="button">너비 맞춤</button>
+                <button id="reader-open-qa" class="btn btn-small" type="button">AI 질문</button>
                 <!-- 번역 전 CTA — 기존 번역 시작 경로(startTranslate)로 위임 (JS가 표시/숨김) -->
                 <button id="reader-translate-btn" class="btn btn-primary reader-cta" type="button" hidden>한국어로 읽기</button>
               </div>
               <div class="reader-grid">
-                <div id="reader-page-pane" class="reader-page-pane">
-                  <img id="reader-image" alt="현재 페이지 원본 이미지" draggable="false">
+                <div class="reader-document">
+                  <div class="reader-document-head">
+                    <div>
+                      <span class="reader-eyebrow">PDF FACSIMILE</span>
+                      <strong id="reader-visual-label">원본 페이지 그대로</strong>
+                    </div>
+                    <span class="reader-fidelity-badge">레이아웃 보존</span>
+                  </div>
+                  <div id="reader-page-pane" class="reader-page-pane">
+                    <img id="reader-image" alt="현재 PDF 페이지" draggable="false">
+                  </div>
                 </div>
-                <div id="reader-content" class="markdown-body reader-content"></div>
+                <aside class="reader-research" aria-label="논문 연구 도구">
+                  <div class="reader-research-head">
+                    <span class="reader-eyebrow">RESEARCH TOOLS</span>
+                    <h3>읽으면서 바로 이해하기</h3>
+                    <p>텍스트를 선택해 설명·하이라이트·인용으로 연결할 수 있습니다.</p>
+                  </div>
+                  <div class="reader-tool-grid">
+                    <button id="reader-summary" class="reader-tool" type="button">페이지 요약</button>
+                    <button id="reader-explain" class="reader-tool" type="button" disabled>선택 설명</button>
+                    <button id="reader-highlight" class="reader-tool" type="button" disabled>하이라이트</button>
+                    <button id="reader-cite" class="reader-tool" type="button" disabled>인용 저장</button>
+                  </div>
+                  <p id="reader-selection" class="reader-selection">오른쪽 텍스트에서 문장을 선택하세요.</p>
+                  <details class="reader-outline-wrap" open>
+                    <summary>문서 개요</summary>
+                    <nav id="reader-outline" class="reader-outline" aria-label="문서 개요"></nav>
+                  </details>
+                  <div class="reader-text-head">
+                    <strong>현재 페이지 텍스트</strong>
+                    <span id="reader-activity">하이라이트 0 · 인용 0</span>
+                  </div>
+                  <div id="reader-content" class="markdown-body reader-content"></div>
+                </aside>
               </div>
             </div>
             <div class="tab-panel" role="tabpanel" data-panel="preview" hidden>

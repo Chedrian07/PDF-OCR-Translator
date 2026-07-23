@@ -216,6 +216,32 @@ def test_layout_standalone_self_contained(tmp_path):
     assert 'src="http' not in html and 'href="http' not in html
 
 
+def test_layout_standalone_facsimile_uses_full_page_and_transparent_text(tmp_path):
+    (tmp_path / "images").mkdir()
+    pages_dir = tmp_path / "pages"
+    pages_dir.mkdir()
+    (pages_dir / "page_0001.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    pages = [{"page": 1, "width": 612, "height": 792, "blocks": [
+        {"type": "title", "bbox": [100, 50, 900, 90], "content": "How to Read a Paper"},
+        {"type": "image", "bbox": [100, 100, 500, 500], "image": "crop.jpg", "content": ""},
+    ]}]
+
+    html = render_layout_standalone(
+        pages,
+        tmp_path,
+        "HowtoReadPaper",
+        FRONTEND_DIR,
+        pages_dir=pages_dir,
+        facsimile=True,
+    )
+    assert "data:image/png;base64," in html
+    assert "layout-page-image" in html and "facsimile-canvas" in html
+    assert "facsimile-text-block" in html
+    assert "How to Read a Paper" in html
+    assert "crop.jpg" not in html  # 완성 페이지에 이미 포함 — 중복 크롭 금지
+    assert '<h1 class="facsimile-document-title">HowtoReadPaper</h1>' in html
+
+
 def test_document_standalone_self_contained(tmp_path):
     """문서 뷰 standalone(document.html) — figure_only 엔진에서도 동작하는 내보내기.
     이미지 base64 인라인·결측 폴백·서버 참조 제거·제목 이스케이프·lang 부여."""

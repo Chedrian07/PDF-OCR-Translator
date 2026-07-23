@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Unlimited-OCR — PDF → Markdown : styles
+   PDF OCR Translator : styles
    No external resources. System font stack. Light/dark via [data-theme].
    ========================================================================== */
 
@@ -1055,6 +1055,38 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
   /* cqw 폰트 단위(layout.py estimate_font_size_cqw)의 기준 컨테이너 */
   container-type: inline-size;
 }
+.layout-page-image {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  background: #fff;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+/* PDF/번역 PDF 페이지가 시각 기준면이다. OCR 블록은 검색·복사·선택을 위한
+   투명 텍스트 레이어로만 유지해 브라우저 폰트의 재조판 오차를 없앤다. */
+.facsimile-canvas .facsimile-text-block {
+  z-index: 1;
+  color: transparent !important;
+  background: transparent !important;
+  padding: 0;
+  cursor: text;
+  text-shadow: none !important;
+}
+.facsimile-canvas .facsimile-text-block * {
+  color: transparent !important;
+  background: transparent !important;
+  border-color: transparent !important;
+}
+.facsimile-canvas .facsimile-text-block::selection,
+.facsimile-canvas .facsimile-text-block *::selection {
+  color: transparent;
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
 /* 문서 뷰이므로 레이아웃 전체를 세리프로 — pre-wrap로 줄바꿈 보존(목록 병합 방지),
    justify+hyphens로 문단 정렬. .layout-table도 이 세리프 스택을 상속한다. */
 .layout-block {
@@ -1260,8 +1292,7 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
 .qa-form textarea:disabled { opacity: 0.6; cursor: not-allowed; }
 
 /* ── 읽기(리더) 탭 ───────────────────────────────────────────────────────
-   완료된 잡의 기본 뷰 — 좌측 원본 페이지 이미지 + 우측 해당 페이지 본문.
-   기존 토큰만 사용(다크 테마 자동 대응), ~900px 이하에서는 세로 스택. */
+   PDF facsimile을 주 작업면으로, 개요·선택 도구·페이지 텍스트를 연구 레일로 둔다. */
 /* 리더 탭이 활성인 동안 결과 영역을 넓혀 두 판을 여유 있게 배치한다
    (:has 미지원 브라우저는 기본 960px 유지 — 기능에는 영향 없음). */
 .job-view > .result-section:has(.tab[data-tab="reader"].active) { max-width: 1400px; }
@@ -1291,17 +1322,52 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
 
 .reader-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-  align-items: stretch;
+  grid-template-columns: minmax(0, 1.65fr) minmax(340px, .85fr);
+  gap: 16px;
+  align-items: start;
+}
+.reader-document,
+.reader-research {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-sm);
+}
+.reader-document-head {
+  min-height: 58px;
+  padding: 11px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.reader-document-head > div { display: grid; gap: 3px; }
+.reader-document-head strong { font-size: 13.5px; color: var(--text); }
+.reader-eyebrow {
+  display: block;
+  color: var(--accent);
+  font-size: 9.5px;
+  font-weight: 750;
+  letter-spacing: .13em;
+}
+.reader-fidelity-badge {
+  padding: 4px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 999px;
+  background: var(--accent-weak);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 650;
+  white-space: nowrap;
 }
 .reader-page-pane {
-  height: clamp(420px, 74vh, 920px);
+  height: clamp(520px, 76vh, 980px);
   overflow: auto;
-  padding: 12px;
+  padding: clamp(12px, 2vw, 24px);
   background: var(--bg-sunken);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 0 0 calc(var(--radius) + 2px) calc(var(--radius) + 2px);
 }
 .reader-page-pane img {
   display: block;
@@ -1310,7 +1376,8 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
   margin: 0 auto;
   background: #fff;
   border: 1px solid var(--border-strong);
-  border-radius: 4px;
+  border-radius: 2px;
+  box-shadow: 0 12px 34px rgba(20, 24, 38, .14);
 }
 /* 이미지 최종 실패(조용한 재시도 1회 후) — 플레이스홀더 배경으로 대체 */
 .reader-page-pane.failed img { display: none; }
@@ -1327,16 +1394,122 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
   font-size: 12.5px;
   font-style: italic;
 }
-.reader-content {
-  height: clamp(420px, 74vh, 920px);
-  overflow-y: auto;
-  padding: 6px 18px 22px;
-  background: var(--bg-elev);
+.reader-research {
+  position: sticky;
+  top: 12px;
+  max-height: clamp(520px, 82vh, 1040px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.reader-research-head { padding: 14px 16px 10px; }
+.reader-research-head h3 { margin: 4px 0 4px; font-size: 15px; letter-spacing: -.01em; }
+.reader-research-head p { margin: 0; color: var(--text-muted); font-size: 11.5px; line-height: 1.5; }
+.reader-tool-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  padding: 0 14px 10px;
+}
+.reader-tool {
+  appearance: none;
+  min-height: 32px;
+  padding: 6px 9px;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  color: var(--text);
+  font: 600 11.5px/1.2 inherit;
+  cursor: pointer;
+  transition: border-color .12s ease, color .12s ease, background-color .12s ease;
+}
+.reader-tool:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-weak);
+  color: var(--accent);
+}
+.reader-tool:disabled { opacity: .42; cursor: default; }
+.reader-selection {
+  margin: 0 14px 10px;
+  min-height: 31px;
+  padding: 7px 9px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-subtle);
+  background: var(--bg-sunken);
+  font-size: 10.5px;
+  line-height: 1.45;
+  overflow: hidden;
+}
+.reader-selection.has-selection {
+  border-left-color: var(--accent);
+  color: var(--text-muted);
+}
+.reader-outline-wrap {
+  margin: 0 14px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.reader-outline-wrap > summary {
+  padding: 7px 9px;
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.reader-outline {
+  max-height: 148px;
+  overflow-y: auto;
+  padding: 5px;
+  display: grid;
+  gap: 2px;
+}
+.reader-outline button {
+  appearance: none;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 5px 7px;
+  text-align: left;
+  font: 500 10.5px/1.35 inherit;
+  cursor: pointer;
+}
+.reader-outline button[data-level="2"] { padding-left: 13px; }
+.reader-outline button[data-level="3"] { padding-left: 20px; }
+.reader-outline button:hover,
+.reader-outline button.active { background: var(--accent-weak); color: var(--accent); }
+.reader-outline-empty { padding: 9px; color: var(--text-subtle); font-size: 10.5px; }
+.reader-text-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+.reader-text-head strong { color: var(--text); font-size: 11.5px; }
+.reader-content {
+  flex: 1 1 auto;
+  min-height: 180px;
+  overflow-y: auto;
+  padding: 10px 16px 24px;
+  background: var(--bg-elev);
+  font-size: 12.5px;
+}
+.reader-content mark.reader-highlight {
+  color: inherit;
+  background: color-mix(in srgb, #ffd43b 52%, transparent);
+  border-radius: 2px;
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1050px) {
   .reader-grid { grid-template-columns: 1fr; }
-  .reader-page-pane, .reader-content { height: auto; max-height: min(60vh, 520px); }
+  .reader-research { position: static; max-height: none; }
+  .reader-page-pane { height: min(72vh, 760px); }
+  .reader-content { max-height: min(55vh, 520px); }
 }

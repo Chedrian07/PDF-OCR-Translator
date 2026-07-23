@@ -102,37 +102,48 @@ def test_full_flow_multi(client, sample_pdf):
     assert html.text.count('<section class="doc-page"') == 3
     assert 'data-page="3"' in html.text
 
-    # 좌표 레이아웃 뷰 (Phase B): 페이지 섹션 + 글로벌 이미지 배치 + 수식 스팬
+    # PDF facsimile 레이아웃 뷰: 완성 페이지 기준면 + 검색용 투명 텍스트 레이어
     layout = client.get(f"/api/jobs/{jid}/layout")
     assert layout.status_code == 200
     assert layout.text.count('<section class="layout-page"') == 3
-    assert f'src="/api/jobs/{jid}/files/images/p0001_0.jpg"' in layout.text
-    assert "layout-title" in layout.text
+    assert f'src="/api/jobs/{jid}/files/pages/page_0001.png"' in layout.text
+    assert "layout-page-image" in layout.text
+    assert "facsimile-text-block" in layout.text
     assert '<span class="math-inline">E = mc^2</span>' in layout.text
-    # 면적 기반 폰트 크기(cqw)가 텍스트 블록에 인라인됨
+    # 투명 선택 레이어에도 원본 좌표·폰트 메타는 유지된다.
     assert "font-size:" in layout.text and "cqw" in layout.text
 
-    # standalone HTML 다운로드: 자립형(이미지 base64), attachment 헤더
+    # standalone HTML 다운로드: PDF 페이지 PNG base64 + 텍스트 레이어
     dl = client.get(f"/api/jobs/{jid}/layout.html")
     assert dl.status_code == 200
     assert "attachment" in dl.headers["content-disposition"]
     assert dl.text.startswith("<!doctype html>")
-    assert "data:image/jpeg;base64," in dl.text
+    assert "data:image/png;base64," in dl.text
+    assert "layout-page-image" in dl.text
     # (uocrFitLayout/KaTeX 인라인은 frontend_dir 자산 필요 — client 픽스처는
     #  no-frontend로 비활성화하므로 여기서 단언 안 함. E2E/test_layout에서 검증.)
     assert f"/api/jobs/{jid}" not in dl.text  # 서버 참조 없는 완전 자립 파일
 
-    # standalone 문서 HTML 다운로드 (figure_only 엔진 대응 내보내기): 문서 뷰
-    # 렌더(/html)와 동일 본문 + 이미지 base64 인라인 + 서버 참조 없음
+    # 주 HTML도 좌표 레이아웃 잡에서는 같은 facsimile renderer를 사용한다.
     doc = client.get(f"/api/jobs/{jid}/document.html")
     assert doc.status_code == 200
     assert "attachment" in doc.headers["content-disposition"]
     assert 'filename="document.html"' in doc.headers["content-disposition"]
     assert doc.text.startswith("<!doctype html>")
-    assert "data:image/jpeg;base64," in doc.text
-    assert "<table>" in doc.text                       # 표 복원 유지
-    assert doc.text.count('<section class="doc-page"') == 3  # 페이지 경계 유지
+    assert "data:image/png;base64," in doc.text
+    assert "layout-page-image" in doc.text
+    assert "facsimile-document-title" in doc.text
+    assert doc.text.count('<section class="layout-page"') == 3
     assert f"/api/jobs/{jid}" not in doc.text          # 완전 자립 파일
+
+    # 리더 최종 페이지 endpoint도 원문 PDF 기준면을 반환한다.
+    page = client.get(f"/api/jobs/{jid}/page/1")
+    assert page.status_code == 200
+    assert page.headers["content-type"].startswith("image/png")
+
+    outline = client.get(f"/api/jobs/{jid}/outline")
+    assert outline.status_code == 200
+    assert any(item["text"].startswith("페이지 1") for item in outline.json()["items"])
 
     img = client.get(res["images"][0])
     assert img.status_code == 200

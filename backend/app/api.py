@@ -24,7 +24,7 @@ from fastapi.responses import (
 )
 
 from . import native_ops
-from .pipeline.pdf import probe_pdf
+from .pipeline.pdf import probe_pdf, render_pdf_pages
 from .pipeline.pdf_export import PdfExportError, build_translated_pdf
 from .pipeline.layout import (
     render_document_standalone,
@@ -42,9 +42,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
-_ALLOWED_FILE_DIRS = ("pages", "images", "layout")
+_ALLOWED_FILE_DIRS = ("pages", "images", "layout", "rendered")
 _UPLOAD_CHUNK = 1024 * 1024
 _PREVIEW_MAX_BYTES = 2_000_000
+_FACSIMILE_RENDER_LOCK = threading.RLock()
 
 # SSE 구독 루프 전용 스레드 예산 — 각 연결이 blocking 폴(_sse_poll, 최대 1초)로
 # 스레드 하나를 상시 점유하므로, 공용 AnyIO 풀(기본 40 토큰 — sync 라우트·업로드
@@ -176,6 +177,8 @@ def _run_translate_thread(
             # 번역이 갱신됐으므로 내보내기 PDF 캐시도 무효화한다.
             (job.dir / f"export.{lang}.pdf").unlink(missing_ok=True)
             (job.dir / f"export.{lang}.report.json").unlink(missing_ok=True)
+            # 번역 PDF에서 만든 HTML 기준면 캐시도 다음 요청에서 다시 렌더한다.
+            (job.dir / "rendered" / lang / ".source.json").unlink(missing_ok=True)
     except TranslateError as e:
         # SSE는 구독자가 없으면 이벤트를 버린다 — 서버 로그에도 반드시 남긴다
         logger.exception("번역 실패: %s (lang=%s)", job.id, lang)
@@ -487,10 +490,107 @@ def _load_layout_pages(job, lang: str | None = None) -> list:
     return pages
 
 
+def _load_pdf_export_report(job, lang: str) -> dict:
+    try:
+        loaded = json.loads(
+            (job.dir / f"export.{lang}.report.json").read_text(encoding="utf-8")
+        )
+        return loaded if isinstance(loaded, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _ensure_translated_pdf(job, lang: str, settings) -> tuple[Path, dict]:
+    """번역 레이아웃과 같은 세대의 PDF를 만들거나 캐시에서 돌려준다."""
+    trans_layout = job.dir / f"layout.{lang}.json"
+    out = job.dir / f"export.{lang}.pdf"
+    if not out.is_file() or out.stat().st_mtime_ns < trans_layout.stat().st_mtime_ns:
+        built = build_translated_pdf(
+            job.dir, lang, fontfile=settings.pdf_export_font,
+        )
+        return built.path, built.report()
+    return out, _load_pdf_export_report(job, lang)
+
+
+def _ensure_facsimile_pages(job, pages: list, lang: str | None, settings) -> Path:
+    """HTML의 시각 기준면이 될 페이지 PNG 디렉터리를 보장한다.
+
+    원문은 OCR 입력에 쓰인 pages/를 그대로 재사용한다. 번역본은 동일한
+    export.{lang}.pdf를 job.dpi로 렌더해, HTML과 다운로드 PDF가 픽셀 수준에서
+    같은 결과를 보게 한다. marker는 PDF 크기·mtime·DPI·페이지 수를 포함한다.
+    """
+    if lang is None:
+        pages_dir = job.dir / "pages"
+        if not pages_dir.is_dir():
+            raise PdfExportError("원본 페이지 이미지가 없습니다")
+        return pages_dir
+
+    pdf_path, _report = _ensure_translated_pdf(job, lang, settings)
+    target = job.dir / "rendered" / lang
+    marker = target / ".source.json"
+    signature = {
+        "pdf_size": pdf_path.stat().st_size,
+        "pdf_mtime_ns": pdf_path.stat().st_mtime_ns,
+        "dpi": int(job.dpi),
+        "pages": len(pages),
+    }
+
+    def _cache_valid() -> bool:
+        try:
+            saved = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if saved != signature:
+            return False
+        expected = [
+            target / f"page_{int(page.get('page', index)):04d}.png"
+            for index, page in enumerate(pages, start=1)
+        ]
+        return bool(expected) and all(path.is_file() for path in expected)
+
+    with _FACSIMILE_RENDER_LOCK:
+        if _cache_valid():
+            return target
+        target.mkdir(parents=True, exist_ok=True)
+        # target은 파생 캐시 전용 경로다. marker를 마지막에 쓰므로 중간 실패는
+        # 다음 요청에서 자동 재생성되며 source/translation 산출물에는 영향이 없다.
+        for old in target.glob("page_*.png"):
+            old.unlink(missing_ok=True)
+        render_pdf_pages(
+            pdf_path,
+            target,
+            dpi=int(job.dpi),
+            max_pages=settings.max_pages,
+        )
+        tmp = target / f".source.{uuid.uuid4().hex}.tmp"
+        try:
+            tmp.write_text(json.dumps(signature, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, marker)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return target
+
+
+def _try_facsimile_pages(job, pages: list, lang: str | None, settings) -> Path | None:
+    """레이아웃 HTML은 PDF export 결함 때문에 완전히 사라지지 않도록 폴백한다."""
+    try:
+        return _ensure_facsimile_pages(job, pages, lang, settings)
+    except (PdfExportError, OSError, ValueError):
+        logger.exception(
+            "facsimile 페이지 준비 실패 — 좌표 텍스트 렌더로 폴백: %s (%s)",
+            job.id,
+            lang or "orig",
+        )
+        return None
+
+
 @router.get("/jobs/{job_id}/layout.html")
 def job_layout_download(request: Request, job_id: str, lang: str | None = None) -> HTMLResponse:
-    """PDF 대응 standalone HTML 다운로드 — 이미지 base64·KaTeX 인라인 단일 파일.
-    lang=ko면 번역본 layout.ko.json으로 렌더하고 파일명에 .ko.를 붙인다."""
+    """PDF facsimile standalone HTML — 완성 페이지와 검색용 OCR 텍스트를 인라인.
+
+    원문은 source.pdf 렌더 페이지, 번역본은 export.{lang}.pdf 렌더 페이지를
+    기준면으로 사용하므로 브라우저 폰트가 원본 좌표를 다시 조판하지 않는다.
+    """
     from urllib.parse import quote
 
     job = _get_job(request, job_id)
@@ -498,9 +598,12 @@ def job_layout_download(request: Request, job_id: str, lang: str | None = None) 
         _check_lang(lang)
     pages = _load_layout_pages(job, lang)
     st = _state(request)
+    pages_dir = _try_facsimile_pages(job, pages, lang, st.settings)
     stem = Path(job.filename).stem or "document"
     html = render_layout_standalone(
         pages, job.dir, stem, st.settings.resolve_frontend_dir(), lang=lang,
+        pages_dir=pages_dir,
+        facsimile=pages_dir is not None,
     )
     suffix = f".{lang}" if lang else ""
     fname = f"{stem}{suffix}.layout.html"
@@ -512,10 +615,11 @@ def job_layout_download(request: Request, job_id: str, lang: str | None = None) 
 
 @router.get("/jobs/{job_id}/document.html")
 def job_document_download(request: Request, job_id: str, lang: str | None = None) -> HTMLResponse:
-    """문서 뷰(/html과 동일 렌더) standalone HTML 다운로드 — 이미지 base64·KaTeX
-    인라인 단일 파일. 레이아웃 좌표가 없는 figure_only 엔진(OvisOCR2·PaddleOCR-VL)
-    에서도 동작하는 HTML 내보내기다 (layout.html은 그 엔진에선 빈 캔버스).
-    lang=ko면 번역 마크다운으로 렌더하고 파일명에 .ko.를 붙인다."""
+    """주 HTML 내보내기.
+
+    완료된 좌표 레이아웃 잡은 PDF와 동일한 facsimile HTML을 내보낸다. 레이아웃이
+    없는 figure_only 잡이나 부분 결과만 기존 읽기용 semantic HTML로 폴백한다.
+    """
     from urllib.parse import quote
 
     job = _get_job(request, job_id)
@@ -525,6 +629,28 @@ def job_document_download(request: Request, job_id: str, lang: str | None = None
         text = _translated_markdown_or_404(job, lang)
     else:
         text, _partial = _read_markdown(job)  # 미완료 잡도 부분 결과 내보내기 허용(/markdown과 동일)
+    layout_path = job.dir / (f"layout.{lang}.json" if lang else "layout.json")
+    if job.status == "done" and layout_path.is_file():
+        pages = _load_layout_pages(job, lang)
+        pages_dir = _try_facsimile_pages(job, pages, lang, st.settings)
+        if pages_dir is not None:
+            stem = Path(job.filename).stem or "document"
+            html = render_layout_standalone(
+                pages,
+                job.dir,
+                stem,
+                st.settings.resolve_frontend_dir(),
+                lang=lang,
+                pages_dir=pages_dir,
+                facsimile=True,
+            )
+            suffix = f".{lang}" if lang else ""
+            fname = f"{stem}{suffix}.html"
+            return HTMLResponse(html, headers={
+                "Content-Disposition":
+                    f"attachment; filename=\"document{suffix}.html\"; "
+                    f"filename*=UTF-8''{quote(fname)}",
+            })
     inner = render_document_html(
         text, f"/api/jobs/{job_id}/files",
         figure_boxes=_load_figure_boxes(job),
@@ -544,14 +670,95 @@ def job_document_download(request: Request, job_id: str, lang: str | None = None
 
 @router.get("/jobs/{job_id}/layout")
 def job_layout(request: Request, job_id: str, lang: str | None = None) -> HTMLResponse:
-    """좌표 기반 레이아웃 뷰(Phase B) — layout.json이 있는 잡만 (없으면 404).
-    다단·절대 위치를 best-effort로 재구성한 부가 뷰. 마크다운 뷰와 독립.
-    lang=ko면 번역본 layout.ko.json을 로드하고 컨테이너에 lang="ko"를 부여한다."""
+    """PDF facsimile 레이아웃 뷰 — 페이지 기준면 + 검색 가능한 OCR 텍스트 레이어."""
     job = _get_job(request, job_id)
     if lang is not None:
         _check_lang(lang)
     pages = _load_layout_pages(job, lang)
-    return HTMLResponse(render_layout_html(pages, f"/api/jobs/{job_id}/files", lang=lang))
+    st = _state(request)
+    pages_dir = _try_facsimile_pages(job, pages, lang, st.settings)
+    page_src = None
+    if pages_dir is not None:
+        rel = pages_dir.relative_to(job.dir).as_posix()
+
+        def page_src(page_number):
+            return f"/api/jobs/{job_id}/files/{rel}/page_{page_number:04d}.png"
+    return HTMLResponse(render_layout_html(
+        pages,
+        f"/api/jobs/{job_id}/files",
+        lang=lang,
+        page_src=page_src,
+        facsimile=page_src is not None,
+    ))
+
+
+@router.get("/jobs/{job_id}/page/{page_number}")
+def job_page_image(
+    request: Request,
+    job_id: str,
+    page_number: int,
+    lang: str | None = None,
+) -> FileResponse:
+    """리더용 최종 페이지 이미지.
+
+    원문은 source 렌더, lang=ko는 번역 PDF 렌더를 반환한다. 프런트가 언어를
+    바꿔도 왼쪽 페이지가 계속 영문으로 남던 기존 경로를 대체한다.
+    """
+    job = _get_job(request, job_id)
+    if lang is not None:
+        _check_lang(lang)
+        _translated_markdown_or_404(job, lang)
+    layout_path = job.dir / (f"layout.{lang}.json" if lang else "layout.json")
+    if not layout_path.is_file():
+        # figure_only 엔진은 번역 텍스트 좌표가 없어 최종 페이지 합성이 불가능하다.
+        # 기존 원본 페이지를 유지하고 오른쪽 semantic 번역문을 계속 제공한다.
+        path = job.dir / "pages" / f"page_{page_number:04d}.png"
+        if page_number < 1 or not path.is_file():
+            raise HTTPException(404, "페이지 이미지를 찾을 수 없습니다")
+        return FileResponse(path, media_type="image/png")
+    pages = _load_layout_pages(job, lang)
+    valid_pages = {
+        int(page.get("page"))
+        for page in pages
+        if isinstance(page, dict) and isinstance(page.get("page"), int)
+    }
+    if page_number not in valid_pages:
+        raise HTTPException(404, "페이지를 찾을 수 없습니다")
+    pages_dir = _ensure_facsimile_pages(job, pages, lang, _state(request).settings)
+    path = pages_dir / f"page_{page_number:04d}.png"
+    if not path.is_file():
+        raise HTTPException(404, "페이지 이미지를 찾을 수 없습니다")
+    return FileResponse(path, media_type="image/png")
+
+
+@router.get("/jobs/{job_id}/outline")
+def job_outline(request: Request, job_id: str, lang: str | None = None) -> dict:
+    """OCR title 블록으로 문서 목차를 만든다 — reader 연구 도구의 탐색 기준."""
+    job = _get_job(request, job_id)
+    if lang is not None:
+        _check_lang(lang)
+    pages = _load_layout_pages(job, lang)
+    items = []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        page_number = page.get("page")
+        if not isinstance(page_number, int):
+            continue
+        for block in page.get("blocks", ()):
+            if not isinstance(block, dict) or block.get("type") != "title":
+                continue
+            text = str(block.get("content") or "").strip()
+            if not text:
+                continue
+            fs = block.get("fs")
+            level = 1 if not items else (2 if isinstance(fs, (int, float)) and fs >= 2.2 else 3)
+            items.append({
+                "page": page_number,
+                "level": level,
+                "text": text[:500],
+            })
+    return {"items": items}
 
 
 @router.get("/jobs/{job_id}/files/{file_path:path}")
@@ -623,24 +830,10 @@ def job_pdf(request: Request, job_id: str, lang: str = "ko") -> FileResponse:
             "이 잡에는 좌표 레이아웃이 없어 PDF 내보내기를 지원하지 않습니다"
             " — HTML 내보내기(document.html)를 사용하세요",
         )
-    out = job.dir / f"export.{lang}.pdf"
-    report: dict = {}
-    if not out.is_file() or out.stat().st_mtime < trans_layout.stat().st_mtime:
-        try:
-            built = build_translated_pdf(
-                job.dir, lang, fontfile=_state(request).settings.pdf_export_font)
-            report = built.report()
-        except PdfExportError as e:
-            raise HTTPException(500, str(e))
-    else:
-        try:
-            loaded = json.loads(
-                (job.dir / f"export.{lang}.report.json").read_text(encoding="utf-8")
-            )
-            if isinstance(loaded, dict):
-                report = loaded
-        except (OSError, ValueError):
-            pass
+    try:
+        out, report = _ensure_translated_pdf(job, lang, _state(request).settings)
+    except PdfExportError as e:
+        raise HTTPException(500, str(e))
     # 헤더는 숫자만 사용해 비ASCII 경고문·원문이 HTTP 메타데이터로 새지 않게 한다.
     specialist = report.get("specialist_kept")
     if not isinstance(specialist, dict):

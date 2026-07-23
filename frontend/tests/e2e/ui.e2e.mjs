@@ -107,11 +107,11 @@ const dlDoc = await page.evaluate(() => {
 check('HTML 다운로드 버튼 활성', !!dlDoc.href && !dlDoc.disabled && !dlDoc.hidden, JSON.stringify(dlDoc));
 if (dlDoc.href) {
   const doc = await (await fetch(new URL(dlDoc.href, BASE))).text();
-  check('document.html: doctype', doc.startsWith('<!doctype html>'));
-  check('document.html: 본문 텍스트 포함', doc.length > 1000 && /<p>/.test(doc));
-  check('document.html: 이미지 base64 인라인', doc.includes('data:image/jpeg;base64,'));
-  check('document.html: 서버 참조 없음(자립형)', !doc.includes('/api/jobs/'));
-  check('document.html: KaTeX 인라인', doc.includes('katex'));
+check('document.html: doctype', doc.startsWith('<!doctype html>'));
+check('document.html: PDF 페이지 구조 포함', doc.length > 1000 && doc.includes('layout-page-image'));
+check('document.html: 페이지 PNG base64 인라인', doc.includes('data:image/png;base64,'));
+check('document.html: 서버 참조 없음(자립형)', !doc.includes('/api/jobs/'));
+check('document.html: 검색용 텍스트 레이어', doc.includes('facsimile-text-block'));
 }
 
 // ── 4) 레이아웃 탭 — capability에 따라 카드 or 캔버스 ────────────────────

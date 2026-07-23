@@ -268,6 +268,63 @@ def test_build_keeps_unreplaceable_types(tmp_path):
     assert KO_TEXT not in text
 
 
+def test_build_translates_reference_text_without_damaging_url(tmp_path):
+    job_dir = _unit_job(
+        tmp_path,
+        block_type="ref_text",
+        src_text="[1] Author, Original Paper Title, https://example.test/paper.",
+    )
+    translated = json.loads((job_dir / "layout.ko.json").read_text(encoding="utf-8"))
+    translated[0]["blocks"][0]["content"] = (
+        "[1] Author, 번역된 논문 제목, https://example.test/paper."
+    )
+    (job_dir / "layout.ko.json").write_text(
+        json.dumps(translated, ensure_ascii=False), encoding="utf-8",
+    )
+
+    result = build_translated_pdf(job_dir, "ko")
+    text = _pdf_text(result.path.read_bytes())
+    assert result.replaced == 1
+    assert "번역된 논문 제목" in text
+    assert "https://example.test/paper." in text
+    assert "Original Paper Title" not in text
+
+
+def test_build_redaction_includes_source_glyphs_past_ocr_bbox(tmp_path):
+    """OCR bbox 밖으로 조금 나온 긴 원문 span 꼬리도 번역문 옆에 남기지 않는다."""
+    import fitz
+
+    job_dir = tmp_path / "short-bbox-job"
+    job_dir.mkdir()
+    original_text = "Original reference URL ending.pdf."
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((60, 100), original_text, fontsize=12)
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+
+    # 실제 span은 x≈250pt까지 가지만 OCR bbox는 x=210pt에서 끝나는 상황.
+    original = [{"page": 1, "width": 595, "height": 842, "blocks": [{
+        "type": "ref_text",
+        "bbox": [round(60 / 595 * 999), round(84 / 842 * 999),
+                 round(210 / 595 * 999), round(104 / 842 * 999)],
+        "content": original_text,
+        "fs": 12 / 595 * 100,
+    }]}]
+    translated = json.loads(json.dumps(original))
+    translated[0]["blocks"][0]["content"] = "번역 참고문헌"
+    (job_dir / "layout.json").write_text(json.dumps(original), encoding="utf-8")
+    (job_dir / "layout.ko.json").write_text(
+        json.dumps(translated, ensure_ascii=False), encoding="utf-8",
+    )
+
+    result = build_translated_pdf(job_dir, "ko")
+    text = _pdf_text(result.path.read_bytes())
+    assert "번역 참고문헌" in text
+    assert "Original" not in text
+    assert "ending.pdf." not in text
+
+
 def test_build_keeps_unchanged_blocks(tmp_path):
     job_dir = _unit_job(tmp_path)
     # 번역본 내용 = 원문 → 아무것도 바꾸지 않아야 한다
@@ -368,3 +425,63 @@ def test_build_expands_only_into_collision_free_space(tmp_path):
     assert result.relocated == 1 and result.replaced == 1
     assert "충돌을 피해서" in text
     assert "Footer obstacle" in text
+
+
+def test_build_preserves_title_size_weight_and_center_alignment(tmp_path):
+    """CJK 행높이 때문에 제목을 축소하지 않고 빈 공간·굵기·가운데 정렬을 쓴다."""
+    import fitz
+
+    job_dir = tmp_path / "styled-title-job"
+    job_dir.mkdir()
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((207, 78), "Original Paper Title", fontsize=18, fontname="hebo")
+    page.insert_text((70, 125), "Next block must remain", fontsize=10)
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+
+    def norm_x(x):
+        return round(x / 595 * 999)
+
+    def norm_y(y):
+        return round(y / 842 * 999)
+
+    original = [{"page": 1, "width": 595, "height": 842, "blocks": [
+        {
+            "type": "title",
+            "bbox": [norm_x(180), norm_y(59), norm_x(415), norm_y(79)],
+            "content": "Original Paper Title",
+        },
+        {
+            "type": "text",
+            "bbox": [norm_x(70), norm_y(112), norm_x(250), norm_y(128)],
+            "content": "Next block must remain",
+        },
+    ]}]
+    translated = json.loads(json.dumps(original))
+    translated[0]["blocks"][0]["content"] = "한국어 논문 제목"
+    (job_dir / "layout.json").write_text(json.dumps(original), encoding="utf-8")
+    (job_dir / "layout.ko.json").write_text(
+        json.dumps(translated, ensure_ascii=False), encoding="utf-8",
+    )
+
+    result = build_translated_pdf(job_dir, "ko")
+    with fitz.open(result.path) as exported:
+        page = exported[0]
+        spans = [
+            span
+            for block in page.get_text("dict")["blocks"]
+            for line in block.get("lines", [])
+            for span in line.get("spans", [])
+            if "한국어" in span.get("text", "")
+        ]
+        streams = b"\n".join(
+            exported.xref_stream(xref) for xref in page.get_contents()
+        )
+
+    assert spans, "번역 제목이 삽입되어야 한다"
+    title = spans[0]
+    assert title["size"] >= 16, title
+    assert abs((title["bbox"][0] + title["bbox"][2]) / 2 - 595 / 2) < 5, title
+    assert b"2 Tr" in streams, "CJK 제목도 fill+stroke로 굵기 계층을 보존해야 한다"
+    assert "Next block must remain" in _pdf_text(result.path.read_bytes())

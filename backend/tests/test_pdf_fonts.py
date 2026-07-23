@@ -141,3 +141,45 @@ def test_enrich_detects_vertical_text_and_stamps_version(tmp_path):
     assert abs(vert["fs"] - 9 / 612 * 100) < 0.15
     assert "vertical" not in horiz
     assert pages[0]["fonts_v"] == ENRICH_VERSION
+
+
+def test_enrich_detects_centered_and_justified_blocks(tmp_path):
+    """저자/대표 제목의 가운데 정렬과 본문 양쪽 정렬을 원문 기하에서 복원한다."""
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    centered_rect = fitz.Rect(120, 70, 492, 145)
+    page.insert_textbox(
+        centered_rect,
+        "Short author\nA considerably longer affiliation line\nCenter",
+        fontsize=11,
+        align=1,
+    )
+    body_rect = fitz.Rect(80, 220, 532, 340)
+    page.insert_textbox(
+        body_rect,
+        "A justified paragraph has enough words to fill several complete lines. "
+        "The final line is intentionally shorter while the preceding lines reach "
+        "both edges of the source text box. Additional material makes the paragraph "
+        "long enough for reliable multi-line alignment detection in this wide box. "
+        "One more sentence leaves only the final source line intentionally short.",
+        fontsize=11,
+        align=3,
+    )
+    p = tmp_path / "align.pdf"
+    doc.save(p)
+    doc.close()
+
+    cx1, cy1 = _norm(centered_rect.x0, centered_rect.y0)
+    cx2, cy2 = _norm(centered_rect.x1, centered_rect.y1)
+    bx1, by1 = _norm(body_rect.x0, body_rect.y0)
+    bx2, by2 = _norm(body_rect.x1, body_rect.y1)
+    pages = [{"page": 1, "width": 612, "height": 792, "blocks": [
+        {"type": "text", "bbox": [cx1, cy1, cx2, cy2], "content": "author"},
+        {"type": "text", "bbox": [bx1, by1, bx2, by2], "content": "paragraph"},
+    ]}]
+
+    assert enrich_layout_fonts(p, pages) is True
+    assert pages[0]["blocks"][0].get("align") == "center"
+    assert pages[0]["blocks"][1].get("align") == "justify"

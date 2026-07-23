@@ -10,6 +10,8 @@ PDF에 텍스트 레이어가 있으면 그 안의 span 크기를 그대로 읽�
 - 그 사각형 안에 **중심점**이 드는 span들을 모아 글자수 가중 중앙값 크기를 구하고
   block["fs"] = size_pt / page_width_pt × 100 (cqw = 페이지 폭의 1%)로 심는다.
 - 볼드 글자가 과반이면 block["bold"] = True.
+- 원문 줄의 폭과 중심을 비교해 block["align"] = "center"|"justify"를 심는다.
+  PDF 번역 내보내기가 모든 블록을 좌측 정렬로 평탄화하지 않게 하기 위함이다.
 - 줄 방향(dir)이 세로인 글자가 과반이면 block["vertical"] = "up"|"down"
   (arXiv 왼쪽 여백 스탬프 같은 90° 회전 텍스트 — 렌더러가 writing-mode로 재현).
 - 처리한 페이지에는 page["fonts_v"] 버전을 스탬프한다 — 백필이 구버전
@@ -23,11 +25,12 @@ enrichment은 절대 잡·렌더를 깨뜨리면 안 된다.
 from __future__ import annotations
 
 from pathlib import Path
+from statistics import median
 
 _BOLD_FLAG = 16  # fitz span flags: bit 4 == bold
 
 # enrichment 스키마 버전 — 필드 추가 시 올리면 기존 잡이 /layout 요청 때 재백필된다
-ENRICH_VERSION = 2
+ENRICH_VERSION = 3
 
 
 def _weighted_median(pairs: list[tuple[float, int]]) -> float:
@@ -49,6 +52,50 @@ def _span_is_bold(span: dict) -> bool:
     if int(span.get("flags", 0)) & _BOLD_FLAG:
         return True
     return "bold" in str(span.get("font", "")).lower()
+
+
+def _infer_alignment(
+    block: dict,
+    block_rect: tuple[float, float, float, float],
+    line_rects: list[tuple[float, float, float, float]],
+    page_width: float,
+) -> str | None:
+    """원문 줄 기하에서 가운데/양쪽 정렬을 보수적으로 추론한다.
+
+    OCR bbox는 대체로 실제 글리프에 딱 맞으므로 한 줄짜리 본문을 가운데 정렬로
+    오인하기 쉽다. 한 줄 제목은 페이지 중앙에 놓인 경우만 center로 보고, 여러
+    줄은 줄 중심이 일정하면서 줄 폭 중앙값이 블록보다 충분히 짧을 때만 center다.
+    대부분의 줄이 블록 폭을 채우는 문단은 justify로 분류한다.
+    """
+    if not line_rects:
+        return None
+    x0, _y0, x1, _y1 = block_rect
+    width = max(1.0, x1 - x0)
+    center = (x0 + x1) / 2
+    line_widths = [max(0.0, r[2] - r[0]) for r in line_rects]
+    line_centers = [(r[0] + r[2]) / 2 for r in line_rects]
+    ratios = [w / width for w in line_widths]
+
+    if len(line_rects) == 1:
+        if (
+            str(block.get("type") or "") == "title"
+            and abs(center - page_width / 2) <= page_width * 0.08
+        ):
+            return "center"
+        return None
+
+    centered = sum(abs(c - center) <= max(3.0, width * 0.04) for c in line_centers)
+    if centered / len(line_rects) >= 0.75 and median(ratios) < 0.72:
+        return "center"
+
+    # 마지막 줄은 짧은 것이 정상이다. 그 전 줄 중 절반 이상이 블록 폭을 거의
+    # 채우면 원문의 양쪽 정렬을 번역 PDF에서도 유지한다.
+    paragraph_lines = ratios[:-1] or ratios
+    if len(line_rects) >= 3 and (
+        sum(r >= 0.82 for r in paragraph_lines) / len(paragraph_lines) >= 0.5
+    ):
+        return "justify"
+    return None
 
 
 def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
@@ -89,12 +136,14 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
             except Exception:
                 continue
             # 페이지의 모든 span을 평면화 (bbox·size·text·flags·font)
-            spans: list[tuple[dict, tuple]] = []
+            spans: list[tuple[dict, tuple, int]] = []
+            line_no = 0
             for tb in text_dict.get("blocks", ()):
                 for line in tb.get("lines", ()):
                     ldir = tuple(line.get("dir") or (1, 0))
                     for sp in line.get("spans", ()):
-                        spans.append((sp, ldir))
+                        spans.append((sp, ldir, line_no))
+                    line_no += 1
             if not spans:
                 page["fonts_v"] = ENRICH_VERSION
                 changed = True
@@ -117,7 +166,8 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
                 bold_chars = 0
                 total_chars = 0
                 vert_up = vert_down = 0
-                for sp, ldir in spans:
+                matched_lines: dict[int, list[float]] = {}
+                for sp, ldir, source_line_no in spans:
                     sb = sp.get("bbox")
                     if not sb or len(sb) != 4:
                         continue
@@ -133,6 +183,13 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
                         continue
                     pairs.append((size, n))
                     total_chars += n
+                    bounds = matched_lines.setdefault(
+                        source_line_no, [float(sb[0]), float(sb[1]), float(sb[2]), float(sb[3])],
+                    )
+                    bounds[0] = min(bounds[0], float(sb[0]))
+                    bounds[1] = min(bounds[1], float(sb[1]))
+                    bounds[2] = max(bounds[2], float(sb[2]))
+                    bounds[3] = max(bounds[3], float(sb[3]))
                     if _span_is_bold(sp):
                         bold_chars += n
                     if abs(ldir[1]) > 0.7:  # 세로쓰기 줄 (y축 진행)
@@ -146,6 +203,18 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
                 block["fs"] = _weighted_median(pairs) / pw * 100
                 if bold_chars > total_chars * 0.5:
                     block["bold"] = True
+                else:
+                    block.pop("bold", None)
+                align = _infer_alignment(
+                    block,
+                    (rx1 + 3, ry1 + 3, rx2 - 3, ry2 - 3),
+                    [tuple(values) for values in matched_lines.values()],
+                    pw,
+                )
+                if align:
+                    block["align"] = align
+                else:
+                    block.pop("align", None)
                 if (vert_up + vert_down) > total_chars * 0.5:
                     block["vertical"] = "up" if vert_up >= vert_down else "down"
                 else:

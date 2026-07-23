@@ -201,7 +201,7 @@ def test_translate_idempotent_and_force(client, sample_pdf, provider_env, monkey
     assert _tstate(client, jid)["status"] == "done"
 
 
-# ── 3. /markdown·/html·/layout·/layout.html?lang=ko — 전 404 / 후 200 ─────
+# ── 3. 한국어 결과 라우트 — 전 404 / 후 200 ─────────────────────────────
 def test_translated_output_routes(client, sample_pdf, provider_env, monkeypatch):
     monkeypatch.setattr("app.api.run_translation", _make_fake())
     jid = _done_job(client, sample_pdf)
@@ -209,7 +209,8 @@ def test_translated_output_routes(client, sample_pdf, provider_env, monkeypatch)
     for path in (f"/api/jobs/{jid}/markdown?lang=ko",
                  f"/api/jobs/{jid}/html?lang=ko",
                  f"/api/jobs/{jid}/layout?lang=ko",
-                 f"/api/jobs/{jid}/layout.html?lang=ko"):
+                 f"/api/jobs/{jid}/layout.html?lang=ko",
+                 f"/api/jobs/{jid}/document.html?lang=ko"):
         assert client.get(path).status_code == 404, path
 
     assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 202
@@ -235,6 +236,14 @@ def test_translated_output_routes(client, sample_pdf, provider_env, monkeypatch)
     assert dl.text.startswith("<!doctype html>")
     assert 'lang="ko"' in dl.text
     assert ".ko.layout.html" in dl.headers["content-disposition"]
+
+    document = client.get(f"/api/jobs/{jid}/document.html?lang=ko")
+    assert document.status_code == 200
+    assert document.text.startswith("<!doctype html>")
+    assert 'lang="ko"' in document.text
+    assert "번역본" in document.text
+    assert ".ko.html" in document.headers["content-disposition"]
+    assert f"/api/jobs/{jid}" not in document.text
 
 
 # ── 4. 400 잘못된 lang / 409 미완료 잡 / 503 env 미설정 ────────────────────

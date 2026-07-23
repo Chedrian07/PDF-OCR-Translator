@@ -934,6 +934,7 @@ import {
   clampReaderPage,
   readerImageUrl,
   pdfExportState,
+  translatedHtmlExportState,
   pdfReportMessage,
 } from '../app.js';
 
@@ -1016,6 +1017,21 @@ test('pdfExportState: 숨김 사유 — 잡 미완료 / 번역 없음(조용히 
       { visible: false, reason: 'translation-missing' },
       `koStatus=${ko} — 안내는 번역 UI가 담당, 버튼은 조용히 숨김`);
   }
+});
+
+test('translatedHtmlExportState: 번역 완료면 레이아웃 없이도 한국어 HTML 노출', () => {
+  assert.deepEqual(
+    translatedHtmlExportState('done', 'done'),
+    { visible: true, reason: '' },
+  );
+  assert.deepEqual(
+    translatedHtmlExportState('running', 'done'),
+    { visible: false, reason: 'job-not-done' },
+  );
+  assert.deepEqual(
+    translatedHtmlExportState('done', 'running'),
+    { visible: false, reason: 'translation-missing' },
+  );
 });
 
 test('pdfReportMessage: 표 셀·재배치·원문 보존을 숫자형 리포트로 안내', () => {

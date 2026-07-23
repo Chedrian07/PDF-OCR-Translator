@@ -420,6 +420,14 @@ export function pdfExportState(jobStatus, koStatus, hasLayout) {
   return { visible: true, reason: '' };
 }
 
+// HTML(한국어)는 좌표 레이아웃이 없어도 번역 완료만 되면 내보낼 수 있다.
+// PDF와 조건을 분리해 figure_only 엔진에서도 명시적인 한국어 HTML을 제공한다.
+export function translatedHtmlExportState(jobStatus, koStatus) {
+  if (jobStatus !== 'done') return { visible: false, reason: 'job-not-done' };
+  if (koStatus !== 'done') return { visible: false, reason: 'translation-missing' };
+  return { visible: true, reason: '' };
+}
+
 // PDF 응답의 숫자형 생성 리포트 → 사용자에게 보여 줄 짧은 무손실 요약.
 // 서버는 비ASCII 경고 본문을 헤더에 싣지 않고 개수만 보내므로 문서 내용이
 // 프록시 로그에 새지 않는다.
@@ -652,6 +660,7 @@ const EL_IDS = {
   dlMd: 'dl-md',
   dlZip: 'dl-zip',
   dlDoc: 'dl-doc',
+  dlDocKo: 'dl-doc-ko',
   dlLayout: 'dl-layout',
   dlPdf: 'dl-pdf',
   readerPrev: 'reader-prev',
@@ -2389,15 +2398,16 @@ function setResultLangAttr() {
   }
 }
 
-// 현재 언어에 맞춰 다운로드 링크(markdown·document.html·layout.html)를 다시 세팅.
-// 아카이브는 ko 파일이 자동 포함되므로 원본 URL 그대로 둔다.
+// 현재 언어에 맞춰 markdown·layout.html을 다시 세팅한다. 문서 HTML은 현재
+// 보기 토글과 분리해 원문/한국어 버튼을 각각 고정하므로 잘못된 언어 파일을
+// 조용히 받지 않는다. 아카이브는 ko 파일이 자동 포함되므로 원본 URL 그대로 둔다.
 function applyDownloadLangs() {
   const u = state.resultUrls || {};
   const base = state.currentBaseName || 'document';
   const suffix = state.currentLang === 'ko' ? '.ko' : '';
   setDownload(el.dlMd, u.markdown ? withLangUrl(u.markdown, state.currentLang) : null, `${base}${suffix}.md`);
   setDownload(el.dlZip, u.archive || null, `${base}.md.zip`);
-  setDownload(el.dlDoc, u.documentHtml ? withLangUrl(u.documentHtml, state.currentLang) : null, `${base}${suffix}.html`);
+  setDownload(el.dlDoc, u.documentHtml || null, `${base}.html`);
   setDownload(el.dlLayout, u.layoutHtml ? withLangUrl(u.layoutHtml, state.currentLang) : null, `${base}${suffix}.layout.html`);
 }
 
@@ -3033,9 +3043,20 @@ function applyReaderTranslateCta() {
   el.readerTranslateBtn.hidden = el.translateBtn.hidden || state.translateAvailable === false;
 }
 
-/* ── PDF(한국어) 내보내기 (다운로드 행) ── */
-// 잡 done ∧ 번역 done ∧ 레이아웃 있음일 때만 노출 (판정은 순수 pdfExportState).
+/* ── 한국어 HTML/PDF 내보내기 (다운로드 행) ── */
+// HTML은 번역 완료만, PDF는 번역 완료 ∧ 레이아웃 있음일 때 노출한다.
 function applyPdfExport() {
+  const hs = translatedHtmlExportState(state.displayedStatus, state.translateState);
+  el.dlDocKo.hidden = !hs.visible;
+  if (hs.visible) {
+    const u = state.resultUrls || {};
+    setDownload(
+      el.dlDocKo,
+      u.documentHtml ? withLangUrl(u.documentHtml, 'ko') : null,
+      `${state.currentBaseName || 'document'}.ko.html`,
+    );
+  }
+
   const ps = pdfExportState(state.displayedStatus, state.translateState, state.resultHasLayout);
   el.dlPdf.hidden = !ps.visible;
   if (ps.visible) {

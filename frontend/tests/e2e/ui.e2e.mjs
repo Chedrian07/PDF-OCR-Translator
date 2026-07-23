@@ -158,11 +158,27 @@ if (VERIFY_MOCK_LLM) {
   await page.click('#translate-btn');
   await page.waitForFunction(() => {
     const pdf = document.getElementById('dl-pdf');
+    const html = document.getElementById('dl-doc-ko');
     const ko = document.getElementById('lang-ko');
-    return pdf && !pdf.hidden && ko && !ko.parentElement.hidden;
+    return pdf && !pdf.hidden && html && !html.hidden && ko && !ko.parentElement.hidden;
   }, null, { timeout: 60_000 });
   check('mock 번역: 완료 후 한국어 토글', await page.evaluate(() => !document.getElementById('lang-toggle').hidden));
+  check('mock 번역: 한국어 HTML 버튼 노출', await page.evaluate(() => {
+    const link = document.getElementById('dl-doc-ko');
+    return !link.hidden && link.getAttribute('href')?.includes('lang=ko')
+      && link.getAttribute('download')?.endsWith('.ko.html');
+  }));
   check('mock 번역: PDF 버튼 노출', await page.evaluate(() => !document.getElementById('dl-pdf').hidden));
+
+  const htmlDownloadPromise = page.waitForEvent('download');
+  await page.click('#dl-doc-ko');
+  const htmlDownload = await htmlDownloadPromise;
+  const htmlPath = await htmlDownload.path();
+  const htmlText = htmlPath ? readFileSync(htmlPath, 'utf8') : '';
+  check('mock 한국어 HTML: 브라우저 다운로드 완료',
+    htmlDownload.suggestedFilename().endsWith('.ko.html'));
+  check('mock 한국어 HTML: lang·한글 번역 본문 포함',
+    htmlText.includes('<html lang="ko">') && /[가-힣]/.test(htmlText));
 
   const downloadPromise = page.waitForEvent('download');
   await page.click('#dl-pdf');

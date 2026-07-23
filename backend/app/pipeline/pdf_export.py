@@ -3,8 +3,8 @@
 원리(레이아웃 보존 번역): layout.json(원문)과 layout.{lang}.json(번역본)을 블록
 단위로 비교해 내용이 실제로 바뀐 텍스트 블록만 원본 페이지에서 리댁션(텍스트만
 제거, 이미지·그래픽 보존)하고 같은 자리에 번역 텍스트를 삽입한다. 번역 엔진이
-마스킹으로 원문을 유지한 블록(수식·참고문헌·식별자·페이지 번호)과 그림·표는
-원본 글리프가 그대로 남으므로 시각 품질이 보존된다.
+마스킹으로 원문을 유지한 블록(수식·식별자·페이지 번호)과 그림·표는 원본
+글리프가 그대로 남으므로 시각 품질이 보존된다.
 
 폰트: PDF_EXPORT_FONT(파일 경로) → 시스템 한글 폰트 후보 → PyMuPDF 내장
 CJK("korea", Droid Sans Fallback) 순으로 폴백한다. 내장 폰트는 어떤 환경에서도
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # 밀어 넣으면 오히려 품질이 나빠진다.
 _REPLACEABLE_TYPES = frozenset({
     "text", "title", "list", "caption", "image_caption", "table_caption",
-    "page_footnote", "footnote", "aside_text", "header", "footer",
+    "page_footnote", "footnote", "aside_text", "header", "footer", "ref_text",
 })
 _SPECIALIST_TYPES = frozenset({"table", "equation", "algorithm"})
 
@@ -97,6 +97,8 @@ class _TextFitPlan:
     rect: object
     fontsize: float
     expanded: bool = False
+    align: int = 0
+    bold: bool = False
 
 
 @dataclass(frozen=True)
@@ -104,6 +106,7 @@ class _Replacement:
     plan: _TextFitPlan
     text: str
     kind: str = "text"
+    redact_rect: object | None = None
 
 
 class _TableParser(HTMLParser):
@@ -317,9 +320,43 @@ def _block_rect(fitz, page, bbox):
     return rect if not rect.is_empty else None
 
 
+def _source_span_rects(fitz, page) -> list[object]:
+    """페이지 텍스트 span 사각형을 한 번만 읽어 반환한다."""
+    out: list[object] = []
+    try:
+        blocks = page.get_text("dict").get("blocks", ())
+    except Exception:  # noqa: BLE001 — 텍스트 레이어가 없으면 빈 목록
+        return out
+    for block in blocks:
+        for line in block.get("lines", ()):
+            for span in line.get("spans", ()):
+                bbox = span.get("bbox")
+                if bbox and len(bbox) == 4 and str(span.get("text") or "").strip():
+                    out.append(fitz.Rect(bbox))
+    return out
+
+
+def _source_text_rect(page, rect, source_spans: list[object]):
+    """OCR bbox에 속한 실제 원문 span까지 포함한 안전한 리댁션 사각형.
+
+    검출 bbox가 URL·긴 단어의 끝을 몇 pt 잘라내는 경우 OCR 사각형만 지우면 `f.`
+    같은 원문 꼬리가 번역문 옆에 남는다. span 중심이 OCR bbox 안에 든 경우에만
+    실제 글리프 bbox를 합치므로 다음 문단까지 무차별 확장하지 않는다.
+    """
+    actual = +rect
+    for source in source_spans:
+        center = (source.tl + source.br) / 2
+        if (
+            rect.x0 - 1 <= center.x <= rect.x1 + 1
+            and rect.y0 - 1 <= center.y <= rect.y1 + 1
+        ):
+            actual.include_rect(source)
+    return actual & page.mediabox
+
+
 def _plan_shrink_to_fit(
     page, rect, text: str, base_pt: float, fontname: str, fontfile: str | None,
-    *, max_rect=None,
+    *, max_rect=None, align: int = 0, bold: bool = False,
 ) -> _TextFitPlan | None:
     """Shape로 실제 삽입과 동일한 조판을 dry-run해 안전한 계획만 반환한다.
 
@@ -327,30 +364,43 @@ def _plan_shrink_to_fit(
     않으면 None을 반환해 해당 원문 블록을 그대로 보존한다.
     """
     rot = page.rotation
-    leftover = -1.0
+
+    grown = +(max_rect if max_rect is not None else rect)
+    if max_rect is None:
+        grown.y1 = page.mediabox.y1
+
+    # OCR bbox는 원본 글리프에 딱 맞지만 CJK 폰트의 ascender/descender는 더 높다.
+    # 같은 크기에서 원래 상자 → 충돌 없는 확장 상자 순으로 시도한 뒤에야 축소한다.
+    # 그렇지 않으면 18pt 제목이 원래 상자의 12.6pt에 먼저 들어가 계층이 무너진다.
     for scale in _SHRINK_STEPS:
         size = max(_MIN_FONT_PT, base_pt * scale)
-        shape = page.new_shape()
-        leftover = shape.insert_textbox(
-            rect, text, fontsize=size, fontname=fontname, fontfile=fontfile,
-            align=0, rotate=rot, color=(0, 0, 0),
-        )
-        if leftover >= 0:
-            return _TextFitPlan(+rect, size, False)
-    # 최종 폴백: 부족한 높이만큼 확장. 호출자가 계산한 충돌 없는 영역을 넘기면
-    # 그 경계를 절대 넘지 않고, 없으면 기존처럼 페이지 하단까지만 허용한다.
-    size = max(_MIN_FONT_PT, base_pt * _SHRINK_STEPS[-1])
-    grown = +rect
-    allowed_y1 = max_rect.y1 if max_rect is not None else page.mediabox.y1
-    grown.y1 = min(allowed_y1, grown.y1 + abs(leftover) + size)
-    if grown.y1 <= rect.y1 + 0.5:
-        return None
-    shape = page.new_shape()
-    if shape.insert_textbox(
-        grown, text, fontsize=size, fontname=fontname, fontfile=fontfile,
-        align=0, rotate=rot, color=(0, 0, 0),
-    ) >= 0:
-        return _TextFitPlan(grown, size, True)
+        kwargs = {
+            "fontsize": size,
+            "fontname": fontname,
+            "fontfile": fontfile,
+            "align": align,
+            "rotate": rot,
+            "color": (0, 0, 0),
+        }
+        if bold:
+            # CJK 시스템 폰트가 단일 TTC/regular 파일인 환경에서도 제목 계층을
+            # 보존한다. fill+stroke는 글자 외곽만 약하게 굵게 하며 조판 폭은 같다.
+            kwargs.update({
+                "render_mode": 2,
+                "fill": (0, 0, 0),
+                # border_width는 pt가 아니라 fontsize 비율이다. 2%만 더해
+                # CJK 획이 서로 붙지 않는 얇은 합성 볼드를 만든다.
+                "border_width": 0.02,
+            })
+        for candidate, expanded in (
+            (rect, False),
+            (grown, True),
+        ):
+            if expanded and grown.y1 <= rect.y1 + 0.5:
+                continue
+            shape = page.new_shape()
+            if shape.insert_textbox(candidate, text, **kwargs) >= 0:
+                return _TextFitPlan(+candidate, size, expanded, align, bold)
     return None
 
 
@@ -358,10 +408,21 @@ def _insert_fitted_text(
     page, plan: _TextFitPlan, text: str, fontname: str, fontfile: str | None,
 ) -> None:
     """검증된 계획을 적용한다. dry-run과 달라지면 손상 PDF를 저장하지 않고 중단."""
-    leftover = page.insert_textbox(
-        plan.rect, text, fontsize=plan.fontsize, fontname=fontname, fontfile=fontfile,
-        align=0, rotate=page.rotation, color=(0, 0, 0),
-    )
+    kwargs = {
+        "fontsize": plan.fontsize,
+        "fontname": fontname,
+        "fontfile": fontfile,
+        "align": plan.align,
+        "rotate": page.rotation,
+        "color": (0, 0, 0),
+    }
+    if plan.bold:
+        kwargs.update({
+            "render_mode": 2,
+            "fill": (0, 0, 0),
+            "border_width": 0.02,
+        })
+    leftover = page.insert_textbox(plan.rect, text, **kwargs)
     if leftover < 0:
         raise PdfExportError("번역 텍스트 조판 결과가 사전 검증과 달라 PDF 생성을 중단했습니다")
 
@@ -421,6 +482,7 @@ def build_translated_pdf(
             oblocks = opage.get("blocks", [])
             tblocks = tpage.get("blocks", [])
             block_rects = [_block_rect(fitz, page, b.get("bbox")) for b in oblocks]
+            source_spans = _source_span_rects(fitz, page)
             targets: list[_Replacement] = []
             for block_index, (ob, tb) in enumerate(zip(oblocks, tblocks)):
                 if not isinstance(ob, dict) or not isinstance(tb, dict):
@@ -464,7 +526,7 @@ def build_translated_pdf(
                                     " — 원문 셀 보존"
                                 )
                                 continue
-                            targets.append(_Replacement(plan, new_text, "table"))
+                            targets.append(_Replacement(plan, new_text, "table", cell))
                     if table_failed:
                         result.specialist_kept["table"] = result.specialist_kept.get("table", 0) + 1
                     continue
@@ -498,6 +560,10 @@ def build_translated_pdf(
                 max_rect = _free_growth_rect(page, rect, obstacles)
                 plan = _plan_shrink_to_fit(
                     page, rect, new, base_pt, fname, ff, max_rect=max_rect,
+                    align={"center": 1, "right": 2, "justify": 3}.get(
+                        str(ob.get("align") or ""), 0,
+                    ),
+                    bold=bool(ob.get("bold")),
                 )
                 if plan is None:
                     result.kept += 1
@@ -505,14 +571,20 @@ def build_translated_pdf(
                         f"p{pno}: 블록 교체 생략(공간 부족) — 원문 보존"
                     )
                     continue
-                targets.append(_Replacement(plan, new))
+                targets.append(_Replacement(
+                    plan, new, "text", _source_text_rect(page, rect, source_spans),
+                ))
 
             if not targets:
                 continue
 
             # 2) 원문 텍스트 리댁션 (이미지·그래픽 보존) — 삽입 전에 일괄 적용
             for target in targets:
-                page.add_redact_annot(target.plan.rect)
+                # 삽입 bbox가 아래 빈 공간으로 커져도 실제 원문 bbox만 지운다.
+                # 확장 사각형 전체를 리댁션하면 인접한 원문 글리프가 함께 사라질 수 있다.
+                page.add_redact_annot(
+                    target.redact_rect if target.redact_rect is not None else target.plan.rect
+                )
             # 텍스트만 제거한다. graphics 기본값(REMOVE_IF_COVERED)을 그대로 두면
             # 블록 안의 밑줄·도형·차트 선까지 사라져 "레이아웃 보존"을 위반한다.
             page.apply_redactions(

@@ -1,0 +1,40 @@
+# Ollama overlay (선택) — 페이지 Q&A/LLM까지 Docker 네트워크 안에 완전 격리:
+#
+#   docker compose -f docker-compose.yml -f compose.ollama.yaml up -d --build ocr-cpu ollama
+#   docker compose -f docker-compose.yml -f compose.ollama.yaml exec ollama ollama pull qwen3:8b
+#   (= make docker-up-ollama / make docker-pull-model)
+#
+# ⚠ ollama 서비스는 반드시 이 overlay 파일에만 둔다 — docker-compose.yml로 옮기면
+#   프로필 없는 서비스라 기본 경로(`docker compose up`)에서도 함께 기동돼 버린다.
+# 호스트에서 Ollama를 직접 돌리는 경우(macOS는 Metal 가속 때문에 보통 이쪽이 빠름)
+# overlay가 필요 없다 — 컨테이너는 OLLAMA_BASE_URL 기본값
+# (http://host.docker.internal:11434)으로 호스트 Ollama에 접근한다.
+
+services:
+  ocr-cpu:
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      # 한국어 번역(README §한국어 번역)까지 Ollama로 돌리려면 OpenAI 호환
+      # /v1 경로로 지정한다 (번역 코어는 버전 경로 포함 base URL 필요):
+      # OPENAI_BASE_URL: http://ollama:11434/v1
+      # OPENAI_MODEL: qwen3:8b
+
+  ollama:
+    image: ollama/ollama:latest   # TODO: 버전 태그 고정 권장
+    # 포트는 Docker 내부 네트워크에만 노출 — 호스트에는 절대 공개하지 않는다
+    expose:
+      - "11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  ollama_models:

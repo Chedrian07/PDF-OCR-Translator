@@ -1,0 +1,501 @@
+"""엔진 — 미니 잡 디렉터리에서 조립·캐시·재시도·취소·상태 전이 검증.
+
+torch/OCR 없이 requests+표준 라이브러리만으로 도는지도 함께 확인한다(스텁 클라이언트).
+"""
+
+import json
+import threading
+
+import pytest
+
+from app.translate.engine import run_translation
+from app.translate.types import TranslateConfig, TranslateResult
+
+SEP = "\n\n---\n\n"
+
+RESULT_MD = (
+    "# Deep Learning\n\n"
+    "We train a model with loss $L = \\sum_i x_i$ over the dataset.\n\n"
+    "---\n\n"
+    "## Results\n\n"
+    "The accuracy improved on the benchmark dataset.\n"
+)
+
+LAYOUT = [
+    {"page": 1, "width": 1000, "height": 1400, "fonts_v": "2", "blocks": [
+        {"type": "title", "bbox": [0, 0, 999, 80], "content": "Deep Learning", "fs": 2.5, "bold": True},
+        {"type": "text", "bbox": [0, 100, 999, 300], "content": "We train a model over data.", "fs": 1.78},
+        {"type": "image", "bbox": [0, 320, 500, 700], "content": "", "image": "p0001_0.jpg"},
+    ]},
+    {"page": 2, "width": 1000, "height": 1400, "blocks": [
+        {"type": "title", "bbox": [0, 0, 999, 80], "content": "Results", "fs": 2.5},
+        {"type": "text", "bbox": [0, 100, 999, 300], "content": "The accuracy improved a lot."},
+    ]},
+]
+
+
+def _marker(user: str) -> str | None:
+    tag = "[번역할 원문]\n"
+    return user.split(tag, 1)[1] if tag in user else None
+
+
+class EchoClient:
+    """[번역할 원문] 섹션을 그대로 반환 → 마스킹 왕복 후 원문과 동일."""
+
+    def __init__(self):
+        self.calls = 0
+        self.api_mode_used = "chat"
+
+    def complete(self, system, user, *, max_tokens):
+        self.calls += 1
+        src = _marker(user)
+        return src if src is not None else ""  # 용어집 프롬프트 → 빈 응답(시드 폴백)
+
+
+class MarkerClient(EchoClient):
+    """각 줄 앞에 § 를 붙임 — 번역 반영 확인용(플레이스홀더는 보존)."""
+
+    def complete(self, system, user, *, max_tokens):
+        self.calls += 1
+        src = _marker(user)
+        if src is None:
+            return ""
+        return "\n".join("§" + ln for ln in src.split("\n"))
+
+
+class FaultyClient(EchoClient):
+    """플레이스홀더를 떨어뜨림 → 래더(repair·분할) 실패 시 원문 유지되어야 함.
+
+    repair 프롬프트엔 [번역할 원문] 마커가 없어 _marker가 None → 빈 응답(repair도 실패)."""
+
+    def complete(self, system, user, *, max_tokens):
+        self.calls += 1
+        src = _marker(user)
+        if src is None:
+            return ""
+        import re
+        return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", src)
+
+
+def _repair_src(user: str) -> str | None:
+    """repair 프롬프트에서 마스킹 원문을 되뽑는다 (테스트용). 헤더는 한 줄 가정."""
+    if "[수정할 번역문]" not in user:
+        return None
+    head = user.split("[수정할 번역문]", 1)[0]          # "[원문 ...]\n{masked}\n\n"
+    parts = head.split("\n", 1)                          # 첫 줄(헤더) 분리
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+class RepairClient(EchoClient):
+    """최초 패스엔 태그 소실, repair 패스엔 원문(태그 포함) 복원 → step1에서 복구."""
+
+    def complete(self, system, user, *, max_tokens):
+        self.calls += 1
+        rsrc = _repair_src(user)
+        if rsrc is not None:
+            return rsrc                                   # repair: 태그 그대로 살려 반환
+        src = _marker(user)
+        if src is None:
+            return ""
+        import re
+        return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", src)  # 최초: 태그 전부 소실
+
+
+class SplitClient(EchoClient):
+    """태그 2개↑면 전부 소실(전체·repair 실패), 1개↓면 보존(반쪽 성공) → step2 분할 복구."""
+
+    def complete(self, system, user, *, max_tokens):
+        self.calls += 1
+        if _repair_src(user) is not None:
+            return ""                                     # repair 실패 유도
+        src = _marker(user)
+        if src is None:
+            return ""
+        import re
+        tags = re.findall(r"<[mkgucft]\d+\b[^>]*>", src)
+        if len(tags) >= 2:
+            return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", src)  # 여러 태그 → 소실
+        return src                                        # 0~1개 → 보존(성공)
+
+
+class DelimiterClient(EchoClient):
+    """태그는 보존하되 모델 발명 딜리미터·<PAGE>를 섞음 → sanitize가 걷어내야 함."""
+
+    def complete(self, system, user, *, max_tokens):
+        self.calls += 1
+        src = _marker(user)
+        if src is None:
+            return ""
+        return src + " \\(추가\\) $$없음$$ <PAGE>"
+
+
+class TableSplitClient(EchoClient):
+    """태그 20개↑ 유닛은 소실(전체·repair 실패), 미만은 보존 — 초대형 HTML 표가
+    </tr> 행 경계 분할(2a)로만 복구되는 실측 시나리오(6.4KB 표) 재현."""
+
+    def complete(self, system, user, *, max_tokens):
+        self.calls += 1
+        if _repair_src(user) is not None:
+            return ""  # repair 실패 유도
+        src = _marker(user)
+        if src is None:
+            return ""
+        import re
+        tags = re.findall(r"<[mkgucft]\d+\b[^>]*>", src)
+        if len(tags) >= 20:
+            return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", src)
+        return src
+
+
+@pytest.fixture
+def cfg() -> TranslateConfig:
+    return TranslateConfig(
+        base_url="https://host/v1", api_key="k", model="test-model",
+        api_mode="chat", concurrency=2, temperature="0", max_tokens_param="max_tokens",
+        context=False,  # 결정성 위해 컨텍스트 비활성(캐시 키엔 무영향)
+    )
+
+
+@pytest.fixture
+def job(tmp_path):
+    (tmp_path / "result.md").write_text(RESULT_MD, encoding="utf-8")
+    (tmp_path / "layout.json").write_text(json.dumps(LAYOUT, ensure_ascii=False), encoding="utf-8")
+    return tmp_path
+
+
+def _state(job) -> dict:
+    return json.loads((job / "translations" / "ko" / "state.json").read_text(encoding="utf-8"))
+
+
+def _report(job) -> dict:
+    return json.loads((job / "translations" / "ko" / "report.json").read_text(encoding="utf-8"))
+
+
+def _run_md(tmp_path, cfg, md, client):
+    """layout 없이 result.md만 두고 번역 → (result, report, result.ko.md 텍스트)."""
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    res = run_translation(tmp_path, "ko", cfg, client=client)
+    return res, _report(tmp_path), (tmp_path / "result.ko.md").read_text(encoding="utf-8")
+
+
+def test_echo_결과_바이트동일_및_레이아웃_content동일(job, cfg):
+    res = run_translation(job, "ko", cfg, client=EchoClient())
+    assert isinstance(res, TranslateResult) and res.status == "done"
+
+    # result.ko.md == result.md (바이트 동일)
+    assert (job / "result.ko.md").read_text(encoding="utf-8") == RESULT_MD
+
+    # layout.ko.json: content는 원본과 동일, 그 외 필드도 완전 동일
+    out = json.loads((job / "layout.ko.json").read_text(encoding="utf-8"))
+    assert out == LAYOUT  # Echo가 content를 원문 그대로 되돌리므로 전체 동일
+
+    st = _state(job)
+    assert st["status"] == "done" and st["current"] == st["total"] == res.total
+    from app.translate.types import PROMPT_V
+    assert st["model"] == "test-model" and st["prompt_v"] == PROMPT_V
+    assert res.kept_original == [] and res.translated > 0
+
+
+def test_marker_md와_layout에_반영_필드보존(job, cfg):
+    res = run_translation(job, "ko", cfg, client=MarkerClient())
+    assert res.status == "done"
+
+    md = (job / "result.ko.md").read_text(encoding="utf-8")
+    assert "§" in md
+    assert len(md.split(SEP)) == 2                      # 페이지 수 보존
+    assert md.count("$L = \\sum_i x_i$") == 1           # 플레이스홀더 복원됨
+
+    out = json.loads((job / "layout.ko.json").read_text(encoding="utf-8"))
+    title = out[0]["blocks"][0]
+    assert title["content"].startswith("§") and title["content"].endswith("Deep Learning")
+    assert title["bbox"] == [0, 0, 999, 80] and title["fs"] == 2.5 and title["bold"] is True
+    assert out[0]["fonts_v"] == "2"
+    # 이미지 블록은 손대지 않음
+    assert out[0]["blocks"][2]["content"] == "" and out[0]["blocks"][2]["image"] == "p0001_0.jpg"
+
+
+def test_캐시_2회차_호출없음(job, cfg):
+    run_translation(job, "ko", cfg, client=EchoClient())
+    echo2 = EchoClient()
+    res2 = run_translation(job, "ko", cfg, client=echo2)
+    assert echo2.calls == 0                    # 용어집 로드 + 전 유닛 캐시 적중
+    assert res2.cached == res2.total and res2.translated == 0
+    assert (job / "result.ko.md").read_text(encoding="utf-8") == RESULT_MD
+
+
+def test_faulty_재시도후_원문유지(job, cfg):
+    faulty = FaultyClient()
+    res = run_translation(job, "ko", cfg, client=faulty)
+    assert res.status == "done"
+    # 수식 플레이스홀더가 있는 유닛(md:0:1)은 복원 실패 → 원문 유지
+    assert "md:0:1" in res.kept_original
+    # retried는 report.json에 기록된다 (TranslateResult엔 없음)
+    report = json.loads((job / "translations" / "ko" / "report.json").read_text(encoding="utf-8"))
+    assert report["retried"] >= 1
+    assert report["kept_original"] == res.kept_original
+    assert "md:0:1" in report["kept_original"]
+    # 결과 md에는 원문 수식이 그대로 남아있어야 함
+    assert "$L = \\sum_i x_i$" in (job / "result.ko.md").read_text(encoding="utf-8")
+
+
+def test_취소_사전set_canceled(job, cfg):
+    ev = threading.Event()
+    ev.set()
+    res = run_translation(job, "ko", cfg, client=EchoClient(), cancel=ev)
+    assert res.status == "canceled"
+    assert not (job / "result.ko.md").exists()   # 조립 전에 중단
+    assert _state(job)["status"] == "canceled"
+
+
+def test_취소_래더단계_사이_감지_repair_호출없음(tmp_path, cfg):
+    """최초 패스 직후 cancel이 set되면 repair/분할 호출 없이 canceled로 끝난다 —
+    거대 표 래더(유닛당 수 분)가 취소 후에도 이어지던 응답성 문제의 회귀 방지."""
+    ev = threading.Event()
+
+    class CancelAfterFirst(EchoClient):
+        """최초 패스에서 태그를 소실시키며 cancel을 set — 래더 진입 직전 취소."""
+
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            src = _marker(user)
+            if src is None:
+                return ""
+            ev.set()
+            import re
+            return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", src)
+
+    md = "The loss $L$ is minimized during training.\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    client = CancelAfterFirst()
+    res = run_translation(tmp_path, "ko", cfg, client=client, cancel=ev)
+    assert res.status == "canceled"
+    assert client.calls == 1                     # repair(2번째 호출)에 진입하지 않음
+    assert res.kept_original == []               # 취소는 kept 통계를 오염시키지 않는다
+
+
+def test_잡삭제_경합시_예외없이_canceled(job, cfg):
+    """번역 도중 잡 디렉터리가 삭제(DELETE 경합)돼도 예외 없이 canceled로 끝난다 —
+    state/캐시 기록은 FileNotFoundError를 무시(best-effort)."""
+    import shutil
+
+    ev = threading.Event()
+
+    class DeletingClient(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            src = _marker(user)
+            if src is not None and not ev.is_set():
+                shutil.rmtree(job, ignore_errors=True)  # DELETE 경합 재현
+                ev.set()                                # api.delete_job의 cancel 전파 재현
+            return super().complete(system, user, max_tokens=max_tokens)
+
+    res = run_translation(job, "ko", cfg, client=DeletingClient(), cancel=ev)
+    assert res.status == "canceled"
+
+
+def test_force_재번역(job, cfg):
+    run_translation(job, "ko", cfg, client=EchoClient())
+    forced = EchoClient()
+    res = run_translation(job, "ko", cfg, client=forced, force=True)
+    assert forced.calls > 0                       # 캐시 무시하고 재번역
+    assert res.translated == res.total and res.cached == 0
+    assert (job / "result.ko.md").read_text(encoding="utf-8") == RESULT_MD
+
+
+def test_result_md_없으면_에러(tmp_path, cfg):
+    from app.translate.types import TranslateError
+    with pytest.raises(TranslateError, match="번역할 결과가 없습니다"):
+        run_translation(tmp_path, "ko", cfg, client=EchoClient())
+    assert _state(tmp_path)["status"] == "error"
+
+
+def test_progress_콜백(job, cfg):
+    seen = []
+    run_translation(job, "ko", cfg, client=EchoClient(), progress=lambda c, t: seen.append((c, t)))
+    assert seen and seen[-1][0] == seen[-1][1]     # 마지막 current == total
+    assert all(t == seen[-1][1] for _, t in seen)
+
+
+def test_layout_없어도_동작(tmp_path, cfg):
+    (tmp_path / "result.md").write_text(RESULT_MD, encoding="utf-8")
+    res = run_translation(tmp_path, "ko", cfg, client=EchoClient())
+    assert res.status == "done"
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == RESULT_MD
+    assert not (tmp_path / "layout.ko.json").exists()
+
+
+# ── 신뢰도 래더 (kept_original → 0) ─────────────────────────────────────────
+
+def test_래더_repair로_복구_kept0(tmp_path, cfg):
+    """(a) 최초 태그 소실 → repair 패스 성공 → translated, report.repaired==1, kept 0."""
+    md = "# Title\n\nThe loss $L$ is minimized during the training here.\n"
+    res, report, _ = _run_md(tmp_path, cfg, md, RepairClient())
+    assert res.status == "done"
+    assert res.kept_original == []
+    assert report["repaired"] == 1 and report["retried"] >= 1 and report["split"] == 0
+
+
+def test_래더_분할로_복구_kept0(tmp_path, cfg):
+    """(b) 전체 실패(태그 2개 소실)·repair 실패 → 문장 분할로 반쪽씩 성공 → split==1."""
+    md = "The value $a$ is here. The value $b$ is there.\n"
+    res, report, md_out = _run_md(tmp_path, cfg, md, SplitClient())
+    assert res.status == "done"
+    assert res.kept_original == []
+    assert report["split"] == 1 and report["retried"] >= 1
+    assert "$a$" in md_out and "$b$" in md_out  # 두 수식 모두 복원
+
+
+def test_래더_구조유닛_분할안함_원문유지(tmp_path, cfg):
+    """(c) 표(구조 유닛)는 문장 경계가 있어도 분할하지 않는다 → kept_original."""
+    md = (
+        "| Description column | Result value here |\n"
+        "| --- | --- |\n"
+        "| First sentence. Second $E$ sentence here | plain data row |\n"
+    )
+    res, report, md_out = _run_md(tmp_path, cfg, md, FaultyClient())
+    assert res.status == "done"
+    assert "md:0:0" in res.kept_original      # 표 유닛 원문 유지
+    assert report["split"] == 0               # 분할 시도 자체 없음
+    assert "$E$" in md_out                    # 원문 수식 보존
+
+
+def test_래더_발명딜리미터_sanitize_제거(tmp_path, cfg):
+    """(d) 출력에 \\(x\\)·$$·<PAGE> 섞여도 최종 결과엔 딜리미터 없음 + sanitized>0."""
+    md = "The final result $R$ is good enough.\n"
+    res, report, md_out = _run_md(tmp_path, cfg, md, DelimiterClient())
+    assert res.status == "done"
+    assert res.kept_original == []            # 태그 보존돼 최초 패스 성공
+    assert report["sanitized"] > 0
+    for delim in ("\\(", "\\)", "\\[", "\\]", "$$", "<PAGE>"):
+        assert delim not in md_out
+    assert "$R$" in md_out                    # 실제 인라인 수식은 마스킹으로 보호돼 살아남음
+
+
+def test_kept_original_확정시_warning_로그(tmp_path, cfg, caplog):
+    """유닛이 최종 원문 유지로 확정되면 warning 1줄 — 유닛 id 등 식별자만 남고
+    문서 원문 내용은 로그에 없어야 한다."""
+    import logging
+
+    md = "The loss $L$ is minimized during the training here.\n"
+    with caplog.at_level(logging.WARNING, logger="app.translate.engine"):
+        res, _, _ = _run_md(tmp_path, cfg, md, FaultyClient())
+    assert res.kept_original == ["md:0:0"]
+    warned = [r.message for r in caplog.records if "원문 유지" in r.message]
+    assert len(warned) == 1 and "md:0:0" in warned[0]
+    assert "loss" not in warned[0]            # 원문 내용 무기록
+
+
+# ── 실패 경로 뒷정리 (2026-07-14 감사: 분할의 수식 훼손·오류 시 큐 드레인) ────
+
+def test_split_two_수식블록_내부경계는_안자름():
+    """$$ 블록 내부 문장 경계(x_i. 뒤)는 분할 후보에서 제외 — 토큰 한가운데를 자르면
+    반쪽의 짝 잃은 $$가 mask()에 안 잡혀 원시 LaTeX 노출→sanitize 삭제(조용한 훼손)."""
+    from app.translate.engine import _split_two
+    from app.translate.masking import mask
+
+    src = (
+        "The estimator follows. $$\n"
+        "\\hat{\\theta} = \\arg\\min_i x_i. \\text{Then the bound holds.}\n"
+        "$$ This completes the proof of the theorem."
+    )
+    halves = _split_two(src)
+    assert halves is not None                    # 토큰 밖 경계(follows. 뒤)에서는 분할 가능
+    for half in halves:
+        assert half.count("$$") % 2 == 0         # $$ 짝 보존 — 토큰 내부를 자르지 않았다
+    math_half = next(h for h in halves if "$$" in h)
+    masked, mapping = mask(math_half)
+    assert mapping                               # 반쪽 mask()가 수식을 온전히 토큰으로 회수
+    assert any(v.startswith("$$") and v.endswith("$$") for v in mapping.values())
+    # 플레이스홀더 태그(v 미리보기 포함) 밖에는 원시 LaTeX가 남지 않는다
+    import re
+    residual = re.sub(r"<[mkgucft]\d+\b[^>]*>", "", masked)
+    assert "$$" not in residual and "\\hat" not in residual
+
+
+def test_split_two_경계가_전부_토큰내부면_분할포기():
+    """문장 경계가 전부 $$ 블록 안이면 None — 호출자가 분할을 포기하고 kept 경로."""
+    from app.translate.engine import _split_two
+
+    src = "Consider $$\na = b. \\text{Then. } c = d\n$$ QED"
+    assert _split_two(src) is None
+
+
+def test_래더_분할이_수식블록을_훼손하지_않음(tmp_path, cfg):
+    """검증자 재현: $$ 블록 내부에 문장 경계가 있는 유닛 — 종전엔 분할이 수식 한가운데를
+    잘라 sanitize가 잔여 $$를 지우고 '번역 성공'으로 위장됐다. 수정 후엔 안전한 경계에서만
+    자르고, 수식 반쪽 실패 시 원문 유지로 귀결돼 $$ 블록이 그대로 남는다(무손실)."""
+    md = (
+        "The estimator follows. $$\n"
+        "\\hat{\\theta} = \\arg\\min_i x_i. \\text{Then the bound holds.}\n"
+        "$$ This completes the proof of the theorem.\n"
+    )
+    res, report, md_out = _run_md(tmp_path, cfg, md, FaultyClient())
+    assert res.status == "done"
+    assert "md:0:0" in res.kept_original         # 수식 반쪽 실패 → 무손실 원문 유지
+    assert md_out.count("$$") == 2               # $$ 블록 보존 — 조용한 삭제 없음
+    assert "\\hat{\\theta}" in md_out
+    assert report["split"] == 0                  # 분할 '성공'으로 위장되지 않는다
+
+
+def test_step0_API오류시_큐드레인_방지_및_부분캐시_flush(tmp_path, cfg):
+    """step-0 API 오류는 잡 전체 실패로 전파(기존 계약)하되, 남은 futures 취소 + abort로
+    큐 드레인(죽은 엔드포인트 × 유닛별 백오프)을 막는다. flush_cache는 finally라 오류
+    전에 완료된 유닛 번역도 캐시에 보존된다."""
+    import time
+
+    from app.translate.types import TranslateAPIError, TranslateError
+
+    class DeadEndpointClient(EchoClient):
+        """유닛 호출 4회는 에코 성공, 이후 전부 API 오류(왕복 50ms) — 죽은 엔드포인트."""
+
+        def __init__(self):
+            super().__init__()
+            self.unit_calls = 0
+            self._lock = threading.Lock()
+
+        def complete(self, system, user, *, max_tokens):
+            src = _marker(user)
+            with self._lock:
+                self.calls += 1
+                if src is None:
+                    return ""                    # 용어집 프롬프트 → 시드 폴백
+                self.unit_calls += 1
+                n = self.unit_calls
+            if n <= 4:
+                return src
+            time.sleep(0.05)                     # 네트워크 왕복 재현 — 메인 스레드가 abort할 틈
+            raise TranslateAPIError("번역 API 연결 실패: dead endpoint")
+
+    md = SEP.join(
+        f"Paragraph number {i} explains the training procedure in detail." for i in range(30)
+    ) + "\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+
+    client = DeadEndpointClient()
+    with pytest.raises(TranslateError):
+        run_translation(tmp_path, "ko", cfg, client=client)  # cfg.concurrency == 2
+
+    # 드레인 방지 — 남은 큐(30유닛)가 죽은 엔드포인트를 전부 두드리지 않는다 (종전 30회)
+    assert client.unit_calls < 15
+    assert _state(tmp_path)["status"] == "error"
+    # finally flush — 오류 전에 완료된 4유닛의 번역이 유닛 캐시에 남아있다
+    units = json.loads(
+        (tmp_path / "translations" / "ko" / "units.json").read_text(encoding="utf-8")
+    )
+    assert len(units) == 4
+
+
+def test_초대형_표유닛은_행경계_분할로_복구(tmp_path, cfg):
+    """HTML 표는 문장 분할 대상이 아니다 — </tr> 행 경계 분할(2a)이 잡아야 한다.
+    전체(26태그)·repair 실패 → 반쪽(13태그) 성공 → 이어붙임이 원 구조와 동일."""
+    import json as _json
+
+    rows = "".join(f"<tr><td>row {i} data</td><td>value {i}</td></tr>" for i in range(4))
+    md = f"# Title\n\n<table>{rows}</table>\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+
+    res = run_translation(tmp_path, "ko", cfg, client=TableSplitClient())
+    assert res.kept_original == []
+    # Echo 기반이라 성공 경로는 원문 복원 — 표 구조가 바이트 그대로 살아야 한다
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == md
+    rep = _json.loads((tmp_path / "translations" / "ko" / "report.json").read_text(encoding="utf-8"))
+    assert rep["split"] == 1

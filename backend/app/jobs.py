@@ -1,0 +1,431 @@
+"""잡 상태 저장(JobStore) · SSE 이벤트 브로커 · 단일 워커 스레드."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import queue
+import shutil
+import threading
+import time
+import uuid
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Callable
+
+    from .config import Settings
+    from .engine.base import OCREngine
+
+logger = logging.getLogger(__name__)
+
+_META_NAME = "meta.json"
+_EVENT_QUEUE_MAX = 2000
+# EventSource 최초 연결·자동 재연결 전에 생성된 OCR 토큰을 복구한다. 페이지별
+# decoded 문자 상한(16,384) × 최대 200페이지보다 넉넉하고, 단일 OCR 워커라
+# 동시에 커지는 히스토리는 하나뿐이다. 터미널 이벤트에서 즉시 폐기한다.
+_TOKEN_HISTORY_MAX_CHARS = 8 * 1024 * 1024
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _default_progress() -> dict:
+    return {"phase": "render", "current_page": 0, "total_pages": 0, "chunk": 0, "total_chunks": 0}
+
+
+@dataclass
+class Job:
+    id: str
+    filename: str
+    mode: str
+    dpi: int
+    dir: Path
+    status: str = "queued"  # queued|running|done|error|canceled
+    created_at: str = field(default_factory=_now_iso)
+    progress: dict = field(default_factory=_default_progress)
+    error: str | None = None
+    warnings: list[str] = field(default_factory=list)
+    delete_requested: bool = False
+    # 변환에 사용된 엔진/모델 메타 — 완료 후에도 어떤 모델로 변환했는지 확인 가능.
+    # 구버전 meta.json에는 없으므로 복원 시 None 허용 (필드 부재 = 알 수 없음).
+    engine: str | None = None
+    model_id: str | None = None
+    model_revision: str | None = None
+    provider: str | None = None
+
+    def _result_block(self) -> dict | None:
+        if self.status != "done":
+            return None
+        base = f"/api/jobs/{self.id}"
+
+        def _urls(subdir: str) -> list[str]:
+            d = self.dir / subdir
+            if not d.is_dir():
+                return []
+            # 이미지 파일만 — images/boxes.json 같은 메타 파일은 목록에서 제외
+            return [
+                f"{base}/files/{subdir}/{f.name}"
+                for f in sorted(d.iterdir())
+                if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png")
+            ]
+
+        return {
+            "markdown_url": f"{base}/markdown",
+            "html_url": f"{base}/html",
+            "archive_url": f"{base}/archive",
+            "images": _urls("images"),
+            "layouts": _urls("layout"),
+            "pages": _urls("pages"),
+            # 레이아웃 뷰/다운로드 가능 여부 — 레이아웃 기능(P14) 이전에 변환된
+            # 잡에는 layout.json이 없어 /layout*이 404가 난다. 프런트가 이 플래그로
+            # 버튼을 비활성화한다 (없으면 재변환 필요).
+            "has_layout": (self.dir / "layout.json").is_file(),
+        }
+
+    def to_dict(self, queue_position: int | None = None) -> dict:
+        d = {
+            "job_id": self.id,
+            "filename": self.filename,
+            "status": self.status,
+            "mode": self.mode,
+            "created_at": self.created_at,
+            "progress": dict(self.progress),
+            "error": self.error,
+            "warnings": list(self.warnings),
+            "result": self._result_block(),
+            # 신규 필드(추가만 — 기존 필드 의미 불변). 구 잡은 null.
+            "engine": self.engine,
+            "model_id": self.model_id,
+            "model_revision": self.model_revision,
+            "provider": self.provider,
+        }
+        # 선택 필드 — queued 잡에만 존재(계약). running/터미널 잡은 필드 자체가 없다.
+        if queue_position is not None:
+            d["queue_position"] = queue_position
+        return d
+
+    def meta(self) -> dict:
+        return {
+            "id": self.id,
+            "filename": self.filename,
+            "mode": self.mode,
+            "dpi": self.dpi,
+            "status": self.status,
+            "created_at": self.created_at,
+            "progress": self.progress,
+            "error": self.error,
+            "warnings": self.warnings,
+            "engine": self.engine,
+            "model_id": self.model_id,
+            "model_revision": self.model_revision,
+            "provider": self.provider,
+        }
+
+
+class JobStore:
+    def __init__(self, jobs_dir: Path) -> None:
+        self.jobs_dir = jobs_dir
+        self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        self._jobs: dict[str, Job] = {}
+        self._lock = threading.RLock()
+
+    def create(
+        self, filename: str, mode: str, dpi: int, engine_info: dict | None = None
+    ) -> Job:
+        job_id = f"j_{uuid.uuid4().hex[:12]}"
+        job_dir = self.jobs_dir / job_id
+        job_dir.mkdir(parents=True)
+        job = Job(id=job_id, filename=filename, mode=mode, dpi=dpi, dir=job_dir)
+        if engine_info:
+            job.engine = engine_info.get("engine")
+            job.model_id = engine_info.get("model_id")
+            job.model_revision = engine_info.get("model_revision")
+            job.provider = engine_info.get("provider")
+        with self._lock:
+            self._jobs[job_id] = job
+        self.save(job)
+        return job
+
+    def get(self, job_id: str) -> Job | None:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def list(self, limit: int = 50) -> list[Job]:
+        with self._lock:
+            jobs = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
+        return jobs[:limit]
+
+    def queue_position(self, job: Job) -> int | None:
+        """queued 잡의 대기열 위치(1-base): 먼저 생성된 queued 잡 수 + 1.
+
+        단일 워커 큐는 FIFO 제출 순서이고 제출은 업로드 완료 직후이므로 생성 순서와
+        일치한다. created_at은 초 단위라 동률이 생기므로 _jobs 삽입 순서(=create()
+        호출 순서)로 센다. running/터미널 잡은 None(직렬화 시 필드 생략)."""
+        if job.status != "queued":
+            return None
+        with self._lock:
+            pos = 1
+            for j in self._jobs.values():
+                if j.id == job.id:
+                    return pos
+                if j.status == "queued":
+                    pos += 1
+        return None  # 삭제 경합 — 목록에서 빠졌으면 위치 없음
+
+    def save(self, job: Job) -> None:
+        tmp = job.dir / f".{_META_NAME}.tmp"
+        try:
+            tmp.write_text(json.dumps(job.meta(), ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(tmp, job.dir / _META_NAME)
+        except FileNotFoundError:  # 삭제 경합 — 무시
+            pass
+
+    def remove(self, job_id: str) -> None:
+        with self._lock:
+            self._jobs.pop(job_id, None)
+
+    def delete_dir(self, job: Job) -> None:
+        shutil.rmtree(job.dir, ignore_errors=True)
+        self.remove(job.id)
+
+    def gc_expired(
+        self, ttl_days: int, is_protected: "Callable[[str], bool] | None" = None
+    ) -> int:
+        """TTL 지난 터미널 잡 자동 정리 (JOB_TTL_DAYS — 0 이하면 무동작).
+
+        마지막 활동 시각은 meta.json mtime(save()가 상태 변화마다 재기록)과
+        translations/*/state.json mtime의 최댓값 — OCR이 오래전에 끝났어도 최근
+        번역된 잡은 보존한다. queued/running 잡은 절대 삭제하지 않고, is_protected
+        (번역 스레드 활성 등)는 삭제 직전에 잡별로 호출한다 — 스냅샷 방식이면 GC
+        패스 도중 시작된 번역이 보호되지 않는다. 삭제는 DELETE 엔드포인트와 같은
+        delete_dir 경로. 삭제 수 반환."""
+        if ttl_days <= 0:
+            return 0
+        now = time.time()
+        cutoff = now - ttl_days * 86400
+        with self._lock:
+            jobs = list(self._jobs.values())
+        removed = 0
+        for job in jobs:
+            if job.status in ("queued", "running"):
+                continue
+            try:
+                mtime = (job.dir / _META_NAME).stat().st_mtime
+            except OSError:  # meta 유실 — 나이를 알 수 없으니 보수적으로 보존
+                continue
+            tdir = job.dir / "translations"
+            if tdir.is_dir():
+                for st in tdir.glob("*/state.json"):
+                    try:
+                        mtime = max(mtime, st.stat().st_mtime)
+                    except OSError:
+                        pass
+            if mtime >= cutoff:
+                continue
+            if is_protected is not None and is_protected(job.id):
+                continue
+            logger.info("잡 GC: %s 삭제 (status=%s, %.1f일 경과 > TTL %d일)",
+                        job.id, job.status, (now - mtime) / 86400, ttl_days)
+            self.delete_dir(job)
+            removed += 1
+        return removed
+
+    def load_existing(self) -> None:
+        """서버 재시작 시 디스크의 잡 복원. 실행 중이던 잡은 오류로 마킹."""
+        if not self.jobs_dir.is_dir():
+            return
+        for d in sorted(self.jobs_dir.iterdir()):
+            meta_path = d / _META_NAME
+            if not meta_path.is_file():
+                continue
+            try:
+                m = json.loads(meta_path.read_text(encoding="utf-8"))
+                job = Job(
+                    id=m["id"], filename=m["filename"], mode=m.get("mode", "multi"),
+                    dpi=int(m.get("dpi", 200)), dir=d, status=m.get("status", "error"),
+                    created_at=m.get("created_at", _now_iso()),
+                    progress=m.get("progress") or _default_progress(),
+                    error=m.get("error"), warnings=m.get("warnings") or [],
+                    # 구버전 meta.json에는 없는 필드 — 없으면 None으로 안전 복원
+                    engine=m.get("engine"), model_id=m.get("model_id"),
+                    model_revision=m.get("model_revision"), provider=m.get("provider"),
+                )
+                changed = job.status in ("queued", "running")
+                if changed:
+                    job.status = "error"
+                    job.error = "서버 재시작으로 중단되었습니다"
+                with self._lock:
+                    self._jobs[job.id] = job
+                # 상태가 바뀐 잡만 재기록 — 터미널 잡의 meta.json mtime은 TTL GC의
+                # "마지막 갱신" 시계라, 무조건 재저장하면 재시작마다 TTL이 리셋된다.
+                if changed:
+                    self.save(job)
+            except Exception:
+                logger.exception("잡 메타 복원 실패: %s", d)
+
+
+class EventBroker:
+    """잡별 SSE 구독 큐 + 실행 중 OCR token 재연결 히스토리.
+
+    느린 구독자의 큐가 가득 차면 token 이벤트는 계속 버리지만, 새 구독은
+    subscribe_with_replay()로 누적 원문을 한 번 받아 중간 접속·재연결 갭을 복구한다.
+    """
+
+    def __init__(self) -> None:
+        self._subs: dict[str, list[queue.Queue]] = {}
+        self._token_history: dict[str, deque[str]] = {}
+        self._token_history_chars: dict[str, int] = {}
+        self._token_history_truncated: set[str] = set()
+        self._lock = threading.Lock()
+
+    def subscribe(self, job_id: str) -> queue.Queue:
+        q: queue.Queue = queue.Queue(maxsize=_EVENT_QUEUE_MAX)
+        with self._lock:
+            self._subs.setdefault(job_id, []).append(q)
+        return q
+
+    def subscribe_with_replay(self, job_id: str) -> tuple[queue.Queue, str, bool]:
+        """구독 등록과 이전 token 스냅샷을 원자적으로 수행한다.
+
+        락 안에서 먼저 히스토리를 복사하고 구독자를 등록한다. publish()도 같은
+        락에서 히스토리 갱신과 구독자 스냅샷을 함께 하므로, 경계의 token은
+        replay 또는 새 큐 중 정확히 한 곳에 들어간다(중복·유실 없음).
+        """
+        q: queue.Queue = queue.Queue(maxsize=_EVENT_QUEUE_MAX)
+        with self._lock:
+            replay = "".join(self._token_history.get(job_id, ()))
+            truncated = job_id in self._token_history_truncated
+            self._subs.setdefault(job_id, []).append(q)
+        return q, replay, truncated
+
+    def unsubscribe(self, job_id: str, q: queue.Queue) -> None:
+        with self._lock:
+            subs = self._subs.get(job_id)
+            if subs and q in subs:
+                subs.remove(q)
+            if subs is not None and not subs:
+                del self._subs[job_id]
+
+    def publish(self, job_id: str, event: str, data: dict) -> None:
+        with self._lock:
+            if event == "token":
+                text = data.get("text")
+                if isinstance(text, str) and text:
+                    history = self._token_history.setdefault(job_id, deque())
+                    history.append(text)
+                    total = self._token_history_chars.get(job_id, 0) + len(text)
+                    while history and total > _TOKEN_HISTORY_MAX_CHARS:
+                        total -= len(history.popleft())
+                        self._token_history_truncated.add(job_id)
+                    self._token_history_chars[job_id] = total
+            subs = list(self._subs.get(job_id, ()))
+            if event in ("done", "error"):
+                self._token_history.pop(job_id, None)
+                self._token_history_chars.pop(job_id, None)
+                self._token_history_truncated.discard(job_id)
+        for q in subs:
+            try:
+                q.put_nowait((event, data))
+            except queue.Full:
+                if event == "token":
+                    continue  # 토큰은 손실 허용
+                try:  # 오래된 것 하나 버리고 재시도
+                    q.get_nowait()
+                    q.put_nowait((event, data))
+                except (queue.Empty, queue.Full):  # pragma: no cover
+                    pass
+
+    def publish_progress(self, job: Job) -> None:
+        self.publish(job.id, "progress", {**job.progress, "status": job.status})
+
+
+class Worker(threading.Thread):
+    """단일 워커: 모델이 프로세스당 1개이므로 잡을 직렬 처리한다."""
+
+    def __init__(
+        self,
+        store: JobStore,
+        broker: EventBroker,
+        engine: "OCREngine",
+        settings: "Settings",
+        cancel_events: dict[str, threading.Event],
+    ) -> None:
+        super().__init__(name="ocr-worker", daemon=True)
+        self.store = store
+        self.broker = broker
+        self.engine = engine
+        self.settings = settings
+        self.cancel_events = cancel_events
+        self._queue: queue.Queue = queue.Queue()
+
+    def submit(self, job: Job) -> None:
+        self.cancel_events.setdefault(job.id, threading.Event())
+        self._queue.put(job.id)
+
+    def stop(self) -> None:
+        self._queue.put(None)
+
+    def run(self) -> None:
+        from .engine.base import JobCanceled
+        from .pipeline.runner import execute_job
+
+        while True:
+            job_id = self._queue.get()
+            if job_id is None:
+                return
+            job = self.store.get(job_id)
+            if job is None:
+                # queued 상태에서 삭제돼 dequeue 시 이미 사라진 잡 — cancel_events도
+                # 정리한다(다른 종료 경로는 모두 pop하는데 이 경로만 누락돼 Event가
+                # 영구 축적되던 누수 수정).
+                self.cancel_events.pop(job_id, None)
+                continue
+            cancel = self.cancel_events.setdefault(job_id, threading.Event())
+            if job.delete_requested or cancel.is_set():
+                job.status = "canceled"
+                job.error = "사용자에 의해 취소되었습니다"
+                self.store.save(job)
+                if job.delete_requested:
+                    self.store.delete_dir(job)
+                self.cancel_events.pop(job_id, None)
+                continue
+            try:
+                if not self.engine.loaded:
+                    def _on_wait(note: str, _jid: str = job_id) -> None:
+                        # 모델 로딩 대기를 진행 상태로 알린다 — 프론트가 "모델 로딩
+                        # 대기 중…"을 표시하고, 잡이 조용히 멈춘 것처럼 보이지 않게 한다.
+                        self.broker.publish(_jid, "progress", {
+                            "phase": "loading", "status": "queued", "note": note,
+                            "current_page": 0, "total_pages": 0, "chunk": 0, "total_chunks": 0,
+                        })
+
+                    _on_wait("모델 로딩 대기 중…")
+                    self.engine.wait_until_ready(cancel, on_wait=_on_wait)
+            except JobCanceled:
+                # 대기 중 사용자가 취소 — 오류가 아니라 취소로 마감
+                job.status = "canceled"
+                job.error = "사용자에 의해 취소되었습니다"
+                self.store.save(job)
+                if job.delete_requested:
+                    self.store.delete_dir(job)
+                else:
+                    self.broker.publish(job_id, "error", {"message": job.error, "canceled": True})
+                self.cancel_events.pop(job_id, None)
+                continue
+            except Exception as e:  # noqa: BLE001 — 로드 실패를 잡 오류로 변환
+                logger.exception("엔진 로드 실패")
+                job.status = "error"
+                job.error = f"모델 로드 실패: {e}"[:2000]
+                self.store.save(job)
+                self.broker.publish(job_id, "error", {"message": job.error})
+                self.cancel_events.pop(job_id, None)
+                continue
+            execute_job(job, self.store, self.broker, self.engine, self.settings, cancel)
+            self.cancel_events.pop(job_id, None)

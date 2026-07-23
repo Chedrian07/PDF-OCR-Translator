@@ -1,0 +1,3704 @@
+// Unlimited-OCR — PDF → Markdown : frontend logic
+// Vanilla ES module. No external dependencies. Same-origin /api calls.
+//
+// Active-job live view = synchronized 3 panes fed by one SSE token stream:
+//   left   : source page image + layout boxes parsed from grounding tokens
+//   middle : raw token stream (with <PAGE> dividers)
+//   right  : det-block structured markdown rendered via POST /render-preview
+//
+// 스트림 문법 (실캡처 확정, docs/ARCHITECTURE.md §5 / frontend/tests/fixtures):
+//   각 페이지는 progress(phase=ocr, current_page=p)로 먼저 "선언"된 뒤
+//   토큰 스트림의 <PAGE> 마커로 시작한다. 선언 직후의 첫 마커는 재확인(no-op)이고,
+//   선언 없이 만나는 마커만 +1 이다. 블록 문법: <|det|>label [x1,y1,x2,y2]<|/det|>텍스트…
+//
+// 테스트: node --test frontend/tests/   (또는 frontend/ 에서: npm test)
+//   픽스처 리플레이 테스트가 아래 "Pure live-stream core" 익스포트를 직접 임포트한다.
+
+'use strict';
+
+/* ============================================================================
+ * Pure live-stream core — exported for frontend/tests/, no DOM access.
+ * ========================================================================== */
+
+export const PAGE_MARKER = '<PAGE>';
+// literals whose partial prefix at a chunk boundary must be held back
+const MARKER_LITERALS = ['<PAGE>', '<|ref|>', '<|/ref|>', '<|det|>', '<|/det|>'];
+const IMAGE_BLOCK = '> 🖼 그림 감지됨';
+// noise labels dropped from the reading-view preview
+const DROP_LABELS = new Set(['page_number', 'header', 'footer', 'footnote']);
+
+export function normalizeLabel(label) {
+  return String(label || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+}
+
+export function scanQuads(payload) {
+  const nums = String(payload).match(/\d+/g);
+  if (!nums) return [];
+  const quads = [];
+  for (let i = 0; i + 3 < nums.length; i += 4) {
+    quads.push([Number(nums[i]), Number(nums[i + 1]), Number(nums[i + 2]), Number(nums[i + 3])]);
+  }
+  return quads;
+}
+
+const clampCoord = (v) => Math.max(0, Math.min(999, Number(v) || 0));
+
+// Index from which `s` may contain an incomplete grounding structure / marker.
+// Returns s.length when the whole string is safe to consume. `cap` guards
+// against holding back forever on a malformed block that never closes.
+export function incompleteTailIndex(s, cap) {
+  const n = s.length;
+  let cut = n;
+
+  // an opened ref block that has not seen its closing <|/det|> yet
+  const lastRef = s.lastIndexOf('<|ref|>');
+  if (lastRef !== -1 && s.indexOf('<|/det|>', lastRef) === -1) cut = Math.min(cut, lastRef);
+
+  // an opened det that has not closed yet
+  const lastDet = s.lastIndexOf('<|det|>');
+  if (lastDet !== -1 && s.indexOf('<|/det|>', lastDet + 7) === -1) cut = Math.min(cut, lastDet);
+
+  // an unterminated special token: "<|" with no "|>" after it
+  const lastPipe = s.lastIndexOf('<|');
+  if (lastPipe !== -1 && s.indexOf('|>', lastPipe + 2) === -1) cut = Math.min(cut, lastPipe);
+
+  // a partial literal prefix at the very tail (e.g. "<PA", "<|de", "<|/re")
+  for (let k = Math.min(7, n); k > 0; k -= 1) {
+    const tail = s.slice(n - k);
+    let isPrefix = false;
+    for (const mk of MARKER_LITERALS) {
+      if (mk.length > k && mk.startsWith(tail)) { isPrefix = true; break; }
+    }
+    if (isPrefix) { cut = Math.min(cut, n - k); break; }
+  }
+
+  if (cap && n - cut > cap) return n; // stale/malformed opener: stop holding back
+  return cut;
+}
+
+// Marker/page state machine + grounding buffer. `page` is the page currently
+// being parsed — every box attaches to it.
+export function createGroundState() {
+  return {
+    buf: '',
+    page: 1,
+    // Job start: page 1 counts as pre-announced, so the very first <PAGE>
+    // marker of the stream is consumed as its confirmation (no advance).
+    expectAnnounce: true,
+    ocrSeen: false,
+    markerCount: 0,
+    totalPages: 0,
+  };
+}
+
+// Apply one progress event to the state machine.
+// Only phase==="ocr" may drive page tracking: the render phase emits
+// current_page=1..N in quick succession while rasterizing (before any token
+// exists) and merge walks the pages again — adopting either would pin the
+// page at N and pile every box onto the last page.
+export function groundAnnounce(g, phase, currentPage, totalPages) {
+  const out = { firstOcr: false, pageChanged: false, totalChanged: false };
+  const total = Number(totalPages) || 0;
+  if (total > g.totalPages) { g.totalPages = total; out.totalChanged = true; }
+  if (phase !== 'ocr') return out;
+
+  if (!g.ocrSeen) {
+    g.ocrSeen = true;
+    out.firstOcr = true;
+    if (g.page !== 1) { g.page = 1; out.pageChanged = true; } // stale pre-OCR advancement guard
+  }
+  // The next <PAGE> marker is the start-of-page confirmation of this
+  // announcement — it must not advance the page again.
+  g.expectAnnounce = true;
+  const cur = Number(currentPage) || 0;
+  const target = g.totalPages ? Math.min(cur, g.totalPages) : cur;
+  if (target > g.page) { g.page = target; out.pageChanged = true; } // never backwards
+  return out;
+}
+
+export function groundPush(g, text) {
+  if (text) g.buf += text;
+}
+
+// Drain the grounding buffer: emit COMPLETE det/ref matches and apply <PAGE>
+// markers in positional order, then consume up to the last complete match.
+// The remainder is kept only from the first potentially-incomplete structure
+// onward (see incompleteTailIndex), so matches split across SSE chunk
+// boundaries are parsed exactly once, after they fully assemble.
+// Returns events: {type:'page', page} | {type:'boxes', page, label, boxes:[{x1,y1,x2,y2}]}
+export function groundDrain(g, final) {
+  const out = [];
+  const buf = g.buf;
+  if (!buf) return out;
+
+  const events = [];
+  let m;
+  // inline dets: <|det|>label [x1,y1,x2,y2]<|/det|>
+  const reDet = /<\|det\|>\s*([A-Za-z_][\w-]*)\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]\s*<\|\/det\|>/g;
+  while ((m = reDet.exec(buf)) !== null) {
+    events.push({
+      start: m.index,
+      end: reDet.lastIndex,
+      label: m[1],
+      quads: [[Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])]],
+    });
+  }
+  // ref blocks: <|ref|>label<|/ref|><|det|>[[x1,y1,x2,y2],...]<|/det|>
+  const reRef = /<\|ref\|>([^<]{1,40})<\|\/ref\|><\|det\|>(\[\[?[\d,\s\[\]]*\]\]?)<\|\/det\|>/g;
+  while ((m = reRef.exec(buf)) !== null) {
+    events.push({ start: m.index, end: reRef.lastIndex, label: m[1].trim(), quads: scanQuads(m[2]) });
+  }
+  // page markers
+  let idx = -1;
+  while ((idx = buf.indexOf(PAGE_MARKER, idx + 1)) !== -1) {
+    events.push({ start: idx, end: idx + PAGE_MARKER.length, page: true });
+  }
+
+  events.sort((a, b) => a.start - b.start);
+  let pos = 0;
+  for (const ev of events) {
+    if (ev.start < pos) continue;
+    if (ev.page) {
+      g.markerCount += 1;
+      if (g.expectAnnounce) {
+        g.expectAnnounce = false; // start-of-page confirmation of the announced page
+      } else {
+        const next = g.totalPages ? Math.min(g.page + 1, g.totalPages) : g.page + 1;
+        if (next > g.page) {
+          g.page = next;
+          out.push({ type: 'page', page: g.page });
+        }
+      }
+    } else {
+      const boxes = [];
+      for (const q of ev.quads) {
+        const x1 = clampCoord(q[0]), y1 = clampCoord(q[1]), x2 = clampCoord(q[2]), y2 = clampCoord(q[3]);
+        if (x2 <= x1 || y2 <= y1) continue; // degenerate box
+        boxes.push({ x1, y1, x2, y2 });
+      }
+      if (boxes.length) out.push({ type: 'boxes', page: g.page, label: ev.label, boxes });
+    }
+    pos = ev.end;
+  }
+
+  if (final) { g.buf = ''; return out; }
+  const rest = buf.slice(pos);
+  g.buf = rest.slice(incompleteTailIndex(rest, 1200));
+  return out;
+}
+
+// Build STRUCTURED markdown from the raw stream for the live preview pane.
+// The model carries structure only in det labels — a flat cleanup collapses
+// everything into run-on paragraphs. Instead each det block becomes its own
+// markdown block: title → "## ", image → placeholder blockquote, page
+// furniture → dropped, everything else (text / raw <table> html / LaTeX) →
+// its own paragraph. <PAGE> → "---" separator. Blank lines between blocks.
+export function structurePreview(raw, final) {
+  let s = raw;
+  if (!final) s = s.slice(0, incompleteTailIndex(s, 2000));
+  if (!s) return '';
+
+  // structural tokens, position-ordered
+  const toks = [];
+  let m;
+  const reDet = /<\|det\|>\s*([A-Za-z_][\w-]*)\s*\[\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\]\s*<\|\/det\|>/g;
+  while ((m = reDet.exec(s)) !== null) toks.push({ start: m.index, end: reDet.lastIndex, label: m[1] });
+  const reRef = /<\|ref\|>([^<]{1,40})<\|\/ref\|><\|det\|>\[\[?[\d,\s\[\]]*\]\]?<\|\/det\|>/g;
+  while ((m = reRef.exec(s)) !== null) toks.push({ start: m.index, end: reRef.lastIndex, label: m[1].trim(), ref: true });
+  let idx = -1;
+  while ((idx = s.indexOf(PAGE_MARKER, idx + 1)) !== -1) {
+    toks.push({ start: idx, end: idx + PAGE_MARKER.length, page: true });
+  }
+  toks.sort((a, b) => a.start - b.start);
+
+  const parts = [];
+  const pushSep = () => {
+    if (parts.length && parts[parts.length - 1] !== '---') parts.push('---'); // no leading/duplicate hr
+  };
+  const pushBlock = (label, text) => {
+    const key = normalizeLabel(label);
+    if (DROP_LABELS.has(key)) return;
+    if (key === 'image') { parts.push(IMAGE_BLOCK); return; }
+    const body = String(text).replace(/<\|[^|>]{0,64}\|>/g, '').trim(); // strip stray specials
+    if (!body) return;
+    if (key === 'title') parts.push('## ' + body.replace(/\s*\n+\s*/g, ' '));
+    else parts.push(body); // text / table(raw html) / equation(LaTeX literal) / unknown
+  };
+
+  let pos = 0;
+  let currentLabel = null; // det label owning the text that follows it
+  for (const t of toks) {
+    if (t.start < pos) continue; // overlap safety
+    pushBlock(currentLabel, s.slice(pos, t.start));
+    if (t.page) {
+      pushSep();
+      currentLabel = null;
+    } else if (normalizeLabel(t.label) === 'image') {
+      pushBlock('image', '');
+      currentLabel = null;
+    } else if (t.ref) {
+      currentLabel = null; // non-image ref: grounding only, no reading content
+    } else {
+      currentLabel = t.label;
+    }
+    pos = t.end;
+  }
+  pushBlock(currentLabel, s.slice(pos));
+
+  if (final && parts.length && parts[parts.length - 1] === '---') parts.pop();
+  return parts.join('\n\n');
+}
+
+// ── 라이브 프리뷰 증분 분할 (순수 — frontend/tests/에서 직접 검증) ──────────
+// raw를 <PAGE> 마커 기준으로 "확정 페이지(뒤에 새 페이지가 시작된 세그먼트)"와
+// "미확정 꼬리"로 나눈다. 마커가 조각나 도착하면(<PA + GE>) 완성되기 전까지
+// 꼬리에 남는다. raw는 잡 안에서 append-only라 확정 세그먼트는 불변 → 캐시 가능.
+export function splitPreviewPages(raw) {
+  const pages = [];
+  let pos = 0;
+  let idx;
+  while ((idx = raw.indexOf(PAGE_MARKER, pos)) !== -1) {
+    pages.push(raw.slice(pos, idx));
+    pos = idx + PAGE_MARKER.length;
+  }
+  return { pages, tail: raw.slice(pos) };
+}
+
+// 이번 사이클에 렌더해야 할 조각 계산: 캐시에 없는 확정 페이지들의 markdown과
+// 꼬리 markdown. sep은 "앞에 렌더된 내용이 있으면 페이지 경계 hr을 붙여라" —
+// 전체 텍스트 structurePreview의 pushSep(선두/중복 hr 억제)과 동치다.
+// cachedHtmls: 확정 페이지별 렌더 HTML 캐시 (빈 문자열 = 내용 없는 페이지).
+export function planPreviewRender(raw, cachedHtmls, lastTailMd, lastTailSep) {
+  const { pages, tail } = splitPreviewPages(raw);
+  let hasBefore = cachedHtmls.some((html) => !!html);
+  const newPages = [];
+  for (let i = cachedHtmls.length; i < pages.length; i += 1) {
+    const md = structurePreview(pages[i], true); // 확정 세그먼트는 완결 — 홀드백 불필요
+    newPages.push({ idx: i, md, sep: !!md && hasBefore });
+    if (md) hasBefore = true;
+  }
+  const tailMd = structurePreview(tail, false);
+  const tailSep = !!tailMd && hasBefore;
+  // 꼬리 md가 같아도 sep이 바뀌면(앞에 내용 있는 페이지가 확정) 재렌더 대상
+  const tailChanged = tailMd !== lastTailMd || tailSep !== !!lastTailSep;
+  return { newPages, tailMd, tailSep, tailChanged };
+}
+
+// ── SSE 폴링 강등 → 재승격 백오프 (순수 — frontend/tests/에서 직접 검증) ──────
+// 강등 후 attempt번째(0부터) 재시도까지 기다릴 지연: 10초 → 20초 → 30초 상한.
+export function ssePromoteDelay(attempt) {
+  return Math.min(30000, 10000 * ((Number(attempt) || 0) + 1));
+}
+
+// raw pane 디바이더 번호(streamPageNo)를 ground 상태머신의 페이지로 재동기화.
+// 디바이더 k는 "페이지 k"이고 마커 k가 페이지 k를 시작하므로, streamPageNo는
+// "다음 마커가 시작할 페이지 - 1"이어야 한다: 선언 대기 중(expectAnnounce)이면
+// 다음 마커는 g.page의 시작 확인이라 g.page-1, 아니면 g.page+1을 시작하라 g.page.
+// 재연결 갭으로 마커가 유실돼도 ground.page는 progress 선언(폴링 포함)으로
+// 따라가므로 이 보정으로 이후 디바이더 번호가 복구된다. 절대 뒤로 가지 않는다.
+export function syncedStreamPageNo(streamPageNo, g) {
+  const target = g.expectAnnounce ? g.page - 1 : g.page;
+  return Math.max(Number(streamPageNo) || 0, target);
+}
+
+/* ── 질문(Q&A) 순수 코어 (DOM 없음 — frontend/tests/에서 직접 검증) ──────────
+ * 완료된 잡의 페이지 텍스트에 대해 선택한 LLM 공급자에게 질문하는 탭의
+ * 요청 본문/공급자 카탈로그/안내 문구 로직. POST /api/jobs/{id}/qa 계약:
+ *   {question, page, provider, model, reasoning_effort, reasoning_summary, thinking}
+ */
+
+// POST /qa 요청 본문 빌드. reasoning_summary는 OpenAI Responses 형식 + Thinking
+// 켜짐일 때만 선택값을 보내고, 그 외에는 항상 'none'(다른 공급자는 미지원).
+// effort는 그대로 전달('default' = API 기본값), 빈 모델은 null(서버 기본 모델).
+export function buildQaBody(s) {
+  const provider = (s && s.provider) || '';
+  const thinking = !!(s && s.thinking);
+  return {
+    question: String((s && s.question) || '').trim(),
+    page: Number(s && s.page) || 1,
+    provider,
+    model: (s && s.model) ? s.model : null,
+    reasoning_effort: (s && s.effort) || 'default',
+    reasoning_summary: (provider === 'openai-responses' && thinking)
+      ? ((s && s.summary) || 'none')
+      : 'none',
+    thinking,
+  };
+}
+
+// 공급자 미설정(available=false) 시 사용자 안내 문구 (클라이언트 측 가드용).
+export function qaProviderHint(provider) {
+  const id = String(provider || '');
+  if (id.startsWith('openai-')) {
+    return 'OPENAI_API_KEY가 설정되지 않았습니다. 서버 환경(.env)에 키를 추가한 뒤 다시 시도해 주세요.';
+  }
+  if (id === 'ollama') {
+    return '로컬 Ollama를 사용할 수 없습니다. ollama serve 실행 후 ollama pull qwen3:8b 로 모델을 준비해 주세요.';
+  }
+  return '선택한 LLM 공급자를 사용할 수 없습니다. 서버 설정을 확인해 주세요.';
+}
+
+// /api/providers 카탈로그에서 공급자 하나의 모델 목록/기본 모델/가용성 추출.
+// 모델 목록이 비어 있으면 default_model 하나로 폴백(선택지 유지), 카탈로그에
+// 없는 공급자·비정상 응답은 전부 빈 값/false — 소비처는 가드 문구로 처리.
+export function pickQaModels(catalog, providerId) {
+  const providers = (catalog && Array.isArray(catalog.providers)) ? catalog.providers : [];
+  const p = providers.find((x) => x && x.id === providerId) || null;
+  const listed = (p && Array.isArray(p.models))
+    ? p.models.filter((m) => typeof m === 'string' && m)
+    : [];
+  const models = listed.length ? listed.slice()
+    : ((p && p.default_model) ? [p.default_model] : []);
+  return {
+    models,
+    defaultModel: (p && p.default_model) || models[0] || '',
+    available: !!(p && p.available),
+    supportsSummary: !!(p && p.supports_reasoning_summary),
+  };
+}
+
+// 질문 대상 페이지 번호 보정: 1 이상, 총 페이지 수를 알면 그 이하로.
+// totalPages 미상(0·비수치)이면 하한만 적용 — 서버 422가 최후 방어.
+export function clampQaPage(value, totalPages) {
+  let v = Math.floor(Number(value));
+  if (!Number.isFinite(v) || v < 1) v = 1;
+  const total = Math.floor(Number(totalPages));
+  if (Number.isFinite(total) && total >= 1 && v > total) v = total;
+  return v;
+}
+
+/* ── 읽기(리더) 탭 + PDF 내보내기 순수 코어 (DOM 없음 — frontend/tests/에서 직접 검증) ──
+ * 리더 탭은 /html 응답을 페이지 섹션 단위로 나눠 현재 페이지 본문만 보여준다.
+ * PDF 내보내기는 GET /api/jobs/{id}/pdf?lang=ko 계약(200 pdf | 400 | 404 | 409)을
+ * 전제로, 노출 여부만 클라이언트에서 판정한다.
+ */
+
+// /html 응답을 서버의 안정 래퍼 <section class="doc-page" data-page="N">…</section>
+// 단위로 분해한다 (비중첩 — 정규식 분해로 충분). 속성 순서·따옴표·추가 클래스
+// 변형을 허용하고, 섹션이 하나도 없으면(구버전 렌더) 전체 HTML 한 장 폴백.
+// 반환: [{page:number, html:string(섹션 전체 마크업)}] — 래퍼를 포함해 돌려줘
+// .doc-page 스타일 훅(페이지 번호 꼬리표 등)이 리더에서도 그대로 살아 있다.
+export function extractDocPages(html) {
+  const s = String(html == null ? '' : html);
+  const out = [];
+  const re = /<section\b([^>]*)>([\s\S]*?)<\/section\s*>/gi;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    const attrs = m[1] || '';
+    const cm = attrs.match(/\bclass\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i);
+    const cls = cm ? (cm[1] != null ? cm[1] : (cm[2] != null ? cm[2] : (cm[3] || ''))) : '';
+    if ((' ' + cls + ' ').indexOf(' doc-page ') === -1) continue; // 다른 섹션은 무시
+    const pm = attrs.match(/\bdata-page\s*=\s*(?:"(\d+)"|'(\d+)'|(\d+))/i);
+    const page = pm ? Number(pm[1] || pm[2] || pm[3]) : out.length + 1; // 번호 부재 → 등장 순번
+    out.push({ page, html: m[0] });
+  }
+  if (!out.length) return [{ page: 1, html: s }];
+  return out;
+}
+
+// 리더 페이지 번호 보정 — clampQaPage와 동일 규칙(1 이상, total을 알면 그 이하,
+// total 미상(0·비수치)이면 하한만). 별도 이름으로 노출해 소비처를 명확히 한다.
+export function clampReaderPage(n, total) {
+  return clampQaPage(n, total);
+}
+
+// 리더 좌측 페이지 이미지 URL — 0패딩 4자리 파일명 계약(page_NNNN.png).
+export function readerImageUrl(jobId, page) {
+  let n = Math.floor(Number(page));
+  if (!Number.isFinite(n) || n < 1) n = 1;
+  return `/api/jobs/${jobId}/files/pages/page_${String(n).padStart(4, '0')}.png`;
+}
+
+// PDF(한국어) 내보내기 버튼 노출 판정.
+// 보임 ⇔ 잡 done ∧ 번역 done ∧ hasLayout !== false (필드 부재는 fail-open —
+// 서버 409가 최후 방어). 번역이 없어 숨겨질 때는 그대로 숨김 유지 — 다음 행동
+// 안내는 다운로드 행의 번역 UI가 이미 담당한다.
+export function pdfExportState(jobStatus, koStatus, hasLayout) {
+  if (jobStatus !== 'done') return { visible: false, reason: 'job-not-done' };
+  if (koStatus !== 'done') return { visible: false, reason: 'translation-missing' };
+  if (hasLayout === false) return { visible: false, reason: 'no-layout' };
+  return { visible: true, reason: '' };
+}
+
+// PDF 응답의 숫자형 생성 리포트 → 사용자에게 보여 줄 짧은 무손실 요약.
+// 서버는 비ASCII 경고 본문을 헤더에 싣지 않고 개수만 보내므로 문서 내용이
+// 프록시 로그에 새지 않는다.
+export function pdfReportMessage(report) {
+  const n = (v) => {
+    const x = Math.floor(Number(v));
+    return Number.isFinite(x) && x >= 0 ? x : 0;
+  };
+  const r = report || {};
+  const replaced = n(r.replaced);
+  const kept = n(r.kept);
+  const relocated = n(r.relocated);
+  const tableCells = n(r.tableCells);
+  const warnings = n(r.warnings);
+  const specialistKept = n(r.specialistKept);
+  const details = [`번역 ${replaced}개 블록`];
+  if (tableCells) details.push(`표 ${tableCells}개 셀`);
+  if (relocated) details.push(`충돌 없이 ${relocated}개 재배치`);
+  if (kept) details.push(`원문 ${kept}개 보존`);
+  if (specialistKept) details.push(`전문 조판 ${specialistKept}개 원형 보존`);
+  if (warnings) details.push(`주의 ${warnings}건`);
+  return `PDF 생성 완료: ${details.join(' · ')}`;
+}
+
+/* ============================ UI constants ============================ */
+
+const PHASE_LABELS = { loading: '모델 로딩 대기', render: '렌더링', ocr: 'OCR', merge: '병합' };
+
+// 진행 페이로드 → 진행바 좌측 문구 (순수 — frontend/tests/에서 검증).
+// note(모델 로딩 대기 등)가 있으면 최우선, 없으면 queued는 대기열 문구, 그 외 phase 라벨.
+export function progressPhaseText(p, status, queuePosLabel) {
+  if (p && typeof p.note === 'string' && p.note) return p.note;
+  if (status === 'queued') return queuePosLabel || '대기중';
+  return (p && PHASE_LABELS[p.phase]) || '처리 중';
+}
+const STATUS_LABELS = {
+  queued: '대기중',
+  running: '변환중',
+  done: '완료',
+  error: '오류',
+  canceled: '취소됨',
+};
+
+// 잡 상태 라벨 (순수 — frontend/tests/에서 직접 검증). queued 잡에 선택 필드
+// queue_position(1-base, 큐 앞의 queued 잡 수 + 1)이 있으면 '대기중 · N번째'.
+// 필드 부재(구버전 서버·SSE 스냅샷)·비정상 값은 기존 라벨 그대로 — 안전 폴백.
+export function statusLabel(job) {
+  const status = (job && job.status) || 'queued';
+  const base = STATUS_LABELS[status] || status;
+  if (status === 'queued') {
+    const pos = job && job.queue_position;
+    if (Number.isInteger(pos) && pos >= 1) return `${base} · ${pos}번째`;
+  }
+  return base;
+}
+const THEME_KEY = 'uocr-theme';
+
+const BOX_COLORS = {
+  title: '#e5484d',
+  text: '#4662d9',
+  image: '#2f9e6e',
+  table: '#8e4ec6',
+  formula: '#d97706',
+  equation: '#d97706',
+  page_number: '#8b8d98',
+  footnote: '#8b8d98',
+  header: '#8b8d98',
+  footer: '#8b8d98',
+};
+const BOX_FALLBACK_COLOR = '#6b7280';
+
+const ICON = {
+  moon: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>',
+  sun: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"/></svg>',
+  x: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  chip: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>',
+  docLayout: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 9v12"/></svg>',
+};
+
+/* ============================ State ============================ */
+
+const state = {
+  jobs: [],
+  currentJobId: null,
+  displayedStatus: null,
+  displayedPhase: null,   // 마지막 진행 phase — loading→render 전이에서 라이브 뷰 오픈 판정
+  queuePos: null, // 열린 잡의 마지막 대기열 위치 — queued가 아니게 되면 해제
+  selectedFiles: [], // 다중 선택 지원 — 검증을 통과한 파일들만 담긴다
+  uploading: false, // 업로드 루프 재진입 가드 — 진행 중 새 선택이 버튼을 되살리지 않게
+  // /api/health 스냅샷 — 필드 부재·미수신 시 undefined (검증·비활성은 fail-open)
+  maxUploadMb: undefined,
+  translateAvailable: undefined,
+  // 엔진 capability 스냅샷 (신규 health 계약 — 구버전 서버는 undefined 유지)
+  healthEngine: undefined,        // 현재 활성 엔진 이름 ('unlimited'|'ovisocr2'|…)
+  streamGranularity: undefined,   // 'token' | 'page'
+  layoutCapability: undefined,    // 'full' | 'figure_only' | 'none'
+  modelLoaded: true,              // 모델 로드 여부 — false면 업로드 영역에 로딩 안내
+  currentJobEngine: undefined,    // 열린 잡의 engine 메타 (구 잡은 undefined)
+  // raw stream pane
+  streamPending: '',
+  streamPageNo: 0, // markers seen by the raw pane — divider k reads "페이지 k"
+  streamAutoScroll: true,
+  streamConnected: false,
+  rafId: 0,
+  // accumulated raw model output (for the preview structurer)
+  rawText: '',
+  // grounding state machine (pure core) + left-pane view state
+  ground: createGroundState(),
+  viewPage: 1,          // page shown in the left pane
+  followLive: true,
+  pageBoxes: new Map(), // pageNo -> [{label,x1,y1,x2,y2}]
+  imgFailed: false,
+  imgLastTry: 0,
+  // live rendered preview (right pane)
+  liveGen: 0,
+  previewDirty: false,
+  previewTimer: 0,
+  previewInFlight: false,
+  previewFails: 0,
+  previewStopped: false,   // 413/연속 실패로 라이브 프리뷰 중단됨
+  previewPageCache: [],    // 확정 페이지 렌더 HTML 캐시 (인덱스 = 확정 페이지 순번)
+  previewTailNodes: [],    // 현재 꼬리 렌더가 소유한 DOM 노드들 (선행 hr 포함)
+  previewTailMd: '',       // 마지막으로 렌더된 꼬리 markdown
+  previewTailSep: false,   // 마지막 꼬리 렌더의 선행 hr 유무
+  previewAutoScroll: true,
+  // cancel
+  cancelRequestedFor: null,
+  // sse / fallback
+  es: null,
+  sseErrorCount: 0,
+  fallbackActive: false,
+  fallbackTimer: 0,
+  ssePromoteTimer: 0,     // 폴링 강등 후 SSE 재승격 재시도 타이머
+  ssePromoteAttempts: 0,  // 재승격 백오프 단계 — 성공(open)·teardown 시 0으로
+  // result tab caches
+  previewLoaded: false,
+  docLayoutLoaded: false,
+  markdownLoaded: false,
+  // translation (완료된 잡 결과 화면 전용 — 잡 전환 시 초기화)
+  currentLang: 'orig',      // 'orig' | 'ko' — 현재 결과 뷰 언어
+  translateState: 'none',   // none|running|done|error|canceled
+  translateEs: null,        // 번역 진행 EventSource
+  translatePollTimer: 0,    // SSE 불가/실패 시 state 폴링 폴백
+  translateSseErrors: 0,
+  resultUrls: null,         // { markdown, archive, layoutHtml, pdf } — 언어별 다운로드 빌드용
+  currentBaseName: 'document',
+  resultHasLayout: undefined, // r.has_layout(+figure_only 판정 반영) — PDF 내보내기 가드
+  // 읽기(리더) 탭 (완료 잡 기본 뷰 — 잡 전환 시 resetReaderForJob)
+  readerPage: 1,            // 현재 리더 페이지 (1-base)
+  readerTotalHint: 0,       // 잡의 총 페이지 힌트 (result.pages → progress.total_pages, 0 = 미상)
+  readerPages: { orig: null, ko: null }, // 언어별 페이지 섹션 캐시 [{page, html}]
+  readerZoom: 100,          // 좌측 원본 이미지 폭 % (60–220, localStorage 'uocr-reader-zoom')
+  readerImgTimer: 0,        // 이미지 조용한 재시도(1회) 타이머
+  qaPageTouched: false,     // 이 잡에서 사용자가 질문 페이지를 직접 수정했는지 (리더 프리필 가드)
+  // 질문(Q&A — 완료된 잡 전용 탭. 잡 전환 시 teardownQa가 로그/진행을 초기화)
+  qaCatalog: null,          // /api/providers 스냅샷 — 질문 탭 최초 활성화 시 1회 로드
+  qaCatalogLoading: false,
+  qaProvider: '',           // 선택된 공급자 id (localStorage 복원)
+  qaModel: '',              // 공급자별 선택 모델 (localStorage 'uocr-qa-model-<id>')
+  qaEffort: 'default',      // reasoning effort ('default' = API 기본값)
+  qaThinking: true,
+  qaSummary: 'none',        // reasoning summary (openai-responses + thinking에서만 전송)
+  qaTotalPages: 0,          // 열린 잡의 총 페이지 수 — 페이지 입력 상한 (0 = 미상)
+  qaBusy: false,            // 질문 전송 중 — 폼 비활성
+  qaGen: 0,                 // 잡 전환 시 증가 — 늦게 도착한 질문 응답 무시
+  // timers
+  jobsTimer: 0,
+  healthTimer: 0,
+  toastTimer: 0,
+  pdfDownloadBusy: false,
+};
+
+// 2단계 삭제 확인의 무장(armed) 상태: key → { t: 만료 타이머, btn: 현재 버튼 }.
+// key는 목록 항목이면 잡 id, 헤더 버튼이면 'header:<잡 id>' — DOM 버튼이 아니라
+// 키로 관리해 5초 주기 재렌더(renderJobList)에도 무장이 유지된다.
+const armTimers = new Map();
+
+/* ============================ DOM refs ============================ */
+
+const el = {};
+const EL_IDS = {
+  healthBadges: 'health-badges',
+  themeToggle: 'theme-toggle',
+  dropzone: 'dropzone',
+  fileInput: 'file-input',
+  fileInfo: 'file-info',
+  fileName: 'file-name',
+  fileSize: 'file-size',
+  fileClear: 'file-clear',
+  uploadError: 'upload-error',
+  uploadModelNotice: 'upload-model-notice',
+  uploadBtn: 'upload-btn',
+  uploadProgress: 'upload-progress',
+  uploadProgressFill: 'upload-progress-fill',
+  dpiInput: 'dpi-input',
+  jobList: 'job-list',
+  jobListEmpty: 'job-list-empty',
+  emptyState: 'empty-state',
+  jobView: 'job-view',
+  jobChip: 'job-status-chip',
+  jobFilename: 'job-filename',
+  jobTime: 'job-time',
+  jobModel: 'job-model',
+  streamModeChip: 'stream-mode-chip',
+  jobStop: 'job-stop',
+  jobStopLabel: 'job-stop-label',
+  jobDelete: 'job-delete',
+  progressSection: 'progress-section',
+  progressPhase: 'progress-phase',
+  progressSpinner: 'progress-spinner',
+  progressCount: 'progress-count',
+  progressTrack: 'progress-track',
+  progressFill: 'progress-fill',
+  progressChunk: 'progress-chunk',
+  liveDetails: 'live-details',
+  streamPane: 'stream-pane',
+  pageImg: 'page-img',
+  boxOverlay: 'box-overlay',
+  pageNote: 'page-note',
+  pagerPrev: 'pager-prev',
+  pagerNext: 'pager-next',
+  pagerLabel: 'pager-label',
+  followChip: 'follow-chip',
+  livePreview: 'live-preview',
+  errorSection: 'error-section',
+  errorTitle: 'error-title',
+  errorMessage: 'error-message',
+  errorHint: 'error-hint',
+  resultSection: 'result-section',
+  dlMd: 'dl-md',
+  dlZip: 'dl-zip',
+  dlDoc: 'dl-doc',
+  dlLayout: 'dl-layout',
+  dlPdf: 'dl-pdf',
+  readerPrev: 'reader-prev',
+  readerNext: 'reader-next',
+  readerPageInput: 'reader-page',
+  readerTotal: 'reader-total',
+  readerZoomOut: 'reader-zoom-out',
+  readerZoomIn: 'reader-zoom-in',
+  readerTranslateBtn: 'reader-translate-btn',
+  readerPagePane: 'reader-page-pane',
+  readerImage: 'reader-image',
+  readerContent: 'reader-content',
+  translateBtn: 'translate-btn',
+  translateProgress: 'translate-progress',
+  translateProgressLabel: 'translate-progress-label',
+  translateProgressTrack: 'translate-progress-track',
+  translateProgressFill: 'translate-progress-fill',
+  translateCancel: 'translate-cancel',
+  langToggle: 'lang-toggle',
+  langOrig: 'lang-orig',
+  langKo: 'lang-ko',
+  previewBody: 'preview-body',
+  doclayoutBody: 'doclayout-body',
+  mdCode: 'md-code',
+  copyMd: 'copy-md',
+  layoutsGrid: 'layouts-grid',
+  pagesGrid: 'pages-grid',
+  qaPlaceholder: 'qa-placeholder',
+  qaBodyWrap: 'qa-body',
+  qaProvider: 'qa-provider',
+  qaModel: 'qa-model',
+  qaEffort: 'qa-effort',
+  qaThinking: 'qa-thinking',
+  qaSummary: 'qa-summary',
+  qaSummaryField: 'qa-summary-field',
+  qaPage: 'qa-page',
+  qaLog: 'qa-log',
+  qaForm: 'qa-form',
+  qaInput: 'qa-input',
+  qaSend: 'qa-send',
+  toast: 'toast',
+};
+
+function grabEls() {
+  for (const key of Object.keys(EL_IDS)) el[key] = document.getElementById(EL_IDS[key]);
+  el.tabs = Array.from(document.querySelectorAll('.tab'));
+  el.panels = Array.from(document.querySelectorAll('.tab-panel'));
+  el.modeRadios = Array.from(document.querySelectorAll('input[name="mode"]'));
+  el.qaSuggestions = Array.from(document.querySelectorAll('.qa-suggestion'));
+}
+
+/* ============================ Utilities ============================ */
+
+function h(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  if (attrs) {
+    for (const key of Object.keys(attrs)) {
+      const val = attrs[key];
+      if (val == null || val === false) continue;
+      if (key === 'class') node.className = val;
+      else if (key === 'text') node.textContent = val;
+      else if (key === 'html') node.innerHTML = val; // only used with trusted literal SVG strings
+      else node.setAttribute(key, val === true ? '' : val);
+    }
+  }
+  for (const child of children) {
+    if (child == null || child === false) continue;
+    node.appendChild(typeof child === 'string' ? document.createTextNode(child) : child);
+  }
+  return node;
+}
+
+function safeParse(text) {
+  try { return JSON.parse(text); } catch (_) { return null; }
+}
+
+function localGet(key) {
+  try { return localStorage.getItem(key); } catch (_) { return null; }
+}
+function localSet(key, val) {
+  try { localStorage.setItem(key, val); } catch (_) { /* ignore */ }
+}
+
+function fmtTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  try {
+    return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
+  } catch (_) {
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+}
+
+function fmtBytes(n) {
+  if (!Number.isFinite(n) || n < 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let v = n, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+  const decimals = i > 0 && v < 10 ? 1 : 0;
+  return `${v.toFixed(decimals)} ${units[i]}`;
+}
+
+function isTerminal(status) {
+  return status === 'done' || status === 'error' || status === 'canceled';
+}
+
+async function apiGet(path) {
+  const res = await fetch(path, { headers: { Accept: 'application/json' } });
+  const text = await res.text().catch(() => '');
+  const data = text ? safeParse(text) : null;
+  if (!res.ok) {
+    const msg = (data && typeof data.detail === 'string') ? data.detail : `요청 실패 (${res.status})`;
+    const err = new Error(msg);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+async function apiDelete(path) {
+  const res = await fetch(path, { method: 'DELETE' });
+  if (!res.ok) {
+    const err = new Error(`삭제 실패 (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  return true;
+}
+
+function showToast(message, kind) {
+  el.toast.textContent = message;
+  el.toast.className = 'toast' + (kind ? ' ' + kind : '');
+  el.toast.hidden = false;
+  clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(() => { el.toast.hidden = true; }, 3600);
+}
+
+/* ============================ Theme ============================ */
+
+function resolvedTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+}
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const label = theme === 'dark' ? '라이트 모드로 전환' : '다크 모드로 전환';
+  el.themeToggle.innerHTML = theme === 'dark' ? ICON.sun : ICON.moon;
+  el.themeToggle.setAttribute('aria-label', label);
+  el.themeToggle.title = label;
+}
+
+function setupTheme() {
+  applyTheme(resolvedTheme()); // sync icon with the value set by the inline bootstrap
+  el.themeToggle.addEventListener('click', () => {
+    const next = resolvedTheme() === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
+    localSet(THEME_KEY, next);
+  });
+  try {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    mq.addEventListener('change', (e) => {
+      const stored = localGet(THEME_KEY);
+      if (stored !== 'light' && stored !== 'dark') applyTheme(e.matches ? 'dark' : 'light');
+    });
+  } catch (_) { /* ignore */ }
+}
+
+/* ============================ Health ============================ */
+
+function shortenGpu(name) {
+  return String(name || '')
+    .replace(/^NVIDIA\s+GeForce\s+/i, '').replace(/^NVIDIA\s+/i, '')
+    .replace(/^Apple\s+/i, '').trim();
+}
+
+// health 응답에서 엔진 capability를 추출하는 순수 코어 (tests에서 직접 검증).
+// 구버전 서버(capabilities 부재)는 모두 undefined — 소비처는 기존 UI 그대로 동작.
+export function healthCapabilities(d) {
+  const caps = (d && d.capabilities && typeof d.capabilities === 'object') ? d.capabilities : {};
+  return {
+    engine: (d && typeof d.engine === 'string') ? d.engine : undefined,
+    streamGranularity: typeof caps.stream_granularity === 'string' ? caps.stream_granularity : undefined,
+    layoutCapability: typeof caps.layout === 'string' ? caps.layout : undefined,
+  };
+}
+
+// sidecar provider 장애 요약 (순수). 문제 없으면 null.
+// 메인 앱 health가 200이어도 provider가 죽어 있으면 사용자에게 알린다.
+export function providerIssue(d) {
+  if (!d || d.provider !== 'local-sidecar') return null;
+  const ph = d.provider_health;
+  if (!ph || typeof ph !== 'object' || ph.status === 'ok') return null;
+  return String(ph.error || ph.status || '알 수 없음');
+}
+
+// 잡 헤더 모델 칩 데이터 (순수). 구버전 잡(메타 없음)은 null → 칩 숨김.
+export function jobModelChip(job) {
+  if (!job) return null;
+  const text = job.model_id || job.engine;
+  if (!text) return null;
+  const title = (job.model_id || '') +
+    (job.model_revision ? ` @ ${String(job.model_revision).slice(0, 8)}` : '') +
+    (job.engine ? ` · engine: ${job.engine}` : '') +
+    (job.provider ? ` · ${job.provider}` : '');
+  return { text, title };
+}
+
+// figure_only 엔진(본문 텍스트에 bbox 없음 → 레이아웃 재구성이 빈 흰 페이지)인지 판정 (순수).
+// **그 잡을 실제로 변환한 엔진**이 현재 엔진일 때만 확신한다 — 엔진 메타가 없는 구 잡
+// (이 기능 이전 변환 = 항상 full layout)이나 다른 엔진의 잡은 제외한다(거짓 판단보다 무표시).
+export function docLayoutIsFigureOnly(layoutCapability, jobEngine, healthEngine) {
+  return layoutCapability === 'figure_only' && !!jobEngine && jobEngine === healthEngine;
+}
+
+async function loadHealth() {
+  clearTimeout(state.healthTimer);
+  let data;
+  try {
+    data = await apiGet('/api/health');
+  } catch (_) {
+    renderHealthError();
+    state.healthTimer = setTimeout(loadHealth, 10000);
+    return;
+  }
+  renderHealth(data || {});
+  if (data && data.model_loaded === false) {
+    state.healthTimer = setTimeout(loadHealth, 10000);
+  }
+}
+
+function renderHealth(d) {
+  // 업로드 사전 검증·번역 버튼 가용성이 소비하는 계약 필드 보관.
+  // 구버전 서버 응답(필드 부재)은 undefined 유지 — 두 소비처 모두 fail-open.
+  state.maxUploadMb = typeof d.max_upload_mb === 'number' ? d.max_upload_mb : undefined;
+  state.translateAvailable = typeof d.translate_available === 'boolean' ? d.translate_available : undefined;
+  // 모델 로드 여부 — 업로드 영역의 "로딩 중" 안내 표시에 사용 (필드 부재는 로드된 것으로 간주)
+  state.modelLoaded = d.model_loaded === false ? false : true;
+  applyTranslateAvailability(); // 잡 뷰가 열려 있는 동안의 health 갱신도 버튼에 반영
+  applyModelLoadingNotice();    // 모델 로딩 중이면 업로드 영역에 안내
+
+  // 엔진 capability (신규 계약 — 필드 부재는 undefined = 기존 UI 그대로)
+  const hc = healthCapabilities(d);
+  state.healthEngine = hc.engine;
+  state.streamGranularity = hc.streamGranularity;
+  state.layoutCapability = hc.layoutCapability;
+  applyStreamModeChip();
+
+  const c = el.healthBadges;
+  c.textContent = '';
+
+  const modelId = d.model_id || 'baidu/Unlimited-OCR';
+  const modelTitle = modelId +
+    (d.model_revision ? ` @ ${String(d.model_revision).slice(0, 8)}` : '') +
+    (d.provider ? ` · ${d.provider}` : '');
+  c.appendChild(h('span', { class: 'badge badge-model', title: modelTitle },
+    h('span', { class: 'badge-ico', html: ICON.chip }),
+    h('span', { text: modelId }),
+  ));
+
+  const isCuda = d.device === 'cuda';
+  const isMetal = d.device === 'metal';
+  const devName = isCuda ? 'CUDA' : (isMetal ? 'Metal' : (d.device === 'cpu' ? 'CPU' : String(d.device || '?').toUpperCase()));
+  let devText = devName;
+  if ((isCuda || isMetal) && d.gpu_name) {
+    const short = shortenGpu(d.gpu_name);
+    if (short) devText = `${devName} · ${short}`;
+  }
+  const devTitle = `디바이스: ${devName}` +
+    (d.gpu_name ? ` (${d.gpu_name})` : '') +
+    ` · dtype: ${d.dtype || '-'} · 네이티브 연산: ${d.native_ops ? 'on' : 'off'}`;
+  const devClass = isCuda ? 'is-cuda' : (isMetal ? 'is-metal' : 'is-cpu');
+  c.appendChild(h('span', { class: `badge badge-device ${devClass}`, title: devTitle },
+    h('span', { class: 'badge-dot' }),
+    h('span', { text: devText }),
+  ));
+
+  if (d.engine === 'fake') {
+    c.appendChild(h('span', {
+      class: 'badge badge-warn',
+      title: '실제 모델 대신 데모용 가짜 엔진이 실행 중입니다.',
+    }, 'FAKE 엔진'));
+  }
+
+  // sidecar provider 상태 — 죽어 있으면 명확한 배지 (메인 앱 health는 200이어도)
+  const pIssue = providerIssue(d);
+  if (pIssue) {
+    c.appendChild(h('span', {
+      class: 'badge badge-error',
+      title: '엔진 서버(sidecar)에 연결할 수 없습니다: ' + pIssue,
+    }, '엔진 서버 연결 안 됨'));
+  }
+
+  // 페이지 단위 스트리밍 엔진 안내 (Unlimited의 토큰 스트리밍과 구분)
+  if (state.streamGranularity === 'page') {
+    c.appendChild(h('span', {
+      class: 'badge badge-page-stream',
+      title: '이 엔진은 페이지가 완료될 때마다 결과를 일괄 표시합니다 (토큰 스트리밍 아님)',
+    }, '페이지 단위'));
+  }
+
+  if (d.model_loaded === false) {
+    c.appendChild(h('span', {
+      class: 'badge badge-loading',
+      title: '모델을 메모리에 로딩하는 중입니다. 첫 작업에서 시간이 걸릴 수 있습니다.',
+    }, h('span', { class: 'spinner spinner-xs' }), h('span', { text: '모델 로딩 중…' })));
+  }
+}
+
+function renderHealthError() {
+  el.healthBadges.textContent = '';
+  el.healthBadges.appendChild(h('span', {
+    class: 'badge badge-error',
+    title: '서버 상태를 확인할 수 없습니다. 자동으로 재시도합니다.',
+  }, '서버 연결 실패'));
+}
+
+// 페이지 단위 스트리밍 엔진이면 라이브 뷰 요약에 안내 칩 표시
+function applyStreamModeChip() {
+  if (!el.streamModeChip) return;
+  el.streamModeChip.hidden = state.streamGranularity !== 'page';
+}
+
+// 모델 로딩 중이면 업로드 영역에 안내 배너 — 업로드가 "실패"가 아니라 "대기"임을 알린다.
+function applyModelLoadingNotice() {
+  if (!el.uploadModelNotice) return;
+  el.uploadModelNotice.hidden = state.modelLoaded !== false;
+}
+
+/* ============================ Job history ============================ */
+
+async function refreshJobs() {
+  let data;
+  try {
+    data = await apiGet('/api/jobs');
+  } catch (_) {
+    return; // keep last known list on transient failure
+  }
+  const jobs = (data && Array.isArray(data.jobs)) ? data.jobs : [];
+  state.jobs = jobs.slice(0, 50);
+  renderJobList();
+
+  if (state.currentJobId) {
+    const open = state.jobs.find((j) => j.job_id === state.currentJobId);
+    if (open) {
+      noteQueuePosition(open.status, open.queue_position);
+      updateHeaderChip(open.status);
+      // queued 동안은 SSE progress가 없어 이 5초 목록 폴링이 유일한 대기열 위치
+      // 갱신원이다 — 진행 영역의 '대기중 · N번째' 문구도 여기서 함께 갱신한다.
+      if (open.status === 'queued' && state.displayedStatus === 'queued') {
+        updateProgress(open.progress || {}, 'queued');
+      }
+      if (isTerminal(open.status) && !isTerminal(state.displayedStatus)) {
+        syncOpenJob();
+      }
+    }
+  }
+}
+
+function renderJobList() {
+  const list = el.jobList;
+  list.textContent = '';
+  if (!state.jobs.length) {
+    el.jobListEmpty.hidden = false;
+    return;
+  }
+  el.jobListEmpty.hidden = true;
+  for (const job of state.jobs) list.appendChild(jobListItem(job));
+}
+
+function jobListItem(job) {
+  const status = job.status || 'queued';
+  const active = job.job_id === state.currentJobId;
+  const fname = job.filename || '(이름 없음)';
+
+  const name = h('span', { class: 'ji-name', text: fname, title: job.filename || '' });
+  const chip = h('span', { class: `chip chip-${status}`, text: statusLabel(job) });
+  const time = h('span', { class: 'ji-time muted', text: fmtTime(job.created_at) });
+  const sub = h('span', { class: 'ji-sub' }, chip, time);
+
+  // 잡 열기·삭제를 형제 버튼으로 분리 — role="button" li 안에 버튼을 중첩하면
+  // 스크린리더가 내부 삭제 버튼에 진입할 수 없다(중첩 인터랙티브 컨트롤 금지).
+  const open = h('button', { class: 'ji-open', type: 'button' },
+    h('span', { class: 'ji-main' }, name, sub));
+  open.addEventListener('click', () => openJob(job.job_id));
+
+  const del = h('button', {
+    class: 'ji-del icon-btn-sm', type: 'button',
+    'aria-label': `"${fname}" 삭제`, title: '삭제', html: ICON.x,
+  });
+  del.addEventListener('click', () => armDelete(del, job.job_id, () => deleteJob(job.job_id)));
+  // 재렌더가 무장(armed) 상태를 파괴하지 않도록 살아있는 무장을 새 버튼에 복원.
+  // 만료 타이머가 최신 버튼을 해제하도록 참조도 교체한다.
+  const arm = armTimers.get(job.job_id);
+  if (arm) {
+    arm.btn = del;
+    del.dataset.baseTitle = del.title;
+    del.classList.add('armed');
+    del.title = '한 번 더 클릭하면 삭제됩니다';
+  }
+
+  return h('li', { class: `job-item${active ? ' active' : ''}` }, open, del);
+}
+
+// 2단계 삭제 확인의 클릭 전이 (순수 — 테스트 대상). entries는 [key, owner] 쌍의
+// 이터러블(owner = 물리 버튼), key는 이번 클릭의 키, owner는 클릭된 버튼.
+// 클릭된 key가 이미 무장돼 있으면 confirm(실삭제), 아니면 같은 owner에 남은
+// 옛 무장(잡 전환 뒤의 헤더 버튼 등)을 회수(clearKeys)하고 새로 무장한다.
+export function armTransition(entries, key, owner) {
+  const clearKeys = [];
+  let confirm = false;
+  for (const [k, o] of entries) {
+    if (k === key) confirm = true;
+    else if (o === owner) clearKeys.push(k);
+  }
+  if (confirm) clearKeys.push(key);
+  return { confirm, clearKeys };
+}
+
+function disarmDeleteBtn(btn) {
+  btn.classList.remove('armed');
+  btn.title = btn.dataset.baseTitle || '삭제';
+}
+
+function armDelete(btn, key, onConfirm) {
+  const { confirm, clearKeys } = armTransition(
+    Array.from(armTimers, ([k, e]) => [k, e.btn]), key, btn);
+  for (const k of clearKeys) {
+    const e = armTimers.get(k);
+    if (e) clearTimeout(e.t);
+    armTimers.delete(k);
+  }
+  if (confirm) {
+    disarmDeleteBtn(btn);
+    onConfirm();
+    return;
+  }
+  if (!btn.dataset.baseTitle) btn.dataset.baseTitle = btn.title || '삭제';
+  btn.classList.add('armed');
+  btn.title = '한 번 더 클릭하면 삭제됩니다';
+  const t = setTimeout(() => {
+    const e = armTimers.get(key);
+    armTimers.delete(key);
+    if (e) disarmDeleteBtn(e.btn); // 재렌더로 교체됐어도 최신 버튼을 해제
+  }, 2600);
+  armTimers.set(key, { t, btn });
+}
+
+function removeJobFromList(id) {
+  state.jobs = state.jobs.filter((j) => j.job_id !== id);
+  renderJobList();
+}
+
+function upsertJob(job) {
+  state.jobs = state.jobs.filter((j) => j.job_id !== job.job_id);
+  state.jobs.unshift(job);
+  state.jobs = state.jobs.slice(0, 50);
+  renderJobList();
+}
+
+async function deleteJob(id) {
+  try {
+    await apiDelete(`/api/jobs/${id}`);
+  } catch (e) {
+    if (e.status !== 404) {
+      showToast('삭제에 실패했습니다.', 'error');
+      return;
+    }
+    // 404 → already gone; fall through to local cleanup
+  }
+  removeJobFromList(id);
+  if (state.currentJobId === id) {
+    teardownConnections();
+    state.currentJobId = null;
+    state.displayedStatus = null;
+    state.displayedPhase = null;
+    showEmptyState();
+    syncJobHash(null); // 삭제된 잡을 가리키는 해시 정리
+  }
+  refreshJobs();
+}
+
+/* ============================ View switching ============================ */
+
+function showEmptyState() {
+  el.jobView.hidden = true;
+  el.emptyState.hidden = false;
+}
+
+function showJobView() {
+  el.emptyState.hidden = true;
+  el.jobView.hidden = false;
+}
+
+function updateHeaderChip(status) {
+  el.jobChip.className = `chip chip-${status}`;
+  el.jobChip.textContent = statusLabel({ status, queue_position: state.queuePos });
+}
+
+// 잡 JSON/진행 페이로드의 대기열 위치를 상태에 흡수. queued가 아니면 해제하고,
+// queued인데 필드가 없으면(SSE 스냅샷·구버전 서버) 마지막 값을 유지한다 —
+// 계약상 필드 부재는 "기존 표시 그대로"가 안전 폴백이다.
+function noteQueuePosition(status, pos) {
+  if (status !== 'queued') state.queuePos = null;
+  else if (Number.isInteger(pos) && pos >= 1) state.queuePos = pos;
+}
+
+/* ============================ location.hash 잡 복원 ============================ */
+
+// location.hash → 잡 id (순수 — frontend/tests/에서 직접 검증).
+// '#abc' → 'abc'. 빈 해시·잡 id에 쓰이지 않는 문자가 섞인 이상값은 null.
+export function jobIdFromHash(hash) {
+  const id = String(hash || '').replace(/^#/, '');
+  return /^[\w-]+$/.test(id) ? id : null;
+}
+
+// 현재 잡을 주소창 해시에 반영 — 새로고침 복원·영속 링크용. replaceState라
+// 히스토리 스택을 오염시키지 않고 hashchange도 발생하지 않는다(자기 변경 루프
+// 없음). id=null이면 해시 제거 — 잡 삭제·404로 현재 잡이 사라진 경우.
+function syncJobHash(id) {
+  try {
+    if (id) history.replaceState(null, '', '#' + id);
+    else if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+  } catch (_) { /* ignore */ }
+}
+
+/* ============================ Open / render a job ============================ */
+
+async function openJob(id) {
+  if (!id || id === state.currentJobId) return;
+
+  teardownConnections();
+  state.currentJobId = id;
+  // 잡 전환 시 이전 잡의 헤더 삭제 무장 잔상 제거 — 기능상 armTransition이 키
+  // 불일치로 confirm을 거부하지만, armed 시각 표시가 남으면 거짓 안내가 된다.
+  for (const [k, e] of armTimers) {
+    if (k.startsWith('header:') && k !== `header:${id}`) {
+      clearTimeout(e.t);
+      armTimers.delete(k);
+      disarmDeleteBtn(e.btn);
+    }
+  }
+  state.displayedStatus = null;
+  state.displayedPhase = null;
+  state.queuePos = null; // 이전 잡의 대기열 위치가 새 잡 칩에 새지 않도록
+  state.previewLoaded = false;
+  state.markdownLoaded = false;
+  state.docLayoutLoaded = false;
+  state.currentLang = 'orig'; // 잡이 바뀌면 언어 선택 초기화
+  state.resultHasLayout = undefined;
+  resetReaderForJob(); // 리더 페이지·언어별 캐시·질문 프리필 가드 초기화
+  resetLiveState();
+  showJobView();
+  renderJobList(); // refresh active highlight
+
+  let job;
+  try {
+    job = await apiGet(`/api/jobs/${id}`);
+  } catch (e) {
+    if (state.currentJobId !== id) return;
+    if (e.status === 404) {
+      showToast('해당 작업을 찾을 수 없습니다.', 'warn');
+      removeJobFromList(id);
+      syncJobHash(null); // 사라진 잡을 가리키는 해시(공유 링크 등) 정리
+    } else {
+      showToast('작업 정보를 불러오지 못했습니다.', 'error');
+    }
+    state.currentJobId = null;
+    showEmptyState();
+    return;
+  }
+  if (state.currentJobId !== id) return; // user switched away during await
+
+  syncJobHash(id); // 성공 경로에서만 해시 동기화 — 새로고침 복원·링크 공유
+  renderJob(job);
+  if (job.status === 'queued' || job.status === 'running') startStream(id);
+}
+
+// Re-render the currently open job without tearing down the live panes.
+async function syncOpenJob() {
+  const id = state.currentJobId;
+  if (!id) return;
+  let job;
+  try {
+    job = await apiGet(`/api/jobs/${id}`);
+  } catch (_) {
+    return;
+  }
+  if (state.currentJobId !== id) return;
+  if (isTerminal(job.status)) {
+    flushStream(true);
+    drainGroundToUI(true);
+    teardownConnections();
+  }
+  renderJob(job);
+}
+
+function renderJob(job) {
+  state.displayedStatus = job.status;
+  noteQueuePosition(job.status, job.queue_position);
+
+  el.jobFilename.textContent = job.filename || '(이름 없음)';
+  el.jobFilename.title = job.filename || '';
+  el.jobTime.textContent = job.created_at ? fmtTime(job.created_at) : '';
+  updateHeaderChip(job.status);
+
+  // 잡의 엔진/모델 메타 칩 — 완료 후에도 어떤 모델로 변환했는지 확인 가능.
+  // 구버전 잡(필드 없음)은 칩 자체를 숨긴다.
+  state.currentJobEngine = typeof job.engine === 'string' ? job.engine : undefined;
+  const modelChip = jobModelChip(job);
+  if (el.jobModel) {
+    if (modelChip) {
+      el.jobModel.textContent = modelChip.text;
+      el.jobModel.title = modelChip.title;
+      el.jobModel.hidden = false;
+    } else {
+      el.jobModel.hidden = true;
+    }
+  }
+
+  const running = job.status === 'queued' || job.status === 'running';
+  const done = job.status === 'done';
+  const canceled = job.status === 'canceled';
+  const failed = job.status === 'error';
+  // 모델 로딩 대기 단계는 아직 페이지가 렌더되지 않아 라이브 뷰(페이지 이미지)를
+  // 열면 404가 쏟아진다 — 진행바만 보여준다.
+  const loadingPhase = running && (job.progress || {}).phase === 'loading';
+
+  el.progressSection.hidden = !running;
+  el.resultSection.hidden = !(done || canceled);
+  el.errorSection.hidden = !(failed || canceled);
+  el.liveDetails.hidden = (loadingPhase || !running) && !hasLiveContent();
+  el.liveDetails.open = running && !loadingPhase;
+  setStopButton(job.status);
+
+  if (running) {
+    const p = job.progress || {};
+    state.displayedPhase = p.phase;
+    updateProgress(p, job.status);
+    if (!loadingPhase) {
+      // A status snapshot goes through the same announce machine as SSE
+      // progress (phase-gated: an OCR snapshot seeds the page when opening a
+      // job mid-OCR; render/merge snapshots must not pin it).
+      const r = groundAnnounce(state.ground, p.phase, p.current_page, p.total_pages);
+      if (r.firstOcr && state.pageBoxes.size > 0) state.pageBoxes = new Map();
+      if (state.followLive) state.viewPage = state.ground.page;
+      updateLeftPane();
+    }
+  }
+  if (done) renderResult(job);
+  if (canceled) {
+    renderError(job.error, true);
+    if (job.result) renderResult(job);
+    else renderPartialResult(job);
+  }
+  if (failed) renderError(job.error, false);
+}
+
+function hasLiveContent() {
+  return state.rawText.length > 0 || state.pageBoxes.size > 0 || el.streamPane.childNodes.length > 0;
+}
+
+/* ============================ Progress ============================ */
+
+// The progress BAR consumes every phase (render progress is real progress);
+// page tracking for the left pane is delegated to groundAnnounce, which
+// filters to phase==="ocr".
+function updateProgress(p, status) {
+  const queued = status === 'queued';
+  // 모델 로딩 대기(note)는 진행 단계가 아직 미정이라 queued와 동일하게 스피너/불확정
+  const note = (p && typeof p.note === 'string' && p.note) ? p.note : '';
+  const total = Number(p.total_pages) || 0;
+  const cur = Number(p.current_page) || 0;
+  const totalChunks = Number(p.total_chunks) || 0;
+  const chunk = Number(p.chunk) || 0;
+
+  // queued 문구는 헤더/목록 칩과 동일 조합('대기중 · N번째')으로 통일
+  el.progressPhase.textContent = progressPhaseText(
+    p, status, statusLabel({ status: 'queued', queue_position: state.queuePos }),
+  );
+  el.progressSpinner.hidden = !queued && !note;
+
+  const determinate = !queued && !note && total > 0;
+  el.progressTrack.classList.toggle('indeterminate', !determinate);
+  if (determinate) {
+    const pct = Math.min(100, Math.max(0, (cur / total) * 100));
+    el.progressFill.style.width = `${pct}%`;
+    el.progressCount.textContent = `${cur} / ${total} 페이지`;
+  } else {
+    el.progressFill.style.width = '';
+    el.progressCount.textContent = '';
+  }
+
+  el.progressChunk.textContent = (!queued && totalChunks > 0) ? `청크 ${chunk} / ${totalChunks}` : '';
+}
+
+// SSE / poll progress payloads are flat objects that include "status".
+function applyProgress(d) {
+  const status = d.status || state.displayedStatus;
+  const wasRunning = state.displayedStatus === 'queued' || state.displayedStatus === 'running';
+  const prevPhase = state.displayedPhase;
+  state.displayedStatus = status;
+  state.displayedPhase = d.phase;
+  noteQueuePosition(status, d.queue_position);
+  updateHeaderChip(status);
+
+  const running = status === 'queued' || status === 'running';
+  el.progressSection.hidden = !running;
+  if (!running) return;
+
+  el.resultSection.hidden = true;
+  el.errorSection.hidden = true;
+  setStopButton(status);
+  updateProgress(d, status);
+
+  // 모델 로딩 대기 단계에서는 아직 페이지가 없으니 라이브 3-패널을 열지 않는다 —
+  // 없는 페이지 이미지를 요청해 404가 쏟아지는 것을 막는다(라이브 내용이 이미
+  // 쌓여 있으면 유지). 실제 render/ocr로 진입하면 아래 경로로 넘어간다.
+  if (d.phase === 'loading') {
+    el.liveDetails.hidden = !hasLiveContent();
+    return;
+  }
+
+  el.liveDetails.hidden = false;
+  // 로딩/미표시에서 실제 처리 단계로 처음 진입할 때 라이브 뷰를 연다 (수동 접힘 존중)
+  if (!wasRunning || prevPhase === 'loading') el.liveDetails.open = true;
+
+  // Drain buffered markers/boxes FIRST so content preceding this announcement
+  // stays attributed to its own page, then apply the announcement.
+  drainGroundToUI(false);
+  const r = groundAnnounce(state.ground, d.phase, d.current_page, d.total_pages);
+  if (r.firstOcr && state.pageBoxes.size > 0) {
+    state.pageBoxes = new Map(); // stale pre-OCR boxes (rerun leftovers)
+    renderOverlay();
+  }
+  if (r.pageChanged || r.firstOcr || r.totalChanged) {
+    if (state.followLive) state.viewPage = state.ground.page;
+    updateLeftPane();
+  }
+  retryPageImageIfNeeded();
+}
+
+/* ============================ Live state ============================ */
+
+function resetLiveState() {
+  state.liveGen += 1;
+  if (state.rafId) { cancelAnimationFrame(state.rafId); state.rafId = 0; }
+  clearTimeout(state.previewTimer);
+  state.previewTimer = 0;
+  state.previewDirty = false;
+  state.previewFails = 0;
+  state.previewStopped = false;
+  state.previewPageCache = [];
+  state.previewTailNodes = [];
+  state.previewTailMd = '';
+  state.previewTailSep = false;
+  state.previewAutoScroll = true;
+  state.streamPending = '';
+  state.streamPageNo = 0;
+  state.streamAutoScroll = true;
+  state.streamConnected = false;
+  state.rawText = '';
+  state.ground = createGroundState();
+  state.viewPage = 1;
+  state.followLive = true;
+  state.pageBoxes = new Map();
+  state.imgFailed = false;
+  state.imgLastTry = 0;
+  state.cancelRequestedFor = null;
+
+  el.streamPane.textContent = '';
+  el.livePreview.innerHTML = '';
+  el.boxOverlay.textContent = '';
+  el.pageImg.hidden = true;
+  el.pageImg.removeAttribute('src');
+  delete el.pageImg.dataset.url;
+  el.pageNote.hidden = false;
+  el.pageNote.textContent = '페이지 이미지 대기 중…';
+  el.pagerLabel.textContent = '– / –';
+  el.pagerPrev.disabled = true;
+  el.pagerNext.disabled = true;
+  el.followChip.hidden = true;
+}
+
+/* ============================ Raw stream (middle pane) ============================ */
+
+function enqueueToken(text) {
+  if (!text) return;
+  state.streamPending += text;
+  state.rawText += text;
+  groundPush(state.ground, text);
+  scheduleFlush();
+}
+
+// 서버가 EventSource 최초 연결/재연결 전에 누적한 전체 token 스트림을 원자적으로
+// 보내는 replay 이벤트. 기존 부분 스트림을 append하면 중복되므로 RAW/grounding/
+// preview 세 축을 같은 원문으로 함께 재구축한다. 진행 스냅샷보다 새 청크 선언이
+// 앞선 경우(current_page > replay의 마지막 마커)는 다음 마커를 confirmation으로 둔다.
+function restoreTokenReplay(d) {
+  if (!d || typeof d.text !== 'string' || !d.text) return;
+  if (d.truncated) {
+    appendSystemLine('누적 출력이 복구 상한을 넘어 전체 리플레이를 적용하지 못했습니다 — 완료 결과는 보존됩니다.', 'warn');
+    return;
+  }
+
+  const oldFollow = state.followLive;
+  const oldView = state.viewPage;
+  state.liveGen += 1; // 진행 중 preview 응답 무효화
+  if (state.rafId) { cancelAnimationFrame(state.rafId); state.rafId = 0; }
+  clearTimeout(state.previewTimer);
+  state.previewTimer = 0;
+  state.previewDirty = false;
+  state.previewFails = 0;
+  state.previewStopped = false;
+  state.previewPageCache = [];
+  state.previewTailNodes = [];
+  state.previewTailMd = '';
+  state.previewTailSep = false;
+  state.streamPending = d.text;
+  state.streamPageNo = 0;
+  state.rawText = d.text;
+  state.ground = createGroundState();
+  state.pageBoxes = new Map();
+
+  el.streamPane.textContent = '';
+  el.livePreview.innerHTML = '';
+  el.boxOverlay.textContent = '';
+
+  groundPush(state.ground, d.text);
+  flushStream(false);
+  drainGroundToUI(false);
+
+  const total = Number(d.total_pages) || 0;
+  if (total > state.ground.totalPages) state.ground.totalPages = total;
+  state.ground.ocrSeen = true;
+  const current = Number(d.current_page) || 0;
+  if (current > state.ground.page) {
+    state.ground.page = total ? Math.min(current, total) : current;
+    state.ground.expectAnnounce = true;
+  }
+  state.streamPageNo = syncedStreamPageNo(state.streamPageNo, state.ground);
+  state.followLive = oldFollow;
+  state.viewPage = oldFollow
+    ? state.ground.page
+    : Math.min(Math.max(1, oldView), Math.max(total, state.ground.page, 1));
+  updateLeftPane();
+  schedulePreviewRender();
+  appendSystemLine('누적 OCR 출력을 복구해 실시간 뷰를 동기화했습니다.');
+}
+
+function scheduleFlush() {
+  if (state.rafId) return;
+  state.rafId = requestAnimationFrame(() => {
+    state.rafId = 0;
+    flushStream(false);
+    drainGroundToUI(false);
+    // pane이 방금 pending 마커를 전부 소화한 시점 — 재연결 갭 등으로 마커가
+    // 유실됐다면 ground 페이지 기준으로 다음 디바이더 번호를 재동기화한다.
+    state.streamPageNo = syncedStreamPageNo(state.streamPageNo, state.ground);
+    schedulePreviewRender();
+  });
+}
+
+// Append pending stream text, converting <PAGE> markers into page-break
+// dividers. Divider k reads "페이지 k" — marker k announces page k (each
+// page's stream segment BEGINS with its marker). A partial marker at the
+// tail is held back (unless final) so it is never split.
+function flushStream(final) {
+  const buf = state.streamPending;
+  state.streamPending = '';
+  if (!buf) return;
+
+  const frag = document.createDocumentFragment();
+  let i = 0;
+  while (true) {
+    const idx = buf.indexOf(PAGE_MARKER, i);
+    if (idx === -1) break;
+    if (idx > i) frag.appendChild(document.createTextNode(buf.slice(i, idx)));
+    state.streamPageNo += 1;
+    frag.appendChild(makePageDivider(state.streamPageNo));
+    i = idx + PAGE_MARKER.length;
+  }
+
+  let rest = buf.slice(i);
+  if (!final && rest) {
+    // hold back the longest suffix that could be the start of "<PAGE>"
+    const maxCheck = Math.min(rest.length, PAGE_MARKER.length - 1);
+    for (let k = maxCheck; k > 0; k -= 1) {
+      if (PAGE_MARKER.startsWith(rest.slice(rest.length - k))) {
+        state.streamPending = rest.slice(rest.length - k) + state.streamPending;
+        rest = rest.slice(0, rest.length - k);
+        break;
+      }
+    }
+  }
+  if (rest) frag.appendChild(document.createTextNode(rest));
+
+  if (frag.childNodes.length) {
+    el.streamPane.appendChild(frag);
+    if (state.streamAutoScroll) el.streamPane.scrollTop = el.streamPane.scrollHeight;
+  }
+}
+
+function makePageDivider(n) {
+  return h('div', { class: 'stream-page-break' }, h('span', { class: 'spb-label', text: `페이지 ${n}` }));
+}
+
+function appendSystemLine(text, kind) {
+  const line = h('div', { class: 'stream-sys' + (kind ? ' ' + kind : ''), text });
+  el.streamPane.appendChild(line);
+  if (state.streamAutoScroll) el.streamPane.scrollTop = el.streamPane.scrollHeight;
+}
+
+function onStreamScroll() {
+  const pane = el.streamPane;
+  state.streamAutoScroll = (pane.scrollHeight - pane.scrollTop - pane.clientHeight) < 24;
+}
+
+/* ============================ Grounding → left pane ============================ */
+
+function drainGroundToUI(final) {
+  const events = groundDrain(state.ground, final);
+  if (!events.length) return;
+  let pageMoved = false;
+  for (const ev of events) {
+    if (ev.type === 'page') pageMoved = true;
+    else addBoxes(ev.page, ev.label, ev.boxes);
+  }
+  if (pageMoved) {
+    if (state.followLive) state.viewPage = state.ground.page;
+    updateLeftPane();
+  }
+}
+
+function labelColor(label) {
+  return BOX_COLORS[normalizeLabel(label)] || BOX_FALLBACK_COLOR;
+}
+
+function addBoxes(page, label, boxes) {
+  let arr = state.pageBoxes.get(page);
+  if (!arr) { arr = []; state.pageBoxes.set(page, arr); }
+  const labeled = boxes.map((b) => ({ label, x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2 }));
+  for (const b of labeled) arr.push(b);
+  if (page === state.viewPage) {
+    const frag = document.createDocumentFragment();
+    for (const b of labeled) frag.appendChild(makeBoxEl(b, true));
+    el.boxOverlay.appendChild(frag);
+  }
+}
+
+function makeBoxEl(b, animate) {
+  const div = h('div', { class: 'gbox' + (animate ? ' gbox-in' : '') });
+  div.style.left = `${(b.x1 / 999) * 100}%`;
+  div.style.top = `${(b.y1 / 999) * 100}%`;
+  div.style.width = `${((b.x2 - b.x1) / 999) * 100}%`;
+  div.style.height = `${((b.y2 - b.y1) / 999) * 100}%`;
+  div.style.setProperty('--gbox-c', labelColor(b.label));
+  div.appendChild(h('span', { class: 'gbox-label', text: b.label }));
+  return div;
+}
+
+function pageImageUrl(id, n) {
+  return readerImageUrl(id, n); // 동일한 0패딩 4자리 파일명 계약 (순수 코어 공유)
+}
+
+function updateLeftPane() {
+  const id = state.currentJobId;
+  if (!id) return;
+  const g = state.ground;
+  const total = Math.max(g.totalPages || 0, g.page, 1);
+  if (state.viewPage > total) state.viewPage = total;
+
+  el.pagerLabel.textContent = `${state.viewPage} / ${total}`;
+  el.pagerPrev.disabled = state.viewPage <= 1;
+  el.pagerNext.disabled = state.viewPage >= total;
+  el.followChip.hidden = state.followLive;
+
+  const url = pageImageUrl(id, state.viewPage);
+  if (el.pageImg.dataset.url !== url) {
+    el.pageImg.dataset.url = url;
+    state.imgFailed = false;
+    el.pageImg.src = url; // visibility settled by the load/error handlers
+  }
+  renderOverlay();
+}
+
+function renderOverlay() {
+  el.boxOverlay.textContent = '';
+  const boxes = state.pageBoxes.get(state.viewPage);
+  if (!boxes || !boxes.length) return;
+  const frag = document.createDocumentFragment();
+  for (const b of boxes) frag.appendChild(makeBoxEl(b, false));
+  el.boxOverlay.appendChild(frag);
+}
+
+function pageNav(dir) {
+  const g = state.ground;
+  const total = Math.max(g.totalPages || 0, g.page, 1);
+  const next = Math.min(total, Math.max(1, state.viewPage + dir));
+  if (next === state.viewPage) return;
+  state.viewPage = next;
+  state.followLive = next === g.page; // paging away disables follow; reaching the live page re-enables
+  updateLeftPane();
+}
+
+function onPageImgLoad() {
+  state.imgFailed = false;
+  el.pageImg.hidden = false;
+  el.pageNote.hidden = true;
+}
+
+function onPageImgError() {
+  if (!el.pageImg.dataset.url) return; // src was cleared on reset
+  state.imgFailed = true;
+  el.pageImg.hidden = true;
+  el.pageNote.hidden = false;
+  el.pageNote.textContent = '페이지 이미지 준비 중…';
+}
+
+// Page PNGs appear once the render phase finishes; retry quietly on progress.
+function retryPageImageIfNeeded() {
+  if (!state.imgFailed) return;
+  const url = el.pageImg.dataset.url;
+  if (!url) return;
+  const now = Date.now();
+  if (now - state.imgLastTry < 1500) return;
+  state.imgLastTry = now;
+  el.pageImg.src = `${url}?r=${now}`; // cache-bust the failed attempt
+}
+
+/* ============================ Live rendered preview (right pane) ============================ */
+
+function schedulePreviewRender() {
+  if (state.previewStopped) return;
+  state.previewDirty = true;
+  if (state.previewTimer || state.previewInFlight) return;
+  state.previewTimer = setTimeout(runPreviewRender, 600);
+}
+
+function maybeReschedulePreview() {
+  if (state.previewDirty && state.currentJobId && !state.previewStopped &&
+      !state.previewTimer && !state.previewInFlight) {
+    state.previewTimer = setTimeout(runPreviewRender, state.previewFails >= 4 ? 3000 : 600);
+  }
+}
+
+// POST 한 번 — 성공 시 {html}, HTTP 실패 시 {status}, 네트워크 오류 시 {status: 0}.
+async function postPreviewRender(id, body) {
+  try {
+    const res = await fetch(`/api/jobs/${id}/render-preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      body,
+    });
+    if (res.ok) return { html: await res.text() };
+    return { status: res.status };
+  } catch (_) {
+    return { status: 0 }; // network error → retried on the next schedule
+  }
+}
+
+// Trusted server-rendered fragment(/html과 동일 렌더러)를 pane 끝에 붙이고
+// 붙인 노드 목록을 돌려준다. withSep이면 페이지 경계 hr을 그룹 선두에 포함.
+// 타이포셋은 새로 붙인 노드로만 제한 — 기존 확정 노드는 재타이포셋하지 않는다.
+function appendPreviewFragment(html, withSep) {
+  const nodes = [];
+  if (withSep) nodes.push(h('hr'));
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  nodes.push(...tpl.content.childNodes);
+  for (const n of nodes) {
+    el.livePreview.appendChild(n);
+    if (n.nodeType === 1) typesetMath(n);
+  }
+  return nodes;
+}
+
+// 413(서버 2MB 상한) 또는 연속 실패 시 라이브 프리뷰를 중단하고 원인에 맞는
+// 한 줄 안내를 남긴다(일시 장애 중단에 '문서가 커서'라고 표시하지 않도록).
+// 잡 완료 후 결과 탭(/html) 렌더는 이와 무관하게 기존 경로로 동작한다.
+function stopLivePreview(message) {
+  state.previewStopped = true;
+  state.previewDirty = false;
+  clearTimeout(state.previewTimer);
+  state.previewTimer = 0;
+  el.livePreview.appendChild(h('div', {
+    class: 'lp-note',
+    text: message || '라이브 미리보기를 중단했습니다 — 완료 후 결과 탭에서 확인하세요',
+  }));
+}
+
+// Throttled, latest-wins (queue of 1): at most one cycle in flight; tokens
+// arriving mid-flight mark it dirty and exactly one follow-up is scheduled.
+// 증분 렌더: 확정 페이지는 최초 1회만 POST해 HTML을 캐시하고, 이후에는
+// 미확정 꼬리만 재전송한다 — 누적 전체 재전송(O(n²)·2MB 413 루프)을 피한다.
+async function runPreviewRender() {
+  state.previewTimer = 0;
+  if (state.previewInFlight || !state.previewDirty || state.previewStopped) return;
+  const id = state.currentJobId;
+  if (!id) { state.previewDirty = false; return; }
+  const gen = state.liveGen;
+  state.previewDirty = false;
+
+  const plan = planPreviewRender(
+    state.rawText, state.previewPageCache, state.previewTailMd, state.previewTailSep);
+  if (!plan.newPages.length && !plan.tailChanged) { maybeReschedulePreview(); return; }
+
+  state.previewInFlight = true;
+  let failStatus = -1; // -1 = 실패 없음
+  const pageHtmls = [];
+  for (const p of plan.newPages) {
+    if (!p.md) { pageHtmls.push(''); continue; }
+    const r = await postPreviewRender(id, p.md);
+    if (state.currentJobId !== id || state.liveGen !== gen) { // 잡 전환 가드
+      state.previewInFlight = false;
+      maybeReschedulePreview();
+      return;
+    }
+    if (r.html == null) { failStatus = r.status; break; }
+    pageHtmls.push(r.html);
+  }
+  let tailHtml = '';
+  if (failStatus < 0 && plan.tailChanged && plan.tailMd) {
+    const r = await postPreviewRender(id, plan.tailMd);
+    if (state.currentJobId !== id || state.liveGen !== gen) { // 잡 전환 가드
+      state.previewInFlight = false;
+      maybeReschedulePreview();
+      return;
+    }
+    if (r.html == null) failStatus = r.status;
+    else tailHtml = r.html;
+  }
+  state.previewInFlight = false;
+
+  if (failStatus >= 0) {
+    state.previewFails += 1;
+    state.previewDirty = true; // 전송하지 못한 조각은 다음 사이클에 재시도
+    if (failStatus === 413) {
+      stopLivePreview('문서가 커서 라이브 미리보기를 중단했습니다 — 완료 후 결과 탭에서 확인하세요');
+    } else if (state.previewFails >= 5) {
+      stopLivePreview('라이브 미리보기 렌더가 계속 실패해 중단했습니다 — 완료 후 결과 탭에서 확인하세요');
+    } else {
+      maybeReschedulePreview();
+    }
+    return;
+  }
+  state.previewFails = 0;
+
+  // DOM 증분 적용: 확정 페이지 노드는 유지하고 꼬리 노드만 이동/교체한다.
+  const oldTail = state.previewTailNodes;
+  for (const n of oldTail) n.remove();
+  state.previewTailNodes = [];
+  plan.newPages.forEach((p, i) => {
+    state.previewPageCache.push(pageHtmls[i]); // p.idx === 캐시 길이 (순서 보장)
+    if (pageHtmls[i]) appendPreviewFragment(pageHtmls[i], p.sep);
+  });
+  if (plan.tailChanged) {
+    state.previewTailMd = plan.tailMd;
+    state.previewTailSep = plan.tailSep;
+    if (tailHtml) state.previewTailNodes = appendPreviewFragment(tailHtml, plan.tailSep);
+  } else {
+    // 꼬리 내용은 그대로인데 앞에 확정 페이지가 생긴 경우 — 같은 노드를 재부착
+    for (const n of oldTail) el.livePreview.appendChild(n);
+    state.previewTailNodes = oldTail;
+  }
+  if (state.previewAutoScroll) el.livePreview.scrollTop = el.livePreview.scrollHeight;
+  maybeReschedulePreview();
+}
+
+function onPreviewScroll() {
+  const pane = el.livePreview;
+  state.previewAutoScroll = (pane.scrollHeight - pane.scrollTop - pane.clientHeight) < 24;
+}
+
+/* ── KaTeX 타이포셋 (로컬 벤더 — vendor/katex) ────────────────────────── */
+// 서버 렌더러(render.py)가 tex를 이스케이프해 .math-inline/.math-display로
+// 내보낸다. KaTeX 미로드(자산 누락 등) 시에는 raw LaTeX 텍스트가 그대로
+// 보이는 그레이스풀 폴백.
+function typesetMath(root) {
+  if (!window.katex || !root) return;
+  // root 자신이 수식 블록일 수 있다 (증분 프리뷰는 최상위 노드 단위로 붙인다)
+  const targets = root.matches && root.matches('.math-inline, .math-display')
+    ? [root, ...root.querySelectorAll('.math-inline, .math-display')]
+    : root.querySelectorAll('.math-inline, .math-display');
+  targets.forEach((elm) => {
+    if (elm.dataset.mathDone) return;
+    const tex = elm.textContent;
+    try {
+      window.katex.render(tex, elm, {
+        displayMode: elm.classList.contains('math-display'),
+        throwOnError: false,
+      });
+      elm.dataset.mathDone = '1';
+    } catch (_) { /* 렌더 불가 tex는 원문 유지 */ }
+  });
+}
+
+/* ============================ Cancel (STOP) ============================ */
+
+function setStopButton(status) {
+  const running = status === 'queued' || status === 'running';
+  el.jobStop.hidden = !running;
+  if (!running) return;
+  const canceling = state.cancelRequestedFor === state.currentJobId;
+  el.jobStop.disabled = canceling;
+  el.jobStopLabel.textContent = canceling ? '취소 중…' : '정지';
+}
+
+async function requestCancel() {
+  const id = state.currentJobId;
+  if (!id) return;
+  const status = state.displayedStatus;
+  if (status !== 'queued' && status !== 'running') return;
+
+  state.cancelRequestedFor = id;
+  setStopButton(status);
+
+  let ok = false;
+  let gone = false;
+  try {
+    const res = await fetch(`/api/jobs/${id}/cancel`, { method: 'POST' });
+    ok = res.ok;
+    gone = res.status === 404;
+  } catch (_) { /* network error */ }
+
+  if (state.currentJobId !== id) return;
+  if (gone) {
+    removeJobFromList(id);
+    teardownConnections();
+    state.currentJobId = null;
+    state.displayedStatus = null;
+    state.displayedPhase = null;
+    showEmptyState();
+    syncJobHash(null); // 404로 사라진 잡 — 해시 정리
+    showToast('해당 작업을 찾을 수 없습니다.', 'warn');
+    return;
+  }
+  if (!ok) {
+    state.cancelRequestedFor = null;
+    setStopButton(state.displayedStatus);
+    showToast('취소 요청에 실패했습니다.', 'error');
+  }
+  // success: the SSE error event (canceled:true) or status polling finalizes the UI
+}
+
+/* ============================ SSE + fallback ============================ */
+
+function parseEventData(e) {
+  if (!e || e.data == null) return null; // connection errors have no data
+  return safeParse(e.data);
+}
+
+function teardownConnections() {
+  if (state.es) { try { state.es.close(); } catch (_) { /* ignore */ } state.es = null; }
+  if (state.fallbackTimer) { clearInterval(state.fallbackTimer); state.fallbackTimer = 0; }
+  clearSsePromote(); // 잡 전환·삭제·터미널 상태에서 재승격 재시도도 함께 정리
+  if (state.rafId) { cancelAnimationFrame(state.rafId); state.rafId = 0; }
+  clearTimeout(state.previewTimer);
+  state.previewTimer = 0;
+  state.previewDirty = false;
+  state.fallbackActive = false;
+  state.sseErrorCount = 0;
+  teardownTranslate(); // 잡 전환·삭제·페이지 이탈 시 번역 구독도 함께 정리
+  teardownQa();        // 질문 탭도 잡 단위 — 이전 잡의 대화 로그/진행 정리
+  teardownReader();    // 리더 이미지 재시도 타이머 정리
+}
+
+// 최초 구독(selectJob 경로)과 폴링 강등 후 재승격 시도가 공유하는 진입점.
+// 재승격 중에는 fallbackActive를 건드리지 않는다 — open 성공까지 폴링 유지.
+function startStream(id) {
+  state.sseErrorCount = 0;
+
+  if (typeof EventSource === 'undefined') {
+    appendSystemLine('이 브라우저는 실시간 스트림을 지원하지 않아 상태 폴링을 사용합니다.', 'warn');
+    startFallbackPolling(id);
+    return;
+  }
+
+  let es;
+  try {
+    es = new EventSource(`/api/jobs/${id}/events`);
+  } catch (_) {
+    if (!state.fallbackActive) startFallbackPolling(id);
+    scheduleSsePromote(id); // 강등은 임시 — 백오프 후 다시 시도
+    return;
+  }
+  state.es = es;
+
+  es.addEventListener('open', () => {
+    if (state.currentJobId !== id) return;
+    state.sseErrorCount = 0;
+    clearSsePromote(); // 재승격 성공 — 백오프 단계 리셋
+    if (state.fallbackActive) stopFallbackPolling(); // 폴링 해제, 정상 복귀
+    if (!state.streamConnected) {
+      state.streamConnected = true;
+      appendSystemLine('실시간 스트림에 연결되었습니다.');
+    } else {
+      // 서버의 replay 이벤트가 누적 원문으로 세 패널을 다시 동기화한다.
+      // replay가 비어 있는(아직 OCR 토큰 없음) 재연결도 연결 자체는 정상이다.
+      flushStream(false);
+      drainGroundToUI(false);
+      state.streamPageNo = syncedStreamPageNo(state.streamPageNo, state.ground);
+      appendSystemLine('스트림 재연결됨 — 누적 출력을 동기화합니다.');
+    }
+  });
+
+  es.addEventListener('progress', (e) => {
+    if (state.currentJobId !== id) return;
+    const d = parseEventData(e);
+    if (d) applyProgress(d);
+  });
+
+  es.addEventListener('token', (e) => {
+    if (state.currentJobId !== id) return;
+    const d = parseEventData(e);
+    if (d && typeof d.text === 'string') enqueueToken(d.text);
+  });
+
+  es.addEventListener('replay', (e) => {
+    if (state.currentJobId !== id) return;
+    restoreTokenReplay(parseEventData(e));
+  });
+
+  es.addEventListener('done', (e) => {
+    if (state.currentJobId !== id) return;
+    onJobDone(id, parseEventData(e) || {});
+  });
+
+  es.addEventListener('error', (e) => {
+    if (state.currentJobId !== id) return;
+    const d = parseEventData(e);
+    if (d) onJobError(id, d);      // server-sent job error (has JSON data)
+    else handleSseConnError(id);   // transport-level error (no data)
+  });
+}
+
+function handleSseConnError(id) {
+  if (state.currentJobId !== id) return;
+  if (state.fallbackActive) {
+    // 폴링 중의 재승격 시도가 실패 — es를 닫고(브라우저 자동 재시도 차단)
+    // 다음 백오프 단계로 재시도만 예약한다. 폴링은 그대로 유지된다.
+    if (state.es) { try { state.es.close(); } catch (_) { /* ignore */ } state.es = null; }
+    scheduleSsePromote(id);
+    return;
+  }
+  state.sseErrorCount += 1;
+  if (state.sseErrorCount >= 2) {
+    if (state.es) { try { state.es.close(); } catch (_) { /* ignore */ } state.es = null; }
+    appendSystemLine('라이브 스트림을 사용할 수 없어 상태 폴링으로 전환했습니다 — 주기적으로 재연결을 시도합니다.', 'warn');
+    startFallbackPolling(id);
+    scheduleSsePromote(id); // 강등은 임시 — 백오프 후 SSE 재승격 시도
+  }
+}
+
+// 폴링 강등 후 SSE 재승격 시도를 백오프(10s→20s→30s 상한)로 예약한다.
+// 타이머는 teardownConnections / 터미널 폴링 / open 성공에서 정리된다.
+function scheduleSsePromote(id) {
+  if (state.ssePromoteTimer) clearTimeout(state.ssePromoteTimer);
+  const delay = ssePromoteDelay(state.ssePromoteAttempts);
+  state.ssePromoteAttempts += 1;
+  state.ssePromoteTimer = setTimeout(() => {
+    state.ssePromoteTimer = 0;
+    // 잡 전환·터미널(폴링 해제)·이미 복귀한 경우에는 시도하지 않는다
+    if (state.currentJobId !== id || !state.fallbackActive) return;
+    startStream(id);
+  }, delay);
+}
+
+function clearSsePromote() {
+  if (state.ssePromoteTimer) { clearTimeout(state.ssePromoteTimer); state.ssePromoteTimer = 0; }
+  state.ssePromoteAttempts = 0;
+}
+
+function stopFallbackPolling() {
+  if (state.fallbackTimer) { clearInterval(state.fallbackTimer); state.fallbackTimer = 0; }
+  state.fallbackActive = false;
+}
+
+function startFallbackPolling(id) {
+  state.fallbackActive = true;
+  if (state.fallbackTimer) clearInterval(state.fallbackTimer);
+  state.fallbackTimer = setInterval(async () => {
+    if (state.currentJobId !== id) { clearInterval(state.fallbackTimer); state.fallbackTimer = 0; return; }
+    let job;
+    try {
+      job = await apiGet(`/api/jobs/${id}`);
+    } catch (e) {
+      if (e.status === 404) {
+        clearInterval(state.fallbackTimer);
+        state.fallbackTimer = 0;
+        clearSsePromote();
+        if (state.es) { try { state.es.close(); } catch (_) { /* ignore */ } state.es = null; } // 재승격 시도 중이던 es
+        removeJobFromList(id);
+        if (state.currentJobId === id) { state.currentJobId = null; showEmptyState(); syncJobHash(null); }
+      }
+      return;
+    }
+    if (state.currentJobId !== id) return;
+    if (isTerminal(job.status)) {
+      clearInterval(state.fallbackTimer);
+      state.fallbackTimer = 0;
+      state.fallbackActive = false;
+      clearSsePromote(); // 터미널 — 재승격 재시도도 정리
+      if (state.es) { try { state.es.close(); } catch (_) { /* ignore */ } state.es = null; } // 재승격 시도 중이던 es
+      flushStream(true);
+      drainGroundToUI(true);
+      renderJob(job);
+      refreshJobs();
+    } else {
+      applyProgress(Object.assign({}, job.progress || {}, {
+        status: job.status,
+        queue_position: job.queue_position, // 상세 폴링도 대기열 위치를 반영
+      }));
+    }
+  }, 1000);
+}
+
+async function onJobDone(id, data) {
+  if (state.currentJobId !== id) return;
+  flushStream(true);
+  drainGroundToUI(true);
+  teardownConnections();
+  state.displayedStatus = 'done';
+  updateHeaderChip('done');
+  setStopButton('done');
+
+  let job = null;
+  try {
+    job = await apiGet(`/api/jobs/${id}`);
+  } catch (_) { /* fall back to event data below */ }
+  if (state.currentJobId !== id) return;
+
+  if (job && job.result) {
+    renderJob(job);
+  } else {
+    // Minimal render from the done event payload (URLs only).
+    el.progressSection.hidden = true;
+    el.errorSection.hidden = true;
+    el.resultSection.hidden = false;
+    el.liveDetails.open = false;
+    resetTranslateUI();
+    const base = 'document';
+    state.currentBaseName = base;
+    state.readerTotalHint = 0;       // 총 페이지 미상 — 리더는 섹션 수로 폴백
+    state.resultHasLayout = undefined; // 미상 → PDF 내보내기 fail-open (서버 409가 방어)
+    state.resultUrls = {
+      markdown: data.markdown_url,
+      archive: data.archive_url,
+      documentHtml: `/api/jobs/${id}/document.html`,
+      layoutHtml: `/api/jobs/${id}/layout.html`,
+      pdf: `/api/jobs/${id}/pdf?lang=ko`,
+    };
+    applyDownloadLangs();
+    el.dlLayout.hidden = false; // 엔진 메타 없는 최소 경로 — 이전 잡의 숨김 상태 잔류 방지
+    renderThumbGrid(el.layoutsGrid, [], '레이아웃 이미지를 불러오지 못했습니다.');
+    renderThumbGrid(el.pagesGrid, [], '페이지 이미지를 불러오지 못했습니다.');
+    state.previewLoaded = false;
+    state.markdownLoaded = false;
+    state.docLayoutLoaded = false;
+    el.previewBody.innerHTML = '';
+    el.doclayoutBody.innerHTML = '';
+    el.mdCode.textContent = '';
+    activateTab('reader'); // 완료 잡의 기본 뷰 (renderResult와 동일 규칙)
+    initTranslateForJob();
+    initQaForJob(job); // job=null 허용 — 총 페이지 미상으로 폼만 연다
+  }
+  refreshJobs();
+}
+
+function onJobError(id, d) {
+  if (state.currentJobId !== id) return;
+  flushStream(true);
+  drainGroundToUI(true);
+  teardownConnections();
+  const canceled = !!(d && d.canceled);
+  state.displayedStatus = canceled ? 'canceled' : 'error';
+  state.cancelRequestedFor = null;
+  updateHeaderChip(state.displayedStatus);
+  el.progressSection.hidden = true;
+  el.errorSection.hidden = false;
+  el.liveDetails.open = false;
+  el.liveDetails.hidden = !hasLiveContent();
+  setStopButton(state.displayedStatus);
+  renderError(d && d.message, canceled);
+  if (canceled) {
+    // partial markdown stays available → offer the Markdown/미리보기 tabs
+    el.resultSection.hidden = false;
+    renderPartialResult({ job_id: id, filename: el.jobFilename.textContent || '' });
+  } else {
+    el.resultSection.hidden = true;
+  }
+  refreshJobs();
+}
+
+/* ============================ Result rendering ============================ */
+
+function baseName(filename) {
+  return String(filename || 'document').replace(/\.pdf$/i, '') || 'document';
+}
+
+function setDownload(anchor, url, downloadName) {
+  if (url) {
+    anchor.href = url;
+    anchor.setAttribute('download', downloadName);
+    anchor.classList.remove('disabled');
+    anchor.removeAttribute('aria-disabled');
+  } else {
+    anchor.removeAttribute('href');
+    anchor.classList.add('disabled');
+    anchor.setAttribute('aria-disabled', 'true');
+  }
+}
+
+function renderResult(job) {
+  const r = job.result || {};
+  const base = baseName(job.filename);
+
+  // 결과를 새로 렌더할 때마다 번역 UI를 원문 상태로 리셋한다
+  // (이전 잡의 ko 선택/EventSource 구독 정리 + 언어 속성 제거).
+  resetTranslateUI();
+
+  state.currentBaseName = base;
+  // 리더 총 페이지 힌트 — 결과의 원본 페이지 목록 우선, 없으면 진행 스냅샷 (0 = 미상)
+  state.readerTotalHint = (Array.isArray(r.pages) && r.pages.length) ||
+    Number((job.progress || {}).total_pages) || 0;
+  // figure_only 엔진의 standalone layout.html은 본문 없는 빈 캔버스라 내보내기 구실을
+  // 못 한다 — HTML 내보내기는 모든 엔진에서 동작하는 document.html(HTML 다운로드)이
+  // 담당하고, 레이아웃 버튼은 이 엔진에선 숨긴다(기능이 완전히 대체됨).
+  const figOnlyLayout = docLayoutIsFigureOnly(
+    state.layoutCapability, state.currentJobEngine, state.healthEngine,
+  );
+  const noLayoutData = r.has_layout === false;
+  // PDF(한국어) 내보내기 가드 — figure_only 엔진은 서버도 409(no-layout)라 함께 숨긴다.
+  // has_layout 미제공(구버전 응답)은 undefined 유지 = fail-open.
+  state.resultHasLayout = (noLayoutData || figOnlyLayout) ? false : r.has_layout;
+  state.resultUrls = {
+    markdown: r.markdown_url,
+    archive: r.archive_url,
+    documentHtml: `/api/jobs/${job.job_id}/document.html`,
+    // 레이아웃 기능 이전에 변환된 옛 잡(layout.json 없음)은 /layout.html이 404 —
+    // 눌러도 조용히 실패하는 버튼 대신 비활성화한다 (has_layout 미제공 구버전 응답은 허용)
+    layoutHtml: (noLayoutData || figOnlyLayout) ? null : `/api/jobs/${job.job_id}/layout.html`,
+    pdf: `/api/jobs/${job.job_id}/pdf?lang=ko`,
+  };
+  applyDownloadLangs(); // currentLang='orig' → 원문 URL로 세팅
+  applyPdfExport();     // 번역 상태가 확인되기 전까지는 숨김 (initTranslateForJob이 갱신)
+  el.dlLayout.hidden = figOnlyLayout;
+  if (noLayoutData) {
+    el.dlLayout.title = '이 작업은 구버전 변환이라 레이아웃 데이터가 없습니다 — PDF를 다시 변환하면 생깁니다';
+  } else {
+    el.dlLayout.removeAttribute('title');
+  }
+
+  renderThumbGrid(el.layoutsGrid, r.layouts, '레이아웃 이미지가 없습니다.');
+  renderThumbGrid(el.pagesGrid, r.pages, '원본 페이지 이미지가 없습니다.');
+
+  // reset lazy caches for the newly opened result
+  state.previewLoaded = false;
+  state.markdownLoaded = false;
+  state.docLayoutLoaded = false;
+  el.previewBody.innerHTML = '';
+  el.doclayoutBody.innerHTML = '';
+  el.mdCode.textContent = '';
+
+  // 완료된 잡은 읽기(리더) 뷰가 기본 — 취소·부분 결과는 기존 동작 유지.
+  activateTab(job.status === 'done' ? 'reader' : 'preview');
+
+  // 번역 컨트롤·질문 폼은 완료(done) 잡에만 붙는다 (취소본은 플레이스홀더 유지).
+  if (job.status === 'done') {
+    initTranslateForJob();
+    initQaForJob(job);
+  } else {
+    showQaPlaceholder();
+  }
+}
+
+// Canceled job: no result object, but partial markdown endpoints still work.
+function renderPartialResult(job) {
+  const id = job.job_id;
+  const base = baseName(job.filename);
+  resetTranslateUI(); // 취소본은 번역 대상이 아니다 (컨트롤 숨김 + PDF 내보내기 숨김)
+  showQaPlaceholder(); // 질문도 완료(done) 잡 전용 — 플레이스홀더 안내
+  // 리더 탭을 열어 보는 경우를 위한 총 페이지 힌트 (부분 결과에는 pages 목록이 없다)
+  state.readerTotalHint = Number((job.progress || {}).total_pages) || 0;
+  setDownload(el.dlMd, `/api/jobs/${id}/markdown`, `${base}.partial.md`);
+  setDownload(el.dlZip, null); // archive returns 409 for unfinished jobs
+  setDownload(el.dlDoc, `/api/jobs/${id}/document.html`, `${base}.partial.html`); // 부분 문서도 유효
+  const figOnly = docLayoutIsFigureOnly(
+    state.layoutCapability, state.currentJobEngine, state.healthEngine,
+  );
+  el.dlLayout.hidden = figOnly; // figure_only의 layout.html은 빈 캔버스 — 문서 HTML이 대체
+  setDownload(el.dlLayout, `/api/jobs/${id}/layout.html`, `${base}.layout.html`); // 부분 레이아웃도 유효
+
+  renderThumbGrid(el.layoutsGrid, [], '취소된 작업에는 레이아웃 이미지가 제공되지 않습니다.');
+  renderThumbGrid(el.pagesGrid, [], '취소된 작업에는 원본 페이지 목록이 제공되지 않습니다.');
+
+  state.previewLoaded = false;
+  state.markdownLoaded = false;
+  state.docLayoutLoaded = false;
+  el.previewBody.innerHTML = '';
+  el.doclayoutBody.innerHTML = '';
+  el.mdCode.textContent = '';
+
+  activateTab('markdown');
+}
+
+function renderThumbGrid(grid, arr, emptyMsg) {
+  grid.textContent = '';
+  if (!Array.isArray(arr) || !arr.length) {
+    grid.appendChild(h('p', { class: 'grid-empty muted', text: emptyMsg }));
+    return;
+  }
+  arr.forEach((url, i) => {
+    const img = h('img', { class: 'thumb-img', loading: 'lazy', decoding: 'async', alt: `${i + 1}번 이미지`, src: url });
+    img.addEventListener('error', () => { img.replaceWith(h('span', { class: 'grid-empty muted', text: '로드 실패' })); });
+    const a = h('a', { class: 'thumb', href: url, target: '_blank', rel: 'noopener', title: `${i + 1} — 새 탭에서 원본 열기` },
+      img, h('span', { class: 'thumb-no', text: String(i + 1) }));
+    grid.appendChild(a);
+  });
+}
+
+/* ============================ Translation (한국어 번역) ============================
+ * 완료된 잡 결과 화면 전용. 상태 머신:
+ *   none/error/canceled → [한국어 번역] 버튼 (error/canceled는 재시도 의미)
+ *   running             → 진행바 + 취소(✕), EventSource 재접속
+ *   done                → [원문 | 한국어] 세그먼트 토글
+ * 라이브 변환 뷰(result-section이 hidden)에는 렌더되지 않는다 — done일 때만 init.
+ * ================================================================================ */
+
+// URL 언어 파라미터 빌더 (순수 — 테스트 대상). ko가 아니면 원본 URL 그대로.
+export function withLangUrl(url, lang) {
+  if (lang !== 'ko' || !url) return url;
+  return url + (url.indexOf('?') === -1 ? '?' : '&') + 'lang=ko';
+}
+
+// translate/state·POST 응답의 status → 노출할 UI (순수 — 테스트 대상).
+export function translateUiStateFor(status) {
+  if (status === 'running') return 'progress';
+  if (status === 'done') return 'toggle';
+  return 'button'; // none | error | canceled | 미지의 값 → 버튼(재시도)
+}
+
+function teardownTranslate() {
+  if (state.translateEs) { try { state.translateEs.close(); } catch (_) { /* ignore */ } state.translateEs = null; }
+  if (state.translatePollTimer) { clearInterval(state.translatePollTimer); state.translatePollTimer = 0; }
+  state.translateSseErrors = 0;
+}
+
+// 번역 UI를 원문 기준으로 완전 초기화 (구독 정리 + 세 컨트롤 숨김 + 언어 속성 제거).
+function resetTranslateUI() {
+  teardownTranslate();
+  state.currentLang = 'orig';
+  state.translateState = 'none';
+  el.translateBtn.hidden = true;
+  el.translateProgress.hidden = true;
+  el.langToggle.hidden = true;
+  setLangSegActive('orig');
+  setResultLangAttr();
+  applyReaderTranslateCta(); // 번역 상태 확인 전에는 리더 CTA도 숨김
+  applyPdfExport();          // 번역 없음 → PDF(한국어) 내보내기 숨김
+}
+
+// health의 translate_available을 버튼에 반영 — false일 때만 비활성.
+// undefined(미수신·구버전 서버)는 활성 유지(fail-open, 서버 503이 최후 방어).
+// 가용성 사유의 비활성만 dataset으로 표시해, 요청 중 일시 비활성(startTranslate)을
+// health 갱신이 잘못 풀어버리지 않게 한다.
+function applyTranslateAvailability() {
+  const btn = el.translateBtn;
+  if (state.translateAvailable === false) {
+    btn.disabled = true;
+    btn.title = '번역 프로바이더가 설정되지 않았습니다 (.env 설정 후 재시작)';
+    btn.dataset.unavailable = '1';
+  } else {
+    btn.removeAttribute('title');
+    if (btn.dataset.unavailable) {
+      delete btn.dataset.unavailable;
+      btn.disabled = false;
+    }
+  }
+  applyReaderTranslateCta(); // health 갱신도 리더 CTA 노출에 반영
+}
+
+/* ── 컨트롤 3종 교체 노출 ─────────────────────────────────────────────── */
+function showTranslateButton() {
+  el.translateBtn.hidden = false;
+  el.translateProgress.hidden = true;
+  el.langToggle.hidden = true;
+  el.translateBtn.disabled = false;
+  el.readerTranslateBtn.disabled = false; // 리더 CTA도 같은 시작 경로 — 함께 복원
+  applyTranslateAvailability(); // 프로바이더 미설정이면 비활성 + 안내 title (CTA 노출도 갱신)
+}
+function showTranslateProgress(current, total) {
+  el.translateBtn.hidden = true;
+  el.translateProgress.hidden = false;
+  el.langToggle.hidden = true;
+  el.translateCancel.disabled = false;
+  updateTranslateProgress(current, total);
+  applyReaderTranslateCta(); // 번역 중에는 리더 CTA 숨김
+}
+function showLangToggle() {
+  el.translateBtn.hidden = true;
+  el.translateProgress.hidden = true;
+  el.langToggle.hidden = false;
+  applyReaderTranslateCta(); // 번역 완료 — 리더 CTA 숨김
+}
+
+function updateTranslateProgress(current, total) {
+  const cur = Number(current) || 0;
+  const tot = Number(total) || 0;
+  el.translateProgressLabel.textContent = tot > 0 ? `번역 중 ${cur}/${tot}` : '번역 중…';
+  const determinate = tot > 0;
+  el.translateProgressTrack.classList.toggle('indeterminate', !determinate);
+  el.translateProgressFill.style.width = determinate
+    ? `${Math.min(100, Math.max(0, (cur / tot) * 100))}%`
+    : '';
+}
+
+function setLangSegActive(lang) {
+  const ko = lang === 'ko';
+  el.langOrig.classList.toggle('active', !ko);
+  el.langKo.classList.toggle('active', ko);
+  el.langOrig.setAttribute('aria-pressed', ko ? 'false' : 'true');
+  el.langKo.setAttribute('aria-pressed', ko ? 'true' : 'false');
+}
+
+// 문서/레이아웃/리더 뷰 컨테이너의 lang="ko" 속성 토글 (CJK 조판 CSS 적용용).
+function setResultLangAttr() {
+  const ko = state.currentLang === 'ko';
+  for (const node of [el.previewBody, el.doclayoutBody, el.readerContent]) {
+    if (!node) continue;
+    if (ko) node.setAttribute('lang', 'ko');
+    else node.removeAttribute('lang');
+  }
+}
+
+// 현재 언어에 맞춰 다운로드 링크(markdown·document.html·layout.html)를 다시 세팅.
+// 아카이브는 ko 파일이 자동 포함되므로 원본 URL 그대로 둔다.
+function applyDownloadLangs() {
+  const u = state.resultUrls || {};
+  const base = state.currentBaseName || 'document';
+  const suffix = state.currentLang === 'ko' ? '.ko' : '';
+  setDownload(el.dlMd, u.markdown ? withLangUrl(u.markdown, state.currentLang) : null, `${base}${suffix}.md`);
+  setDownload(el.dlZip, u.archive || null, `${base}.md.zip`);
+  setDownload(el.dlDoc, u.documentHtml ? withLangUrl(u.documentHtml, state.currentLang) : null, `${base}${suffix}.html`);
+  setDownload(el.dlLayout, u.layoutHtml ? withLangUrl(u.layoutHtml, state.currentLang) : null, `${base}${suffix}.layout.html`);
+}
+
+// 결과 뷰 진입 시 번역 상태를 조회해 알맞은 컨트롤을 노출한다 (done 잡에서만 호출).
+async function initTranslateForJob() {
+  const id = state.currentJobId;
+  if (!id) return;
+  let st = null;
+  try {
+    st = await apiGet(`/api/jobs/${id}/translate/state?lang=ko`);
+  } catch (_) { /* state 엔드포인트 불가 → 버튼 노출로 폴백 */ }
+  if (state.currentJobId !== id) return;
+  const status = (st && st.status) || 'none';
+  state.translateState = status;
+  const ui = translateUiStateFor(status);
+  if (ui === 'progress') {
+    showTranslateProgress(st && st.current, st && st.total);
+    connectTranslateEvents(id); // 진행 중이던 번역에 재접속
+  } else if (ui === 'toggle') {
+    showLangToggle(); // 이미 번역 완료 → 토글만 노출(원문 기본, 사용자가 선택)
+  } else {
+    showTranslateButton();
+  }
+  applyPdfExport(); // 이미 번역된 잡을 열면 이 시점에 PDF(한국어) 버튼이 나타난다
+}
+
+// [한국어 번역] / 리더 [한국어로 읽기] 클릭 → 번역 시작 (공용 경로).
+async function startTranslate() {
+  const id = state.currentJobId;
+  if (!id) return;
+  el.translateBtn.disabled = true;
+  el.readerTranslateBtn.disabled = true; // 리더 CTA도 같은 요청 — 이중 클릭 방지
+  let res = null;
+  let data = null;
+  try {
+    res = await fetch(`/api/jobs/${id}/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ lang: 'ko', force: false }),
+    });
+    const text = await res.text().catch(() => '');
+    data = text ? safeParse(text) : null;
+  } catch (_) {
+    if (state.currentJobId !== id) return;
+    el.translateBtn.disabled = false;
+    el.readerTranslateBtn.disabled = false;
+    showToast('번역 요청 중 네트워크 오류가 발생했습니다.', 'error');
+    return;
+  }
+  if (state.currentJobId !== id) return;
+
+  if (!res.ok) {
+    el.translateBtn.disabled = false;
+    el.readerTranslateBtn.disabled = false;
+    const detail = (data && typeof data.detail === 'string') ? data.detail : null;
+    if (res.status === 503) showToast(detail || '번역 프로바이더가 설정되지 않았습니다.', 'error');
+    else if (res.status === 409) showToast(detail || '아직 완료되지 않은 작업은 번역할 수 없습니다.', 'warn');
+    else if (res.status === 400) showToast(detail || '지원하지 않는 번역 언어입니다.', 'error');
+    else showToast(detail || `번역 요청에 실패했습니다. (${res.status})`, 'error');
+    return;
+  }
+
+  // 202/200 — 이미 번역돼 있으면(done) 바로 토글, 아니면 진행 UI + 구독.
+  state.translateState = 'running';
+  if (data && data.status === 'done') { onTranslateDone(id); return; }
+  showTranslateProgress(0, 0);
+  connectTranslateEvents(id);
+}
+
+function connectTranslateEvents(id) {
+  teardownTranslate(); // 중복 구독 방지
+  if (typeof EventSource === 'undefined') { startTranslatePolling(id); return; }
+  let es;
+  try {
+    es = new EventSource(`/api/jobs/${id}/translate/events?lang=ko`);
+  } catch (_) { startTranslatePolling(id); return; }
+  state.translateEs = es;
+
+  es.addEventListener('progress', (e) => {
+    if (state.currentJobId !== id) return;
+    state.translateSseErrors = 0;
+    const d = parseEventData(e);
+    if (d) { state.translateState = 'running'; showTranslateProgress(d.current, d.total); }
+  });
+  es.addEventListener('done', (e) => {
+    if (state.currentJobId !== id) return;
+    onTranslateDone(id);
+  });
+  es.addEventListener('error', (e) => {
+    if (state.currentJobId !== id) return;
+    const d = parseEventData(e);
+    if (d) onTranslateError(id, d);        // 서버가 보낸 번역 오류(JSON)
+    else handleTranslateConnError(id);     // 전송 계층 오류(데이터 없음)
+  });
+}
+
+function handleTranslateConnError(id) {
+  if (state.currentJobId !== id || !state.translateEs) return;
+  state.translateSseErrors += 1;
+  if (state.translateSseErrors >= 2) { teardownTranslate(); startTranslatePolling(id); }
+}
+
+// SSE 불가/불안정 시 state를 폴링해 진행/완료/오류를 반영하는 폴백.
+function startTranslatePolling(id) {
+  teardownTranslate();
+  state.translatePollTimer = setInterval(async () => {
+    if (state.currentJobId !== id) { clearInterval(state.translatePollTimer); state.translatePollTimer = 0; return; }
+    let st;
+    try { st = await apiGet(`/api/jobs/${id}/translate/state?lang=ko`); }
+    catch (_) { return; }
+    if (state.currentJobId !== id) return;
+    const status = st && st.status;
+    if (status === 'running') { showTranslateProgress(st.current, st.total); return; }
+    clearInterval(state.translatePollTimer); state.translatePollTimer = 0;
+    if (status === 'done') onTranslateDone(id);
+    else if (status === 'error') onTranslateError(id, { message: st.error });
+    else if (status === 'canceled') onTranslateError(id, { canceled: true });
+    else showTranslateButton();
+  }, 1500);
+}
+
+function onTranslateDone(id) {
+  if (state.currentJobId !== id) return;
+  teardownTranslate();
+  state.translateState = 'done';
+  showLangToggle();
+  applyPdfExport(); // 번역이 끝나는 즉시 PDF(한국어) 내보내기 노출
+  setLang('ko'); // 완료 직후 자동으로 한국어 뷰로 전환
+}
+
+function onTranslateError(id, d) {
+  if (state.currentJobId !== id) return;
+  teardownTranslate();
+  const canceled = !!(d && d.canceled);
+  state.translateState = canceled ? 'canceled' : 'error';
+  showTranslateButton(); // 버튼 복원(재시도 가능)
+  applyPdfExport();
+  if (canceled) showToast('번역이 취소되었습니다.', 'warn');
+  else showToast((d && d.message) || '번역 중 오류가 발생했습니다.', 'error');
+}
+
+// 취소(✕) — 요청만 보내고, UI 확정은 error(canceled) 이벤트/폴링에 맡긴다.
+async function cancelTranslate() {
+  const id = state.currentJobId;
+  if (!id) return;
+  el.translateCancel.disabled = true;
+  let ok = false;
+  try {
+    const res = await fetch(`/api/jobs/${id}/translate/cancel?lang=ko`, { method: 'POST' });
+    ok = res.ok || res.status === 404;
+  } catch (_) { /* 네트워크 오류 */ }
+  if (state.currentJobId !== id) return;
+  if (!ok) {
+    el.translateCancel.disabled = false;
+    showToast('번역 취소 요청에 실패했습니다.', 'error');
+  }
+  // 성공: error(canceled) 이벤트 또는 state 폴링이 버튼을 복원한다.
+}
+
+// 언어 토글. 캐시를 무효화하고 현재 탭을 새 언어로 다시 로드한다.
+function setLang(lang) {
+  const next = lang === 'ko' ? 'ko' : 'orig';
+  setLangSegActive(next);
+  if (state.currentLang === next) return;
+  state.currentLang = next;
+  setResultLangAttr();
+  state.previewLoaded = false;
+  state.markdownLoaded = false;
+  state.docLayoutLoaded = false;
+  el.previewBody.innerHTML = '';
+  el.doclayoutBody.innerHTML = '';
+  el.mdCode.textContent = '';
+  applyDownloadLangs();
+  reloadActiveResultTab();
+}
+
+// 번역본 fetch가 404/실패일 때 조용히 원문으로 되돌린다 (호출부가 재로드).
+function revertToOriginal(reason) {
+  if (state.currentLang !== 'ko') return false;
+  state.currentLang = 'orig';
+  setLangSegActive('orig');
+  setResultLangAttr();
+  applyDownloadLangs();
+  state.previewLoaded = false;
+  state.markdownLoaded = false;
+  state.docLayoutLoaded = false;
+  el.previewBody.innerHTML = '';
+  el.doclayoutBody.innerHTML = '';
+  el.mdCode.textContent = '';
+  showToast(reason || '번역본을 불러오지 못해 원문을 표시합니다.', 'warn');
+  return true;
+}
+
+// 현재 활성 결과 탭만 다시 로드 (썸네일·질문 탭은 언어 무관 → 스킵).
+// 리더는 언어별 캐시가 있으면 같은 페이지를 새 언어로 즉시 재스왑한다.
+function reloadActiveResultTab() {
+  const active = el.tabs.find((t) => t.classList.contains('active'));
+  const name = active ? active.dataset.tab : 'preview';
+  if (name === 'preview') loadPreview();
+  else if (name === 'markdown') loadMarkdown();
+  else if (name === 'doclayout') loadDocLayout();
+  else if (name === 'reader') loadReader();
+}
+
+/* ============================ 질문 (Q&A) ============================
+ * 완료된 잡의 페이지 텍스트에 대해 선택한 LLM(OpenAI Responses/Chat·Ollama)에게
+ * 질문하는 결과 탭. 공급자/모델/effort/thinking/summary 선택은 localStorage에
+ * 기억하고, 카탈로그(/api/providers)는 탭 최초 활성화 시 1회만 불러온다.
+ * 미완료(취소 포함) 잡에는 플레이스홀더만 노출 — 폼 자체가 숨겨진다.
+ * ================================================================== */
+
+const QA_LS_PROVIDER = 'uocr-qa-provider';
+const QA_LS_EFFORT = 'uocr-qa-effort';
+const QA_LS_THINKING = 'uocr-qa-thinking';
+const QA_LS_SUMMARY = 'uocr-qa-summary';
+const qaModelKey = (providerId) => `uocr-qa-model-${providerId}`;
+// index.html의 select 옵션과 동일한 닫힌 집합 — 저장값 복원 시 검증용
+const QA_EFFORTS = ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const QA_SUMMARIES = ['none', 'auto', 'concise', 'detailed'];
+
+// 잡 전환·삭제 공통 정리 훅 (teardownConnections에서 호출) — 이전 잡의 대화
+// 로그를 비우고 진행 중 요청의 응답을 무효화한다. 컨트롤/카탈로그는 잡과
+// 무관한 사용자 설정이므로 유지한다.
+function teardownQa() {
+  state.qaGen += 1; // 진행 중이던 질문 응답은 도착해도 무시된다
+  state.qaBusy = false;
+  state.qaTotalPages = 0;
+  if (!el.qaLog) return; // grabEls 이전(이론상) 방어
+  el.qaLog.textContent = '';
+  setQaBusyUI(false);
+  showQaPlaceholder(); // 다음 done 잡의 initQaForJob이 폼을 다시 연다
+}
+
+function showQaPlaceholder() {
+  el.qaPlaceholder.hidden = false;
+  el.qaBodyWrap.hidden = true;
+}
+
+// 완료(done) 잡의 결과 렌더에서 호출 — 폼 노출 + 페이지 입력 기본/상한 설정.
+// 총 페이지 수는 결과의 원본 페이지 목록(pages) 우선, 없으면 진행 스냅샷.
+function initQaForJob(job) {
+  const r = (job && job.result) || {};
+  const total = (Array.isArray(r.pages) && r.pages.length) ||
+    Number(((job || {}).progress || {}).total_pages) || 0;
+  state.qaTotalPages = total;
+  el.qaPlaceholder.hidden = true;
+  el.qaBodyWrap.hidden = false;
+  el.qaPage.value = '1';
+  if (total >= 1) el.qaPage.max = String(total);
+  else el.qaPage.removeAttribute('max');
+}
+
+// 질문 탭 활성화 진입점 — 카탈로그 미로드 시에만 fetch (실패 시 다음 활성화에 재시도).
+function initQaTab() {
+  if (state.qaCatalog || state.qaCatalogLoading) return;
+  loadQaCatalog();
+}
+
+function setQaCatalogNote(text) {
+  el.qaProvider.textContent = '';
+  el.qaProvider.appendChild(h('option', { value: '', text }));
+  el.qaModel.textContent = '';
+  el.qaModel.appendChild(h('option', { value: '', text: '—' }));
+}
+
+async function loadQaCatalog() {
+  state.qaCatalogLoading = true;
+  setQaCatalogNote('공급자 확인 중…');
+  let catalog = null;
+  try {
+    catalog = await apiGet('/api/providers');
+  } catch (_) { /* 아래 공통 실패 처리 */ }
+  state.qaCatalogLoading = false;
+  if (!catalog || !Array.isArray(catalog.providers) || !catalog.providers.length) {
+    setQaCatalogNote('공급자 정보를 불러오지 못했습니다');
+    showToast('LLM 공급자 정보를 불러오지 못했습니다. 탭을 다시 열면 재시도합니다.', 'error');
+    return;
+  }
+  state.qaCatalog = catalog;
+
+  // 저장된 선택 복원 — 카탈로그에 없으면 서버 기본값 → 첫 공급자 순으로 폴백
+  const ids = catalog.providers.map((p) => p && p.id);
+  const savedProvider = localGet(QA_LS_PROVIDER);
+  state.qaProvider = ids.includes(savedProvider) ? savedProvider
+    : (ids.includes(catalog.default_provider) ? catalog.default_provider : (ids[0] || ''));
+  localSet(QA_LS_PROVIDER, state.qaProvider);
+
+  const savedEffort = localGet(QA_LS_EFFORT);
+  state.qaEffort = QA_EFFORTS.includes(savedEffort) ? savedEffort
+    : (QA_EFFORTS.includes(catalog.default_reasoning_effort) ? catalog.default_reasoning_effort : 'default');
+  state.qaThinking = localGet(QA_LS_THINKING) !== 'false'; // 기본 켜짐
+  const savedSummary = localGet(QA_LS_SUMMARY);
+  state.qaSummary = QA_SUMMARIES.includes(savedSummary) ? savedSummary : 'none';
+  el.qaEffort.value = state.qaEffort;
+
+  el.qaProvider.textContent = '';
+  for (const p of catalog.providers) {
+    if (!p || !p.id) continue;
+    el.qaProvider.appendChild(h('option', {
+      value: p.id,
+      text: p.available ? String(p.label || p.id) : `${p.label || p.id} (설정 필요)`,
+    }));
+  }
+  el.qaProvider.value = state.qaProvider;
+  updateQaProviderControls();
+}
+
+// 공급자 선택에 맞춰 모델 목록/summary 가용성/thinking 표시를 갱신.
+// (Localight updateProviderControls 이식 — 공급자별 저장 모델 복원 포함)
+function updateQaProviderControls() {
+  const picked = pickQaModels(state.qaCatalog, state.qaProvider);
+
+  el.qaModel.textContent = '';
+  const names = picked.models.length ? picked.models : [''];
+  for (const name of names) {
+    el.qaModel.appendChild(h('option', { value: name, text: name || '모델 없음' }));
+  }
+  const savedModel = localGet(qaModelKey(state.qaProvider)) || '';
+  state.qaModel = picked.models.includes(savedModel) ? savedModel : picked.defaultModel;
+  el.qaModel.value = state.qaModel;
+  if (el.qaModel.value !== state.qaModel) { // default_model이 목록에 없는 방어
+    state.qaModel = names[0] || '';
+    el.qaModel.value = state.qaModel;
+  }
+  if (state.qaModel) localSet(qaModelKey(state.qaProvider), state.qaModel);
+
+  // summary는 OpenAI Responses(supports_reasoning_summary) + Thinking 켜짐에서만 의미 있음
+  const summaryOn = picked.supportsSummary && state.qaThinking;
+  el.qaSummary.disabled = !summaryOn;
+  el.qaSummaryField.classList.toggle('unsupported', !summaryOn);
+  el.qaSummary.value = summaryOn ? state.qaSummary : 'none';
+
+  el.qaThinking.classList.toggle('active', state.qaThinking);
+  el.qaThinking.setAttribute('aria-pressed', state.qaThinking ? 'true' : 'false');
+  el.qaThinking.innerHTML = '<i></i>Thinking ' + (state.qaThinking ? 'ON' : 'OFF');
+}
+
+function qaProviderLabel(providerId) {
+  const providers = (state.qaCatalog && state.qaCatalog.providers) || [];
+  const p = providers.find((x) => x && x.id === providerId);
+  return (p && p.label) || providerId || '모델';
+}
+
+// 대화 로그에 말풍선 추가. kind: 'user' | 'assistant' (+ ' loading'/' error')
+function appendQaMessage(kind, text) {
+  const node = h('div', { class: `qa-msg ${kind}`, text });
+  el.qaLog.appendChild(node);
+  el.qaLog.scrollTop = el.qaLog.scrollHeight;
+  return node;
+}
+
+function setQaMessageError(node, message) {
+  node.classList.remove('loading');
+  node.classList.add('error');
+  node.textContent = message;
+  el.qaLog.scrollTop = el.qaLog.scrollHeight;
+}
+
+// 응답 도착 — 로딩 말풍선을 답변 + 메타 한 줄(공급자 · 모델 · effort)로 교체,
+// reasoning summary가 있으면 접힌 <details>로 덧붙인다.
+function renderQaAnswer(node, d) {
+  node.classList.remove('loading');
+  node.textContent = String(d.answer || '');
+  const meta = [qaProviderLabel(d.provider || state.qaProvider), d.model, d.reasoning_effort]
+    .filter((x) => typeof x === 'string' && x)
+    .join(' · ');
+  if (meta) node.appendChild(h('div', { class: 'qa-meta', text: meta }));
+  if (d.reasoning_summary) {
+    node.appendChild(h('details', { class: 'qa-summary' },
+      h('summary', { text: 'Reasoning summary' }),
+      h('p', { text: String(d.reasoning_summary) })));
+  }
+  el.qaLog.scrollTop = el.qaLog.scrollHeight;
+}
+
+function setQaBusyUI(on) {
+  el.qaInput.disabled = on;
+  el.qaSend.disabled = on;
+  for (const b of el.qaSuggestions) b.disabled = on;
+}
+
+async function submitQaQuestion() {
+  const id = state.currentJobId;
+  if (!id || state.qaBusy) return;
+  const question = (el.qaInput.value || '').trim();
+  if (!question) return;
+
+  if (!state.qaCatalog) {
+    // 카탈로그 없이는 공급자 가드도 요청 구성도 못 한다 — 재시도 유도
+    showToast('LLM 공급자 정보를 아직 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.', 'warn');
+    initQaTab();
+    return;
+  }
+  const picked = pickQaModels(state.qaCatalog, state.qaProvider);
+  if (!picked.available) {
+    // Localight식 클라이언트 가드 — 서버 503 대신 설정 방법을 바로 안내
+    const hint = qaProviderHint(state.qaProvider);
+    showToast(hint, 'warn');
+    appendQaMessage('assistant error', hint);
+    return;
+  }
+
+  const page = clampQaPage(el.qaPage.value, state.qaTotalPages);
+  el.qaPage.value = String(page);
+  const body = buildQaBody({
+    question,
+    page,
+    provider: state.qaProvider,
+    model: state.qaModel,
+    effort: state.qaEffort,
+    summary: state.qaSummary,
+    thinking: state.qaThinking,
+  });
+
+  const gen = state.qaGen;
+  state.qaBusy = true;
+  setQaBusyUI(true);
+  appendQaMessage('user', question);
+  const loading = appendQaMessage('assistant loading',
+    `${qaProviderLabel(state.qaProvider)} — ${page}페이지를 읽고 답변을 생성하는 중…`);
+  el.qaInput.value = '';
+
+  let res = null;
+  let data = null;
+  try {
+    res = await fetch(`/api/jobs/${id}/qa`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text().catch(() => '');
+    data = text ? safeParse(text) : null;
+  } catch (_) {
+    if (state.currentJobId !== id || state.qaGen !== gen) return; // 잡 전환 가드
+    state.qaBusy = false;
+    setQaBusyUI(false);
+    setQaMessageError(loading, '네트워크 오류로 질문을 보내지 못했습니다. 다시 시도해 주세요.');
+    return;
+  }
+  if (state.currentJobId !== id || state.qaGen !== gen) return; // 잡 전환 가드
+  state.qaBusy = false;
+  setQaBusyUI(false);
+
+  if (!res.ok) {
+    // 409(미완료)/422(페이지·빈 텍스트)/503(LLM 오류)의 한국어 detail을 그대로 노출
+    const detail = (data && typeof data.detail === 'string') ? data.detail : null;
+    let msg = detail;
+    if (!msg) {
+      if (res.status === 503) msg = 'LLM 공급자를 사용할 수 없습니다. 서버 설정을 확인해 주세요.';
+      else if (res.status === 422) msg = '해당 페이지에서 질문에 사용할 텍스트를 찾지 못했습니다.';
+      else if (res.status === 409) msg = '변환이 완료된 작업에서만 질문할 수 있습니다.';
+      else msg = `질문 요청에 실패했습니다. (${res.status})`;
+    }
+    setQaMessageError(loading, msg);
+    return;
+  }
+
+  renderQaAnswer(loading, data || {});
+}
+
+// 질문 탭 활성화 시 리더의 현재 페이지를 페이지 입력에 프리필 — 사용자가 이 잡에서
+// 직접 값을 바꾼 적이 없을 때만 (qaPageTouched는 잡 전환 시 리셋).
+function prefillQaPageFromReader() {
+  if (state.qaPageTouched) return;
+  el.qaPage.value = String(clampQaPage(state.readerPage, state.qaTotalPages));
+}
+
+/* ============================ 읽기 (리더) 탭 ============================
+ * 완료된 잡의 기본 뷰 — 좌측 원본 페이지 이미지 + 우측 해당 페이지 본문.
+ * 본문은 /html 응답을 extractDocPages(순수 코어)로 페이지 섹션별로 나눠
+ * (잡, 언어)별로 캐시하고, 페이지 이동 시 현재 섹션만 innerHTML로 교체한다
+ * (미리보기 탭과 동일한 서버 신뢰 HTML 경계 + typesetMath).
+ * 페이지 번호는 잡 전환 시에만 초기화 — 언어 전환 시에는 같은 페이지를 유지.
+ * ==================================================================== */
+
+const READER_ZOOM_KEY = 'uocr-reader-zoom';
+const READER_ZOOM_MIN = 60;
+const READER_ZOOM_MAX = 220;
+const READER_ZOOM_STEP = 10;
+
+function readerLangKey() { return state.currentLang === 'ko' ? 'ko' : 'orig'; }
+
+// 리더 탭이 실제로 보이는 상태인지 (키보드 ←/→ 가드).
+function readerIsActive() {
+  return !el.resultSection.hidden &&
+    el.tabs.some((t) => t.dataset.tab === 'reader' && t.classList.contains('active'));
+}
+
+// 총 페이지: 잡 메타 힌트(result.pages → progress.total_pages) 우선,
+// 없으면 추출된 섹션 수, 그마저 없으면 1.
+function readerTotal() {
+  const pages = state.readerPages[readerLangKey()];
+  return state.readerTotalHint || (pages ? pages.length : 0) || 1;
+}
+
+function teardownReader() {
+  clearTimeout(state.readerImgTimer);
+  state.readerImgTimer = 0;
+}
+
+// 잡 전환 시 리더 상태 초기화 — 페이지 1, 언어별 캐시 폐기, 이미지/재시도 정리.
+function resetReaderForJob() {
+  teardownReader();
+  state.readerPage = 1;
+  state.readerTotalHint = 0;
+  state.readerPages = { orig: null, ko: null };
+  state.qaPageTouched = false;
+  el.readerContent.innerHTML = '';
+  el.readerPagePane.classList.remove('failed');
+  el.readerImage.removeAttribute('src');
+  delete el.readerImage.dataset.url;
+  delete el.readerImage.dataset.retried;
+  el.readerPageInput.value = '1';
+  el.readerTotal.textContent = '–';
+  el.readerPrev.disabled = true;
+  el.readerNext.disabled = true;
+}
+
+// 리더 탭 활성화/언어 전환 진입점 — (잡, 언어)별 최초 1회만 /html을 가져와
+// 페이지 섹션으로 분해해 캐시한다. 캐시가 있으면 즉시 현재 페이지를 그린다.
+async function loadReader() {
+  const id = state.currentJobId;
+  if (!id) return;
+  const lang = state.currentLang;
+  if (state.readerPages[readerLangKey()]) { renderReaderPage(); return; }
+  el.readerContent.innerHTML = '';
+  el.readerContent.appendChild(h('p', { class: 'muted', text: '본문을 불러오는 중…' }));
+  let html = null;
+  try {
+    const res = await fetch(withLangUrl(`/api/jobs/${id}/html`, lang), { headers: { Accept: 'text/html' } });
+    if (res.ok) html = await res.text();
+  } catch (_) { /* 아래 공통 실패 처리 */ }
+  if (state.currentJobId !== id || state.currentLang !== lang) return; // 잡/언어 전환 → 최신 로더에 위임
+  if (html == null) {
+    // 한국어 뷰에서 번역본을 못 받으면 조용히 원문으로 폴백 (다른 탭과 동일 규칙).
+    if (lang === 'ko' && revertToOriginal('한국어 본문을 불러오지 못해 원문을 표시합니다.')) { loadReader(); return; }
+    el.readerContent.innerHTML = '';
+    el.readerContent.appendChild(h('p', { class: 'muted', text: '본문을 불러오지 못했습니다.' }));
+    return;
+  }
+  state.readerPages[lang === 'ko' ? 'ko' : 'orig'] = extractDocPages(html);
+  renderReaderPage();
+}
+
+// 현재 페이지를 리더에 반영: 컨트롤 바 + 좌측 이미지 + 우측 해당 섹션.
+function renderReaderPage() {
+  const id = state.currentJobId;
+  if (!id) return;
+  const pages = state.readerPages[readerLangKey()];
+  if (!pages) return;
+  const total = readerTotal();
+  state.readerPage = clampReaderPage(state.readerPage, total);
+  const n = state.readerPage;
+
+  el.readerPageInput.value = String(n);
+  el.readerPageInput.max = String(total);
+  el.readerTotal.textContent = String(total);
+  el.readerPrev.disabled = n <= 1;
+  el.readerNext.disabled = n >= total;
+
+  setReaderImage(id, n);
+
+  // 섹션 페이지 번호 우선 매칭 — 섹션이 하나뿐(구버전 렌더 폴백)이면 전체 본문 유지.
+  const entry = pages.find((p) => p.page === n) || (pages.length === 1 ? pages[0] : null);
+  el.readerContent.innerHTML = '';
+  if (entry) {
+    // Trusted server-rendered fragment (/html — 미리보기 탭과 동일한 신뢰 경계).
+    el.readerContent.innerHTML = entry.html;
+    typesetMath(el.readerContent);
+  } else {
+    el.readerContent.appendChild(h('p', { class: 'muted', text: '이 페이지에는 표시할 본문이 없습니다.' }));
+  }
+  el.readerContent.scrollTop = 0;
+}
+
+function setReaderPage(n) {
+  if (!state.readerPages[readerLangKey()]) return; // 본문 로드 전 — 컨트롤 비활성 상태
+  const next = clampReaderPage(n, readerTotal());
+  if (next === state.readerPage) { el.readerPageInput.value = String(next); return; }
+  state.readerPage = next;
+  renderReaderPage();
+}
+
+function setReaderImage(id, n) {
+  const url = readerImageUrl(id, n);
+  if (el.readerImage.dataset.url === url) return;
+  teardownReader(); // 이전 페이지의 재시도 타이머 취소
+  delete el.readerImage.dataset.retried;
+  el.readerPagePane.classList.remove('failed');
+  el.readerImage.dataset.url = url;
+  el.readerImage.src = url;
+}
+
+function onReaderImgLoad() {
+  delete el.readerImage.dataset.retried;
+  el.readerPagePane.classList.remove('failed');
+}
+
+// 조용한 재시도 1회 (1.5초 후 캐시버스트) → 그래도 실패면 플레이스홀더 배경.
+function onReaderImgError() {
+  const url = el.readerImage.dataset.url;
+  if (!url) return; // 리셋으로 src가 제거된 경우
+  if (!el.readerImage.dataset.retried) {
+    el.readerImage.dataset.retried = '1';
+    clearTimeout(state.readerImgTimer);
+    state.readerImgTimer = setTimeout(() => {
+      state.readerImgTimer = 0;
+      if (el.readerImage.dataset.url !== url) return; // 페이지/잡 전환됨
+      el.readerImage.src = `${url}?r=${Date.now()}`;
+    }, 1500);
+    return;
+  }
+  el.readerPagePane.classList.add('failed');
+}
+
+/* ── 줌 (좌측 이미지 폭 % — localStorage 'uocr-reader-zoom' 유지) ── */
+function applyReaderZoom() {
+  el.readerImage.style.width = `${state.readerZoom}%`;
+  el.readerZoomOut.title = `원본 페이지 축소 (현재 ${state.readerZoom}%)`;
+  el.readerZoomIn.title = `원본 페이지 확대 (현재 ${state.readerZoom}%)`;
+}
+
+function readerZoomBy(delta) {
+  state.readerZoom = Math.min(READER_ZOOM_MAX, Math.max(READER_ZOOM_MIN, state.readerZoom + delta));
+  localSet(READER_ZOOM_KEY, String(state.readerZoom));
+  applyReaderZoom();
+}
+
+// 리더 CTA [한국어로 읽기] — 메인 [한국어 번역] 버튼이 보일 때만(=번역 상태
+// none/error/canceled) 함께 보인다. 프로바이더 미설정(translate_available=false)
+// 이면 숨김 — 사유 안내는 다운로드 행의 기존 번역 UI가 담당한다.
+function applyReaderTranslateCta() {
+  el.readerTranslateBtn.hidden = el.translateBtn.hidden || state.translateAvailable === false;
+}
+
+/* ── PDF(한국어) 내보내기 (다운로드 행) ── */
+// 잡 done ∧ 번역 done ∧ 레이아웃 있음일 때만 노출 (판정은 순수 pdfExportState).
+function applyPdfExport() {
+  const ps = pdfExportState(state.displayedStatus, state.translateState, state.resultHasLayout);
+  el.dlPdf.hidden = !ps.visible;
+  if (ps.visible) {
+    const u = state.resultUrls || {};
+    setDownload(el.dlPdf, u.pdf || null, `${state.currentBaseName || 'document'}.ko.pdf`);
+  }
+}
+
+async function downloadPdfWithReport(ev) {
+  ev.preventDefault();
+  if (state.pdfDownloadBusy || el.dlPdf.classList.contains('disabled')) return;
+  const url = el.dlPdf.getAttribute('href');
+  if (!url) return;
+  state.pdfDownloadBusy = true;
+  el.dlPdf.setAttribute('aria-busy', 'true');
+  try {
+    const res = await fetch(url, { headers: { Accept: 'application/pdf' } });
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.json()).detail || ''; } catch (_) { /* body may be plain */ }
+      throw new Error(detail || `PDF 생성 실패 (${res.status})`);
+    }
+    const blob = await res.blob();
+    if (!blob.size || !String(blob.type || '').includes('pdf')) {
+      throw new Error('서버가 올바른 PDF를 반환하지 않았습니다.');
+    }
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = el.dlPdf.getAttribute('download') || 'document.ko.pdf';
+    a.hidden = true;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 2000);
+    const report = {
+      replaced: res.headers.get('X-UOCR-PDF-Replaced'),
+      kept: res.headers.get('X-UOCR-PDF-Preserved'),
+      relocated: res.headers.get('X-UOCR-PDF-Relocated'),
+      tableCells: res.headers.get('X-UOCR-PDF-Table-Cells'),
+      warnings: res.headers.get('X-UOCR-PDF-Warnings'),
+      specialistKept: res.headers.get('X-UOCR-PDF-Specialist-Preserved'),
+    };
+    showToast(pdfReportMessage(report), Number(report.kept) || Number(report.warnings) ? 'warn' : '');
+  } catch (e) {
+    showToast(e && e.message ? e.message : 'PDF 다운로드에 실패했습니다.', 'error');
+  } finally {
+    state.pdfDownloadBusy = false;
+    el.dlPdf.removeAttribute('aria-busy');
+  }
+}
+
+/* ============================ Tabs ============================ */
+
+function activateTab(name) {
+  el.tabs.forEach((t) => {
+    const on = t.dataset.tab === name;
+    t.classList.toggle('active', on);
+    t.setAttribute('aria-selected', on ? 'true' : 'false');
+    t.tabIndex = on ? 0 : -1;
+  });
+  el.panels.forEach((p) => { p.hidden = p.dataset.panel !== name; });
+  if (name === 'reader') loadReader();
+  else if (name === 'preview') loadPreview();
+  else if (name === 'markdown') loadMarkdown();
+  else if (name === 'doclayout') loadDocLayout();
+  else if (name === 'qa') { prefillQaPageFromReader(); initQaTab(); }
+}
+
+// figure_only 엔진(OvisOCR2·PaddleOCR-VL 등)은 본문 텍스트에 좌표가 없어 서버 레이아웃
+// 재구성이 "빈 흰 페이지 + 그림 사각형 몇 개"로 나온다 — 사용자에겐 변환이 깨진 것처럼
+// 보인다. 오해를 주는 캔버스 대신, 전체 내용은 미리보기/Markdown에 있고 그림 위치는
+// 감지 박스 탭에 있음을 분명히 안내하는 카드를 그린다.
+function renderFigureOnlyDocLayout() {
+  el.doclayoutBody.textContent = '';
+  const goPreview = h('button', { class: 'btn btn-primary btn-small', type: 'button' }, '미리보기로 이동');
+  goPreview.addEventListener('click', () => activateTab('preview'));
+  el.doclayoutBody.appendChild(h('div', { class: 'doclayout-figonly' },
+    h('div', { class: 'df-icon', html: ICON.docLayout }),
+    h('h3', { class: 'df-title', text: '이 엔진은 텍스트 배치 좌표를 제공하지 않습니다' }),
+    h('p', { class: 'df-lead', text: '현재 OCR 엔진은 문서를 흐름 텍스트로 재구성합니다. '
+      + '페이지 위 정확한 좌표로 텍스트를 재배치하는 레이아웃 뷰는 Unlimited 엔진에서만 제공됩니다 — '
+      + '변환된 내용이 사라진 것이 아닙니다.' }),
+    h('ul', { class: 'df-list' },
+      h('li', null, h('strong', { text: '전체 내용' }), ' — “미리보기” · “Markdown” 탭에 텍스트·표·수식이 모두 있습니다.'),
+      h('li', null, h('strong', { text: '그림·표 위치' }), ' — “감지 박스” 탭에서 원본 페이지 위에 표시됩니다.'),
+    ),
+    goPreview,
+  ));
+}
+
+async function loadDocLayout() {
+  if (state.docLayoutLoaded) return;
+  const id = state.currentJobId;
+  if (!id) return;
+  // figure_only 엔진은 캔버스가 비어 "흰 바탕에 그림만" 나온다 — 캔버스를 아예 그리지 않고
+  // 안내 카드로 대체(전체 내용은 미리보기/Markdown, 그림 위치는 감지 박스로 유도).
+  if (docLayoutIsFigureOnly(state.layoutCapability, state.currentJobEngine, state.healthEngine)) {
+    state.docLayoutLoaded = true;
+    renderFigureOnlyDocLayout();
+    return;
+  }
+  const lang = state.currentLang; // 응답 도착 시점에 언어가 바뀌었는지 판별용
+  el.doclayoutBody.textContent = '';
+  el.doclayoutBody.appendChild(h('p', { class: 'muted', text: '레이아웃을 불러오는 중…' }));
+  let html = null;
+  let missing = false;
+  try {
+    const res = await fetch(withLangUrl(`/api/jobs/${id}/layout`, lang), { headers: { Accept: 'text/html' } });
+    if (res.status === 404) missing = true;
+    else if (res.ok) html = await res.text();
+  } catch (_) { /* 아래 공통 실패 처리 */ }
+  if (state.currentJobId !== id || state.currentLang !== lang) return; // 잡/언어 전환 → 최신 로더에 위임
+  // 한국어 뷰에서 번역본을 못 받으면(404·실패) 조용히 원문으로 폴백 + 토스트.
+  if ((missing || html == null) && lang === 'ko' &&
+      revertToOriginal('한국어 레이아웃을 불러오지 못해 원문을 표시합니다.')) {
+    loadDocLayout();
+    return;
+  }
+  el.doclayoutBody.textContent = '';
+  if (missing) {
+    state.docLayoutLoaded = true; // 404는 재시도해도 같음
+    el.doclayoutBody.appendChild(h('p', {
+      class: 'muted',
+      text: '이 작업에는 레이아웃 데이터가 없습니다 (이 기능 추가 이전에 변환된 결과).',
+    }));
+    return;
+  }
+  if (html == null) {
+    const noLayout = state.resultUrls && state.resultUrls.layoutHtml === null;
+    el.doclayoutBody.appendChild(h('p', {
+      class: 'muted',
+      text: noLayout
+        ? '이 작업은 레이아웃 기능 이전에 변환되어 레이아웃 데이터가 없습니다 — PDF를 다시 변환하면 생깁니다.'
+        : '레이아웃 뷰를 불러오지 못했습니다.',
+    }));
+    return;
+  }
+  state.docLayoutLoaded = true;
+  // Trusted server-rendered fragment (pipeline/layout.py — 텍스트 전부 이스케이프됨).
+  // 번역본은 루트에 lang="ko"가 붙어 오지만, 컨테이너에도 setResultLangAttr로 반영해 둔다.
+  el.doclayoutBody.innerHTML = html;
+  typesetMath(el.doclayoutBody);
+  if (window.uocrFitLayout) window.uocrFitLayout(el.doclayoutBody);
+}
+
+async function loadPreview() {
+  if (state.previewLoaded) return;
+  const id = state.currentJobId;
+  if (!id) return;
+  const lang = state.currentLang;
+  el.previewBody.textContent = '';
+  el.previewBody.appendChild(h('p', { class: 'muted', text: '미리보기를 불러오는 중…' }));
+  let html = null;
+  try {
+    const res = await fetch(withLangUrl(`/api/jobs/${id}/html`, lang), { headers: { Accept: 'text/html' } });
+    if (res.ok) html = await res.text();
+  } catch (_) { /* 아래 공통 실패 처리 */ }
+  if (state.currentJobId !== id || state.currentLang !== lang) return;
+  if (html == null) {
+    // 한국어 뷰에서 번역본을 못 받으면 조용히 원문으로 폴백.
+    if (lang === 'ko' && revertToOriginal('한국어 미리보기를 불러오지 못해 원문을 표시합니다.')) { loadPreview(); return; }
+    el.previewBody.textContent = '';
+    el.previewBody.appendChild(h('p', { class: 'muted', text: '미리보기를 불러오지 못했습니다.' }));
+    return;
+  }
+  state.previewLoaded = true;
+  // Trusted server-rendered fragment (/html, same renderer as /render-preview).
+  el.previewBody.innerHTML = html;
+  typesetMath(el.previewBody);
+}
+
+async function loadMarkdown() {
+  if (state.markdownLoaded) return;
+  const id = state.currentJobId;
+  if (!id) return;
+  const lang = state.currentLang;
+  el.mdCode.textContent = '불러오는 중…';
+  let text = null;
+  try {
+    const res = await fetch(withLangUrl(`/api/jobs/${id}/markdown`, lang), { headers: { Accept: 'text/markdown' } });
+    if (res.ok) text = await res.text();
+  } catch (_) { /* 아래 공통 실패 처리 */ }
+  if (state.currentJobId !== id || state.currentLang !== lang) return;
+  if (text == null) {
+    if (lang === 'ko' && revertToOriginal('한국어 Markdown을 불러오지 못해 원문을 표시합니다.')) { loadMarkdown(); return; }
+    el.mdCode.textContent = 'Markdown을 불러오지 못했습니다.';
+    return;
+  }
+  state.markdownLoaded = true;
+  el.mdCode.textContent = text;
+}
+
+/* ============================ Error rendering ============================ */
+
+function renderError(message, canceled) {
+  el.errorSection.classList.toggle('canceled', !!canceled);
+  el.errorTitle.textContent = canceled ? '취소됨' : '오류';
+  el.errorMessage.textContent = message || (canceled ? '작업이 취소되었습니다.' : '변환 중 오류가 발생했습니다.');
+  el.errorHint.textContent = canceled
+    ? '중단 시점까지의 부분 결과를 아래 Markdown 탭에서 확인할 수 있습니다.'
+    : '다시 시도하려면 왼쪽에서 PDF를 다시 업로드해 주세요.';
+}
+
+/* ============================ Upload ============================ */
+
+// 파일 크기 사전 검증 (순수 — frontend/tests/에서 직접 검증). 상한 초과면 안내
+// 문구, 통과면 null. limitMb 미수신(undefined 등 비정상)이면 검증을 생략한다
+// — 서버 413이 최후 방어.
+export function fileSizeError(sizeBytes, limitMb) {
+  const limit = Number(limitMb);
+  const size = Number(sizeBytes);
+  if (!Number.isFinite(limit) || limit <= 0 || !Number.isFinite(size)) return null;
+  if (size <= limit * 1024 * 1024) return null;
+  // 표시 반올림이 상한과 같아지는 경계(상한+1바이트 → '100 MB — 상한 100MB')의
+  // 자기모순 문구를 피한다 — 반올림 표시가 상한을 명확히 넘을 때만 크기를 병기.
+  const sizeMb = size / (1024 * 1024);
+  return sizeMb - limit >= 0.05
+    ? `파일이 너무 큽니다 (${fmtBytes(size)} — 서버 상한 ${limit}MB)`
+    : `파일이 너무 큽니다 (서버 상한 ${limit}MB 초과)`;
+}
+
+function validateFile(file) {
+  const name = file && file.name ? file.name : '';
+  if (!/\.pdf$/i.test(name)) return 'PDF 파일만 업로드할 수 있습니다. (.pdf)';
+  const type = file.type || '';
+  if (type && !/pdf/i.test(type)) return '올바른 PDF 파일이 아닌 것 같습니다. 파일을 확인해 주세요.';
+  return null;
+}
+
+// 다중 선택 검증 분류 (순수 — frontend/tests/에서 직접 검증). validate(file)는
+// 오류 문구 또는 null을 반환. 유효 파일과 '건너뜀' 대상(파일명+사유)으로 나눈다.
+export function classifyFiles(files, validate) {
+  const valid = [];
+  const skipped = [];
+  for (const f of Array.from(files || [])) {
+    const reason = validate(f);
+    if (reason) skipped.push({ file: f, name: (f && f.name) || '(이름 없음)', reason });
+    else valid.push(f);
+  }
+  return { valid, skipped };
+}
+
+// file-info 표시 문구 (순수 — 테스트 대상). 1개면 기존 단일 표시(이름·크기),
+// 여러 개면 'N개 파일 · 총 X' + title에 파일명 나열. 빈 선택은 null.
+export function selectionSummary(files) {
+  const list = Array.from(files || []);
+  if (!list.length) return null;
+  if (list.length === 1) {
+    return { name: list[0].name, size: fmtBytes(Number(list[0].size) || 0), title: list[0].name };
+  }
+  const total = list.reduce((sum, f) => sum + (Number(f.size) || 0), 0);
+  return {
+    name: `${list.length}개 파일`,
+    size: `총 ${fmtBytes(total)}`,
+    title: list.map((f) => f.name).join(', '),
+  };
+}
+
+// '첫 건 + 나머지 개수' 요약 (순수 — 테스트 대상). entries: [{name, reason}].
+// prefix 예: '건너뜀' | '업로드 실패'. 빈 배열이면 null.
+export function summarizeIssues(prefix, entries) {
+  if (!entries || !entries.length) return null;
+  const first = `${prefix}: ${entries[0].name} — ${entries[0].reason}`;
+  return entries.length === 1 ? first : `${first} 외 ${entries.length - 1}건`;
+}
+
+// 형식 검증에 이어 서버 상한 크기 사전 검증 — 선택·업로드 직전 공통.
+function fileValidationError(file) {
+  return validateFile(file) || fileSizeError(file && file.size, state.maxUploadMb);
+}
+
+// 현재 선택(state.selectedFiles)을 file-info와 업로드 버튼에 반영.
+function renderFileInfo() {
+  const s = selectionSummary(state.selectedFiles);
+  if (!s) {
+    el.fileInfo.hidden = true;
+    el.uploadBtn.disabled = true;
+    return;
+  }
+  el.fileName.textContent = s.name;
+  el.fileName.title = s.title;
+  el.fileSize.textContent = s.size;
+  el.fileInfo.hidden = false;
+  // 업로드 진행 중의 새 선택은 버튼을 되살리지 않는다 — 루프 이중 진입 방지.
+  // 진행 중 선택은 setUploading(false)가 끝나며 재활성화된다.
+  el.uploadBtn.disabled = state.uploading;
+}
+
+// 픽커·드래그드롭 공통 진입점 — 파일별 검증으로 유효분만 선택에 담고, 무효분은
+// '건너뜀' 요약을 기존 업로드 에러 영역에 안내한다(전부 무효면 선택 없음).
+function setSelectedFiles(files) {
+  const { valid, skipped } = classifyFiles(files, fileValidationError);
+  const skipMsg = summarizeIssues('건너뜀', skipped);
+  if (skipMsg) showUploadError(skipMsg);
+  else hideUploadError();
+  state.selectedFiles = valid;
+  renderFileInfo();
+}
+
+function clearSelectedFiles() {
+  state.selectedFiles = [];
+  el.fileInput.value = '';
+  el.fileInfo.hidden = true;
+  el.uploadBtn.disabled = true;
+  hideUploadError();
+}
+
+function showUploadError(msg) {
+  el.uploadError.textContent = msg;
+  el.uploadError.hidden = false;
+}
+function hideUploadError() {
+  el.uploadError.hidden = true;
+  el.uploadError.textContent = '';
+}
+
+function setUploading(on) {
+  state.uploading = on;
+  el.uploadBtn.disabled = on || !state.selectedFiles.length;
+  el.uploadBtn.textContent = on ? '업로드 중…' : '변환 시작';
+  el.dropzone.classList.toggle('disabled', on);
+}
+
+// 업로드 진행바 (progress-track/fill 재사용). frac=null이면 총량을 알 수 없는
+// 전송(lengthComputable=false) — indeterminate 애니메이션으로 표시.
+function showUploadProgress(frac) {
+  el.uploadProgress.hidden = false;
+  const indet = frac == null;
+  el.uploadProgress.classList.toggle('indeterminate', indet);
+  el.uploadProgressFill.style.width = indet ? '' : `${Math.min(100, Math.max(0, frac * 100))}%`;
+}
+
+function hideUploadProgress() {
+  el.uploadProgress.hidden = true;
+  el.uploadProgress.classList.remove('indeterminate');
+  el.uploadProgressFill.style.width = '';
+}
+
+// XHR 업로드 — fetch에는 업로드 진행 이벤트가 없어 진행률 표시용으로만 XHR을
+// 쓴다. 응답은 fetch 경로와 같은 의미의 {status, text}로 통일하고, 전송 실패
+// (네트워크 오류)만 reject한다. HTTP 오류 상태는 resolve — 호출부가 분기한다.
+function uploadWithProgress(url, form, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    if (xhr.upload) {
+      xhr.upload.addEventListener('progress', (e) => {
+        onProgress(e.lengthComputable && e.total > 0 ? e.loaded / e.total : null);
+      });
+    }
+    xhr.addEventListener('load', () => resolve({ status: xhr.status, text: xhr.responseText || '' }));
+    xhr.addEventListener('error', () => reject(new Error('network error')));
+    xhr.addEventListener('abort', () => reject(new Error('aborted')));
+    xhr.send(form);
+  });
+}
+
+function readMode() {
+  const checked = el.modeRadios.find((r) => r.checked);
+  return checked ? checked.value : 'multi';
+}
+
+function readDpi() {
+  let dpi = parseInt(el.dpiInput.value, 10);
+  if (!Number.isFinite(dpi)) dpi = 200;
+  dpi = Math.min(400, Math.max(72, dpi));
+  el.dpiInput.value = String(dpi);
+  return dpi;
+}
+
+// HTTP 실패 상태 → 실패 사유 문구. 서버 detail(실시간 상한 포함)을 우선하고,
+// 413은 health로 받은 상한, 그마저 없으면 중립 문구.
+function uploadFailureMessage(status, data) {
+  const detail = data && typeof data.detail === 'string' ? data.detail : null;
+  if (detail) return detail;
+  if (status === 413) {
+    return state.maxUploadMb
+      ? `파일이 너무 큽니다. 더 작은 PDF를 업로드해 주세요. (최대 ${state.maxUploadMb}MB)`
+      : '파일이 너무 커서 서버 업로드 상한을 초과했습니다. 더 작은 PDF를 업로드해 주세요.';
+  }
+  if (status === 400) return '유효하지 않은 PDF 파일입니다.';
+  return `업로드에 실패했습니다. (${status})`;
+}
+
+// 순차 다중 업로드 — 파일별로 기존 XHR 경로(uploadWithProgress)를 재사용하고
+// 진행바는 파일 단위로 리셋한다. 첫 성공 잡은 즉시 openJob(대기하지 않음 —
+// 업로드 도중 잡 전환이 일어나도 루프는 계속), 이후 성공은 목록 upsert만.
+// 개별 실패는 수집해 끝에 요약하고, 실패분만 선택에 남겨 재시도할 수 있게 한다.
+async function handleUpload() {
+  if (state.uploading || !state.selectedFiles.length) return; // 재진입 가드
+  hideUploadError();
+
+  // 선택 시점에는 health 미수신이었어도 이후 수신됐으면 여기서 한 번 더 차단
+  const { valid, skipped } = classifyFiles(state.selectedFiles, fileValidationError);
+  if (!valid.length) {
+    showUploadError(summarizeIssues('건너뜀', skipped) || '업로드할 수 있는 파일이 없습니다.');
+    return;
+  }
+
+  const selectionAtStart = state.selectedFiles;
+  const mode = readMode();
+  const dpi = readDpi();
+  const failures = skipped.slice(); // {file, name, reason} — 뒤늦게 걸러진 파일도 요약에 포함
+  let successCount = 0;
+  let firstJobId = null;
+
+  setUploading(true);
+  for (let i = 0; i < valid.length; i += 1) {
+    const file = valid[i];
+    if (valid.length > 1) el.uploadBtn.textContent = `업로드 중… (${i + 1}/${valid.length})`;
+    showUploadProgress(0); // 파일 단위 리셋
+
+    const form = new FormData();
+    form.append('file', file);
+    form.append('mode', mode);
+    form.append('dpi', String(dpi));
+
+    let res;
+    try {
+      res = await uploadWithProgress('/api/jobs', form, showUploadProgress);
+    } catch (_) {
+      failures.push({ file, name: file.name, reason: '네트워크 오류가 발생했습니다. 다시 시도해 주세요.' });
+      continue;
+    }
+    const data = res.text ? safeParse(res.text) : null;
+    if (!(res.status >= 200 && res.status < 300)) {
+      failures.push({ file, name: file.name, reason: uploadFailureMessage(res.status, data) });
+      continue;
+    }
+    const jobId = data && data.job_id;
+    if (!jobId) {
+      failures.push({ file, name: file.name, reason: '서버 응답이 올바르지 않습니다.' });
+      continue;
+    }
+
+    successCount += 1;
+    // Optimistically add to history; the first success opens + streams.
+    upsertJob({
+      job_id: jobId,
+      filename: file.name,
+      status: data.status || 'queued',
+      mode,
+      created_at: new Date().toISOString(),
+      progress: {},
+      result: null,
+      error: null,
+    });
+    if (firstJobId === null) {
+      firstJobId = jobId;
+      openJob(jobId); // 나머지 업로드와 병행 — 루프는 currentJobId에 의존하지 않는다
+    }
+  }
+  hideUploadProgress();
+
+  // 업로드 도중 사용자가 선택을 바꿨다면(드롭 등) 그 새 선택은 건드리지 않는다.
+  if (state.selectedFiles === selectionAtStart) {
+    state.selectedFiles = failures.map((f) => f.file); // 실패분만 남겨 재시도 가능
+    if (!failures.length) el.fileInput.value = '';
+    renderFileInfo();
+  }
+  setUploading(false);
+
+  if (failures.length) {
+    showUploadError(summarizeIssues('업로드 실패', failures));
+    showToast(`업로드 요약 — 성공 ${successCount} · 실패 ${failures.length}`,
+      successCount ? 'warn' : 'error');
+  } else if (valid.length > 1) {
+    showToast(`${successCount}개 파일이 업로드되었습니다.`);
+  }
+  refreshJobs();
+}
+
+/* ============================ Dropzone wiring ============================ */
+
+function setupDropzone() {
+  const dz = el.dropzone;
+  dz.addEventListener('click', () => el.fileInput.click());
+  dz.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); el.fileInput.click(); }
+  });
+  dz.addEventListener('dragover', (ev) => { ev.preventDefault(); dz.classList.add('dragover'); });
+  dz.addEventListener('dragleave', (ev) => {
+    if (ev.target === dz) dz.classList.remove('dragover');
+  });
+  dz.addEventListener('drop', (ev) => {
+    ev.preventDefault();
+    dz.classList.remove('dragover');
+    const files = ev.dataTransfer && ev.dataTransfer.files;
+    if (files && files.length) setSelectedFiles(files);
+  });
+  el.fileInput.addEventListener('change', () => {
+    if (el.fileInput.files && el.fileInput.files.length) setSelectedFiles(el.fileInput.files);
+  });
+  el.fileClear.innerHTML = ICON.x;
+  el.fileClear.addEventListener('click', clearSelectedFiles);
+}
+
+/* ============================ Tabs / result wiring ============================ */
+
+function setupTabs() {
+  el.tabs.forEach((t) => {
+    t.addEventListener('click', () => activateTab(t.dataset.tab));
+  });
+  // basic roving-tabindex keyboard nav
+  const tablist = el.tabs.length ? el.tabs[0].parentElement : null;
+  if (tablist) {
+    tablist.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'ArrowRight' && ev.key !== 'ArrowLeft') return;
+      const idx = el.tabs.findIndex((t) => t.classList.contains('active'));
+      if (idx === -1) return;
+      const dir = ev.key === 'ArrowRight' ? 1 : -1;
+      const next = el.tabs[(idx + dir + el.tabs.length) % el.tabs.length];
+      ev.preventDefault();
+      activateTab(next.dataset.tab);
+      next.focus();
+    });
+  }
+
+  el.copyMd.addEventListener('click', async () => {
+    const text = el.mdCode.textContent || '';
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        throw new Error('no clipboard');
+      }
+      el.copyMd.textContent = '복사됨';
+      el.copyMd.classList.add('copied');
+      setTimeout(() => { el.copyMd.textContent = '복사'; el.copyMd.classList.remove('copied'); }, 1600);
+    } catch (_) {
+      showToast('클립보드 복사에 실패했습니다.', 'error');
+    }
+  });
+}
+
+/* ============================ Init ============================ */
+
+function init() {
+  grabEls();
+  setupTheme();
+  setupDropzone();
+  setupTabs();
+
+  el.uploadBtn.addEventListener('click', handleUpload);
+  el.streamPane.addEventListener('scroll', onStreamScroll, { passive: true });
+  el.livePreview.addEventListener('scroll', onPreviewScroll, { passive: true });
+  el.jobStop.addEventListener('click', requestCancel);
+  el.jobDelete.addEventListener('click', () => {
+    if (!state.currentJobId) return;
+    // 키에 잡 id 포함 — 잡 전환 뒤 남은 무장이 다른 잡을 삭제하지 못하게 한다.
+    armDelete(el.jobDelete, `header:${state.currentJobId}`, () => deleteJob(state.currentJobId));
+  });
+
+  // 번역 컨트롤
+  el.translateCancel.innerHTML = ICON.x;
+  el.translateBtn.addEventListener('click', startTranslate);
+  el.translateCancel.addEventListener('click', cancelTranslate);
+  el.dlPdf.addEventListener('click', downloadPdfWithReport);
+  el.langOrig.addEventListener('click', () => setLang('orig'));
+  el.langKo.addEventListener('click', () => setLang('ko'));
+
+  // 질문(Q&A) 컨트롤 — 선택은 localStorage에 기억 (공급자별 모델 포함)
+  el.qaProvider.addEventListener('change', () => {
+    if (!el.qaProvider.value) return; // 카탈로그 로드 전 플레이스홀더 옵션
+    state.qaProvider = el.qaProvider.value;
+    localSet(QA_LS_PROVIDER, state.qaProvider);
+    updateQaProviderControls();
+  });
+  el.qaModel.addEventListener('change', () => {
+    state.qaModel = el.qaModel.value;
+    if (state.qaModel) localSet(qaModelKey(state.qaProvider), state.qaModel);
+  });
+  el.qaEffort.addEventListener('change', () => {
+    state.qaEffort = el.qaEffort.value;
+    localSet(QA_LS_EFFORT, state.qaEffort);
+  });
+  el.qaThinking.addEventListener('click', () => {
+    state.qaThinking = !state.qaThinking;
+    localSet(QA_LS_THINKING, String(state.qaThinking));
+    updateQaProviderControls(); // summary 가용성/토글 표시 갱신
+  });
+  el.qaSummary.addEventListener('change', () => {
+    state.qaSummary = el.qaSummary.value;
+    localSet(QA_LS_SUMMARY, state.qaSummary);
+  });
+  el.qaPage.addEventListener('change', () => {
+    state.qaPageTouched = true; // 이 잡에서는 리더 페이지 프리필로 덮어쓰지 않는다
+    el.qaPage.value = String(clampQaPage(el.qaPage.value, state.qaTotalPages));
+  });
+  for (const btn of el.qaSuggestions) {
+    btn.addEventListener('click', () => { // 추천 질문 → 입력창 채우기 (전송은 사용자가)
+      el.qaInput.value = btn.textContent;
+      el.qaInput.focus();
+    });
+  }
+  el.qaForm.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    submitQaQuestion();
+  });
+
+  el.pagerPrev.addEventListener('click', () => pageNav(-1));
+  el.pagerNext.addEventListener('click', () => pageNav(1));
+  el.followChip.addEventListener('click', () => {
+    state.followLive = true;
+    state.viewPage = state.ground.page;
+    updateLeftPane();
+  });
+  el.pageImg.addEventListener('load', onPageImgLoad);
+  el.pageImg.addEventListener('error', onPageImgError);
+
+  // 읽기(리더) 탭 컨트롤
+  el.readerPrev.addEventListener('click', () => setReaderPage(state.readerPage - 1));
+  el.readerNext.addEventListener('click', () => setReaderPage(state.readerPage + 1));
+  el.readerPageInput.addEventListener('change', () => setReaderPage(el.readerPageInput.value));
+  el.readerZoomOut.addEventListener('click', () => readerZoomBy(-READER_ZOOM_STEP));
+  el.readerZoomIn.addEventListener('click', () => readerZoomBy(READER_ZOOM_STEP));
+  el.readerTranslateBtn.addEventListener('click', startTranslate); // 기존 번역 시작 경로에 위임
+  el.readerImage.addEventListener('load', onReaderImgLoad);
+  el.readerImage.addEventListener('error', onReaderImgError);
+  // ←/→ 페이지 이동 — 리더 탭이 보일 때만, 입력 요소 포커스 시 제외 (copy-moonlight 가드)
+  window.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+    if (ev.defaultPrevented) return; // 탭 줄 roving 포커스 등 선행 핸들러 존중
+    const active = document.activeElement;
+    const tag = active ? active.tagName : '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (!readerIsActive()) return;
+    setReaderPage(state.readerPage + (ev.key === 'ArrowRight' ? 1 : -1));
+  });
+  // 저장된 리더 줌 복원 (60–220% 클램프)
+  const savedZoom = parseInt(localGet(READER_ZOOM_KEY) || '', 10);
+  if (Number.isFinite(savedZoom)) {
+    state.readerZoom = Math.min(READER_ZOOM_MAX, Math.max(READER_ZOOM_MIN, savedZoom));
+  }
+  applyReaderZoom();
+
+  // 사용자가 주소창을 직접 고치거나 뒤로가기로 해시가 바뀐 경우 해당 잡을 연다.
+  // 우리가 만드는 변경은 replaceState라 hashchange가 발생하지 않는다(루프 없음).
+  window.addEventListener('hashchange', () => {
+    const id = jobIdFromHash(location.hash);
+    if (id && id !== state.currentJobId) openJob(id);
+  });
+
+  showEmptyState();
+  loadHealth();
+  refreshJobs().then(() => {
+    // 첫 잡 목록 수신 직후 해시의 잡 복원 — 새로고침·공유 링크 진입.
+    // 404면 openJob의 기존 처리(토스트)가 동작하고 해시를 비운다.
+    const id = jobIdFromHash(location.hash);
+    if (id) openJob(id);
+  });
+  state.jobsTimer = setInterval(refreshJobs, 5000);
+
+  window.addEventListener('beforeunload', teardownConnections);
+}
+
+// Browser bootstrap only — the module is also imported by frontend/tests/
+// under Node, where no DOM exists (only the exported pure core is used).
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+}

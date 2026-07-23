@@ -1,0 +1,370 @@
+# Unlimited-OCR — PDF → Markdown
+#
+#   CPU (기본):       docker compose up -d --build          → http://localhost:8000
+#   CUDA(Unlimited):  docker compose up -d --build ocr-cuda → http://localhost:8001
+#   OvisOCR2:      docker compose --profile ovis   up -d --build ovisocr2 ocr-ovis      → :8002
+#   PaddleOCR-VL:  docker compose --profile paddle up -d --build paddleocr-vl ocr-paddle → :8003
+#   Ollama(Q&A):   docker compose -f docker-compose.yml -f compose.ollama.yaml up -d --build ocr-cpu ollama
+#                  (ollama 서비스는 overlay 파일에만 있다 — compose.ollama.yaml 헤더 참조)
+#
+# ⚠ 서비스명을 반드시 명시할 것: `--profile ovis up -d`만 쓰면 프로필 없는 기본
+#   서비스(ocr-cpu)까지 함께 기동돼 6.7GB 모델을 불필요하게 로드한다.
+#   같은 이유로 전환은 `docker compose stop ovisocr2 ocr-ovis`(대상만 정지)를 쓰고,
+#   `--profile ovis down`은 ocr-cpu까지 내리는 전체 정리용으로만 쓴다.
+#
+# ocr-cpu는 프로필 없는 기본 서비스라 .env 없이도 기동된다.
+# ocr-cuda는 cuda 프로필 — 서비스명을 명시하면 프로필이 자동 활성화된다.
+# 모델 가중치(~6.7GB)는 최초 실행 시 hf-cache 볼륨에 1회 다운로드된다.
+# Metal(Apple Silicon)은 컨테이너에서 GPU를 쓸 수 없어 로컬 uv로 실행한다 — README §macOS 참조.
+#
+# ⚠ 단일 GPU 원칙 (RTX 5070 Ti 16GB): 한 시점에 GPU를 쓰는 스택은 하나만 기동한다.
+#   ocr-cuda / ovis 프로필 / paddle 프로필을 동시에 켜면 VRAM을 경쟁해 OOM이 난다.
+#   전환:  docker compose stop ovisocr2 ocr-ovis
+#          docker compose --profile paddle up -d --build paddleocr-vl ocr-paddle
+#          (`--profile … down/up`만 쓰면 위 경고대로 ocr-cpu까지 지웠다 다시 만든다)
+#   GPU는 sidecar(ovisocr2·paddleocr-vl)만 사용하고, ocr-ovis/ocr-paddle 백엔드는
+#   GPU 예약 없이 sidecar와 HTTP로만 통신한다 (docs/CUDA_5070TI_MULTI_OCR_PLAN.md).
+#
+# ✅ 세 엔진 모두 OCR 모델을 CUDA에서 실행한다 — `gpus: all`을 받는 컨테이너는
+#    모델을 돌리는 셋뿐이다: ocr-cuda(Unlimited)·ovisocr2(Ovis)·paddleocr-vl(Paddle).
+#    ocr-ovis/ocr-paddle의 `TORCH_VARIANT: cpu`는 **웹/PDF렌더 오케스트레이터**용이며
+#    OCR 추론과 무관하다(GPU는 sidecar 독점). 각 sidecar는 CUDA가 없으면 CPU로
+#    조용히 강등하지 않고 명확한 오류로 **하드 실패**한다(app/model.py::_require_cuda).
+
+services:
+  ocr-cpu:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        TORCH_VARIANT: cpu
+    image: unlimited-ocr-web:cpu
+    ports:
+      # 루프백 전용 바인딩 — 이 서비스는 인증이 없다 (README §보안).
+      # LAN 공개는 opt-in: "8000:8000"으로 바꾸고 리버스 프록시 뒤 인증 +
+      # environment에 ALLOWED_HOSTS로 서버 IP/호스트명 추가.
+      - "127.0.0.1:8000:8000"
+    environment:
+      OCR_DEVICE: cpu
+      OCR_DTYPE: ${OCR_DTYPE:-auto}
+      OCR_ENGINE: ${OCR_ENGINE:-unlimited}
+      MODEL_ID: ${MODEL_ID:-baidu/Unlimited-OCR}
+      PRELOAD_MODEL: ${PRELOAD_MODEL:-1}
+      PAGES_PER_CHUNK: ${PAGES_PER_CHUNK:-8}
+      RENDER_DPI: ${RENDER_DPI:-200}
+      MAX_PAGES: ${MAX_PAGES:-200}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      MAX_PAGE_OUTPUT_CHARS: ${MAX_PAGE_OUTPUT_CHARS:-16384}
+      MAX_PAGE_OUTPUT_TOKENS: ${MAX_PAGE_OUTPUT_TOKENS:-6144}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}   # 빈 값이면 서버 기본(localhost,127.0.0.1)
+      JOB_TTL_DAYS: ${JOB_TTL_DAYS:-0}    # 0 = 잡 자동 삭제 비활성 (opt-in)
+      HF_TOKEN: ${HF_TOKEN:-}
+      OCR_CPU_THREADS: ${OCR_CPU_THREADS:-0}
+      OCR_FAST_DECODE: ${OCR_FAST_DECODE:-1}
+      OCR_DECODE_BLOCK: ${OCR_DECODE_BLOCK:-8}
+      OCR_CUDA_GRAPHS: ${OCR_CUDA_GRAPHS:-}
+      OCR_MOE_FUSED: ${OCR_MOE_FUSED:-}
+      OCR_MOE_FAST: ${OCR_MOE_FAST:-}
+      OCR_SDPA: ${OCR_SDPA:-}
+      OCR_NGRAM_HOST: ${OCR_NGRAM_HOST:-}
+      CUDA_LAUNCH_BLOCKING: ${CUDA_LAUNCH_BLOCKING:-}
+      # ── 한국어 번역 (OpenAI 호환 API) — 미설정 시 번역 기능만 비활성 ──
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      TRANSLATE_MODEL: ${TRANSLATE_MODEL:-}
+      TRANSLATE_API_MODE: ${TRANSLATE_API_MODE:-auto}
+      TRANSLATE_CONCURRENCY: ${TRANSLATE_CONCURRENCY:-4}
+      TRANSLATE_TIMEOUT_S: ${TRANSLATE_TIMEOUT_S:-180}
+      TRANSLATE_MAX_RETRIES: ${TRANSLATE_MAX_RETRIES:-3}
+      TRANSLATE_TEMPERATURE: ${TRANSLATE_TEMPERATURE:-0}
+      TRANSLATE_MAX_TOKENS_PARAM: ${TRANSLATE_MAX_TOKENS_PARAM:-max_tokens}
+      TRANSLATE_REASONING: ${TRANSLATE_REASONING:-}
+      # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) ──
+      OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
+      NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}
+      # 컨테이너의 기본 Ollama 주소는 host.docker.internal(allowlist 등재) = 호스트 Ollama.
+      # 완전 격리(컨테이너 Ollama)는 compose.ollama.yaml overlay가 이 값을 덮어쓴다.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai-responses}
+      LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-low}
+      # 기본값은 config.py와 동일 — .env는 .dockerignore로 이미지·컨테이너에 없어서
+      # 여기서 스레딩하지 않으면 사용자의 .env 값이 조용히 무시된다 (make dev와 대칭)
+      LLM_OPENAI_BASE_URL: ${LLM_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      LLM_OPENAI_RESPONSES_MODELS: ${LLM_OPENAI_RESPONSES_MODELS:-gpt-5.6-luna,gpt-5.6-terra,gpt-5.6-sol}
+      LLM_OPENAI_CHAT_MODELS: ${LLM_OPENAI_CHAT_MODELS:-chat-latest,gpt-5.6-luna,gpt-5.6-terra}
+      LLM_OPENAI_RESPONSES_MODEL: ${LLM_OPENAI_RESPONSES_MODEL:-gpt-5.6-luna}
+      LLM_OPENAI_CHAT_MODEL: ${LLM_OPENAI_CHAT_MODEL:-chat-latest}
+    volumes:
+      - ocr-data:/data
+      - hf-cache:/data/hf
+    extra_hosts:
+      # Linux 호스트에서도 host.docker.internal이 호스트를 가리키게 (호스트 Ollama 접근용)
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  ocr-cuda:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        TORCH_VARIANT: cu129
+    image: unlimited-ocr-web:cuda
+    profiles: ["cuda"]
+    gpus: all
+    ports:
+      # 루프백 전용 — LAN 공개 방법은 ocr-cpu의 ports 주석 참조
+      - "127.0.0.1:8001:8000"
+    environment:
+      OCR_DEVICE: cuda
+      OCR_DTYPE: ${OCR_DTYPE:-auto}
+      OCR_ENGINE: ${OCR_ENGINE:-unlimited}
+      MODEL_ID: ${MODEL_ID:-baidu/Unlimited-OCR}
+      PRELOAD_MODEL: ${PRELOAD_MODEL:-1}
+      PAGES_PER_CHUNK: ${PAGES_PER_CHUNK:-8}
+      RENDER_DPI: ${RENDER_DPI:-200}
+      MAX_PAGES: ${MAX_PAGES:-200}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      MAX_PAGE_OUTPUT_CHARS: ${MAX_PAGE_OUTPUT_CHARS:-16384}
+      MAX_PAGE_OUTPUT_TOKENS: ${MAX_PAGE_OUTPUT_TOKENS:-6144}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}   # 빈 값이면 서버 기본(localhost,127.0.0.1)
+      JOB_TTL_DAYS: ${JOB_TTL_DAYS:-0}    # 0 = 잡 자동 삭제 비활성 (opt-in)
+      HF_TOKEN: ${HF_TOKEN:-}
+      # GPU_DEVICE=1 로 두 번째 GPU 선택 가능 (기본 0)
+      CUDA_VISIBLE_DEVICES: ${GPU_DEVICE:-0}
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      OCR_FAST_DECODE: ${OCR_FAST_DECODE:-1}
+      OCR_DECODE_BLOCK: ${OCR_DECODE_BLOCK:-8}
+      OCR_CUDA_GRAPHS: ${OCR_CUDA_GRAPHS:-}
+      OCR_MOE_FUSED: ${OCR_MOE_FUSED:-}
+      OCR_MOE_FAST: ${OCR_MOE_FAST:-}
+      OCR_SDPA: ${OCR_SDPA:-}
+      OCR_NGRAM_HOST: ${OCR_NGRAM_HOST:-}
+      CUDA_LAUNCH_BLOCKING: ${CUDA_LAUNCH_BLOCKING:-}
+      # ── 한국어 번역 (OpenAI 호환 API) — 미설정 시 번역 기능만 비활성 ──
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      TRANSLATE_MODEL: ${TRANSLATE_MODEL:-}
+      TRANSLATE_API_MODE: ${TRANSLATE_API_MODE:-auto}
+      TRANSLATE_CONCURRENCY: ${TRANSLATE_CONCURRENCY:-4}
+      TRANSLATE_TIMEOUT_S: ${TRANSLATE_TIMEOUT_S:-180}
+      TRANSLATE_MAX_RETRIES: ${TRANSLATE_MAX_RETRIES:-3}
+      TRANSLATE_TEMPERATURE: ${TRANSLATE_TEMPERATURE:-0}
+      TRANSLATE_MAX_TOKENS_PARAM: ${TRANSLATE_MAX_TOKENS_PARAM:-max_tokens}
+      TRANSLATE_REASONING: ${TRANSLATE_REASONING:-}
+      # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) — 설명은 ocr-cpu 참조 ──
+      OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
+      NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai-responses}
+      LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-low}
+      LLM_OPENAI_BASE_URL: ${LLM_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      LLM_OPENAI_RESPONSES_MODELS: ${LLM_OPENAI_RESPONSES_MODELS:-gpt-5.6-luna,gpt-5.6-terra,gpt-5.6-sol}
+      LLM_OPENAI_CHAT_MODELS: ${LLM_OPENAI_CHAT_MODELS:-chat-latest,gpt-5.6-luna,gpt-5.6-terra}
+      LLM_OPENAI_RESPONSES_MODEL: ${LLM_OPENAI_RESPONSES_MODEL:-gpt-5.6-luna}
+      LLM_OPENAI_CHAT_MODEL: ${LLM_OPENAI_CHAT_MODEL:-chat-latest}
+    volumes:
+      - ocr-data:/data
+      - hf-cache:/data/hf
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  # ── OvisOCR2 스택 (profile: ovis) ────────────────────────────
+  # backend(ocr-ovis)는 GPU 미사용 — GPU는 ovisocr2 sidecar 전용.
+  ocr-ovis:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        TORCH_VARIANT: cpu   # sidecar 클라이언트 — torch GPU 불필요 (이미지 재사용)
+    image: unlimited-ocr-web:cpu
+    profiles: ["ovis"]
+    ports:
+      # 루프백 전용 — LAN 공개 방법은 ocr-cpu의 ports 주석 참조
+      - "127.0.0.1:8002:8000"
+    environment:
+      OCR_DEVICE: cpu                # backend 프로세스는 GPU를 쓰지 않는다
+      OCR_ENGINE: ovisocr2
+      OCR_SIDECAR_URL: http://ovisocr2:8080
+      OCR_SIDECAR_CONNECT_TIMEOUT_S: ${OCR_SIDECAR_CONNECT_TIMEOUT_S:-10}
+      OCR_SIDECAR_READ_TIMEOUT_S: ${OCR_SIDECAR_READ_TIMEOUT_S:-600}
+      OCR_SIDECAR_HEALTH_TIMEOUT_S: ${OCR_SIDECAR_HEALTH_TIMEOUT_S:-5}
+      OCR_SIDECAR_MAX_RESPONSE_MB: ${OCR_SIDECAR_MAX_RESPONSE_MB:-20}
+      OCR_SIDECAR_RETRIES: ${OCR_SIDECAR_RETRIES:-1}
+      OCR_REMOTE_PAGE_CONCURRENCY: ${OCR_REMOTE_PAGE_CONCURRENCY:-1}
+      PRELOAD_MODEL: ${PRELOAD_MODEL:-1}
+      RENDER_DPI: ${RENDER_DPI:-200}
+      MAX_PAGES: ${MAX_PAGES:-200}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+      JOB_TTL_DAYS: ${JOB_TTL_DAYS:-0}
+      # ── 한국어 번역 (OpenAI 호환 API) — 미설정 시 번역 기능만 비활성 ──
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      TRANSLATE_MODEL: ${TRANSLATE_MODEL:-}
+      TRANSLATE_API_MODE: ${TRANSLATE_API_MODE:-auto}
+      TRANSLATE_CONCURRENCY: ${TRANSLATE_CONCURRENCY:-4}
+      TRANSLATE_TIMEOUT_S: ${TRANSLATE_TIMEOUT_S:-180}
+      TRANSLATE_MAX_RETRIES: ${TRANSLATE_MAX_RETRIES:-3}
+      TRANSLATE_TEMPERATURE: ${TRANSLATE_TEMPERATURE:-0}
+      TRANSLATE_MAX_TOKENS_PARAM: ${TRANSLATE_MAX_TOKENS_PARAM:-max_tokens}
+      TRANSLATE_REASONING: ${TRANSLATE_REASONING:-}
+      # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) — 설명은 ocr-cpu 참조 ──
+      OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
+      NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai-responses}
+      LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-low}
+      LLM_OPENAI_BASE_URL: ${LLM_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      LLM_OPENAI_RESPONSES_MODELS: ${LLM_OPENAI_RESPONSES_MODELS:-gpt-5.6-luna,gpt-5.6-terra,gpt-5.6-sol}
+      LLM_OPENAI_CHAT_MODELS: ${LLM_OPENAI_CHAT_MODELS:-chat-latest,gpt-5.6-luna,gpt-5.6-terra}
+      LLM_OPENAI_RESPONSES_MODEL: ${LLM_OPENAI_RESPONSES_MODEL:-gpt-5.6-luna}
+      LLM_OPENAI_CHAT_MODEL: ${LLM_OPENAI_CHAT_MODEL:-chat-latest}
+    volumes:
+      - ocr-ovis-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      ovisocr2:
+        # service_healthy 대신 service_started: 최초 모델 다운로드가 수십 분일 수
+        # 있고, backend는 sidecar 미준비를 health/잡 오류로 안전하게 표면화한다.
+        condition: service_started
+    restart: unless-stopped
+
+  ovisocr2:
+    build:
+      context: services/ovisocr2
+    image: ovisocr2-sidecar:0.22.1-cu129
+    profiles: ["ovis"]
+    gpus: all
+    # 포트는 Docker 내부 네트워크에만 노출 — 브라우저 접근은 ocr-ovis(8002)로만
+    expose:
+      - "8080"
+    environment:
+      CUDA_VISIBLE_DEVICES: ${GPU_DEVICE:-0}
+      HF_TOKEN: ${HF_TOKEN:-}          # 빌드 레이어가 아닌 runtime env로만 전달
+      OVIS_MODEL_ID: ${OVIS_MODEL_ID:-ATH-MaaS/OvisOCR2}
+      OVIS_MODEL_REVISION: ${OVIS_MODEL_REVISION:-}   # 빈 값 = 코드 기본 고정 SHA
+      OVIS_DTYPE: ${OVIS_DTYPE:-bfloat16}
+      OVIS_GPU_MEMORY_UTILIZATION: ${OVIS_GPU_MEMORY_UTILIZATION:-0.80}
+      OVIS_MAX_MODEL_LEN: ${OVIS_MAX_MODEL_LEN:-24576}
+      OVIS_MAX_OUTPUT_TOKENS: ${OVIS_MAX_OUTPUT_TOKENS:-8192}
+      OVIS_MAX_NUM_SEQS: ${OVIS_MAX_NUM_SEQS:-1}
+      OVIS_MIN_PIXELS: ${OVIS_MIN_PIXELS:-}
+      OVIS_MAX_PIXELS: ${OVIS_MAX_PIXELS:-}
+      OVIS_GDN_PREFILL_BACKEND: ${OVIS_GDN_PREFILL_BACKEND:-triton}
+      OVIS_MAX_UPLOAD_MB: ${OVIS_MAX_UPLOAD_MB:-128}   # backend 페이지 PNG 상한과 정합
+    volumes:
+      - ovis-hf-cache:/data/hf
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  # ── PaddleOCR-VL-1.6 스택 (profile: paddle) ──────────────────
+  ocr-paddle:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        TORCH_VARIANT: cpu
+    image: unlimited-ocr-web:cpu
+    profiles: ["paddle"]
+    ports:
+      - "127.0.0.1:8003:8000"
+    environment:
+      OCR_DEVICE: cpu
+      OCR_ENGINE: paddleocr_vl
+      OCR_SIDECAR_URL: http://paddleocr-vl:8080
+      OCR_SIDECAR_CONNECT_TIMEOUT_S: ${OCR_SIDECAR_CONNECT_TIMEOUT_S:-10}
+      OCR_SIDECAR_READ_TIMEOUT_S: ${OCR_SIDECAR_READ_TIMEOUT_S:-600}
+      OCR_SIDECAR_HEALTH_TIMEOUT_S: ${OCR_SIDECAR_HEALTH_TIMEOUT_S:-5}
+      OCR_SIDECAR_MAX_RESPONSE_MB: ${OCR_SIDECAR_MAX_RESPONSE_MB:-20}
+      OCR_SIDECAR_RETRIES: ${OCR_SIDECAR_RETRIES:-1}
+      OCR_REMOTE_PAGE_CONCURRENCY: ${OCR_REMOTE_PAGE_CONCURRENCY:-1}
+      PRELOAD_MODEL: ${PRELOAD_MODEL:-1}
+      RENDER_DPI: ${RENDER_DPI:-200}
+      MAX_PAGES: ${MAX_PAGES:-200}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+      JOB_TTL_DAYS: ${JOB_TTL_DAYS:-0}
+      # ── 한국어 번역 (OpenAI 호환 API) — 미설정 시 번역 기능만 비활성 ──
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      TRANSLATE_MODEL: ${TRANSLATE_MODEL:-}
+      TRANSLATE_API_MODE: ${TRANSLATE_API_MODE:-auto}
+      TRANSLATE_CONCURRENCY: ${TRANSLATE_CONCURRENCY:-4}
+      TRANSLATE_TIMEOUT_S: ${TRANSLATE_TIMEOUT_S:-180}
+      TRANSLATE_MAX_RETRIES: ${TRANSLATE_MAX_RETRIES:-3}
+      TRANSLATE_TEMPERATURE: ${TRANSLATE_TEMPERATURE:-0}
+      TRANSLATE_MAX_TOKENS_PARAM: ${TRANSLATE_MAX_TOKENS_PARAM:-max_tokens}
+      TRANSLATE_REASONING: ${TRANSLATE_REASONING:-}
+      # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) — 설명은 ocr-cpu 참조 ──
+      OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
+      NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai-responses}
+      LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-low}
+      LLM_OPENAI_BASE_URL: ${LLM_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      LLM_OPENAI_RESPONSES_MODELS: ${LLM_OPENAI_RESPONSES_MODELS:-gpt-5.6-luna,gpt-5.6-terra,gpt-5.6-sol}
+      LLM_OPENAI_CHAT_MODELS: ${LLM_OPENAI_CHAT_MODELS:-chat-latest,gpt-5.6-luna,gpt-5.6-terra}
+      LLM_OPENAI_RESPONSES_MODEL: ${LLM_OPENAI_RESPONSES_MODEL:-gpt-5.6-luna}
+      LLM_OPENAI_CHAT_MODEL: ${LLM_OPENAI_CHAT_MODEL:-chat-latest}
+    volumes:
+      - ocr-paddle-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      paddleocr-vl:
+        condition: service_started
+    restart: unless-stopped
+
+  paddleocr-vl:
+    build:
+      context: services/paddleocr_vl
+    image: paddleocr-vl-sidecar:3.6.0-cu129
+    profiles: ["paddle"]
+    gpus: all
+    expose:
+      - "8080"
+    environment:
+      CUDA_VISIBLE_DEVICES: ${GPU_DEVICE:-0}
+      HF_TOKEN: ${HF_TOKEN:-}
+      PADDLE_PDX_MODEL_SOURCE: huggingface
+      PADDLEOCR_MODEL_ID: ${PADDLEOCR_MODEL_ID:-PaddlePaddle/PaddleOCR-VL-1.6}
+      PADDLEOCR_MODEL_REVISION: ${PADDLEOCR_MODEL_REVISION:-}  # 빈 값 = 코드 기본 고정 SHA
+      PADDLEOCR_DEVICE: ${PADDLEOCR_DEVICE:-gpu:0}
+      PADDLEOCR_MIN_PIXELS: ${PADDLEOCR_MIN_PIXELS:-}
+      PADDLEOCR_MAX_PIXELS: ${PADDLEOCR_MAX_PIXELS:-}
+      PADDLEOCR_MAX_UPLOAD_MB: ${PADDLEOCR_MAX_UPLOAD_MB:-128}  # backend 페이지 PNG 상한과 정합
+    volumes:
+      - paddle-hf-cache:/data/hf     # HF 모델 캐시 (Paddle 캐시와 분리)
+      - paddle-x-cache:/root/.paddlex  # PaddleX 파이프라인/layout 모델 캐시
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  ocr-data:
+  hf-cache:
+  # sidecar 스택별 분리 볼륨 — 소유권(uid)·캐시 충돌 방지
+  ocr-ovis-data:
+  ocr-paddle-data:
+  ovis-hf-cache:
+  paddle-hf-cache:
+  paddle-x-cache:

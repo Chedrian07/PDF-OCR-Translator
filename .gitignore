@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# Native build
+native/_skbuild/
+native/build/
+*.so
+
+# Data / runtime (런타임 잡 데이터만 — 앱 내장 데이터 backend/app/**/data/ 는 추적)
+/data/
+/backend/data/
+*.log
+sample/e2e-*/
+nohup.out
+
+# Node (e2e 브라우저 테스트 의존성)
+node_modules/
+frontend/tests/e2e/shots/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# HF cache (로컬 개발 시)
+hf-cache/
+*.tmp.*
+
+# 로컬 환경 (API 키 포함 — 절대 커밋 금지)
+.env
+.env.*
+!.env.example
+
+# 인증서·개인키·로컬 자격증명
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+credentials/
+secrets/
+
+# 커버리지·일회성 렌더/검증 파일
+.coverage
+coverage.xml
+htmlcov/
+tmp/
+
+# smoke 테스트가 backend/에서 실행될 때 생기는 부산물
+backend/sample/

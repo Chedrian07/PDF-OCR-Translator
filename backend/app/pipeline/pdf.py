@@ -1,0 +1,227 @@
+"""PDF → 페이지 PNG 렌더링 (pymupdf)."""
+
+from __future__ import annotations
+
+import logging
+import re
+from collections import Counter
+from pathlib import Path
+from typing import Callable
+
+logger = logging.getLogger(__name__)
+
+# ── 리소스 상한 (렌더 OOM 방어) ────────────────────────────────────────────
+# 페이지 한 변(pt) 상한. A0 = 2384×3370pt이므로 5400pt(≈1.9m)면 포스터·도면류
+# 정상 문서까지 넉넉히 통과한다. PDF 스펙은 MediaBox를 14400pt(200인치)까지
+# 허용하는데, 그런 페이지 1장(파일 수 KB)이 기본 200dpi에서 40000×40000px
+# ≈ RGB 4.8GB를 할당해 워커를 OOM으로 죽인다 — 업로드 검증(probe)에서 거부.
+MAX_PAGE_SIDE_PT = 5400
+
+# 페이지당 렌더 픽셀 수 상한. 50M px ≈ RGB 150MB(pixmap 버퍼)로 워커 메모리
+# 안에서 안전하다. A4@400dpi(≈15.5M px)는 그대로 통과하지만, probe를 통과한
+# 대형 페이지도 고 dpi에선 초과할 수 있으므로(예: 5400pt² @400dpi ≈ 900M px)
+# 거부가 아니라 비율 유지 축소로 처리한다. 그라운딩 좌표는 0–999 정규화라
+# 균일 축소에 영향 없다 (layout.py/_pct, pdf_fonts.py 참조).
+MAX_RENDER_PIXELS = 50_000_000
+
+# OCR fallback에서 한 페이지의 숨은/중복 텍스트 레이어가 결과 파일을 폭증시키지
+# 못하게 하는 독립 상한. 정상 논문/문서 페이지의 텍스트는 이보다 훨씬 작다.
+MAX_EMBEDDED_TEXT_CHARS = 100_000
+_UNSAFE_TEXT_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_EMBEDDED_RECOVERY_NOTE = "> ℹ️ PDF 내장 텍스트 레이어에서 복구한 plain text입니다."
+
+
+def quiet_fitz():
+    """fitz(pymupdf) 지연 임포트 + MuPDF 에러의 stderr 직접 출력 차단(프로세스 1회).
+
+    MuPDF C 라이브러리는 복구 가능한 파싱 문제(예: 손상 CID 폰트의
+    "syntax error: unknown cid font type")를 텍스트 객체마다 stderr에 직접 찍는다
+    — 한 페이지에서 수십 줄씩 서버 콘솔을 뒤덮지만 렌더 자체는 폰트 폴백으로
+    정상 진행된다(실측: 27p 문서에서 p5 하나가 49줄). 표시만 끄면 동작·예외는
+    불변이고 메시지는 내부 버퍼에 계속 쌓이므로, 호출부가 작업 단위로
+    drain_mupdf_warnings()로 요약해 로거에 남긴다."""
+    import fitz
+
+    if fitz.TOOLS.mupdf_display_errors():
+        fitz.TOOLS.mupdf_display_errors(False)
+    return fitz
+
+
+def drain_mupdf_warnings(context: str) -> None:
+    """MuPDF 내부 경고 버퍼를 비우고 종류별 건수로 요약해 한 줄 로깅.
+
+    버퍼는 프로세스 전역이라 동시 사용 시 다른 작업의 메시지가 섞일 수 있으나
+    (잡 러너는 단일 워커) 진단용 요약이므로 best-effort로 충분하다."""
+    try:
+        import fitz
+
+        text = fitz.TOOLS.mupdf_warnings()
+    except Exception:  # pragma: no cover - 방어적
+        return
+    if not text:
+        return
+    counts = Counter(text.splitlines())
+    top = [f"{m} (x{c})" if c > 1 else m for m, c in counts.most_common(3)]
+    extra = f" 외 {len(counts) - 3}종" if len(counts) > 3 else ""
+    logger.info("MuPDF 복구성 경고 %d건 (%s — 처리는 계속됨): %s%s",
+                sum(counts.values()), context, " · ".join(top), extra)
+
+
+def probe_pdf(pdf_path: Path, max_pages: int) -> int:
+    """업로드 검증: 열 수 있는 PDF인지 확인하고 페이지 수를 돌려준다.
+    문제가 있으면 사용자 메시지를 담은 ValueError."""
+    fitz = quiet_fitz()
+
+    try:
+        doc = fitz.open(str(pdf_path))
+    except Exception as e:
+        drain_mupdf_warnings("업로드 검증")
+        raise ValueError(f"PDF를 열 수 없습니다: {e}") from e
+    try:
+        if doc.needs_pass:
+            raise ValueError("암호화된 PDF는 지원하지 않습니다")
+        n = doc.page_count
+        if n == 0:
+            raise ValueError("페이지가 없는 PDF입니다")
+        if n > max_pages:
+            raise ValueError(f"페이지 수({n})가 상한({max_pages})을 초과합니다")
+        for i in range(n):
+            try:
+                r = doc[i].rect
+            except Exception:  # 페이지 로드 실패는 렌더 단계가 흰색 페이지로 격리
+                continue
+            if max(r.width, r.height) > MAX_PAGE_SIDE_PT:
+                raise ValueError(
+                    f"페이지 {i + 1}의 크기({r.width:.0f}×{r.height:.0f}pt)가 "
+                    f"한 변 상한({MAX_PAGE_SIDE_PT}pt)을 초과합니다"
+                )
+        return n
+    finally:
+        doc.close()
+        drain_mupdf_warnings("업로드 검증")
+
+
+def extract_embedded_page_markdown(pdf_path: Path, page_number: int) -> str | None:
+    """PDF의 1-based 페이지 텍스트 레이어를 안전한 plain-text Markdown으로 추출.
+
+    각 줄을 들여쓴 code block으로 만들어 원문의 ``#``/``<PAGE>``/``---``가
+    Markdown 구조나 파이프라인 페이지 구분자로 해석되지 않게 한다. 스캔 문서처럼
+    유효한 텍스트가 없거나 MuPDF 추출이 실패하면 ``None``을 반환한다.
+    """
+    fitz = quiet_fitz()
+    doc = None
+    try:
+        doc = fitz.open(str(pdf_path))
+        if doc.needs_pass or not 1 <= page_number <= doc.page_count:
+            return None
+        text = doc[page_number - 1].get_text("text", sort=True)
+        text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
+        text = _UNSAFE_TEXT_CONTROLS.sub("", text)
+        text = "\n".join(line.rstrip() for line in text.split("\n")).strip()
+        if not text or not any(char.isalnum() for char in text):
+            return None
+        if len(text) > MAX_EMBEDDED_TEXT_CHARS:
+            logger.warning(
+                "%d페이지 PDF 텍스트 레이어가 상한(%d자)을 초과해 절단",
+                page_number,
+                MAX_EMBEDDED_TEXT_CHARS,
+            )
+            text = text[:MAX_EMBEDDED_TEXT_CHARS].rstrip() + "\n[텍스트 레이어 절단됨]"
+        indented = "\n".join(f"    {line}" if line else "" for line in text.split("\n"))
+        return f"{_EMBEDDED_RECOVERY_NOTE}\n\n{indented}"
+    except Exception as error:  # noqa: BLE001 — OCR 실패 뒤의 best-effort 복구
+        logger.warning(
+            "%d페이지 PDF 텍스트 레이어 추출 실패 (%s: %s)",
+            page_number,
+            error.__class__.__name__,
+            str(error)[:200],
+        )
+        return None
+    finally:
+        if doc is not None:
+            doc.close()
+        drain_mupdf_warnings(f"{page_number}페이지 텍스트 복구")
+
+
+def _capped_scale(w_pt: float, h_pt: float, dpi: int) -> tuple[float, int]:
+    """dpi 배율의 목표 픽셀 수를 구하고, MAX_RENDER_PIXELS 초과면 비율을
+    유지한 채 줄인 배율을 돌려준다. 반환: (배율, 축소 전 목표 픽셀 수)."""
+    scale = dpi / 72
+    target = int(w_pt * scale) * int(h_pt * scale)
+    if target > MAX_RENDER_PIXELS:
+        scale *= (MAX_RENDER_PIXELS / target) ** 0.5
+    return scale, target
+
+
+def _write_blank_page(doc, index: int, path: Path, dpi: int) -> None:
+    """렌더 실패 페이지의 대체 흰색 PNG — 페이지 크기를 못 읽으면 A4(pt) 기준.
+    정상 렌더와 같은 픽셀 상한을 지켜 대체 경로도 OOM을 못 일으키게 한다."""
+    from PIL import Image
+
+    try:
+        rect = doc[index].rect
+        w_pt, h_pt = float(rect.width), float(rect.height)
+    except Exception:  # 페이지 객체 자체가 깨진 경우
+        w_pt, h_pt = 595.0, 842.0
+    scale, _ = _capped_scale(w_pt, h_pt, dpi)
+    size = (max(1, round(w_pt * scale)), max(1, round(h_pt * scale)))
+    Image.new("RGB", size, "white").save(path)
+
+
+def render_pdf_pages(
+    pdf_path: Path,
+    pages_dir: Path,
+    dpi: int,
+    max_pages: int,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> list[Path]:
+    """모든 페이지를 pages_dir/page_%04d.png (1-based)로 렌더.
+
+    한 페이지가 깨져도(get_pixmap 예외) 잡 전체를 죽이지 않는다 — 흰색 페이지로
+    대체하고 계속한다. 전 페이지 실패 시에만 ValueError.
+    페이지당 픽셀 수가 MAX_RENDER_PIXELS를 넘으면 비율을 유지한 채 축소한다."""
+    fitz = quiet_fitz()
+
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open(str(pdf_path))
+    try:
+        if doc.needs_pass:
+            raise ValueError("암호화된 PDF는 지원하지 않습니다")
+        n = doc.page_count
+        if n == 0:
+            raise ValueError("페이지가 없는 PDF입니다")
+        if n > max_pages:
+            raise ValueError(f"페이지 수({n})가 상한({max_pages})을 초과합니다")
+        out: list[Path] = []
+        failed = 0
+        last_err: Exception | None = None
+        for i in range(n):
+            p = pages_dir / f"page_{i + 1:04d}.png"
+            try:
+                page = doc[i]
+                rect = page.rect
+                # pix 생성 전에 목표 픽셀 수를 계산 — 상한 초과 시 비율 유지 축소
+                # (probe의 치수 검사를 통과한 페이지도 고 dpi에선 넘을 수 있다)
+                scale, target = _capped_scale(rect.width, rect.height, dpi)
+                if target > MAX_RENDER_PIXELS:
+                    logger.warning(
+                        "페이지 %d/%d: 렌더 %dpx가 페이지당 상한(%dpx)을 초과 — "
+                        "비율 유지 축소 (배율 %.3f→%.3f)",
+                        i + 1, n, target, MAX_RENDER_PIXELS, dpi / 72, scale)
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+                pix.save(str(p))
+            except Exception as e:  # noqa: BLE001 — 페이지 단위 격리
+                failed += 1
+                last_err = e
+                logger.warning("페이지 %d/%d 렌더 실패 (%s: %s) — 흰색 페이지로 대체",
+                               i + 1, n, e.__class__.__name__, str(e)[:200])
+                _write_blank_page(doc, i, p, dpi)
+            out.append(p)
+            if progress_cb:
+                progress_cb(i + 1, n)
+        if failed == n:
+            raise ValueError(f"모든 페이지({n}) 렌더에 실패했습니다: {last_err}") from last_err
+        return out
+    finally:
+        doc.close()
+        drain_mupdf_warnings("페이지 렌더")

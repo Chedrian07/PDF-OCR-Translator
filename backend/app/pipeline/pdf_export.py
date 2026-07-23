@@ -477,7 +477,17 @@ def _plan_single_line(
     vertical = max_rect if max_rect is not None else rect
     for scale in _SINGLE_LINE_SCALES:
         size = max(_MIN_FONT_PT, base_pt * scale)
-        width = font.text_length(text, fontsize=size)
+        # PyMuPDF의 내장 CJK 폰트는 ``Font.text_length()``와 실제
+        # ``Page.insert_text()``가 서로 다른 폭을 보고한다. 예를 들어 korea
+        # 폰트의 Font API는 ASCII 공백을 약 0.26em으로 계산하지만 PDF 삽입기는
+        # 모든 문자를 1em 전각으로 인코딩한다. 그 값을 그대로 가운데 정렬에 쓰면
+        # Linux 폴백 환경에서 제목이 오른쪽으로 밀린다. 파일 폰트는 Font 메트릭을,
+        # 내장 폰트는 실제 삽입기와 계약이 같은 get_text_length()를 사용한다.
+        width = (
+            font.text_length(text, fontsize=size)
+            if fontfile
+            else fitz.get_text_length(text, fontname=fontname, fontsize=size)
+        )
         if width > rect.width + 0.25:
             continue
         if align == 1:

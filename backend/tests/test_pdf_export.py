@@ -450,9 +450,16 @@ def test_build_expands_only_into_collision_free_space(tmp_path):
     assert "Footer obstacle" in text
 
 
-def test_build_preserves_title_size_weight_and_center_alignment(tmp_path):
+def test_build_preserves_title_size_weight_and_center_alignment(tmp_path, monkeypatch):
     """CJK 행높이 때문에 제목을 축소하지 않고 빈 공간·굵기·가운데 정렬을 쓴다."""
     import fitz
+
+    # 개발 머신의 시스템 한글 폰트 유무와 관계없이 Linux 최종 폴백을 검증한다.
+    # PyMuPDF 내장 CJK 폰트는 Font.text_length()와 실제 삽입 폭이 다르다.
+    monkeypatch.setattr(
+        "app.pipeline.pdf_export._resolve_font",
+        lambda *args, **kwargs: (None, "korea"),
+    )
 
     job_dir = tmp_path / "styled-title-job"
     job_dir.mkdir()

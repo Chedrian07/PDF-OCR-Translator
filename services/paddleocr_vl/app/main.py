@@ -144,8 +144,13 @@ def health() -> dict:
 
 
 def _validate_image(data: bytes) -> tuple[int, int]:
-    """형식·픽셀 수를 **디코드 전에** 헤더로 검증한 뒤에만 실제 디코드한다
-    (load() 후 검사하면 픽셀 폭탄이 이미 메모리를 잡은 뒤다)."""
+    """형식·픽셀 수를 **헤더만으로** 검증한다 (Image.open은 lazy — 픽셀 미디코드).
+
+    전체 디코드(im.load)는 하지 않는다: 결과 픽셀은 어차피 버려지고 파이프라인이
+    임시 파일에서 같은 이미지를 다시 디코드하므로, 대형 페이지 PNG에서 페이지당
+    수백 ms의 순수 이중 디코드 비용이었다. 픽셀 폭탄 방어는 헤더 치수 검사로
+    성립한다(PNG/JPEG 디코드 할당량은 헤더 치수가 결정). 손상 파일은 파이프라인
+    디코드 실패 → 기존 502 경로로 표면화된다 (backend 재시도 정책과 정합)."""
     if len(data) > cfg.max_upload_mb * 1024 * 1024:
         raise HTTPException(413, f"이미지가 상한({cfg.max_upload_mb}MB)을 초과합니다")
     try:
@@ -156,10 +161,6 @@ def _validate_image(data: bytes) -> tuple[int, int]:
         raise HTTPException(400, f"지원하지 않는 이미지 형식: {im.format}")
     if im.width * im.height > _MAX_IMAGE_PIXELS:
         raise HTTPException(400, "이미지 픽셀 수가 상한을 초과합니다")
-    try:
-        im.load()
-    except Exception as e:
-        raise HTTPException(400, "이미지를 디코드할 수 없습니다") from e
     return im.width, im.height
 
 

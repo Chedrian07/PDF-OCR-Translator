@@ -41,20 +41,34 @@ def check_nvidia_smi() -> dict | None:
     if not q:
         print(f"{FAIL} nvidia-smi 질의 실패 — 드라이버/GPU 상태를 확인하세요")
         return None
-    first = q.splitlines()[0]
-    name, total_mb, used_mb, driver, cc = [p.strip() for p in first.split(",")]
-    info = {
-        "gpu_name": name, "vram_total_mb": int(float(total_mb)),
-        "vram_used_mb": int(float(used_mb)), "driver": driver, "compute_cap": cc,
-    }
-    print(f"{OK} GPU: {name}")
-    print(f"   VRAM: {info['vram_total_mb']}MB 총량 / {info['vram_used_mb']}MB 사용 중")
-    print(f"   드라이버: {driver} · compute capability: {cc}")
+    gpus = []
+    for idx, line in enumerate(q.splitlines()):
+        name, total_mb, used_mb, driver, cc = [p.strip() for p in line.split(",")]
+        gpus.append({
+            "index": idx, "gpu_name": name, "vram_total_mb": int(float(total_mb)),
+            "vram_used_mb": int(float(used_mb)), "driver": driver, "compute_cap": cc,
+        })
+        print(f"{OK} GPU {idx}: {name}")
+        print(f"   VRAM: {int(float(total_mb))}MB 총량 / {int(float(used_mb))}MB 사용 중")
+        print(f"   드라이버: {driver} · compute capability: {cc}")
+    if len(gpus) > 1:
+        print(f"{WARN} GPU가 {len(gpus)}개 감지됨 — compose는 CUDA_VISIBLE_DEVICES="
+              "${GPU_DEVICE:-0}로 서빙 카드를 선택합니다. compose가 "
+              "CUDA_DEVICE_ORDER=PCI_BUS_ID를 설정하므로 인덱스는 위(nvidia-smi) "
+              "순서와 일치합니다 — GPU_DEVICE가 의도한 카드인지 확인하세요")
+    # 서빙 대상 = sm_120(Blackwell) 행 우선, 없으면 GPU 0 (JSON 스키마 후방 호환)
+    target = next((g for g in gpus if g["compute_cap"].split(".")[0] == "12"), gpus[0])
+    info = {k: v for k, v in target.items() if k != "index"}
+    info["gpu_index"] = target["index"]
+    info["gpus"] = gpus
 
     smi = _run(["nvidia-smi"]) or ""
-    cuda_line = next((line for line in smi.splitlines() if "CUDA Version" in line), "")
+    # 구형 헤더는 "CUDA Version: 12.x", 신형(예: 610.xx)은 "CUDA UMD Version: 13.x" —
+    # 마지막 "Version:" 뒤 값을 취하면 두 형식 모두에서 CUDA 버전이 나온다.
+    cuda_line = next(
+        (line for line in smi.splitlines() if "CUDA" in line and "Version" in line), "")
     if cuda_line:
-        cuda_ver = cuda_line.split("CUDA Version:")[-1].strip().rstrip("|").strip()
+        cuda_ver = cuda_line.split("Version:")[-1].strip().rstrip("|").strip()
         info["driver_cuda"] = cuda_ver
         print(f"   드라이버 CUDA 지원: {cuda_ver}")
     return info
@@ -104,6 +118,9 @@ def sidecar_compat_warnings(info: dict) -> None:
         print("   · OvisOCR2 sidecar: vllm/vllm-openai:v0.22.1-cu129 (충족)")
         print("   · PaddleOCR-VL sidecar: paddlepaddle-gpu cu129 wheel (충족)")
         print("   · cu118/torch<2.7 기반 스택(DeepSeek-OCR-2 공식 경로 등)은 동작 불가")
+        if info.get("gpu_index", 0) != 0:
+            print(f"{WARN} 서빙 대상 GPU(sm_120)가 인덱스 {info['gpu_index']}입니다 — "
+                  f".env에 GPU_DEVICE={info['gpu_index']} 를 설정하세요 (기본 0)")
     elif cc:
         print(f"{WARN} compute capability {cc} — 이 저장소의 sidecar 기본값은 "
               "RTX 5070 Ti(sm_120) 기준입니다. 다른 GPU는 문서의 VRAM 정책을 조정하세요")

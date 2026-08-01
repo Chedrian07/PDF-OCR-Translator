@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -66,17 +67,34 @@ app = FastAPI(title="OvisOCR2 sidecar", lifespan=lifespan)
 
 
 def _gpu_info() -> dict:
-    try:
-        import torch
+    """NVML로 GPU 정보 조회 — torch.cuda API는 쓰지 않는다.
 
-        if not torch.cuda.is_available():
-            return {"gpu_name": None, "gpu_total_mb": None, "gpu_free_mb": None}
-        free_b, total_b = torch.cuda.mem_get_info(0)
-        return {
-            "gpu_name": torch.cuda.get_device_name(0),
-            "gpu_total_mb": total_b // (1024 * 1024),
-            "gpu_free_mb": free_b // (1024 * 1024),
-        }
+    torch.cuda.mem_get_info는 지연 초기화로 이 API 프로세스에 **영구 primary CUDA
+    컨텍스트**(~수백 MB VRAM)를 만든다. vLLM V1의 모델은 자식 EngineCore 프로세스에
+    있으므로 그 컨텍스트는 순수 낭비이고, HEALTHCHECK 30초 폴링이 모델 프로파일링
+    전에 먼저 도착해 KV 캐시 예산까지 깎는다. NVML(nvidia-ml-py, vLLM 동봉)은
+    컨텍스트를 만들지 않는다. NVML 열거는 PCI 순서라 CUDA_VISIBLE_DEVICES를
+    무시하므로 env를 직접 파싱해 매핑한다 (compose가 CUDA_DEVICE_ORDER=PCI_BUS_ID로
+    CUDA 인덱스도 PCI 순서로 고정 — 인덱스 의미가 일치한다)."""
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        try:
+            visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0].strip()
+            idx = int(visible) if visible.isdigit() else 0
+            handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            name = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode()
+            return {
+                "gpu_name": name,
+                "gpu_total_mb": mem.total // (1024 * 1024),
+                "gpu_free_mb": mem.free // (1024 * 1024),
+            }
+        finally:
+            pynvml.nvmlShutdown()
     except Exception:  # noqa: BLE001 — health는 항상 응답해야 한다
         return {"gpu_name": None, "gpu_total_mb": None, "gpu_free_mb": None}
 
@@ -159,9 +177,10 @@ def parse(
     t1 = time.monotonic()
 
     warnings: list[str] = []
-    max_pixels = opts.max_pixels or cfg.max_pixels
     # 옵션은 상한을 **낮추는 방향으로만** 유효하다 — 설정 상한을 넘기면
-    # max_model_len 예산을 깨고 vLLM이 요청 자체를 거부한다.
+    # max_model_len 예산을 깨고 vLLM이 요청 자체를 거부한다 (max_pixels도 동일:
+    # 비전 토큰 수가 max_pixels에 비례하므로 clamp 없이는 예산 위반 요청이 가능했다).
+    max_pixels = min(opts.max_pixels or cfg.max_pixels, cfg.max_pixels)
     max_output_tokens = min(opts.max_output_tokens or cfg.max_output_tokens,
                             cfg.max_output_tokens)
     try:

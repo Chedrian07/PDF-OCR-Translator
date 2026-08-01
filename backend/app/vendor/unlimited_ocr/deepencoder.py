@@ -706,7 +706,9 @@ class ImageEncoderViT(nn.Module):
 
         x = self.neck(x.permute(0, 3, 1, 2))
         x2 = self.net_2(x)
-        x3 = self.net_3(x2.clone())
+        # [vendor patch P21] conv는 입력을 in-place 변경하지 않고 x2는 이후 미사용 —
+        # 불필요한 중간 텐서 복사(clone) 제거.
+        x3 = self.net_3(x2)
 
         return x3
 

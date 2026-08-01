@@ -713,6 +713,11 @@ class UnlimitedOCRForCausalLM(DeepseekV2ForCausalLM, GenerationMixin):  # [vendo
         # print(transformer_outputs)
 
         hidden_states = outputs[0]
+        # [vendor patch P21] 추론 경로(HF generate·fast_decode)는 마지막 위치의 logits만
+        # 소비한다([:, -1, :]) — 프리필에서 전체 시퀀스 × vocab의 fp32 logits 실체화를
+        # 피해 페이지당 ~1GB급 VRAM 스파이크를 제거. 학습(labels) 경로는 전체 유지.
+        if labels is None and hidden_states.shape[1] > 1:
+            hidden_states = hidden_states[:, -1:, :]
         logits = self.lm_head(hidden_states)
         logits = logits.float()
 
@@ -802,7 +807,8 @@ class UnlimitedOCRForCausalLM(DeepseekV2ForCausalLM, GenerationMixin):  # [vendo
 
         # TODO @gante we should only keep a `cache_position` in generate, and do +=1.
         # same goes for position ids. Could also help with continued generation.
-        cache_position = torch.arange(past_length, past_length + position_ids.shape[-1], device=position_ids.device)
+        # [vendor patch P21] cache_position은 model_inputs에 포함되지 않는 죽은 계산이었다 —
+        # 디코드 스텝마다 버려지는 디바이스 텐서(torch.arange) 할당을 제거.
 
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and past_key_values is None:

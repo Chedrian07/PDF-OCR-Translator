@@ -57,45 +57,65 @@ def _cuda_graphs_enabled() -> bool:
     return os.environ.get("OCR_CUDA_GRAPHS", "").strip().lower() not in ("0", "false", "no", "off")
 
 
-def _should_try_cuda_graph(input_ids, processors, model, block: int) -> bool:
-    """그래프 경로 발동 조건 — 하나라도 어긋나면 False(→ eager, 예외 아님).
+def _graph_skip_reason(input_ids, processors, model, block) -> str | None:
+    """그래프 경로를 못 타는 **첫 사유** 문자열 — 탈 수 있으면 None.
 
-    CUDA 입력 · env on · 프로세서가 ngram_size/window를 제공하는 **단일** ngram
-    (우리 ngram 하나라는 가정을 검증 — 다르면 폴백) · ``graph_capable=False``
+    검사 항목: CUDA 입력 · env on · 프로세서가 ngram_size/window를 제공하는 **단일**
+    ngram(우리 ngram 하나라는 가정을 검증 — 다르면 폴백) · ``graph_capable=False``
     마커 없음(OCR_NGRAM_HOST 절연 레버가 단 표식 — 그래프 대체 시 절연 무효) ·
     링 윈도우 존재(정상상태 판정 기준) · block ≤ ngram window(블록 회수가 ngram
     링 용량을 넘지 않게). 순수 파이썬 검사만 수행하므로 CPU 스텁으로 단위 검증 가능."""
     if not getattr(input_ids, "is_cuda", False):
-        return False
+        return "cpu/mps 입력"
     if not _cuda_graphs_enabled():
-        return False
+        return "OCR_CUDA_GRAPHS=off"
     if len(processors) != 1:
-        return False
+        return f"processors={len(processors)} (단일 ngram 아님)"
     proc = processors[0]
     if not (hasattr(proc, "ngram_size") and hasattr(proc, "window")):
-        return False
+        return "ngram_size/window 없는 프로세서"
     if not getattr(proc, "graph_capable", True):  # 마커 없으면 기존 동작(그래프 허용)
-        return False
+        return "graph_capable=False (OCR_NGRAM_HOST=1)"
     try:
         if int(block) > int(proc.window):
-            return False
+            return f"OCR_DECODE_BLOCK({block}) > ngram window({proc.window})"
     except (TypeError, ValueError):
-        return False
+        return "block/window 값 해석 불가"
     W = getattr(getattr(model, "config", None), "_ring_window", None)
     if not W:
-        return False
-    return True
+        return "_ring_window 미설정"
+    return None
+
+
+def _should_try_cuda_graph(input_ids, processors, model, block: int) -> bool:
+    """그래프 경로 발동 조건 — 하나라도 어긋나면 False(→ eager, 예외 아님).
+    사유는 _graph_skip_reason 참조 (경로 선택 로깅과 판정이 같은 검사를 공유)."""
+    return _graph_skip_reason(input_ids, processors, model, block) is None
 
 
 def fast_greedy_decode(model, gen_kwargs: dict, block: int = 8):
     """벤더 infer/infer_multi의 gen_kwargs(P15의 generate_fn 계약)를 받아
     output_ids [1, prompt+생성] 텐서를 돌려준다 — self.generate와 동일 형태."""
     import torch
-    from transformers.cache_utils import DynamicCache
 
     if gen_kwargs.get("do_sample"):
         logger.info("do_sample 요청 — HF generate로 폴백")
         return model.generate(**gen_kwargs)
+
+    # [U3] 그리디 경로 전 구간을 inference_mode로 실행 — no_grad는 grad 기록만 끄고
+    # 버전 카운터 증가·뷰 메타데이터 추적은 유지하므로, 토큰당 소형 커널 수십 개를
+    # 파이썬 디스패치로 도는 eager 구간(CPU/MPS 전 구간 + CUDA 워밍업/폴백)의
+    # per-op 오버헤드가 남는다. P17 융합 MoE의 지연 Parameter 빌드·캐시 재사용·
+    # CUDA graph 캡처 모두 inference_mode 하에서 정상 동작함을 torch 2.10에서 확인.
+    # do_sample 폴백(HF generate)은 기존 no_grad 경로에 남긴다.
+    with torch.inference_mode():
+        return _greedy_decode_body(model, gen_kwargs, block)
+
+
+def _greedy_decode_body(model, gen_kwargs: dict, block: int):
+    """fast_greedy_decode 본체 — 호출자가 inference_mode로 감싼다."""
+    import torch
+    from transformers.cache_utils import DynamicCache
 
     input_ids = gen_kwargs["input_ids"]
     eos_id = gen_kwargs.get("eos_token_id")
@@ -121,11 +141,18 @@ def fast_greedy_decode(model, gen_kwargs: dict, block: int = 8):
         streamer.put(input_ids.cpu())  # skip_prompt 스트리머의 프롬프트 소비 (HF와 동일)
 
     # [U2] CUDA Graph 경로 — 조건 만족 시 캡처+리플레이 (실패해도 내부에서 eager 마무리).
+    # 경로 선택은 호출(청크)당 1회 로깅 — env 조합에 따른 조용한 eager 강등(실측 3.3x
+    # 격차, ARCHITECTURE.md)을 운영 로그로 진단하고 OCR_CUDA_GRAPHS 0/1 파리티 검증의
+    # 실행 경로 근거를 남긴다. CPU/MPS 입력은 로그 스팸 방지를 위해 남기지 않는다.
     if _should_try_cuda_graph(input_ids, processors, model, block):
+        logger.info("decode path: cuda-graph (block=%d)", block)
         return _cuda_graph_greedy_decode(
             model, input_ids, model_kwargs, processors, criteria,
             eos_id, streamer, max_length, block,
         )
+    if getattr(input_ids, "is_cuda", False):
+        logger.info("decode path: eager (%s)",
+                    _graph_skip_reason(input_ids, processors, model, block))
 
     finished_at = None  # EOS 포함 절단 위치 (prompt+생성 기준 절대 인덱스)
     pending = 0         # 아직 호스트로 내리지 않은 신규 토큰 수
@@ -317,6 +344,15 @@ def _cuda_graph_greedy_decode(model, input_ids, model_kwargs, processors, criter
 
     except Exception as exc:  # 캡처/리플레이 실패 — 변환이 죽지 않게 eager로 마무리
         logger.warning("CUDA Graph 디코드 실패 — eager 폴백: %r", exc, exc_info=True)
+        # 사이드스트림 워밍업(③) **도중** 실패하면 wait_stream에 도달하지 못한 채
+        # 여기로 점프한다 — 스트림 s에 큐잉된 커널이 pos_ids·ngram 링을 아직 갱신
+        # 중일 수 있으므로, 회수 전에 디바이스를 배수해 스테일/경합 읽기를 차단한다.
+        # 캡처 ④ 이후 실패는 torch.cuda.graph 진입 synchronize가 ③을 이미 배수한
+        # 뒤라 no-op이고, 이미 예외 경로라 전체 동기화 비용은 무관하다.
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
         # 아직 input_ids로 안 내려간 그래프 스텝 토큰을 best-effort 회수.
         # pos_ids는 각 스텝의 마지막 연산에서만 증가하므로 (완료 스텝 수)의 진리원이다.
         # (캡처는 실행이 아니라서 증가시키지 않음. 스텝 도중 실패는 커널 사이 창이라

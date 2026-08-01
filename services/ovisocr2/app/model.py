@@ -25,6 +25,15 @@ OFFICIAL_PROMPT = (
 )
 
 
+
+# 엔진 사망을 나타내는 예외 시그니처 (클래스명/메시지 소문자 부분 일치).
+# vLLM 버전에 따라 EngineDeadError가 RuntimeError 등으로 표면화될 수 있어
+# 타입 하나에 의존하지 않고, 연속 실패 카운터(_WEDGE_THRESHOLD)를 병행한다.
+_ENGINE_DEAD_MARKERS = ("enginedead", "enginecore", "engine core")
+_WEDGE_THRESHOLD = 3
+_WEDGE_PREFIX = "엔진 비정상: "
+
+
 class OvisModel:
     """단일 프로세스·단일 모델. 추론은 락으로 직렬화한다 (max_num_seqs=1)."""
 
@@ -34,6 +43,7 @@ class OvisModel:
         self._prompt: str | None = None
         self._sampling_cls = None
         self._infer_lock = threading.Lock()
+        self._infer_failures = 0  # 연속 추론 실패 수 (성공 시 리셋)
         self.load_error: str | None = None
 
     @property
@@ -123,12 +133,45 @@ class OvisModel:
             },
         }
         with self._infer_lock:
-            outputs = self._llm.generate([request], params, use_tqdm=False)
+            try:
+                outputs = self._llm.generate([request], params, use_tqdm=False)
+            except Exception as e:
+                self._note_infer_failure(e)
+                raise
+            self._note_infer_success()
         return outputs[0].outputs[0].text
+
+    def _note_infer_failure(self, e: Exception) -> None:
+        """엔진 사망 웨지 감지 — health를 영원히 ok로 두지 않는다.
+
+        vLLM V1의 EngineCore는 별도 프로세스라 하드 CUDA OOM 등으로 죽으면 이후
+        모든 generate가 실패하는데, `_llm is not None`만 보는 loaded/health는
+        초록으로 남고 uvicorn은 살아 있어 restart 정책도 발동하지 않는다.
+        사망 시그니처 매칭 또는 연속 실패 임계 도달 시 load_error를 세워
+        health가 status=error로 전환되게 한다 (_llm은 유지 — 오탐이었다면
+        다음 성공이 자동으로 복구한다)."""
+        self._infer_failures += 1
+        text = f"{e.__class__.__name__}: {e}".lower()
+        dead = any(m in text for m in _ENGINE_DEAD_MARKERS)
+        if dead or self._infer_failures >= _WEDGE_THRESHOLD:
+            reason = "엔진 사망 시그니처" if dead else f"연속 {self._infer_failures}회 추론 실패"
+            self.load_error = (
+                f"{_WEDGE_PREFIX}{reason} — 마지막 오류 {e.__class__.__name__}: {e}"[:500]
+            )
+            logger.error("vLLM 엔진 비정상 판정 (%s) — health를 error로 전환", reason)
+
+    def _note_infer_success(self) -> None:
+        self._infer_failures = 0
+        if self.load_error and self.load_error.startswith(_WEDGE_PREFIX):
+            self.load_error = None  # 웨지 오탐 자동 복구 (로드 시점 오류는 건드리지 않음)
 
     @staticmethod
     def release_cache() -> None:
-        """OOM 후 CUDA 캐시 반환 (best-effort)."""
+        """OOM 후 CUDA 캐시 반환 (best-effort).
+
+        주의: vLLM V1은 EngineCore를 별도 프로세스로 띄우므로 이 호출은 API
+        프로세스의 캐시만 비운다 — 엔진 VRAM에는 닿지 않는 보수적 완화책이다
+        (하드 엔진 OOM은 위 _note_infer_failure의 웨지 감지가 표면화한다)."""
         try:
             import torch
 

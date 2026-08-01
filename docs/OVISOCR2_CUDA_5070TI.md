@@ -138,7 +138,8 @@ CPU offload는 사용하지 않는다.
   밀집)을 82s(3.3s/p)에 처리 — 2단 저자 블록 읽기순서·display/inline LaTeX·Lemma
   구조 정확, figure 27개 추출, 실패 0. 스캔 시뮬 PDF(텍스트 레이어 0)도 정확히
   OCR. `OCR_REMOTE_PAGE_CONCURRENCY` 1↔4 출력 바이트 동일(순서 보존 확인).
-- 참고: 이 머신은 5070 Ti + 4060 Ti 2-GPU 구성 — vLLM이 두 GPU를 감지하지만
-  CUDA 기본(fastest-first) 순서로 device 0 = 5070 Ti가 선택된다. 결정적 선택이
-  필요하면 compose에 `CUDA_DEVICE_ORDER=PCI_BUS_ID`를 추가하고 `GPU_DEVICE`를
-  PCI 순서 기준으로 지정하라 (단일 GPU 원칙은 불변 — TP=1, 분산 없음).
+- 참고: 이 머신은 5070 Ti + 4060 Ti 2-GPU 구성. compose가 GPU 서비스 셋
+  (ocr-cuda·ovisocr2·paddleocr-vl)에 `CUDA_DEVICE_ORDER=PCI_BUS_ID`를 기본
+  설정하므로 `GPU_DEVICE` 인덱스는 nvidia-smi(PCI) 순서와 결정적으로 일치한다 —
+  이 호스트에서는 0 = 5070 Ti (단일 GPU 원칙은 불변 — TP=1, 분산 없음).
+  기동 후 sidecar `/health`의 `gpu_name`으로 의도한 카드인지 확인할 것.

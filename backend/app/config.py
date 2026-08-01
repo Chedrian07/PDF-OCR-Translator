@@ -152,7 +152,9 @@ class Settings:
             dtype=os.environ.get("OCR_DTYPE", "auto").strip().lower(),
             engine=os.environ.get("OCR_ENGINE", "unlimited").strip().lower(),
             model_id=os.environ.get("MODEL_ID", "baidu/Unlimited-OCR"),
-            model_revision=os.environ.get("MODEL_REVISION", _DEFAULT_REVISION),
+            # `or` 폴백: compose가 ${MODEL_REVISION:-}로 **빈 문자열**을 넘겨도
+            # 기본 고정 SHA가 무력화되지 않게 (sidecar들의 _env_str 패턴과 동일)
+            model_revision=os.environ.get("MODEL_REVISION") or _DEFAULT_REVISION,
             preload_model=_env_bool("PRELOAD_MODEL", True),
             data_dir=Path(os.environ.get("DATA_DIR", "data")),
             frontend_dir=Path(frontend) if frontend else None,

@@ -19,9 +19,12 @@ GitHub's private vulnerability reporting or another agreed private channel.
   Review the provider and model before enabling these opt-in features.
 - Keep `.env`, private keys, certificates, job data, and model caches outside Git and the
   Docker build context. The supplied ignore files enforce the common cases.
-- The application is unauthenticated and binds Compose ports to loopback by default. Put
-  authentication and TLS at a reverse proxy before any network exposure.
-- Keep `ALLOWED_HOSTS` narrow. Do not use a wildcard on an untrusted network.
+- The application is unauthenticated. The Compose default binds ports to `0.0.0.0` with
+  `ALLOWED_HOSTS=*`, assuming a trusted network (VPN/Tailscale, firewalled LAN). Put
+  authentication and TLS at a reverse proxy before exposing beyond that; set
+  `BIND_HOST=127.0.0.1` in `.env` to restore loopback-only binding.
+- Keep `ALLOWED_HOSTS` narrow when clients reach the service via a stable hostname/IP.
+  Do not rely on the wildcard default on an untrusted network.
 
 ## Secret response
 

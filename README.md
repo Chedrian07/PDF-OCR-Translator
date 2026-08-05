@@ -89,17 +89,20 @@ OCR_ENGINE=fake docker compose up -d --build
 ## 보안
 
 이 서비스는 **인증이 없습니다** — 접근 가능한 사람은 누구나 문서 열람·삭제·변환·(설정 시)
-유료 번역 트리거가 가능합니다. 그래서 compose는 기본적으로 **루프백(127.0.0.1)에만**
-포트를 바인딩하고, `ALLOWED_HOSTS`(기본 `localhost,127.0.0.1`) 밖의 Host 헤더는
-400으로 거부합니다(DNS rebinding 방어).
+유료 번역 트리거가 가능합니다.
 
-LAN이나 공개 네트워크에 노출하려면 **반드시 인증을 제공하는 리버스 프록시**
-(예: nginx + basic auth, Tailscale/VPN) 뒤에 두세요. 그 후:
+compose 기본값은 **외부 노출**입니다: 포트를 `0.0.0.0`에 바인딩하고
+`ALLOWED_HOSTS` 기본이 `*`(모든 Host 허용)입니다. 이 기본값은 **신뢰
+네트워크**(VPN/Tailscale, 방화벽 뒤 홈랩)를 전제로 합니다 — 공개 인터넷에
+노출한다면 **반드시 인증을 제공하는 리버스 프록시**(예: nginx + basic auth)
+뒤에 두세요.
 
-1. `docker-compose.yml`의 ports를 `"8000:8000"`으로 변경 (또는 프록시만 컨테이너에 접근)
-2. 접속에 쓸 호스트명/IP를 `.env`의 `ALLOWED_HOSTS`에 추가 — 예:
-   `ALLOWED_HOSTS=localhost,127.0.0.1,ocr.example.com` (포트는 비교 시 무시됨).
-   compose가 컨테이너로 전달합니다.
+로컬 전용으로 되돌리려면 `.env`에:
+
+1. `BIND_HOST=127.0.0.1` — 포트를 루프백에만 바인딩
+2. `ALLOWED_HOSTS=localhost,127.0.0.1` — Host 헤더 화이트리스트 복원
+   (DNS rebinding 방어 — 도메인/IP로 접속한다면 그 값을 목록에 추가.
+   포트는 비교 시 무시됨). compose가 컨테이너로 전달합니다.
 
 ## 한국어 번역
 

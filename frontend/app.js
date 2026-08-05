@@ -4217,13 +4217,25 @@ function setupTabs() {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         await navigator.clipboard.writeText(text);
       } else {
-        throw new Error('no clipboard');
+        // navigator.clipboard는 secure context(HTTPS·localhost) 전용 — http://IP
+        // 접속(VPN 배포 기본)에서는 undefined다. 사용자 제스처 하에서는 insecure
+        // context에서도 동작하는 execCommand 경로로 폴백한다.
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        ta.remove();
+        if (!ok) throw new Error('no clipboard');
       }
       el.copyMd.textContent = '복사됨';
       el.copyMd.classList.add('copied');
       setTimeout(() => { el.copyMd.textContent = '복사'; el.copyMd.classList.remove('copied'); }, 1600);
     } catch (_) {
-      showToast('클립보드 복사에 실패했습니다.', 'error');
+      showToast('클립보드 복사에 실패했습니다. (HTTPS가 아닌 접속에서는 브라우저가 복사를 제한할 수 있습니다)', 'error');
     }
   });
 }

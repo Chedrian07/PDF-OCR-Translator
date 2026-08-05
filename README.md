@@ -104,6 +104,28 @@ compose 기본값은 **외부 노출**입니다: 포트를 `0.0.0.0`에 바인�
    (DNS rebinding 방어 — 도메인/IP로 접속한다면 그 값을 목록에 추가.
    포트는 비교 시 무시됨). compose가 컨테이너로 전달합니다.
 
+### 원격 접속 (Tailscale) — HTTPS 권장
+
+`http://<tailscale IP>:8001` 직접 접속도 동작하지만, 비보안(http) origin에서는
+최신 브라우저가 **파일 다운로드를 "안전하지 않음"으로 차단**하고(다운로드
+트레이에서 수동 "보관" 필요) 클립보드 복사도 제한됩니다. Tailscale 내장
+HTTPS를 쓰면 전부 해결됩니다 (tailnet 전용 — 인터넷에 노출되지 않음):
+
+```bash
+# 1회: 관리자 콘솔(https://login.tailscale.com/admin/dns)에서
+#      MagicDNS + "HTTPS Certificates" 활성화
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8001
+# → https://<노드명>.<tailnet>.ts.net 로 접속 (정식 인증서, 재부팅에도 유지)
+```
+
+**트러블슈팅 — 작은 응답(health)은 되는데 페이지/다운로드가 멈출 때**: 터널
+경로 MTU 블랙홀 가능성이 높습니다. `tailscale ping --size 1250 <peer>` 는
+되는데 `--size 1280` 이 실패하면, tailscaled에 `TS_DEBUG_MTU=1200` 환경변수를
+주고(systemd drop-in) 재시작 + tailscale0에 TCP MSS 클램핑(iptables mangle
+FORWARD, `--clamp-mss-to-pmtu` 양방향)을 적용하세요. `tailscale serve` 경로는
+tun이 아닌 tailscaled 내부 netstack을 타므로 **tailscaled 재시작까지 해야**
+적용됩니다 (2026-08 WSL2 호스트 실측).
+
 ## 한국어 번역
 
 변환이 끝난 문서(`result.md` + 레이아웃)를 OpenAI 호환 API로 한국어 번역해

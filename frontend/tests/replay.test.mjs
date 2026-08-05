@@ -936,6 +936,7 @@ import {
   extractDocPages,
   clampReaderPage,
   readerImageUrl,
+  livePageImageUrl,
   alignmentRect,
   normalizeAlignmentPayload,
   pdfExportState,
@@ -1002,6 +1003,24 @@ test('readerImageUrl: 언어와 무관하게 원문 좌표 기준면 endpoint', 
   assert.equal(readerImageUrl('j_abc', 0), '/api/jobs/j_abc/page/1', '방어: 1 미만은 1');
   assert.equal(readerImageUrl('j_abc', 3, 'ko'), '/api/jobs/j_abc/page/3',
     '한국어 rail에서도 왼쪽 이미지는 원문으로 고정');
+});
+
+test('livePageImageUrl: 라이브 패널은 렌더 단계 산출물(pages/)을 직접 본다', () => {
+  assert.equal(livePageImageUrl('j_abc', 7), '/api/jobs/j_abc/files/pages/page_0007.png',
+    '0패딩 4자리 파일명 계약');
+  assert.equal(livePageImageUrl('j_abc', 12), '/api/jobs/j_abc/files/pages/page_0012.png');
+  assert.equal(livePageImageUrl('j_abc', 1234), '/api/jobs/j_abc/files/pages/page_1234.png',
+    '4자리 초과 없이 그대로');
+  assert.equal(livePageImageUrl('j_abc', '7'), '/api/jobs/j_abc/files/pages/page_0007.png',
+    '문자열 페이지 허용');
+  assert.equal(livePageImageUrl('j_abc', 0), '/api/jobs/j_abc/files/pages/page_0001.png',
+    '방어: 1 미만은 1 (readerImageUrl과 동일 규칙)');
+  assert.equal(livePageImageUrl('j_abc', NaN), '/api/jobs/j_abc/files/pages/page_0001.png',
+    '방어: 비수치는 1');
+  // 계약 분리 고정 — 라이브는 렌더 산출물 직접, 리더는 병합 완료 페이지(/page/{n}).
+  // 이 둘이 같아지면 진행 중 페이지를 따라가는 follow-live가 영구 404에 빠진다.
+  assert.notEqual(livePageImageUrl('j_abc', 1), readerImageUrl('j_abc', 1),
+    '라이브/리더 URL 계약은 분리 유지');
 });
 
 test('production viewer search: 열림·페이지·언어를 파싱하고 비정상값을 안전하게 보정', () => {

@@ -631,6 +631,10 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
 .page-wrap img { display: block; width: 100%; height: auto; }
 .page-note { font-size: 12.5px; color: #6b7280; font-style: italic; text-align: center; padding: 30px 8px; }
 .box-overlay { position: absolute; inset: 0; pointer-events: none; }
+/* 이미지가 안 뜬 동안 오버레이를 그리면 높이 0 컨테이너에 퍼센트 좌표 박스가
+   전부 top:0/height:0으로 붕괴해 라벨 칩만 겹쳐 보인다 — 이미지 표시 전에는 숨김.
+   (index.html에서 #page-img 바로 다음 형제가 #box-overlay임을 전제) */
+.page-wrap img[hidden] + .box-overlay { display: none; }
 .gbox {
   position: absolute;
   border: 2px solid var(--gbox-c, #6b7280);

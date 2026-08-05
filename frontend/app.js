@@ -451,6 +451,17 @@ export function readerImageUrl(jobId, page, _lang = 'orig') {
   return `/api/jobs/${jobId}/page/${n}`;
 }
 
+// 라이브 뷰는 렌더 단계 산출물(pages/)을 직접 본다 — /page/{n}은 layout.json에
+// 병합 완료된 페이지만 제공하므로, 항상 'OCR 진행 중인 페이지'를 따라가는
+// follow-live가 그 URL을 쓰면 영구 404가 된다. 렌더 단계는 OCR 시작 전에
+// 전 페이지 PNG를 만들어 두므로 이 경로는 진행 중에도 즉시 200이다.
+// (readerImageUrl은 완료 잡 리더/뷰어 전용 — 페이지 보정 규칙은 동일하게 유지)
+export function livePageImageUrl(jobId, page) {
+  let n = Math.floor(Number(page));
+  if (!Number.isFinite(n) || n < 1) n = 1;
+  return `/api/jobs/${jobId}/files/pages/page_${String(n).padStart(4, '0')}.png`;
+}
+
 // 서버 alignment 응답의 bbox(0..bbox_space)를 퍼센트 좌표로 변환한다.
 // 잘못된 값은 null로 제거해 DOM style 주입과 화면 밖 오버레이를 함께 차단한다.
 export function alignmentRect(bbox, bboxSpace = 1000) {
@@ -1777,7 +1788,9 @@ function makeBoxEl(b, animate) {
 }
 
 function pageImageUrl(id, n) {
-  return readerImageUrl(id, n); // 동일한 0패딩 4자리 파일명 계약 (순수 코어 공유)
+  // 라이브 패널은 렌더 단계 산출물을 직접 본다 (진행 중 페이지도 즉시 제공).
+  // readerImageUrl(/page/{n})은 병합 완료 페이지 전용이라 여기서 쓰면 영구 404.
+  return livePageImageUrl(id, n);
 }
 
 function updateLeftPane() {

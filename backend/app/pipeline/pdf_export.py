@@ -6,15 +6,18 @@
 마스킹으로 원문을 유지한 블록(수식·식별자·페이지 번호)과 그림·표는 원본
 글리프가 그대로 남으므로 시각 품질이 보존된다.
 
-폰트: PDF_EXPORT_FONT(파일 경로) → 시스템 한글 폰트 후보 → PyMuPDF 내장
-CJK("korea", Droid Sans Fallback) 순으로 폴백한다. 내장 폰트는 어떤 환경에서도
-존재하므로 내보내기가 폰트 때문에 실패하지는 않는다.
+폰트: PDF_EXPORT_FONT(파일 경로) → 시스템 한글 폰트 후보 → fc-list 런타임
+탐색 → PyMuPDF 내장 CJK("korea", Droid Sans Fallback) 순으로 폴백한다. 내장
+폰트는 어떤 환경에서도 존재하므로 내보내기가 폰트 때문에 실패하지는 않지만,
+전 문자를 1em 전각으로 조판하는 비임베드 폰트라 채택 시 경고를 리포트에 남긴다.
 """
 from __future__ import annotations
 
 import json
 import logging
 import re
+import shutil
+import subprocess
 import uuid
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -69,6 +72,9 @@ _SYSTEM_SANS_FONT_CANDIDATES = (
     # sans가 없으면 한글 누락보다 명조 폴백이 낫다.
     "/System/Library/Fonts/Supplemental/AppleMyungjo.ttf",
 )
+# fc-list 탐색 결과에서 serif(명조) 계열을 판별하는 파일명 힌트 — serif 체인은
+# 명조를 앞세우고 sans 체인은 뒤로 미뤄 원문 Times 질감 우선순위를 유지한다.
+_SERIF_NAME_HINT = re.compile(r"serif|myeongjo|myungjo|batang", re.IGNORECASE)
 
 # insert_textbox 축소 사다리 — layout-fit.js와 같은 정신: 최대 45%까지 줄여 본다.
 _SHRINK_STEPS = (1.0, 0.9, 0.8, 0.7, 0.62, 0.55)
@@ -169,26 +175,75 @@ class _TableParser(HTMLParser):
             self._cell.append(data)
 
 
+def _fontconfig_candidates() -> tuple[str, ...]:
+    """fc-list로 한글 지원 폰트 파일을 탐색한다 — 정적 후보 전멸 시 최후 보조.
+
+    _SYSTEM_FONT_CANDIDATES는 macOS·Debian 계열 경로만 알고 있어 Fedora/Arch
+    같은 배포판에서는 전부 빗나갈 수 있다. fc-list가 없는 환경(macOS 기본,
+    fontconfig 미설치 컨테이너)이나 실행 실패는 조용히 빈 목록으로 처리해
+    기존 폴백 체인을 그대로 따른다.
+    """
+    fc = shutil.which("fc-list")
+    if not fc:
+        return ()
+    try:
+        proc = subprocess.run(
+            [fc, "--format", "%{file}\n", ":lang=ko"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001 — 탐색 실패는 조용히 정적 폴백 유지
+        return ()
+    return tuple(dict.fromkeys(
+        line.strip() for line in proc.stdout.splitlines() if line.strip()
+    ))
+
+
 def _resolve_font(
     explicit: str = "",
     candidates: tuple[str, ...] = _SYSTEM_FONT_CANDIDATES,
+    *,
+    prefer_serif: bool = True,
 ) -> tuple[str | None, str]:
-    """(fontfile|None, fontname) 반환. 파일 폰트는 로드 검증 후 채택한다."""
+    """(fontfile|None, fontname) 반환. 파일 폰트는 로드 검증 후 채택한다.
+
+    정적 후보가 전부 실패하면 fc-list(fontconfig) 런타임 탐색을 최후 보조로
+    시도하고, 그마저 없으면 PyMuPDF 내장 CJK로 폴백한다 — 내보내기가 폰트
+    때문에 실패하지는 않는다는 모듈 계약 유지.
+    """
     fitz = quiet_fitz()
-    paths = ([explicit] if explicit else []) + list(candidates)
-    for path in paths:
+
+    def _verify(path: str) -> str | None:
         p = Path(path)
         if not p.is_file():
             if path == explicit:
                 logger.warning("PDF_EXPORT_FONT 파일이 없습니다: %s — 폴백 사용", path)
-            continue
+            return None
         try:
             font = fitz.Font(fontfile=str(p))
             if font.has_glyph(ord("한")):
-                return str(p), "uocr-ko"
+                return str(p)
             logger.warning("폰트에 한글 글리프가 없습니다: %s — 폴백 사용", path)
         except Exception:  # noqa: BLE001 — 손상/미지원 포맷은 다음 후보로
             logger.warning("폰트 로드 실패: %s — 폴백 사용", path)
+        return None
+
+    paths = ([explicit] if explicit else []) + list(candidates)
+    for path in paths:
+        found = _verify(path)
+        if found is not None:
+            return found, "uocr-ko"
+    # 정적 후보 전멸 — fc-list가 찾은 한글 폰트를 같은 has_glyph 검증으로 시도.
+    extras = [p for p in _fontconfig_candidates() if p not in paths]
+    extras.sort(
+        key=lambda p: bool(_SERIF_NAME_HINT.search(Path(p).name)) != prefer_serif
+    )
+    for path in extras:
+        found = _verify(path)
+        if found is not None:
+            return found, "uocr-ko"
     return None, "korea"  # PyMuPDF 내장 CJK (Droid Sans Fallback) — 항상 존재
 
 
@@ -234,6 +289,11 @@ def _table_matrix(content: str) -> list[list[str]] | None:
 
 def _rect_horizontal_overlap(a, b) -> float:
     return max(0.0, min(a.x1, b.x1) - max(a.x0, b.x0))
+
+
+def _rect_overlap_area(a, b) -> float:
+    """두 Rect의 교차 면적. 겹치지 않으면 0 — fitz `&`의 빈 Rect 의존 없이 계산."""
+    return _rect_horizontal_overlap(a, b) * max(0.0, min(a.y1, b.y1) - max(a.y0, b.y0))
 
 
 def _free_growth_rect(page, rect, obstacles: list[object]) -> object:
@@ -576,9 +636,21 @@ def build_translated_pdf(
 
     orig_pages = {p.get("page"): p for p in orig_page_list}
     serif_ff, serif_name = _resolve_font(fontfile)
-    sans_ff, sans_name = _resolve_font(fontfile, _SYSTEM_SANS_FONT_CANDIDATES)
+    sans_ff, sans_name = _resolve_font(
+        fontfile, _SYSTEM_SANS_FONT_CANDIDATES, prefer_serif=False,
+    )
 
     result = PdfExportResult(path=job_dir / f"export.{lang}.pdf")
+    if serif_ff is None and sans_ff is None:
+        # 내장 CJK(비임베드 Dotum)는 라틴 포함 전 문자를 1em 전각으로 조판해
+        # "R e i n f o r c e m e n t"처럼 자간이 찢어진다. 내보내기는 계속하되
+        # (폰트 때문에 실패하지 않는다는 모듈 계약) 품질 열화를 리포트·UI 토스트
+        # 파이프라인(report.json → X-UOCR-PDF-Warnings 헤더)으로 드러낸다.
+        result.warnings.append(
+            "한글 폰트 파일을 찾지 못해 PyMuPDF 내장 CJK(비임베드)로 대체합니다 — "
+            "글자 간격 품질이 낮아집니다. 컨테이너에 fonts-noto-cjk를 설치하거나 "
+            "PDF_EXPORT_FONT로 폰트 파일을 지정하세요"
+        )
     try:
         doc = fitz.open(src)
     except Exception as e:  # noqa: BLE001 — mupdf 예외 타입이 다양함
@@ -601,6 +673,29 @@ def build_translated_pdf(
             tblocks = tpage.get("blocks", [])
             block_rects = [_block_rect(fitz, page, b.get("bbox")) for b in oblocks]
             source_spans = _source_span_rects(fitz, page)
+            # 래스터 인스턴스는 리댁션 '이전'에 1회만 수집한다 — apply_redactions
+            # 이후의 get_image_info()는 스테일 캐시를 반환할 수 있다(실측).
+            try:
+                raster_rects = [fitz.Rect(info["bbox"]) for info in page.get_image_info()]
+            except Exception:  # noqa: BLE001 — 이미지 목록 실패가 텍스트 교체를 막지 않는다
+                raster_rects = []
+            # 그림 위 텍스트 방어용 영역: layout image 블록 ∪ 래스터 인스턴스.
+            # 페이지의 85% 이상을 덮는 영역은 전면 스캔 배경으로 간주해 제외한다
+            # — 스캔 문서에서 모든 블록 교체가 생략되는 사고 방지.
+            page_area = page.rect.width * page.rect.height or 1.0
+            image_regions = [
+                r
+                for r, b in zip(block_rects, oblocks)
+                if (
+                    r is not None
+                    and isinstance(b, dict)
+                    and (str(b.get("type") or "") == "image" or b.get("image"))
+                    and r.width * r.height < page_area * 0.85
+                )
+            ]
+            image_regions += [
+                r for r in raster_rects if 0 < r.width * r.height < page_area * 0.85
+            ]
             targets: list[_Replacement] = []
             for block_index, (ob, tb) in enumerate(zip(oblocks, tblocks)):
                 if not isinstance(ob, dict) or not isinstance(tb, dict):
@@ -688,6 +783,21 @@ def build_translated_pdf(
                 if rect is None:
                     result.kept += 1
                     continue
+                # 그림 패널·로고 위 OCR 텍스트 블록은 교체하지 않는다. 그림 속
+                # 텍스트는 OCR 오독이 잦고 원본 조판이 항상 우월하며, 번역을
+                # 스탬프하면 원문 그림과 이중으로 겹쳐 보인다. 임계값 0.30은
+                # 실측 분포(문제 블록 53.7~93% vs 정상 블록 ≤2%)의 빈 구간 안.
+                rect_area = rect.width * rect.height
+                if rect_area > 0 and any(
+                    _rect_overlap_area(rect, region) / rect_area >= 0.30
+                    for region in image_regions
+                ):
+                    result.kept += 1
+                    result.specialist_kept["figure_text"] = (
+                        result.specialist_kept.get("figure_text", 0) + 1
+                    )
+                    result.warnings.append(f"p{pno}: 그림 위 텍스트 — 원문 보존")
+                    continue
                 fs_cqw = tb.get("fs") or ob.get("fs") or estimate_font_size_cqw(
                     tb.get("bbox"), str(tb.get("content") or ""), aspect,
                 ) or 1.8
@@ -770,12 +880,13 @@ def build_translated_pdf(
                 continue
 
             # 2) 원문 텍스트 리댁션 (이미지·그래픽 보존) — 삽입 전에 일괄 적용
+            redact_rects = []
             for target in targets:
                 # 삽입 bbox가 아래 빈 공간으로 커져도 실제 원문 bbox만 지운다.
                 # 확장 사각형 전체를 리댁션하면 인접한 원문 글리프가 함께 사라질 수 있다.
-                page.add_redact_annot(
-                    target.redact_rect if target.redact_rect is not None else target.plan.rect
-                )
+                rr = target.redact_rect if target.redact_rect is not None else target.plan.rect
+                redact_rects.append(+rr)
+                page.add_redact_annot(rr)
             # 텍스트만 제거한다. graphics 기본값(REMOVE_IF_COVERED)을 그대로 두면
             # 블록 안의 밑줄·도형·차트 선까지 사라져 "레이아웃 보존"을 위반한다.
             page.apply_redactions(
@@ -783,6 +894,35 @@ def build_translated_pdf(
                 graphics=fitz.PDF_REDACT_LINE_ART_NONE,
                 text=fitz.PDF_REDACT_TEXT_REMOVE,
             )
+            # 2b) 이모지의 '이미지 절반' 제거. macOS Quartz 산출 PDF는 컬러
+            # 이모지를 (보이지 않는 텍스트 글리프 + 이미지 XObject) 이중으로
+            # 기록해 텍스트 리댁션만으로는 이미지가 번역문 위에 남는다. 교체
+            # 사각형에 완전히 포함된 소형(25% 이하) 인스턴스만 별도 pass로
+            # 지운다 — 부분 겹침 rect에 IMAGE_REMOVE를 쓰면 걸친 그림에 흰
+            # 구멍이 나므로 절대 블록 rect 전체로 걸지 않는다.
+            emoji_boxes = []
+            for bbox in raster_rects:
+                area = bbox.width * bbox.height
+                for rr in redact_rects:
+                    # Quartz 반올림으로 이미지가 글리프 상자를 1pt 미만 벗어나는
+                    # 경우가 있어 1pt 허용 오차로 '완전 포함'을 판정한다.
+                    if (
+                        bbox.x0 >= rr.x0 - 1.0
+                        and bbox.y0 >= rr.y0 - 1.0
+                        and bbox.x1 <= rr.x1 + 1.0
+                        and bbox.y1 <= rr.y1 + 1.0
+                        and 0 < area <= rr.width * rr.height * 0.25
+                    ):
+                        emoji_boxes.append(bbox)
+                        break
+            if emoji_boxes:
+                for bbox in emoji_boxes:
+                    page.add_redact_annot(bbox)
+                page.apply_redactions(
+                    images=fitz.PDF_REDACT_IMAGE_REMOVE,
+                    graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+                    text=fitz.PDF_REDACT_TEXT_NONE,
+                )
 
             # 3) 번역 텍스트 삽입
             for target in targets:

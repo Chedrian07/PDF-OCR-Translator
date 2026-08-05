@@ -24,6 +24,10 @@ jobs:
           cache-dependency-glob: backend/uv.lock
       - name: Install (torch CPU 휠)
         run: uv sync --extra cpu
+      # Docker 런타임(backend/Dockerfile)과 동일한 Noto CJK 경로로 폰트 해석을
+      # 검증한다 — 없으면 내장 폴백 경고가 result.warnings에 남아 테스트가 깨진다.
+      - name: Install CJK fonts (Docker 런타임과 동일 경로)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
       - name: pytest
         run: uv run pytest
 

@@ -17,6 +17,7 @@ from app.pipeline.pdf_export import (
     PdfExportError,
     _free_growth_rect,
     _plain_text,
+    _resolve_font,
     build_translated_pdf,
 )
 
@@ -515,3 +516,164 @@ def test_build_preserves_title_size_weight_and_center_alignment(tmp_path, monkey
     assert abs((title["bbox"][0] + title["bbox"][2]) / 2 - 595 / 2) < 5, title
     assert b"2 Tr" in streams, "CJK 제목도 fill+stroke로 굵기 계층을 보존해야 한다"
     assert "Next block must remain" in _pdf_text(result.path.read_bytes())
+
+
+# ── 폰트 폴백·이모지 이미지·그림 위 텍스트 (Docker 폰트 부재 회귀) ─────────
+def test_resolve_font_falls_back_to_builtin_when_no_candidates(tmp_path, monkeypatch):
+    """후보 폰트가 전부 없으면 (None, 'korea') 내장 폴백 계약을 지킨다.
+
+    ⚠ candidates 기본값은 def 시점에 바인딩되므로 모듈 상수 monkeypatch 대신
+    빈 튜플을 직접 전달한다. fc-list 런타임 탐색도 결정적으로 비활성화한다.
+    """
+    monkeypatch.setattr("app.pipeline.pdf_export._fontconfig_candidates", lambda: ())
+    assert _resolve_font("", ()) == (None, "korea")
+    assert _resolve_font(str(tmp_path / "missing.ttf"), ()) == (None, "korea")
+
+
+def test_resolve_font_uses_fontconfig_discovery_as_last_resort(monkeypatch):
+    """정적 후보 전멸 시 fc-list가 찾은 한글 폰트를 같은 has_glyph 검증으로 채택."""
+    from app.pipeline.pdf_export import _SYSTEM_FONT_CANDIDATES
+
+    real_font = next((p for p in _SYSTEM_FONT_CANDIDATES if Path(p).is_file()), None)
+    if real_font is None:
+        pytest.skip("시스템 한글 폰트가 없어 fc-list 탐색을 대리 검증할 수 없음")
+    monkeypatch.setattr(
+        "app.pipeline.pdf_export._fontconfig_candidates", lambda: (real_font,))
+    assert _resolve_font("", ()) == (real_font, "uocr-ko")
+
+
+def test_build_warns_when_only_builtin_cjk_font_available(tmp_path, monkeypatch):
+    """내장 'korea' 폴백은 실패 대신 경고를 리포트로 드러낸다(방어적 폴백 유지)."""
+    monkeypatch.setattr(
+        "app.pipeline.pdf_export._resolve_font",
+        lambda *args, **kwargs: (None, "korea"),
+    )
+    job_dir = _unit_job(tmp_path)
+    result = build_translated_pdf(job_dir, "ko")
+    assert result.replaced == 1  # 폴백에도 내보내기는 성공한다
+    assert any("폰트" in w for w in result.warnings)
+    report = json.loads((job_dir / "export.ko.report.json").read_text(encoding="utf-8"))
+    assert report["warning_count"] >= 1
+    assert any("폰트" in w for w in report["warnings"])
+
+
+def _png_stamp(size: int = 8, value: int = 120) -> bytes:
+    import fitz
+
+    pm = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, size, size))
+    pm.clear_with(value)
+    return pm.tobytes("png")
+
+
+def test_build_removes_inline_emoji_image_inside_replaced_block(tmp_path):
+    """교체 블록 안에 완전히 포함된 소형 이미지(이모지의 '이미지 절반')는 제거된다.
+
+    macOS Quartz 산출 PDF는 컬러 이모지를 보이지 않는 텍스트 글리프 + 이미지
+    XObject로 이중 기록한다 — 텍스트 리댁션만으로는 이미지가 번역문 위에 남는다.
+    같은 이미지라도 블록 밖 인스턴스는 보존되어야 한다(인스턴스 단위 제거).
+    """
+    import fitz
+
+    job_dir = tmp_path / "emoji-job"
+    job_dir.mkdir()
+    stamp = _png_stamp()
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_textbox(
+        fitz.Rect(60, 85, 535, 250), "Original English sentence", fontsize=12)
+    page.insert_image(fitz.Rect(100, 120, 112, 132), stream=stamp)  # 블록 안 '이모지'
+    page.insert_image(fitz.Rect(100, 700, 112, 712), stream=stamp)  # 블록 밖 — 보존
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+
+    original = [{"page": 1, "width": 1000, "height": 1414, "blocks": [
+        {"type": "text", "bbox": [100, 100, 900, 300],
+         "content": "Original English sentence", "fs": 2.0},
+    ]}]
+    translated = json.loads(json.dumps(original))
+    translated[0]["blocks"][0]["content"] = KO_TEXT
+    (job_dir / "layout.json").write_text(json.dumps(original), encoding="utf-8")
+    (job_dir / "layout.ko.json").write_text(
+        json.dumps(translated, ensure_ascii=False), encoding="utf-8")
+
+    result = build_translated_pdf(job_dir, "ko")
+    assert result.replaced == 1
+    assert KO_TEXT in _pdf_text(result.path.read_bytes())
+    with fitz.open(result.path) as exported:
+        boxes = [fitz.Rect(info["bbox"]) for info in exported[0].get_image_info()]
+    assert any(abs(box.y0 - 700) < 2.0 for box in boxes), boxes  # 블록 밖 보존
+    assert not any(box.y0 < 200 for box in boxes), boxes         # 블록 안 제거
+
+
+def test_build_keeps_text_block_overlapping_figure_image(tmp_path):
+    """래스터 그림과 크게 겹치는(≥30%) OCR 텍스트 블록은 교체하지 않는다.
+
+    그림 속 텍스트는 OCR 오독이 잦고, 번역을 스탬프하면 리댁션되지 않은 원문
+    그림·텍스트와 이중으로 겹쳐 보인다 — 원본 조판 보존이 항상 우월하다.
+    """
+    import fitz
+
+    job_dir = tmp_path / "figure-job"
+    job_dir.mkdir()
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    # keep_proportion=False: 블록 표시 영역(59.5,84.2..535.5,252.6)을 거의 다
+    # 덮는 그림 — 겹침비 약 98%.
+    page.insert_image(
+        fitz.Rect(60, 85, 535, 250), stream=_png_stamp(32, 200),
+        keep_proportion=False)
+    page.insert_textbox(
+        fitz.Rect(60, 85, 535, 250), "Original English sentence", fontsize=12)
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+
+    original = [{"page": 1, "width": 1000, "height": 1414, "blocks": [
+        {"type": "text", "bbox": [100, 100, 900, 300],
+         "content": "Original English sentence", "fs": 2.0},
+    ]}]
+    translated = json.loads(json.dumps(original))
+    translated[0]["blocks"][0]["content"] = KO_TEXT
+    (job_dir / "layout.json").write_text(json.dumps(original), encoding="utf-8")
+    (job_dir / "layout.ko.json").write_text(
+        json.dumps(translated, ensure_ascii=False), encoding="utf-8")
+
+    result = build_translated_pdf(job_dir, "ko")
+    assert result.replaced == 0 and result.kept >= 1
+    assert result.specialist_kept.get("figure_text") == 1
+    assert any("그림" in w for w in result.warnings)
+    text = _pdf_text(result.path.read_bytes())
+    assert "Original English sentence" in text  # 원문·그림 그대로 보존
+    assert KO_TEXT not in text
+
+
+def test_build_replaces_text_over_full_page_scan_background(tmp_path):
+    """전면 스캔 래스터(페이지 85% 이상)는 배경으로 간주 — 번역이 생략되지 않는다."""
+    import fitz
+
+    job_dir = tmp_path / "scan-job"
+    job_dir.mkdir()
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_image(page.rect, stream=_png_stamp(32, 250), keep_proportion=False)
+    page.insert_textbox(
+        fitz.Rect(60, 85, 535, 250), "Original English sentence", fontsize=12)
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+
+    original = [{"page": 1, "width": 1000, "height": 1414, "blocks": [
+        {"type": "text", "bbox": [100, 100, 900, 300],
+         "content": "Original English sentence", "fs": 2.0},
+    ]}]
+    translated = json.loads(json.dumps(original))
+    translated[0]["blocks"][0]["content"] = KO_TEXT
+    (job_dir / "layout.json").write_text(json.dumps(original), encoding="utf-8")
+    (job_dir / "layout.ko.json").write_text(
+        json.dumps(translated, ensure_ascii=False), encoding="utf-8")
+
+    result = build_translated_pdf(job_dir, "ko")
+    assert result.replaced == 1
+    assert "figure_text" not in result.specialist_kept
+    assert KO_TEXT in _pdf_text(result.path.read_bytes())
+    with fitz.open(result.path) as exported:
+        # 전면 배경 이미지는 이모지 패스(완전 포함 + 소면적 한정)에 걸리지 않는다.
+        assert exported[0].get_image_info(), "전면 스캔 배경은 보존되어야 한다"

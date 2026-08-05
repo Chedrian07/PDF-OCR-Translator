@@ -30,9 +30,15 @@ RUN uv pip install -p /venv/bin/python /src/native
 FROM python:3.12-slim-bookworm
 
 # tesseract-ocr(+eng/kor): textlayer 엔진의 스캔 페이지 OCR 폴백 (OCR_LANGUAGES=eng+kor)
+# fonts-noto-cjk: 번역 PDF 내보내기(pdf_export._SYSTEM_FONT_CANDIDATES)의
+#   Noto Serif/Sans CJK — 없으면 PyMuPDF 내장 비임베드 Dotum 폴백으로
+#   전각 조판(라틴 자간 파손)이 된다
+# fontconfig: 정적 폰트 후보가 전부 없을 때의 fc-list 런타임 탐색
+#   (pdf_export._fontconfig_candidates)용
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
         tesseract-ocr tesseract-ocr-eng tesseract-ocr-kor \
+        fonts-noto-cjk fontconfig \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 1000 --create-home app \
     && mkdir -p /data/hf && chown -R app:app /data

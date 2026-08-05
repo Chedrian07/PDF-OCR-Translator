@@ -87,6 +87,9 @@ services:
       TRANSLATE_TEMPERATURE: ${TRANSLATE_TEMPERATURE:-0}
       TRANSLATE_MAX_TOKENS_PARAM: ${TRANSLATE_MAX_TOKENS_PARAM:-max_tokens}
       TRANSLATE_REASONING: ${TRANSLATE_REASONING:-}
+      # 번역 PDF 내보내기용 사용자 지정 폰트(컨테이너 내 경로, 볼륨 마운트 필요).
+      # .env는 dockerignore로 컨테이너에 없어 여기서 스레딩해야 동작한다.
+      PDF_EXPORT_FONT: ${PDF_EXPORT_FONT:-}
       # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) ──
       OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
       NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}
@@ -171,6 +174,7 @@ services:
       TRANSLATE_TEMPERATURE: ${TRANSLATE_TEMPERATURE:-0}
       TRANSLATE_MAX_TOKENS_PARAM: ${TRANSLATE_MAX_TOKENS_PARAM:-max_tokens}
       TRANSLATE_REASONING: ${TRANSLATE_REASONING:-}
+      PDF_EXPORT_FONT: ${PDF_EXPORT_FONT:-}   # 내보내기 폰트 스레딩 — 설명은 ocr-cpu 참조
       # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) — 설명은 ocr-cpu 참조 ──
       OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
       NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}
@@ -236,6 +240,7 @@ services:
       TRANSLATE_TEMPERATURE: ${TRANSLATE_TEMPERATURE:-0}
       TRANSLATE_MAX_TOKENS_PARAM: ${TRANSLATE_MAX_TOKENS_PARAM:-max_tokens}
       TRANSLATE_REASONING: ${TRANSLATE_REASONING:-}
+      PDF_EXPORT_FONT: ${PDF_EXPORT_FONT:-}   # 내보내기 폰트 스레딩 — 설명은 ocr-cpu 참조
       # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) — 설명은 ocr-cpu 참조 ──
       OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
       NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}
@@ -338,6 +343,7 @@ services:
       TRANSLATE_TEMPERATURE: ${TRANSLATE_TEMPERATURE:-0}
       TRANSLATE_MAX_TOKENS_PARAM: ${TRANSLATE_MAX_TOKENS_PARAM:-max_tokens}
       TRANSLATE_REASONING: ${TRANSLATE_REASONING:-}
+      PDF_EXPORT_FONT: ${PDF_EXPORT_FONT:-}   # 내보내기 폰트 스레딩 — 설명은 ocr-cpu 참조
       # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) — 설명은 ocr-cpu 참조 ──
       OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
       NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}

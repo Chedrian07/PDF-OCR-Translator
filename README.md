@@ -182,8 +182,10 @@ PDF 내보내기 UI는 `GET /api/jobs/{id}/pdf?lang=ko&view=dual`로 원문·한
 유지합니다. 한국어 번역이 완료된 잡에서 활성화되며, 좌표 레이아웃이 없는
 figure_only 엔진(OvisOCR2)에서는 HTML
 내보내기를 안내합니다. 원본 PDF span의 serif/sans 계열과 실측 글자 크기를 블록마다
-추출해, 본문·절 제목은 시스템 명조(macOS AppleMyungjo, Linux Noto Serif CJK),
-sans 대표 제목은 시스템 고딕으로 대응시킵니다. 한 줄 제목·목록은 원본 baseline과
+추출해 대응시킵니다. 배포 기준인 Docker 이미지는 `fonts-noto-cjk`와 `fontconfig`를
+기본 설치하므로 별도 설정 없이 본문·절 제목에는 Noto Serif CJK, sans 대표 제목에는
+Noto Sans CJK를 임베드합니다. macOS의 Apple 계열 폰트는 네이티브 로컬 실행에서만
+쓰는 조건부 후보이며 컨테이너 런타임 의존성이 아닙니다. 한 줄 제목·목록은 원본 baseline과
 크기를 직접 보존하고, 여러 줄 본문만 충돌 없는 범위에서 행간·줄바꿈을 맞춥니다.
 글꼴이 없으면 PyMuPDF 내장 CJK로 폴백하며 `PDF_EXPORT_FONT`로
 원하는 폰트 파일을 지정할 수 있습니다. 원문과 번역 레이아웃의 블록 대응을 먼저
@@ -197,6 +199,26 @@ HTML과 PDF의 제목·단·그림·수식 위치가 서로 달라지지 않습�
 읽기 패널의 흐름형 Markdown도 원문 줄과 레이아웃 블록이 대응하면 같은 블록
 번역을 재사용하므로, PDF·문서 개요·오른쪽 텍스트의 제목과 용어가 서로 달라지지
 않습니다.
+
+Compose에서 사용자 폰트를 쓸 때 `PDF_EXPORT_FONT`는 호스트 경로가 아니라
+**컨테이너 내부 절대경로**여야 합니다. 사용하는 backend 서비스에 읽기 전용으로
+마운트한 뒤 같은 경로를 `.env`에 지정합니다(기본 Noto를 쓸 때는 모두 생략).
+
+```yaml
+# compose.font.yaml — 실제로 기동할 backend 서비스에 동일하게 적용
+services:
+  ocr-cpu:
+    volumes:
+      - /absolute/host/path/custom.otf:/fonts/custom.otf:ro
+```
+
+```dotenv
+PDF_EXPORT_FONT=/fonts/custom.otf
+```
+
+```bash
+docker compose -f docker-compose.yml -f compose.font.yaml up -d --build ocr-cpu
+```
 
 ## 페이지 Q&A (AI에게 묻기)
 

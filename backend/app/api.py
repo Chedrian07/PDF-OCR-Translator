@@ -27,7 +27,7 @@ from fastapi.responses import (
 
 from . import native_ops
 from .pipeline.pdf import probe_pdf, render_pdf_pages
-from .pipeline.pdf_export import PdfExportError, build_translated_pdf
+from .pipeline.pdf_export import PdfExportError, build_dual_pdf, build_translated_pdf
 from .pipeline.layout import (
     render_document_standalone,
     render_layout_html,
@@ -179,6 +179,7 @@ def _run_translate_thread(
             # 번역이 갱신됐으므로 내보내기 PDF 캐시도 무효화한다.
             (job.dir / f"export.{lang}.pdf").unlink(missing_ok=True)
             (job.dir / f"export.{lang}.report.json").unlink(missing_ok=True)
+            (job.dir / f"export.{lang}.dual.pdf").unlink(missing_ok=True)
             # 번역 PDF에서 만든 HTML 기준면 캐시도 다음 요청에서 다시 렌더한다.
             (job.dir / "rendered" / lang / ".source.json").unlink(missing_ok=True)
     except TranslateError as e:
@@ -512,6 +513,23 @@ def _ensure_translated_pdf(job, lang: str, settings) -> tuple[Path, dict]:
         )
         return built.path, built.report()
     return out, _load_pdf_export_report(job, lang)
+
+
+def _ensure_dual_pdf(job, lang: str, translated_pdf: Path) -> Path:
+    """원본·번역 대조 PDF 캐시를 번역 단일 PDF와 같은 세대로 유지한다."""
+    source_pdf = job.dir / "source.pdf"
+    out = job.dir / f"export.{lang}.dual.pdf"
+    try:
+        latest_input = max(
+            source_pdf.stat().st_mtime_ns,
+            translated_pdf.stat().st_mtime_ns,
+        )
+    except OSError:
+        # build_dual_pdf가 누락 파일을 사용자에게 읽을 수 있는 PdfExportError로 바꾼다.
+        return build_dual_pdf(source_pdf, translated_pdf, out)
+    if not out.is_file() or out.stat().st_mtime_ns < latest_input:
+        return build_dual_pdf(source_pdf, translated_pdf, out)
+    return out
 
 
 def _ensure_facsimile_pages(job, pages: list, lang: str | None, settings) -> Path:
@@ -1092,13 +1110,20 @@ def job_archive(request: Request, job_id: str) -> FileResponse:
 
 
 @router.get("/jobs/{job_id}/pdf")
-def job_pdf(request: Request, job_id: str, lang: str = "ko") -> FileResponse:
+def job_pdf(
+    request: Request,
+    job_id: str,
+    lang: str = "ko",
+    view: str = "single",
+) -> FileResponse:
     """레이아웃 보존 번역 PDF 내보내기 — layout.json/layout.{lang}.json 기반으로
     번역된 텍스트 블록만 원본 PDF에서 교체한다(수식·그림·표는 원본 유지).
-    캐시: job.dir/export.{lang}.pdf — 번역 레이아웃보다 오래되면 재생성하고,
-    번역 완료 시(_run_translate_thread) 무효화된다."""
+    ``view=dual``이면 원본과 번역 페이지를 좌우로 붙인 대조 PDF를 반환한다.
+    캐시는 번역 완료 시(_run_translate_thread) 무효화된다."""
     job = _get_job(request, job_id)
     _check_lang(lang)
+    if view not in ("single", "dual"):
+        raise HTTPException(400, "지원하지 않는 PDF 보기 형식")
     if job.status != "done":
         raise HTTPException(409, "아직 변환이 완료되지 않았습니다")
     _translated_markdown_or_404(job, lang)
@@ -1110,7 +1135,10 @@ def job_pdf(request: Request, job_id: str, lang: str = "ko") -> FileResponse:
             " — HTML 내보내기(document.html)를 사용하세요",
         )
     try:
-        out, report = _ensure_translated_pdf(job, lang, _state(request).settings)
+        translated_pdf, report = _ensure_translated_pdf(
+            job, lang, _state(request).settings,
+        )
+        out = _ensure_dual_pdf(job, lang, translated_pdf) if view == "dual" else translated_pdf
     except PdfExportError as e:
         raise HTTPException(500, str(e))
     # 헤더는 숫자만 사용해 비ASCII 경고문·원문이 HTTP 메타데이터로 새지 않게 한다.

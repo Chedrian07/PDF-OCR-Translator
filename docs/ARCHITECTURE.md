@@ -289,8 +289,8 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 ### GET /api/jobs/{id}/archive
 - `result.md` + `images/`를 담은 zip (`{원본이름}.md.zip`). 미완료 시 409
 
-### GET /api/jobs/{id}/pdf?lang=ko
-- **레이아웃 보존 번역 PDF 내보내기** (`{원본이름}.ko.pdf`, application/pdf).
+### GET /api/jobs/{id}/pdf?lang=ko[&view=dual]
+- 기본 `view=single`은 **레이아웃 보존 번역 PDF** (`{원본이름}.ko.pdf`, application/pdf)를 반환한다.
   `layout.json`(원문)과 `layout.{lang}.json`(번역)을 블록 단위로 비교해
   **내용이 실제로 바뀐 텍스트 블록만** 원본 PDF에서 리댁션(텍스트만 제거,
   이미지·그래픽 보존) 후 같은 자리에 번역 텍스트를 삽입한다
@@ -307,6 +307,10 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   다음 블록·표·그림·푸터 앞까지만 아래 빈 영역을 사용하며, 그래도 부족하면
   원문을 보존한다. 빈 `list` 컨테이너는 장애물에서 제외하고, y 경계가 맞닿는
   다음 문단은 확장 공간으로 오인하지 않아 번역 블록 중첩을 막는다.
+- `view=dual`은 UI의 기본 내보내기다. 같은 번호의 원본 페이지를 왼쪽, 위 단일
+  번역 PDF 페이지를 오른쪽에 원래 크기로 붙이고 중앙에 1pt 선을 그린다. 따라서
+  A4 세로 원본은 A3 가로 대조 페이지가 되며, 래스터화하지 않아 벡터·그림·텍스트
+  선택성을 유지한다.
 - 폰트: 원본 span의 실측 크기·굵기·정렬과 `font_style=serif|sans`를 추출한다.
   serif 블록은 시스템 한글 명조(macOS AppleMyungjo, Linux Noto Serif CJK),
   sans 블록은 시스템 한글 고딕에 대응하고 PyMuPDF 내장 CJK(`korea`)로 폴백한다.
@@ -319,8 +323,9 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 - 응답 헤더: `X-UOCR-PDF-Replaced`, `-Preserved`, `-Relocated`, `-Table-Cells`,
   `-Specialist-Preserved`, `-Warnings`. 모두 숫자만 담아 원문·경고 본문이 프록시
   메타데이터로 새지 않으며, 프런트 다운로드 토스트가 이를 요약한다.
-- 캐시: `job.dir/export.{lang}.pdf` + `export.{lang}.report.json` —
-  `layout.{lang}.json`보다 오래되면 재생성, 번역 완료 시 함께 무효화한다.
+- 캐시: 단일판 `job.dir/export.{lang}.pdf` + `export.{lang}.report.json`, 대조판
+  `export.{lang}.dual.pdf` — 단일판은 `layout.{lang}.json`보다 오래되면 재생성하고,
+  대조판은 원본·단일판보다 오래되면 재생성한다. 번역 완료 시 함께 무효화한다.
 
 ### POST /api/jobs/{id}/cancel
 - 실행/대기 중 잡을 **삭제 없이** 중단. 202 `{"job_id","status":"canceling"}`

@@ -410,7 +410,7 @@ export function viewerThumbnailWindow(total, current, radius = 2) {
 
 /* ── 읽기(리더) 탭 + PDF 내보내기 순수 코어 (DOM 없음 — frontend/tests/에서 직접 검증) ──
  * 리더 탭은 /html 응답을 페이지 섹션 단위로 나눠 현재 페이지 본문만 보여준다.
- * PDF 내보내기는 GET /api/jobs/{id}/pdf?lang=ko 계약(200 pdf | 400 | 404 | 409)을
+ * PDF 내보내기는 GET /api/jobs/{id}/pdf?lang=ko&view=dual 계약(200 pdf | 400 | 404 | 409)을
  * 전제로, 노출 여부만 클라이언트에서 판정한다.
  */
 
@@ -514,7 +514,7 @@ export function normalizeAlignmentPayload(payload) {
   };
 }
 
-// PDF(한국어) 내보내기 버튼 노출 판정.
+// 원문·한국어 대조 PDF 내보내기 버튼 노출 판정.
 // 보임 ⇔ 잡 done ∧ 번역 done ∧ hasLayout !== false (필드 부재는 fail-open —
 // 서버 409가 최후 방어). 번역이 없어 숨겨질 때는 그대로 숨김 유지 — 다음 행동
 // 안내는 다운로드 행의 번역 UI가 이미 담당한다.
@@ -2277,7 +2277,7 @@ async function onJobDone(id, data) {
       markdown: data.markdown_url,
       archive: data.archive_url,
       documentHtml: `/api/jobs/${id}/document.html`,
-      pdf: `/api/jobs/${id}/pdf?lang=ko`,
+      pdf: `/api/jobs/${id}/pdf?lang=ko&view=dual`,
       viewerManifest: `/api/jobs/${id}/viewer-manifest`,
     };
     applyDownloadLangs();
@@ -2358,14 +2358,14 @@ function renderResult(job) {
     state.layoutCapability, state.currentJobEngine, state.healthEngine,
   );
   const noLayoutData = r.has_layout === false;
-  // PDF(한국어) 내보내기 가드 — figure_only 엔진은 서버도 409(no-layout)라 함께 숨긴다.
+  // 원문·한국어 대조 PDF 내보내기 가드 — figure_only 엔진은 서버도 409(no-layout)라 함께 숨긴다.
   // has_layout 미제공(구버전 응답)은 undefined 유지 = fail-open.
   state.resultHasLayout = (noLayoutData || figOnlyLayout) ? false : r.has_layout;
   state.resultUrls = {
     markdown: r.markdown_url,
     archive: r.archive_url,
     documentHtml: `/api/jobs/${job.job_id}/document.html`,
-    pdf: `/api/jobs/${job.job_id}/pdf?lang=ko`,
+    pdf: `/api/jobs/${job.job_id}/pdf?lang=ko&view=dual`,
     viewerManifest: r.viewer_manifest_url || `/api/jobs/${job.job_id}/viewer-manifest`,
   };
   applyDownloadLangs(); // currentLang='orig' → 원문 URL로 세팅
@@ -2476,7 +2476,7 @@ function resetTranslateUI() {
   setLangSegActive('orig');
   setResultLangAttr();
   applyReaderTranslateCta(); // 번역 상태 확인 전에는 리더 CTA도 숨김
-  applyPdfExport();          // 번역 없음 → PDF(한국어) 내보내기 숨김
+  applyPdfExport();          // 번역 없음 → 원문·한국어 대조 PDF 내보내기 숨김
 }
 
 // health의 translate_available을 버튼에 반영 — false일 때만 비활성.
@@ -2597,7 +2597,7 @@ async function initTranslateForJob() {
   } else {
     showTranslateButton();
   }
-  applyPdfExport(); // 이미 번역된 잡을 열면 이 시점에 PDF(한국어) 버튼이 나타난다
+  applyPdfExport(); // 이미 번역된 잡을 열면 이 시점에 대조 PDF 버튼이 나타난다
   if (state.viewerOpen && state.viewerIntent.lang === 'ko' && status === 'done') setLang('ko');
 }
 
@@ -2701,7 +2701,7 @@ function onTranslateDone(id) {
   teardownTranslate();
   state.translateState = 'done';
   showLangToggle();
-  applyPdfExport(); // 번역이 끝나는 즉시 PDF(한국어) 내보내기 노출
+  applyPdfExport(); // 번역이 끝나는 즉시 원문·한국어 대조 PDF 내보내기 노출
   setLang('ko'); // 완료 직후 자동으로 한국어 뷰로 전환
 }
 
@@ -3684,7 +3684,7 @@ function applyReaderTranslateCta() {
   el.readerTranslateBtn.hidden = el.translateBtn.hidden || state.translateAvailable === false;
 }
 
-/* ── 한국어 HTML/PDF 내보내기 (다운로드 행) ── */
+/* ── 한국어 HTML / 원문·한국어 대조 PDF 내보내기 (다운로드 행) ── */
 // HTML은 번역 완료만, PDF는 번역 완료 ∧ 레이아웃 있음일 때 노출한다.
 function applyPdfExport() {
   const hs = translatedHtmlExportState(state.displayedStatus, state.translateState);

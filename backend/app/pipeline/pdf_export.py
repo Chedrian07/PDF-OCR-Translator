@@ -963,3 +963,89 @@ def build_translated_pdf(
     finally:
         report_tmp.unlink(missing_ok=True)
     return result
+
+
+def build_dual_pdf(source_pdf: Path, translated_pdf: Path, out: Path) -> Path:
+    """원본·번역 PDF를 페이지별 좌우 대조 스프레드로 원자적으로 묶는다.
+
+    각 출력 페이지는 왼쪽에 원본, 오른쪽에 같은 번호의 번역 페이지를 원래 크기로
+    배치한다. ``show_pdf_page``를 써서 래스터화하지 않으므로 텍스트 선택·벡터
+    그림·원본 해상도를 보존한다. 두 입력의 페이지 수가 다르면 잘못 짝지은 대조본을
+    만들지 않고 명시적으로 실패한다.
+    """
+    for path, message in (
+        (source_pdf, "원본 PDF가 없습니다"),
+        (translated_pdf, "번역 PDF가 없습니다 — 먼저 번역 PDF를 생성하세요"),
+    ):
+        if not path.is_file():
+            raise PdfExportError(message)
+
+    fitz = quiet_fitz()
+    source = translated = dual = None
+    tmp = out.parent / f".{out.stem}.{uuid.uuid4().hex}.tmp"
+    try:
+        source = fitz.open(str(source_pdf))
+        translated = fitz.open(str(translated_pdf))
+        if source.needs_pass or translated.needs_pass:
+            raise PdfExportError("암호화된 PDF는 원문·번역 대조 내보내기를 지원하지 않습니다")
+        if source.page_count != translated.page_count:
+            raise PdfExportError(
+                "원본과 번역 PDF의 페이지 수가 일치하지 않아 대조 PDF를 만들 수 없습니다"
+            )
+        if source.page_count == 0:
+            raise PdfExportError("페이지가 없는 PDF는 대조 내보내기를 지원하지 않습니다")
+
+        dual = fitz.open()
+        for index in range(source.page_count):
+            source_page = source[index]
+            translated_page = translated[index]
+            # show_pdf_page()는 원본 페이지의 /Rotate를 Form XObject에 자동으로
+            # 승계하지 않는다. 저장본은 건드리지 않고 열린 문서 메모리에서만
+            # 회전을 평탄화해, 회전된 원본·번역본도 각자 화면에 보이던 방향과
+            # 크기로 대조 스프레드에 들어가게 한다.
+            if source_page.rotation:
+                source_page.remove_rotation()
+            if translated_page.rotation:
+                translated_page.remove_rotation()
+            left = source_page.rect
+            right = translated_page.rect
+            left_width, left_height = float(left.width), float(left.height)
+            right_width, right_height = float(right.width), float(right.height)
+            if min(left_width, left_height, right_width, right_height) <= 0:
+                raise PdfExportError(f"{index + 1}페이지 크기를 읽을 수 없습니다")
+
+            page_height = max(left_height, right_height)
+            page = dual.new_page(width=left_width + right_width, height=page_height)
+            page.show_pdf_page(
+                fitz.Rect(0, 0, left_width, left_height), source, index,
+            )
+            page.show_pdf_page(
+                fitz.Rect(left_width, 0, left_width + right_width, right_height),
+                translated,
+                index,
+            )
+            # 대조할 두 면을 명확히 나누는 1pt 중앙선. 참조 Doclingo 대조 PDF와
+            # 같은 구조이며 페이지 여백 안에만 있으므로 원문 콘텐츠를 가리지 않는다.
+            page.draw_line(
+                fitz.Point(left_width, 0),
+                fitz.Point(left_width, page_height),
+                color=(0, 0, 0),
+                width=1,
+            )
+
+        out.parent.mkdir(parents=True, exist_ok=True)
+        dual.save(str(tmp), garbage=3, deflate=True)
+        tmp.replace(out)
+        return out
+    except PdfExportError:
+        raise
+    except Exception as error:  # noqa: BLE001 — MuPDF 오류를 사용자 메시지로 정규화
+        raise PdfExportError("원문·번역 대조 PDF를 만들 수 없습니다") from error
+    finally:
+        if dual is not None:
+            dual.close()
+        if translated is not None:
+            translated.close()
+        if source is not None:
+            source.close()
+        tmp.unlink(missing_ok=True)

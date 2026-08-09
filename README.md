@@ -172,13 +172,15 @@ cp .env.example .env   # 키 설정 후 docker compose up -d 로 재기동
 | 형식 | 버튼 | 내용 |
 | --- | --- | --- |
 | HTML | `원본 HTML` / `한국어 HTML` | **PDF facsimile 단일 파일** — 완성 페이지 PNG를 인라인하고 OCR 블록을 검색·복사용 투명 텍스트 레이어로 보존 |
-| PDF | `한국어 PDF` | **레이아웃 보존 번역 PDF** — 일반 텍스트와 구조가 안정적인 표 셀을 교체. 독립 수식·그림·참고문헌·세로쓰기는 원본 유지 |
+| PDF | `원문·한국어 PDF` | **원문·번역 대조 PDF** — 한 장의 가로 스프레드에 원본 페이지(왼쪽)와 레이아웃 보존 한국어판(오른쪽)을 나란히 배치. 일반 텍스트와 구조가 안정적인 표 셀을 교체하며, 독립 수식·그림·참고문헌·세로쓰기는 원본 유지 |
 
 기존 `/layout.html` 주소는 같은 파일을 중복 생성하지 않고 정식
 `/document.html` 내보내기로 리다이렉트합니다.
 
-PDF 내보내기(`GET /api/jobs/{id}/pdf?lang=ko`)는 한국어 번역이 완료된 잡에서
-활성화되며, 좌표 레이아웃이 없는 figure_only 엔진(OvisOCR2)에서는 HTML
+PDF 내보내기 UI는 `GET /api/jobs/{id}/pdf?lang=ko&view=dual`로 원문·한국어
+대조본을 만듭니다. 기존 단일 한국어판 API(`view=single`, 기본값)도 호환성을 위해
+유지합니다. 한국어 번역이 완료된 잡에서 활성화되며, 좌표 레이아웃이 없는
+figure_only 엔진(OvisOCR2)에서는 HTML
 내보내기를 안내합니다. 원본 PDF span의 serif/sans 계열과 실측 글자 크기를 블록마다
 추출해, 본문·절 제목은 시스템 명조(macOS AppleMyungjo, Linux Noto Serif CJK),
 sans 대표 제목은 시스템 고딕으로 대응시킵니다. 한 줄 제목·목록은 원본 baseline과

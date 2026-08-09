@@ -267,7 +267,11 @@ if (VERIFY_MOCK_LLM) {
     return !link.hidden && link.getAttribute('href')?.includes('lang=ko')
       && link.getAttribute('download')?.endsWith('.ko.html');
   }));
-  check('mock 번역: PDF 버튼 노출', await page.evaluate(() => !document.getElementById('dl-pdf').hidden));
+  check('mock 번역: 대조 PDF 버튼 노출', await page.evaluate(() => {
+    const link = document.getElementById('dl-pdf');
+    return !link.hidden && link.textContent.includes('원문·한국어')
+      && link.getAttribute('href')?.includes('view=dual');
+  }));
   await page.click('#viewer-open');
   await page.waitForSelector('#production-viewer.is-open');
   await page.waitForFunction(() =>

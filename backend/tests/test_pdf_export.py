@@ -18,6 +18,7 @@ from app.pipeline.pdf_export import (
     _free_growth_rect,
     _plain_text,
     _resolve_font,
+    build_dual_pdf,
     build_translated_pdf,
 )
 
@@ -103,6 +104,29 @@ def test_pdf_export_e2e(client):
     assert "facsimile-text-block" in document.text
     assert (_job_dir(client, job_id) / "rendered" / "ko" / ".source.json").is_file()
 
+    # UI가 쓰는 대조형은 한 장마다 좌측 원문·우측 한국어를 벡터로 붙인다.
+    dual = client.get(f"/api/jobs/{job_id}/pdf?view=dual")
+    assert dual.status_code == 200
+    assert dual.headers["content-type"] == "application/pdf"
+    assert (_job_dir(client, job_id) / "export.ko.dual.pdf").is_file()
+    with fitz.open(stream=r.content, filetype="pdf") as single_doc, \
+            fitz.open(stream=dual.content, filetype="pdf") as dual_doc:
+        assert dual_doc.page_count == single_doc.page_count
+        page = dual_doc[0]
+        assert page.rect.width == pytest.approx(single_doc[0].rect.width * 2)
+        assert page.rect.height == pytest.approx(single_doc[0].rect.height)
+        page_text = page.get_text().replace("\xa0", " ")
+        assert "Sample page 1" in page_text
+        assert KO_TEXT in page_text
+        center = single_doc[0].rect.width
+        assert any(
+            drawing["rect"].x0 == pytest.approx(center)
+            and drawing["rect"].x1 == pytest.approx(center)
+            and drawing["rect"].height == pytest.approx(page.rect.height)
+            and drawing["width"] == pytest.approx(1)
+            for drawing in page.get_drawings()
+        )
+
 
 def test_pdf_409_before_done(client):
     job_id = _make_done_job(client)
@@ -126,6 +150,11 @@ def test_pdf_400_bad_lang(client):
     assert client.get(f"/api/jobs/{job_id}/pdf?lang=jp").status_code == 400
 
 
+def test_pdf_400_bad_view(client):
+    job_id = _make_done_job(client)
+    assert client.get(f"/api/jobs/{job_id}/pdf?view=stacked").status_code == 400
+
+
 def test_pdf_409_without_layout(client):
     job_id = _make_done_job(client)
     job_dir = _job_dir(client, job_id)
@@ -145,14 +174,22 @@ def test_pdf_cache_and_rebuild(client):
     out = job_dir / "export.ko.pdf"
     first = out.stat().st_mtime_ns
 
+    assert client.get(f"/api/jobs/{job_id}/pdf?view=dual").status_code == 200
+    dual = job_dir / "export.ko.dual.pdf"
+    dual_first = dual.stat().st_mtime_ns
+
     assert client.get(f"/api/jobs/{job_id}/pdf").status_code == 200
     assert out.stat().st_mtime_ns == first  # 캐시 히트 — 재생성 없음
+    assert client.get(f"/api/jobs/{job_id}/pdf?view=dual").status_code == 200
+    assert dual.stat().st_mtime_ns == dual_first
 
     # 번역 레이아웃이 갱신되면(더 새로운 mtime) 재생성
     newer = out.stat().st_mtime + 5
     os.utime(job_dir / "layout.ko.json", (newer, newer))
     assert client.get(f"/api/jobs/{job_id}/pdf").status_code == 200
     assert out.stat().st_mtime_ns != first
+    assert client.get(f"/api/jobs/{job_id}/pdf?view=dual").status_code == 200
+    assert dual.stat().st_mtime_ns != dual_first
 
 
 def test_unknown_job_404(client):
@@ -198,6 +235,46 @@ def test_build_replaces_and_redacts(tmp_path):
     text = _pdf_text(result.path.read_bytes())
     assert KO_TEXT in text
     assert "Original English sentence" not in text  # 리댁션으로 원문 제거
+
+
+def test_build_dual_pdf_keeps_each_page_as_a_source_translation_pair(tmp_path):
+    import fitz
+
+    job_dir = _unit_job(tmp_path)
+    translated = build_translated_pdf(job_dir, "ko")
+    out = build_dual_pdf(
+        job_dir / "source.pdf",
+        translated.path,
+        job_dir / "export.ko.dual.pdf",
+    )
+
+    with fitz.open(out) as doc:
+        page = doc[0]
+        assert page.rect.width == pytest.approx(595 * 2)
+        assert page.rect.height == pytest.approx(842)
+        text = page.get_text().replace("\xa0", " ")
+        assert "Original English sentence" in text
+        assert KO_TEXT in text
+        assert any(
+            drawing["rect"].x0 == pytest.approx(595)
+            and drawing["rect"].height == pytest.approx(842)
+            for drawing in page.get_drawings()
+        )
+
+
+def test_build_dual_pdf_rejects_different_page_counts(tmp_path):
+    import fitz
+
+    job_dir = _unit_job(tmp_path)
+    translated = build_translated_pdf(job_dir, "ko")
+    mismatched = tmp_path / "mismatched.pdf"
+    with fitz.open(translated.path) as doc:
+        doc.new_page()
+        doc.save(mismatched)
+
+    with pytest.raises(PdfExportError, match="페이지 수가 일치하지"):
+        build_dual_pdf(job_dir / "source.pdf", mismatched, job_dir / "dual.pdf")
+    assert not (job_dir / "dual.pdf").exists()
 
 
 def test_build_preserves_vector_graphics_inside_replaced_block(tmp_path):
@@ -276,10 +353,19 @@ def test_build_uses_source_font_metrics_without_layout_view(tmp_path, monkeypatc
 
 
 def test_build_rotated_page(tmp_path):
+    import fitz
+
     job_dir = _unit_job(tmp_path, rotate=90)
     result = build_translated_pdf(job_dir, "ko")
     assert result.replaced == 1
     assert KO_TEXT in _pdf_text(result.path.read_bytes())
+    dual = build_dual_pdf(job_dir / "source.pdf", result.path, job_dir / "dual.pdf")
+    with fitz.open(job_dir / "source.pdf") as source, fitz.open(dual) as exported:
+        page = exported[0]
+        assert page.rect.width == pytest.approx(source[0].rect.width * 2)
+        assert page.rect.height == pytest.approx(source[0].rect.height)
+        assert "Original English sentence" in page.get_text()
+        assert KO_TEXT in page.get_text()
 
 
 def test_build_keeps_unreplaceable_types(tmp_path):

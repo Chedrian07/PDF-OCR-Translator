@@ -27,7 +27,12 @@ from fastapi.responses import (
 
 from . import native_ops
 from .pipeline.pdf import probe_pdf, render_pdf_pages
-from .pipeline.pdf_export import PdfExportError, build_dual_pdf, build_translated_pdf
+from .pipeline.pdf_export import (
+    PDF_EXPORT_FORMAT_VERSION,
+    PdfExportError,
+    build_dual_pdf,
+    build_translated_pdf,
+)
 from .pipeline.layout import (
     render_document_standalone,
     render_layout_html,
@@ -505,14 +510,31 @@ def _load_pdf_export_report(job, lang: str) -> dict:
 
 def _ensure_translated_pdf(job, lang: str, settings) -> tuple[Path, dict]:
     """번역 레이아웃과 같은 세대의 PDF를 만들거나 캐시에서 돌려준다."""
+    source_pdf = job.dir / "source.pdf"
+    orig_layout = job.dir / "layout.json"
     trans_layout = job.dir / f"layout.{lang}.json"
     out = job.dir / f"export.{lang}.pdf"
-    if not out.is_file() or out.stat().st_mtime_ns < trans_layout.stat().st_mtime_ns:
+    report = _load_pdf_export_report(job, lang)
+    try:
+        latest_input = max(
+            source_pdf.stat().st_mtime_ns,
+            orig_layout.stat().st_mtime_ns,
+            trans_layout.stat().st_mtime_ns,
+        )
+        cache_current = (
+            out.is_file()
+            and out.stat().st_mtime_ns >= latest_input
+            and report.get("format_version") == PDF_EXPORT_FORMAT_VERSION
+        )
+    except OSError:
+        # build_translated_pdf가 누락 입력을 사용자용 PdfExportError로 변환한다.
+        cache_current = False
+    if not cache_current:
         built = build_translated_pdf(
             job.dir, lang, fontfile=settings.pdf_export_font,
         )
         return built.path, built.report()
-    return out, _load_pdf_export_report(job, lang)
+    return out, report
 
 
 def _ensure_dual_pdf(job, lang: str, translated_pdf: Path) -> Path:

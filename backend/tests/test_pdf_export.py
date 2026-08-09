@@ -14,6 +14,7 @@ import pytest
 from conftest import make_pdf_bytes, wait_done
 
 from app.pipeline.pdf_export import (
+    PDF_EXPORT_FORMAT_VERSION,
     PdfExportError,
     _free_growth_rect,
     _plain_text,
@@ -92,7 +93,18 @@ def test_pdf_export_e2e(client):
     assert KO_TEXT in text          # 번역 블록 삽입됨
     # 캐시 파일 생성
     assert (_job_dir(client, job_id) / "export.ko.pdf").is_file()
-    assert (_job_dir(client, job_id) / "export.ko.report.json").is_file()
+    report_path = _job_dir(client, job_id) / "export.ko.report.json"
+    assert report_path.is_file()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["format_version"] == PDF_EXPORT_FORMAT_VERSION
+
+    # 조판 규칙 버전이 오래된 캐시는 입력 mtime이 그대로여도 재생성한다.
+    report["format_version"] = PDF_EXPORT_FORMAT_VERSION - 1
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    refreshed = client.get(f"/api/jobs/{job_id}/pdf")
+    assert refreshed.status_code == 200
+    refreshed_report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert refreshed_report["format_version"] == PDF_EXPORT_FORMAT_VERSION
 
     # 같은 PDF를 기준면으로 쓰는 한국어 HTML/리더 페이지도 생성된다.
     page = client.get(f"/api/jobs/{job_id}/page/1?lang=ko")
@@ -365,7 +377,9 @@ def test_build_rotated_page(tmp_path):
         assert page.rect.width == pytest.approx(source[0].rect.width * 2)
         assert page.rect.height == pytest.approx(source[0].rect.height)
         assert "Original English sentence" in page.get_text()
-        assert KO_TEXT in page.get_text()
+        # PyMuPDF can expose CJK word separators as NBSP after show_pdf_page().
+        # Normalize them before checking semantic text preservation.
+        assert KO_TEXT in page.get_text().replace("\xa0", " ")
 
 
 def test_build_keeps_unreplaceable_types(tmp_path):

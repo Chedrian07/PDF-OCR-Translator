@@ -113,17 +113,28 @@ def load_job(job_dir, lang: str = "ko") -> Job:
 
 # ── 유닛 번역 재구성 (엔진과 동일한 cache_key 재현법) ─────────────────────
 
-def unit_cache_key(unit, glossary: Glossary, model: str) -> str:
+def unit_cache_key(
+    unit, glossary: Glossary, model: str, *, context_tail: str | None = None,
+) -> str:
     """엔진의 유닛 캐시 키를 그대로 재현한다.
 
     masked,_=mask(src) → pairs,first=glossary.for_unit(src, id) + keep_terms(src)
-    → cache_key(masked, model, pairs+first+[(k,k)…]). PROMPT_V는 cache_key가 임포트한
-    상수를 쓰므로 여기서 주입하지 않는다(엔진 버전 상향에 자동 추종).
+    → cache_key(masked, model, pairs+first+[(k,k)…], original_src, unit_kind,
+    context_tail).
+    PROMPT_V는 cache_key가 임포트한 상수를 쓰므로 여기서 주입하지 않는다
+    (엔진 버전 상향에 자동 추종).
     """
     masked, _ = mask(unit.src)
     pairs, first = glossary.for_unit(unit.src, unit.id)
     keep = glossary.keep_terms(unit.src)
-    return cache_key(masked, model, pairs + first + [(k, k) for k in keep])
+    return cache_key(
+        masked,
+        model,
+        pairs + first + [(k, k) for k in keep],
+        original_src=unit.src,
+        unit_kind=unit.kind,
+        context_tail=context_tail,
+    )
 
 
 @dataclass
@@ -150,13 +161,24 @@ def reconstruct(job: Job) -> Recon:
     rec.md_ids = [u.id for u in md_units]
     rec.by_id = {u.id: u for u in rec.units}
 
+    context_map: dict[str, str] = {}
+    if bool(job.state.get("context", False)):
+        for seq in (md_units, lay_units):
+            prev = None
+            for u in seq:
+                if prev is not None:
+                    context_map[u.id] = prev.src[-200:]
+                prev = u
+
     model = job.state.get("model", "")
     kept = set(job.report.get("kept_original", []) or [])
     for u in rec.units:
         if u.skip_reason or should_skip(u.src):
             rec.skipped_ids.append(u.id)
             continue
-        key = unit_cache_key(u, job.glossary, model)
+        key = unit_cache_key(
+            u, job.glossary, model, context_tail=context_map.get(u.id),
+        )
         if key in job.cache:
             rec.found[u.id] = job.cache[key]
         elif u.id in kept:

@@ -106,8 +106,9 @@ class TranslateConfig:
             api_key=_clean(e.get("OPENAI_API_KEY")),
             model=model,
             api_mode=mode,
-            # 현재 번역 API 서버의 병렬 처리 상한은 8. 잘못 큰 값을 넣어도
-            # 업스트림을 과부하시키지 않도록 설정 경계에서 1..8로 고정한다.
+            # 한 잡의 worker 상한은 8. 잘못 큰 값을 넣어도 설정 경계에서
+            # 1..8로 고정한다. API 서버는 별도의 프로세스 전역 semaphore로
+            # 여러 잡을 합친 실제 HTTP 요청 수도 같은 상한 안에 둔다.
             concurrency=min(
                 MAX_TRANSLATE_CONCURRENCY,
                 max(
@@ -140,11 +141,26 @@ class TranslateResult:
     api_mode: str = ""  # 실제 사용된 모드 (auto가 확정된 결과)
 
 
-def cache_key(masked_src: str, model: str, glossary_pairs: list[tuple[str, str]]) -> str:
-    """유닛 캐시 키 — 원문(마스킹 후)·모델·프롬프트 버전·해당 유닛 용어집에 민감.
+def cache_key(
+    masked_src: str,
+    model: str,
+    glossary_pairs: list[tuple[str, str]],
+    *,
+    original_src: str,
+    unit_kind: str,
+    context_tail: str | None,
+) -> str:
+    """유닛 캐시 키 — 원문·마스킹문·종류·모델·프롬프트·용어집에 민감.
 
     용어집이 바뀌면 영향받는 유닛만 자연 무효화된다. glossary_pairs는
     (src, ko) 튜플 목록이며 순서 무관하도록 정렬해 해시한다.
+
+    마스킹 플레이스홀더의 ``v`` 미리보기는 의도적으로 짧다. 따라서 masked_src만
+    해시하면 앞부분이 같은 긴 수식/URL이 충돌해 다른 유닛의 *복원 완료 텍스트*를
+    재사용할 수 있다. 원문 전체를 함께 넣어 그 데이터 훼손 경로를 막는다. title은
+    본문과 다른 프롬프트 정책을 쓰므로 unit_kind도 반드시 키 재료에 포함한다.
+    직전 문맥이 프롬프트에 들어가는 유닛은 context_tail까지 포함해 같은 문장이
+    다른 문맥에서 서로의 번역을 강제로 재사용하지 않게 한다.
     """
     h = hashlib.sha256()
     h.update(PROMPT_V.encode())
@@ -157,4 +173,10 @@ def cache_key(masked_src: str, model: str, glossary_pairs: list[tuple[str, str]]
         h.update(k.encode())
         h.update(b"\x1f")
     h.update(masked_src.encode())
+    h.update(b"\x1f")
+    h.update(original_src.encode())
+    h.update(b"\x1f")
+    h.update(unit_kind.encode())
+    h.update(b"\x1f")
+    h.update((context_tail or "").encode())
     return h.hexdigest()

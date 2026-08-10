@@ -146,16 +146,23 @@ cp .env.example .env   # 키 설정 후 docker compose up -d 로 재기동
 "번역 프로바이더가 설정되지 않았습니다" 안내가 표시됩니다.
 동시성/재시도/reasoning 등 세부 옵션과 파이프라인 설계는
 [docs/ARCHITECTURE.md §13](docs/ARCHITECTURE.md#13-한국어-번역-translation) 참조.
-번역 요청 동시성은 기본 8이며 `TRANSLATE_CONCURRENCY`를 1–8 범위에서 조정할 수
-있습니다. 8을 넘는 값은 API 서버 상한 보호를 위해 자동으로 8로 제한됩니다.
+잡 하나의 번역 요청 동시성은 기본 8이며 `TRANSLATE_CONCURRENCY`를 1–8 범위에서
+조정할 수 있습니다. 여러 잡을 합친 실제 upstream HTTP 요청 상한은
+`TRANSLATE_GLOBAL_CONCURRENCY`이며, 생략하면 잡당 값과 같은 수를 사용합니다.
+로컬 vLLM/Ollama나 429가 잦은 공급자는 두 값을 4 이하로 낮추는 편이 안전합니다.
 
 ## 읽기 뷰 (기본 화면)
 
 변환이 완료된 논문은 **'읽기' 탭**이 기본으로 열립니다. 왼쪽은 언어 전환과
-무관하게 원본 PDF를 좌표 기준면으로 유지하고, 오른쪽은 현재 페이지의 원문 또는
-한국어 번역 블록을 읽기 레일로 보여 줍니다.
+무관하게 원본 PDF 전 페이지를 하나의 연속 스크롤 면으로 유지하고, 오른쪽도 같은
+페이지 순서의 원문 또는 한국어 번역 블록을 연속 읽기 레일로 보여 줍니다.
 
-- 페이지 이동: ◀/▶ 버튼, 페이지 번호 입력, 키보드 ←/→
+- 마우스/트랙패드 스크롤만으로 다음 페이지를 계속 읽을 수 있습니다. ◀/▶, 페이지
+  번호, 썸네일, 문서 개요, 키보드 ←/→는 해당 페이지로 즉시 이동하는 보조 탐색입니다.
+- **연동/개별** 토글로 원문과 번역문을 같은 OCR 문단에 맞춰 양방향 스크롤하거나
+  서로 따로 볼 수 있습니다. 마지막 읽던 페이지는 잡별로 저장되어 다음 열기에 복원됩니다.
+- 긴 논문은 전체 페이지 자리를 먼저 잡되 현재 주변 이미지만 지연 로드해 메모리와
+  네트워크 사용량을 제한합니다. 완료 잡 목록의 책 아이콘으로 뷰어를 바로 열 수 있습니다.
 - 확대/축소와 너비 맞춤: 60–220%, 브라우저에 저장
 - 번역 전이면 **'한국어로 읽기'** 버튼으로 곧바로 전체 번역을 시작할 수 있고,
   완료되면 자동으로 한국어 레일로 전환됩니다 ([원문|한국어] 토글로 언제든 대조)
@@ -328,7 +335,7 @@ npm test --prefix frontend
 | `make setup-native` | C++ 가속 모듈 설치 (선택) |
 | `make dev` | 개발 서버 — `127.0.0.1:8000`, `--reload` |
 | `make dev-textlayer` | `OCR_ENGINE=textlayer`로 개발 서버 (모델 불필요) |
-| `make test` | CI와 동일 — backend pytest · ruff · frontend 테스트 |
+| `make test` | 핵심 로컬 검사 — backend pytest · ruff · frontend 테스트 |
 | `make e2e` | `./scripts/smoke_e2e.sh` (기동된 백엔드 필요) |
 | `make docker-up` / `make docker-down` | CPU 스택(ocr-cpu) 기동/정리 |
 | `make docker-up-ollama` / `make docker-down-ollama` | ocr-cpu + Ollama 컨테이너 (overlay) |

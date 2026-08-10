@@ -1,8 +1,8 @@
 // Unlimited-OCR frontend — live-view replay test suite.
 //
 // 테스트 실행 (의존성 0, Node 내장 러너만 사용):
-//   node --test frontend/tests/          (저장소 루트에서)
-//   cd frontend && npm test              (또는: node --test tests/)
+//   npm test --prefix frontend           (저장소 루트에서)
+//   cd frontend && npm test
 //   node --test frontend/tests/replay.test.mjs
 //
 // fixtures/*.sse.txt 는 실제 서버 SSE 캡처다. 이 스위트는 캡처를 이벤트로 파싱해

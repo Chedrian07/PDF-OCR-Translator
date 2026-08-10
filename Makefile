@@ -26,7 +26,7 @@ dev:              ## 로컬 개발 서버 — http://127.0.0.1:8000
 dev-textlayer:    ## 모델 다운로드 없이 textlayer 엔진으로 개발 서버
 	cd backend && OCR_ENGINE=textlayer uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
-test:             ## CI와 동일한 3종 — backend pytest · ruff · frontend (node --test)
+test:             ## 핵심 로컬 3종 — backend pytest · ruff · frontend (node --test)
 	cd backend && uv run pytest
 	cd backend && uv run --only-group dev ruff check .
 	npm test --prefix frontend

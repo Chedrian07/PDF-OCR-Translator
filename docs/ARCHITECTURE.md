@@ -415,13 +415,15 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
 | `OPENAI_MODEL` | (없음) | 번역 모델 ID. `OPENAI_BASE_URL`과 함께 있어야 번역 활성화 |
 | `TRANSLATE_MODEL` | `OPENAI_MODEL` | 번역 전용 모델 오버라이드 |
 | `TRANSLATE_API_MODE` | `auto` | `auto`\|`chat`\|`responses` (auto: responses 시도 → 미지원 시 chat) |
-| `TRANSLATE_CONCURRENCY` | `8` | 동시 번역 요청 수 (1–8, API 서버 상한 8) |
-| `TRANSLATE_TIMEOUT_S` | `180` | 요청 타임아웃(초) |
-| `TRANSLATE_MAX_RETRIES` | `3` | 429/5xx 재시도 횟수 |
+| `TRANSLATE_CONCURRENCY` | `8` | 잡당 동시 번역 요청 수 (1–8) |
+| `TRANSLATE_GLOBAL_CONCURRENCY` | `TRANSLATE_CONCURRENCY` | 여러 잡을 합친 프로세스 전체 실제 번역 HTTP 상한 (1–8) |
+| `TRANSLATE_TIMEOUT_S` | `180` | 응답 읽기 타임아웃(초). 연결은 `min(10초, 이 값)`으로 별도 제한 |
+| `TRANSLATE_MAX_RETRIES` | `3` | 연결 오류와 408/429/500/502/503/504 재시도 횟수 |
 | `TRANSLATE_TEMPERATURE` | `0` | `none`이면 temperature 파라미터 자체 생략 |
 | `TRANSLATE_MAX_TOKENS_PARAM` | `max_tokens` | `max_tokens`\|`max_completion_tokens`\|`none` |
 | `OCR_CUDA_GRAPHS` | (CUDA on) | 디코드 스텝 CUDA Graph 캡처·리플레이 — 커널 launch 갭 제거. `0`으로 비활성. 실측(8p): 191s→57s, sm 33%→98% |
 | `TRANSLATE_REASONING` | (미전송) | reasoning 모델 제어: `off`\|`low`\|`medium`\|`high`\|`xhigh`. reasoning 모델은 `off` 권장 — 실측 유닛당 37s→1.7s, 출력 토큰 ~1/40. effort별 요청 max_tokens: 8192/10240/20480/40960/81920 (미설정=8192) |
+| `TRANSLATE_CONTEXT` | `1` | 직전 유닛 꼬리를 번역 문맥으로 제공. `0`이면 비활성 |
 | `GPU_DEVICE` | `0` | (compose) CUDA_VISIBLE_DEVICES로 전달 — 두 번째 GPU는 `1` |
 | `HOST`/`PORT` | `0.0.0.0`/`8000` | 서버 바인드 |
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1` | Host 헤더 화이트리스트(콤마 구분) — DNS rebinding 방어, 포트는 비교 시 무시 (§14) |
@@ -549,6 +551,11 @@ OCR로 얻은 **데이터 레이어**(`result.md` + `layout.json`)를 OpenAI 호
   run_translation(job_dir, lang, cfg, *, page_separator, progress, cancel, force)
     1. result.md(+layout.json)를 번역 유닛으로 분해, 마스킹(<m1 .../> 플레이스홀더)
     2. 유닛 캐시(units.json)·용어집(glossary.json) 활용해 API 호출 (Chat/Responses)
+       - 잡당 최대 8 worker, 프로세스 전역 HTTP 세마포어 기본 8
+         (`TRANSLATE_GLOBAL_CONCURRENCY`로 1–8 조정)
+       - 같은 cache key는 single-flight로 결과·오류를 공유해 중복 과금/재시도를 차단
+       - auto 모드의 Responses→Chat capability probe도 동시 최초 호출끼리는 single-flight.
+         초기 협상이 일시 오류로 실패하면 후속 순차 호출은 재협상 가능
        - `title` 유닛은 의미·정보량을 유지하고 UI 라벨식 축약을 금지한다
     3. 플레이스홀더 복원 → layout 블록과 정확히 대응하는 Markdown 줄은 동일 번역으로 정렬
        (PDF·개요·읽기 텍스트의 제목/용어 SSOT, ref_text는 양쪽 모두 원문 유지)
@@ -567,10 +574,13 @@ OCR로 얻은 **데이터 레이어**(`result.md` + `layout.json`)를 OpenAI 호
   `/layout?lang=ko`, `/page/{n}?lang=ko`는 동일한 번역 PDF 페이지를 기준면으로
   사용한다. 정식 standalone 내보내기는 `/document.html` 하나이며, 구버전
   `/layout.html`은 이 경로로 307 리다이렉트한다.
-- 읽기 탭은 왼쪽 `/page/{n}` 원문을 고정하고
-  `/alignment?page={n}&lang=ko`의 블록 인덱스와 bbox로 오른쪽 한국어 문단을
-  양방향 연결한다. 따라서 번역 PDF 재조판 결과가 아니라 OCR 원문의 실제 위치를
-  항상 가리킨다.
+- 읽기 탭은 왼쪽에 전 페이지 `/page/{n}` 자리를 연속으로 쌓고 현재 페이지 ±2만
+  이미지/좌표를 hydrate한다. 오른쪽도 전 페이지 레일을 연속으로 유지하며
+  `/viewer/pages?start=N&limit=L&include=alignment` 배치 응답(구버전은 단건
+  `/alignment?page={n}` 폴백)의 블록 인덱스와 bbox로 양방향 스크롤을 맞춘다.
+  따라서 번역 PDF 재조판 결과가 아니라 OCR 원문의 실제 위치를 항상 가리킨다.
+  페이지 점프·줌·패널 접기·창 리사이즈 때는 `{page,fraction}` 앵커를 새 높이에
+  다시 매핑하고, 잡별 마지막 페이지와 연동 설정을 localStorage에 보존한다.
 
 ### 13.2 파일 계약 (`{job_dir}/`)
 
@@ -589,7 +599,8 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   "lang": "ko", "status": "running",   // running|done|error|canceled
   "current": 3, "total": 12,
   "error": null, "model": "gpt-4o-mini", "api_mode": "chat",
-  "prompt_v": "1", "started_at": "…", "finished_at": null
+  "prompt_v": "1", "context": true,
+  "started_at": "…", "finished_at": null
 }
 ```
 
@@ -626,8 +637,11 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
 - **플레이스홀더 100% 복원**: 수식·이미지·표 등은 `<m1 v="…"/>`로 마스킹 후 번역, 복원한다.
 - **원문 유지 폴백**: 플레이스홀더 복원 실패 유닛은 **원문을 그대로 둔다**(내용 손실 금지).
   해당 유닛 id는 `report.json`의 `kept_original`에 남는다.
-- **캐시 키 구성**: `sha256(PROMPT_V ∥ model ∥ 정렬된 용어집쌍 ∥ 마스킹된 원문)`.
-  모델·프롬프트 버전·해당 유닛 용어집이 바뀌면 영향받는 유닛만 자동 재번역된다.
+- **캐시 키 구성**: `sha256(PROMPT_V ∥ model ∥ 정렬된 용어집쌍 ∥ 마스킹된 원문
+  ∥ 원문 전체 ∥ 블록 종류 ∥ 직전 문맥)`.
+  모델·프롬프트 버전·해당 유닛 용어집·원문·제목/본문 정책이 바뀌면 영향받는
+  유닛만 자동 재번역된다. 짧은 placeholder 미리보기 충돌도 원문 전체로 분리하고,
+  같은 문장도 직전 문맥이 다르면 별도 번역한다.
 - **잘림 감지 재시도**: chat `finish_reason=="length"` / Responses `status=="incomplete"`를
   감지하면 같은 요청을 **max_tokens 2배로 1회 재시도**한다 (thinking 토큰이 예산을
   소진하는 경우 대비). `TRANSLATE_MAX_TOKENS_PARAM=none`이면 같은 요청의 반복이라 생략.

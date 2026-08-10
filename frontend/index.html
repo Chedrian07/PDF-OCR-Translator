@@ -312,6 +312,8 @@
                 <button id="reader-zoom-out" class="btn btn-small" type="button" aria-label="페이지 축소">−</button>
                 <button id="reader-zoom-in" class="btn btn-small" type="button" aria-label="페이지 확대">＋</button>
                 <button id="reader-fit-width" class="btn btn-small" type="button">너비 맞춤</button>
+                <button id="reader-sync" class="btn btn-small reader-sync-btn" type="button" aria-pressed="true"
+                        title="원문과 번역문의 스크롤을 같은 문단에 맞춰 함께 움직입니다">연동</button>
                 <div id="viewer-lang-toggle" class="lang-toggle viewer-only" role="group" aria-label="뷰어 문서 언어 선택" hidden>
                   <button id="viewer-lang-orig" class="lang-seg active" type="button" aria-pressed="true">원문</button>
                   <button id="viewer-lang-ko" class="lang-seg" type="button" aria-pressed="false">한국어</button>
@@ -321,6 +323,10 @@
                 <button id="viewer-toggle-rail" class="btn btn-small viewer-only viewer-panel-toggle" type="button" aria-pressed="true" aria-controls="viewer-translation">번역문</button>
                 <!-- 번역 전 CTA — 기존 번역 시작 경로(startTranslate)로 위임 (JS가 표시/숨김) -->
                 <button id="reader-translate-btn" class="btn btn-primary reader-cta" type="button" hidden>한국어로 읽기</button>
+              </div>
+              <!-- 읽은 분량 표시 — 연속 스크롤에서 현재 위치를 한눈에 (JS가 폭 갱신) -->
+              <div class="reader-progress" aria-hidden="true">
+                <div id="reader-progress-fill" class="reader-progress-fill"></div>
               </div>
               <div class="reader-grid">
                 <aside id="viewer-navigation" class="viewer-column-nav reader-navigation" aria-label="페이지 탐색과 문서 개요">
@@ -342,11 +348,10 @@
                     </div>
                     <span class="reader-fidelity-badge">원문 고정</span>
                   </div>
-                  <div id="reader-page-pane" class="reader-page-pane">
-                    <div id="reader-page-stage" class="reader-page-stage">
-                      <img id="reader-image" alt="현재 원문 PDF 페이지" draggable="false">
-                      <div id="reader-map-overlay" class="reader-map-overlay" aria-label="원문 블록 위치"></div>
-                    </div>
+                  <!-- 연속 스크롤 면 — JS(buildReaderPageStack)가 페이지 섹션을 채운다.
+                       tabindex는 Space/PageDown 등 브라우저 기본 스크롤 키를 위해 필요. -->
+                  <div id="reader-page-pane" class="reader-page-pane" tabindex="0">
+                    <div id="reader-page-stage" class="reader-page-stage"></div>
                   </div>
                 </div>
                 <aside id="viewer-translation" class="viewer-column-translation reader-research" aria-label="번역문과 원문 위치 매핑">

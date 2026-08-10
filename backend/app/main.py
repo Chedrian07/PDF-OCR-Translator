@@ -93,6 +93,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # OCR 워커(단일 스레드 직렬)와 달리 번역은 잡별 데몬 스레드로 병렬 실행된다.
     app.state.translate_tasks: dict[tuple[str, str], dict] = {}
     app.state.translate_lock = threading.Lock()
+    # 잡별 worker와 별도로, 여러 잡이 동시에 번역돼도 한 프로세스가 upstream에
+    # 보내는 실제 HTTP 합계는 설정 상한을 넘지 않는다.
+    app.state.translate_api_slots = threading.BoundedSemaphore(
+        settings.translate_global_concurrency
+    )
     # Localight LLM 라우터 (페이지 Q&A + 프로바이더 카탈로그). 잘못된 LLM env는
     # Settings.from_env(local_url/openai_url/_env_choice)가 이미 기동 시점에 ValueError로
     # 걸러냈으므로 여기서는 조립만 한다 — 네트워크 호출 없음.

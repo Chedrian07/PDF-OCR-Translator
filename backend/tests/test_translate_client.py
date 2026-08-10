@@ -28,6 +28,125 @@ def test_base_url_정규화():
     )
 
 
+@pytest.mark.parametrize(("timeout_s", "expected"), [
+    (180.0, (10.0, 180.0)),
+    (5.0, (5.0, 5.0)),
+])
+def test_post는_connect와_read_timeout을_분리(timeout_s, expected):
+    captured = {}
+
+    class Response:
+        status_code = 200
+        headers = {"X-Test": "yes"}
+        text = "unused"
+
+        @staticmethod
+        def json():
+            return {"output_text": "ok"}
+
+    class Session:
+        @staticmethod
+        def post(url, **kwargs):
+            captured.update(url=url, **kwargs)
+            return Response()
+
+    client = OpenAICompatClient(_cfg(api_mode="responses", timeout_s=timeout_s))
+    client.session = Session()
+    status, body, headers = client._post("responses", {"input": "x"})
+
+    assert captured["timeout"] == expected
+    assert captured["url"] == "https://host/v1/responses"
+    assert status == 200 and body == {"output_text": "ok"}
+    assert headers["X-Test"] == "yes"
+
+
+def test_request_semaphore는_여러_잡의_실제_HTTP_동시성을_제한():
+    import concurrent.futures as cf
+    import threading
+    import time
+
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    class Response:
+        status_code = 200
+        headers = {}
+        text = "unused"
+
+        @staticmethod
+        def json():
+            return {"output_text": "ok"}
+
+    class Session:
+        @staticmethod
+        def post(url, **kwargs):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.04)
+            with lock:
+                active -= 1
+            return Response()
+
+    slots = threading.BoundedSemaphore(2)
+    clients = [
+        OpenAICompatClient(_cfg(api_mode="responses"), request_semaphore=slots)
+        for _ in range(6)
+    ]
+    for client in clients:
+        client.session = Session()
+    with cf.ThreadPoolExecutor(max_workers=len(clients)) as executor:
+        results = list(executor.map(
+            lambda client: client._post("responses", {"input": "x"})[0], clients,
+        ))
+
+    assert results == [200] * len(clients)
+    assert peak == 2
+
+
+def test_request_semaphore_대기중_취소면_HTTP를_보내지_않음():
+    import concurrent.futures as cf
+    import threading
+
+    entered = threading.Event()
+    canceled = threading.Event()
+    slots = threading.BoundedSemaphore(1)
+    assert slots.acquire(blocking=False)  # 다른 잡이 유일한 전역 슬롯을 점유
+    calls = 0
+
+    class ObservedSemaphore:
+        def acquire(self, **kwargs):
+            entered.set()
+            return slots.acquire(**kwargs)
+
+        def release(self):
+            slots.release()
+
+    class Session:
+        @staticmethod
+        def post(url, **kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("취소된 요청은 session.post에 도달하면 안 된다")
+
+    client = OpenAICompatClient(
+        _cfg(api_mode="responses"),
+        request_semaphore=ObservedSemaphore(),
+        cancel_check=canceled.is_set,
+    )
+    client.session = Session()
+    with cf.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(client._post, "responses", {"input": "x"})
+        assert entered.wait(1)
+        canceled.set()
+        with pytest.raises(TranslateAPIError, match="취소"):
+            future.result(timeout=2)
+    assert calls == 0
+    slots.release()
+
+
 def test_chat_파싱():
     c = OpenAICompatClient(_cfg(api_mode="chat"))
     c._post = lambda p, pl: (200, {"choices": [{"message": {"content": "안녕하세요"}}]}, {})
@@ -88,6 +207,90 @@ def test_auto_responses_성공시_래치():
     c._post = lambda p, pl: (200, {"output_text": "ok"}, {})
     c.complete("s", "u", max_tokens=100)
     assert c.api_mode_used == "responses"
+
+
+def test_auto_첫_probe는_concurrency에서도_single_flight():
+    import concurrent.futures as cf
+    import threading
+    import time
+
+    workers = 8
+    start = threading.Barrier(workers)
+    lock = threading.Lock()
+    paths = []
+
+    def post(path, payload):
+        with lock:
+            paths.append(path)
+        if path == "responses":
+            time.sleep(0.08)  # lock이 없으면 모든 worker가 None을 읽고 함께 probe
+            return (404, "not found", {})
+        return (200, {"choices": [{"message": {"content": payload["messages"][1]["content"]}}]}, {})
+
+    client = OpenAICompatClient(_cfg(api_mode="auto"))
+    client._post = post
+
+    def complete(index):
+        start.wait()
+        return client.complete("s", f"u{index}", max_tokens=100)
+
+    with cf.ThreadPoolExecutor(max_workers=workers) as executor:
+        results = list(executor.map(complete, range(workers)))
+
+    assert results == [f"u{i}" for i in range(workers)]
+    assert paths.count("responses") == 1
+    assert paths.count("chat/completions") == workers
+    assert client.api_mode_used == "chat"
+
+
+def test_auto_첫_probe_실패도_동시_대기자에게_single_flight():
+    import concurrent.futures as cf
+    import threading
+    import time
+
+    workers = 8
+    start = threading.Barrier(workers)
+    lock = threading.Lock()
+    calls = 0
+
+    def post(path, payload):
+        nonlocal calls
+        with lock:
+            calls += 1
+        time.sleep(0.08)
+        return (500, "provider down", {})
+
+    client = OpenAICompatClient(_cfg(api_mode="auto", max_retries=0))
+    client._post = post
+
+    def complete(index):
+        start.wait()
+        with pytest.raises(TranslateAPIError, match="HTTP 500"):
+            client.complete("s", f"u{index}", max_tokens=100)
+
+    with cf.ThreadPoolExecutor(max_workers=workers) as executor:
+        list(executor.map(complete, range(workers)))
+
+    assert calls == 1
+    assert client.api_mode_used == ""
+
+
+def test_auto_실패_flight는_후속_순차호출의_회복을_막지_않음():
+    calls = []
+
+    def post(path, payload):
+        calls.append(path)
+        if len(calls) == 1:
+            return (500, "temporary", {})
+        return (200, {"output_text": "회복"}, {})
+
+    client = OpenAICompatClient(_cfg(api_mode="auto", max_retries=0))
+    client._post = post
+    with pytest.raises(TranslateAPIError, match="HTTP 500"):
+        client.complete("s", "first", max_tokens=100)
+    assert client.complete("s", "second", max_tokens=100) == "회복"
+    assert calls == ["responses", "responses"]
+    assert client.api_mode_used == "responses"
 
 
 def test_429_retry_after_재시도():

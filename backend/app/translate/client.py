@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
+from collections.abc import Callable
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
@@ -31,12 +33,33 @@ _RETRYABLE = frozenset({408, 429, 500, 502, 503, 504})
 # auto 모드에서 responses → chat 폴백을 유발하는 상태코드
 _FALLBACK = frozenset({404, 405, 501})
 
+# 접속 단계 상한 — 응답 생성이 아무리 길어도 TCP 연결 자체는 10초 안에 되거나 안 된다.
+# 스칼라 timeout은 connect에도 read와 같은 값(기본 180s)을 걸어, 엔드포인트가 죽으면
+# 워커 하나가 시도당 수십 초(리눅스 SYN 재시도 상한 ~127초)를 붙잡혔다. 재시도 4회 ×
+# 백오프까지 더하면 잡 하나가 오류를 알리는 데 500초를 넘긴다 — 동시성을 올릴수록
+# 그만큼 워커가 통째로 묶인다. read 타임아웃은 그대로라 정상 응답에는 영향이 없다.
+_CONNECT_TIMEOUT_S = 10.0
+
 _THINK_RE = re.compile(r"^\s*<think>.*?</think>", re.DOTALL)
 _FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)```\s*$", re.DOTALL)
 
 
 class _NeedsFallback(Exception):
     """내부용 — auto 모드에서 responses가 미지원일 때 chat 폴백을 신호."""
+
+
+class _RequestCancelled(TranslateAPIError):
+    """내부용 — 새 HTTP 요청을 보내기 전에 cancel/abort를 관찰했다."""
+
+
+class _ModeFlight:
+    """auto 최초 협상의 결과/오류를 동시 호출자에게 한 번만 공개한다."""
+
+    __slots__ = ("event", "error")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.error: tuple[type[BaseException], tuple] | None = None
 
 
 def _normalize_base_url(raw: str) -> str:
@@ -60,12 +83,54 @@ def _endpoint_url(base_url: str, path: str) -> str:
 
 
 class OpenAICompatClient:
-    def __init__(self, cfg: TranslateConfig) -> None:
+    def __init__(
+        self,
+        cfg: TranslateConfig,
+        *,
+        request_semaphore: threading.Semaphore | None = None,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> None:
         self.cfg = cfg
         self.base_url = _normalize_base_url(cfg.base_url)
         self.session = requests.Session()
+        self._request_semaphore = request_semaphore
+        self._cancel_check = cancel_check
         self._latched: str | None = None  # auto 확정 모드 (인스턴스 수명 동안 유지)
+        self._mode_lock = threading.Lock()  # _latched/_mode_flight 상태만 짧게 보호
+        self._mode_flight: _ModeFlight | None = None
         self.api_mode_used = "" if cfg.api_mode == "auto" else cfg.api_mode
+
+    def set_cancel_check(self, check: Callable[[], bool] | None) -> None:
+        """엔진의 cancel+abort predicate를 주입한다 (사용자 제공 client와 호환용 선택 API)."""
+        self._cancel_check = check
+
+    def _raise_if_cancelled(self) -> None:
+        check = self._cancel_check
+        if check is not None and check():
+            raise _RequestCancelled("번역 요청이 취소되었습니다")
+
+    def _wait_or_cancel(self, seconds: float) -> None:
+        """재시도 backoff를 잘게 기다려 취소 뒤 새 요청이 나가지 않게 한다."""
+        wait = max(0.0, float(seconds))
+        if self._cancel_check is None:
+            time.sleep(wait)
+            return
+        deadline = time.monotonic() + wait
+        while True:
+            self._raise_if_cancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.1, remaining))
+
+    @staticmethod
+    def _raise_flight_error(error: tuple[type[BaseException], tuple]) -> None:
+        error_type, error_args = error
+        try:
+            cloned = error_type(*error_args)
+        except TypeError as clone_error:
+            raise TranslateAPIError("번역 API 초기 모드 협상에 실패했습니다") from clone_error
+        raise cloned
 
     # ── 전송 심(seam) — 테스트는 이 메서드만 몽키패치 ──────────────────
     def _post(self, path: str, payload: dict) -> tuple[int, dict | str, dict]:
@@ -74,7 +139,25 @@ class OpenAICompatClient:
         headers = {"Content-Type": "application/json"}
         if self.cfg.api_key:
             headers["Authorization"] = f"Bearer {self.cfg.api_key}"
-        resp = self.session.post(url, json=payload, headers=headers, timeout=self.cfg.timeout_s)
+        semaphore = self._request_semaphore
+        acquired = False
+        if semaphore is not None:
+            # 여러 잡의 전역 슬롯을 기다리는 동안 cancel/abort를 확인한다. 무기한
+            # acquire 뒤 곧장 전송하면 취소된 잡이 슬롯이 풀린 순간 유료 요청을 보낸다.
+            while not semaphore.acquire(timeout=0.1):
+                self._raise_if_cancelled()
+            acquired = True
+        try:
+            # acquire 직후 cancel과의 마지막 경쟁창도 닫고 나서만 네트워크로 나간다.
+            self._raise_if_cancelled()
+            resp = self.session.post(
+                url, json=payload, headers=headers,
+                # (connect, read) — min은 timeout_s를 10초 미만으로 줄인 설정을 존중한다.
+                timeout=(min(_CONNECT_TIMEOUT_S, self.cfg.timeout_s), self.cfg.timeout_s),
+            )
+        finally:
+            if semaphore is not None and acquired:
+                semaphore.release()
         try:
             body: dict | str = resp.json()
         except ValueError:
@@ -108,26 +191,72 @@ class OpenAICompatClient:
 
     def _complete_once(self, system: str, user: str, max_tokens: int) -> tuple[str, bool]:
         """1회 완성 시도 — (텍스트, 잘림 여부) 반환. auto 모드 폴백/래치 담당."""
-        mode, allow_fallback = self._mode_for_call()
+        if self.cfg.api_mode != "auto":
+            return self._send(
+                self.cfg.api_mode, system, user, max_tokens, allow_fallback=False,
+            )
+
+        # concurrency worker들이 모두 _latched=None을 보고 /responses를 중복 probe하지
+        # 않게 첫 capability negotiation을 single-flight한다. 성공 뒤 각 유닛 요청은
+        # lock 밖에서 병렬로 흐르고, 최초 probe가 실패하면 그 시점의 동시 대기자 모두
+        # 같은 오류를 받아 죽은 endpoint를 직렬로 다시 두드리지 않는다.
+        owner = False
+        with self._mode_lock:
+            flight = self._mode_flight
+            if flight is not None and flight.event.is_set() and flight.error is not None:
+                self._raise_flight_error(flight.error)
+            mode = self._latched
+            if mode is None and flight is None:
+                flight = self._mode_flight = _ModeFlight()
+                owner = True
+
+        if not owner and flight is not None:
+            # Event.wait 자체는 cancel을 모르므로 짧게 끊는다. owner는 모든 경로에서
+            # result/error를 공개한 뒤 반드시 set한다.
+            while not flight.event.wait(0.1):
+                self._raise_if_cancelled()
+            if flight.error is not None:
+                self._raise_flight_error(flight.error)
+            with self._mode_lock:
+                mode = self._latched
+            if mode is None:  # 방어 경로 — 성공 flight는 반드시 mode를 래치한다.
+                raise TranslateAPIError("번역 API 초기 모드 협상 결과가 없습니다")
+            return self._send(mode, system, user, max_tokens, allow_fallback=False)
+
+        if mode is not None:
+            return self._send(mode, system, user, max_tokens, allow_fallback=False)
+
         try:
-            result = self._send(mode, system, user, max_tokens, allow_fallback)
-        except _NeedsFallback:
-            # responses 미지원 → chat으로 영구 래치, 같은 요청 재전송(재시도 미소모)
-            self._latched = "chat"
-            self.api_mode_used = "chat"
-            return self._send("chat", system, user, max_tokens, allow_fallback=False)
-        if self.cfg.api_mode == "auto" and self._latched is None:
-            self._latched = mode
-            self.api_mode_used = mode
-        return result
+            try:
+                result = self._send(
+                    "responses", system, user, max_tokens, allow_fallback=True,
+                )
+            except _NeedsFallback:
+                with self._mode_lock:
+                    self._latched = "chat"
+                    self.api_mode_used = "chat"
+                result = self._send(
+                    "chat", system, user, max_tokens, allow_fallback=False,
+                )
+            else:
+                with self._mode_lock:
+                    self._latched = "responses"
+                    self.api_mode_used = "responses"
+            return result
+        except BaseException as exc:
+            flight.error = (type(exc), exc.args)
+            raise
+        finally:
+            flight.event.set()
+            if flight.error is not None:
+                # 이미 flight 참조를 얻은 동시 대기자들은 같은 오류를 받되, 나중의
+                # 순차 호출은 새 협상을 허용한다. 일시 500/연결 오류 하나를 client
+                # 수명 전체에 영구 래치하면 glossary 실패 뒤 본 번역도 회복할 수 없다.
+                with self._mode_lock:
+                    if self._mode_flight is flight:
+                        self._mode_flight = None
 
     # ── 내부 ────────────────────────────────────────────────────────
-    def _mode_for_call(self) -> tuple[str, bool]:
-        if self.cfg.api_mode != "auto":
-            return self.cfg.api_mode, False
-        if self._latched is not None:
-            return self._latched, False
-        return "responses", True  # 첫 auto 호출 — responses 시도, 폴백 허용
 
     def _build_payload(self, mode: str, system: str, user: str, max_tokens: int) -> dict:
         cfg = self.cfg
@@ -171,8 +300,11 @@ class OpenAICompatClient:
         payload = self._build_payload(mode, system, user, max_tokens)
         attempt = 0
         while True:
+            self._raise_if_cancelled()
             try:
                 status, body, headers = self._post(path, payload)
+            except _RequestCancelled:
+                raise
             except requests.RequestException as e:
                 # ConnectionError·Timeout뿐 아니라 본문 수신 중 끊김(ChunkedEncodingError·
                 # ContentDecodingError 등 RequestException 계열, ConnectionError 비상속)도
@@ -184,7 +316,7 @@ class OpenAICompatClient:
                         "번역 API 연결 오류(%s) — %.1fs 후 재시도 (%d/%d)",
                         type(e).__name__, wait, attempt + 1, self.cfg.max_retries,
                     )
-                    time.sleep(wait)
+                    self._wait_or_cancel(wait)
                     attempt += 1
                     continue
                 raise TranslateAPIError(f"번역 API 연결 실패: {e}") from e
@@ -207,7 +339,7 @@ class OpenAICompatClient:
                     status, wait, attempt + 1, self.cfg.max_retries,
                     f" (Retry-After: {ra})" if ra is not None else "",
                 )
-                time.sleep(wait)
+                self._wait_or_cancel(wait)
                 attempt += 1
                 continue
             raise TranslateAPIError(f"번역 API 오류 (HTTP {status}): {_body_preview(body)}")

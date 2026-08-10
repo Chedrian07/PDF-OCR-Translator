@@ -87,6 +87,25 @@ def _env_choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
     return v
 
 
+def _translate_global_concurrency() -> int:
+    """서버 전체 번역 HTTP 상한(1..8).
+
+    새 전역 키가 없으면 기존 TRANSLATE_CONCURRENCY를 따라 단일 설정만 쓰던 배포도
+    여러 잡 합계까지 같은 값으로 제한한다. 기존 키가 잘못된 경우 앱 기동 자체는
+    유지하고 TranslateConfig의 503 검증에 맡긴다. 새 키의 오타는 명시 설정이므로
+    기동 시 바로 드러낸다.
+    """
+    raw = os.environ.get("TRANSLATE_GLOBAL_CONCURRENCY")
+    # Compose는 선택 키를 빈 문자열로 명시 전달한다. 빈 값은 '미설정'과 같게
+    # 취급해야 아래의 잡당 상한 fallback 계약이 컨테이너에서도 유지된다.
+    if raw is not None and raw.strip():
+        return min(8, max(1, int(raw)))
+    try:
+        return min(8, max(1, int(os.environ.get("TRANSLATE_CONCURRENCY") or 8)))
+    except ValueError:
+        return 8
+
+
 @dataclass
 class Settings:
     device: str = "cpu"                 # cpu | cuda | metal (mps는 metal의 별칭)
@@ -138,6 +157,8 @@ class Settings:
     llm_openai_chat_model: str = "chat-latest"        # Chat Completions 기본 모델
     # 번역 서브시스템(TranslateConfig.from_env)과 공유하는 키 — 여기서는 읽기만 한다
     openai_api_key: str = ""
+    # 여러 번역 잡을 합친 실제 upstream HTTP 요청 상한. 기본은 잡당 상한과 같은 8.
+    translate_global_concurrency: int = 8
     # 번역 PDF 내보내기용 한글 폰트 파일 경로 — 빈 값이면 시스템 폰트 → 내장 CJK 폴백
     pdf_export_font: str = ""
 
@@ -204,6 +225,7 @@ class Settings:
             llm_openai_responses_model=os.environ.get("LLM_OPENAI_RESPONSES_MODEL", "gpt-5.6-luna"),
             llm_openai_chat_model=os.environ.get("LLM_OPENAI_CHAT_MODEL", "chat-latest"),
             openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip(),
+            translate_global_concurrency=_translate_global_concurrency(),
             pdf_export_font=os.environ.get("PDF_EXPORT_FONT", "").strip(),
         )
 

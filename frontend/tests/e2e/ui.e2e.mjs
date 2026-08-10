@@ -30,6 +30,23 @@ function check(name, ok, detail = '') {
   if (!ok) failures.push(name);
 }
 
+async function readerSemanticFocus() {
+  return page.evaluate(() => {
+    const pane = document.getElementById('reader-page-pane');
+    const current = Number(document.getElementById('reader-page')?.value) || 1;
+    const section = document.querySelector(`.reader-page[data-page="${current}"]`);
+    if (!pane || !section || !section.offsetHeight) return { page: current, fraction: 0 };
+    const paneRect = pane.getBoundingClientRect();
+    const rect = section.getBoundingClientRect();
+    const top = rect.top - paneRect.top + pane.scrollTop;
+    const focusY = pane.scrollTop + pane.clientHeight * 0.28;
+    return {
+      page: current,
+      fraction: Math.min(1, Math.max(0, (focusY - top) / rect.height)),
+    };
+  });
+}
+
 // ── 0) 백엔드 프리플라이트 ──────────────────────────────────────────────
 let health;
 try {
@@ -111,23 +128,43 @@ check('프로덕션 뷰어: 다중 페이지 썸네일', viewerStructure.thumbna
 
 // 열린 뷰어 안에서만 원문/본문/좌표 매핑을 로드한다.
 await page.waitForTimeout(1200);
-const reader = await page.evaluate(() => ({
-  textLen: (document.getElementById('reader-content')?.innerText || '').length,
-  img: !!document.getElementById('reader-image')?.getAttribute('src'),
-  total: document.getElementById('reader-total')?.textContent || '',
-  cards: document.querySelectorAll('#reader-content .reader-map-card').length,
-  boxes: document.querySelectorAll('#reader-map-overlay .reader-map-box').length,
-}));
-check('프로덕션 뷰어: 현재 페이지 본문 렌더', reader.textLen > 20);
+// 연속 스크롤 리더 — 카드/박스 대조는 "현재 페이지" 범위로 본다 (전 페이지가
+// 한 DOM에 쌓여 있으므로 전역 비교는 다페이지 문서에서 성립하지 않는다).
+const reader = await page.evaluate(() => {
+  const n = document.getElementById('reader-page')?.value || '1';
+  return {
+    textLen: (document.getElementById('reader-content')?.innerText || '').length,
+    img: !!document.getElementById('reader-image')?.getAttribute('src'),
+    total: document.getElementById('reader-total')?.textContent || '',
+    stackPages: document.querySelectorAll('#reader-page-stage .reader-page').length,
+    railPages: document.querySelectorAll('#reader-content .reader-rail-page').length,
+    hydrated: [...document.querySelectorAll('.reader-page-image')]
+      .filter((i) => i.getAttribute('src')).length,
+    cards: document.querySelectorAll(`.reader-rail-page[data-page="${n}"] .reader-map-card`).length,
+    boxes: document.querySelectorAll(`.reader-page[data-page="${n}"] .reader-map-box`).length,
+  };
+});
+check('프로덕션 뷰어: 연속 본문 rail 렌더', reader.textLen > 20);
 check('프로덕션 뷰어: 원문 페이지 이미지 로드', reader.img);
 check('프로덕션 뷰어: 다중 페이지 결과', Number(reader.total) >= 2, JSON.stringify(reader));
+check('연속 스크롤: 전체 페이지가 한 스크롤 면에 쌓임',
+  reader.stackPages === Number(reader.total) && reader.railPages === Number(reader.total),
+  JSON.stringify(reader));
+check('연속 스크롤: 이미지는 현재 창만 붙는다(지연 로드)',
+  reader.hydrated > 0 && reader.hydrated <= Math.min(Number(reader.total), 7),
+  `hydrated=${reader.hydrated}/${reader.total}`);
+check('연속 스크롤: bbox 버튼 컨테이너가 접근성 트리에서 숨겨지지 않음',
+  await page.evaluate(() => {
+    const overlay = document.getElementById('reader-map-overlay');
+    return overlay?.getAttribute('role') === 'group' && !overlay.hasAttribute('aria-hidden');
+  }));
 if (layoutCap !== 'figure_only') {
-  check('프로덕션 뷰어: 원문 bbox와 텍스트 블록 1:1',
+  check('프로덕션 뷰어: 원문 bbox와 텍스트 블록 1:1 (현재 페이지)',
     reader.cards > 0 && reader.cards === reader.boxes, JSON.stringify(reader));
   await page.locator('#reader-content .reader-map-card').first().click();
   check('프로덕션 뷰어: 번역/본문 클릭 → 원문 bbox 활성', await page.evaluate(() => {
     const card = document.querySelector('#reader-content .reader-map-card.is-active');
-    const box = document.querySelector('#reader-map-overlay .reader-map-box.is-active');
+    const box = document.querySelector('#reader-page-stage .reader-map-box.is-active');
     return !!card && !!box && card.dataset.blockId === box.dataset.blockId;
   }));
 }
@@ -146,24 +183,217 @@ await page.keyboard.press('ArrowRight');
 await page.waitForFunction(() => document.getElementById('reader-page')?.value === '2');
 check('프로덕션 뷰어: ArrowRight 다음 페이지', true);
 
+/* ── 연속 스크롤: 스크롤만으로 페이지가 넘어가고 번역 레일이 따라온다 ── */
+let readerRailStyle = '';
+{
+  const total = Number(await page.$eval('#reader-total', (e) => e.textContent)) || 1;
+  // 2페이지짜리 경량 fixture는 번역문 전체가 레일 높이 안에 들어갈 수 있다.
+  // 이 블록에서만 레일을 작게 만들어 양방향 "스크롤" 계약을 실제로 운동시킨다.
+  readerRailStyle = await page.$eval('#reader-content', (rail) => rail.getAttribute('style') || '');
+  await page.$eval('#reader-content', (rail) => {
+    rail.style.flex = '0 0 180px';
+    rail.style.height = '180px';
+    rail.style.minHeight = '0';
+  });
+  check('연속 스크롤: 양방향 연동 테스트 레일이 스크롤 가능', await page.evaluate(() => {
+    const rail = document.getElementById('reader-content');
+    return rail.scrollHeight > rail.clientHeight;
+  }));
+  await page.$eval('#reader-page-pane', (pane) => { pane.scrollTop = 0; });
+  await page.waitForFunction(() => document.getElementById('reader-page')?.value === '1');
+  await page.waitForTimeout(350); // 직전 키보드 페이지 점프의 quiet 기간 해제
+
+  // 원문 면을 끝까지 스크롤 → 페이지 번호가 따라 올라간다 (버튼 조작 없음)
+  await page.$eval('#reader-page-pane', (pane) => { pane.scrollTop = pane.scrollHeight; });
+  await page.waitForFunction((n) =>
+    Number(document.getElementById('reader-page')?.value) === n, total, { timeout: 15000 });
+  check('연속 스크롤: 스크롤만으로 마지막 페이지 도달', true, `total=${total}`);
+  check('연속 스크롤: 마지막에서 다음 버튼 비활성',
+    await page.evaluate(() => document.getElementById('reader-next')?.disabled === true));
+
+  // 번역 레일도 함께 내려와 있어야 한다 (좌우 동기화)
+  check('연속 스크롤: 번역 레일이 원문을 따라옴',
+    await page.evaluate(() => document.getElementById('reader-content').scrollTop > 0));
+
+  // 위로 되돌리기
+  await page.$eval('#reader-page-pane', (pane) => { pane.scrollTop = 0; });
+  await page.waitForFunction(() => document.getElementById('reader-page')?.value === '1');
+  check('연속 스크롤: 맨 위로 되돌리면 1페이지', true);
+
+  // 페이지 번호 입력 → 실제로 그 페이지가 뷰포트 안으로 들어온다
+  await page.fill('#reader-page', String(total));
+  await page.press('#reader-page', 'Enter');
+  await page.waitForFunction((n) => {
+    const pane = document.getElementById('reader-page-pane').getBoundingClientRect();
+    const section = document.querySelector(`.reader-page[data-page="${n}"]`);
+    if (!section) return false;
+    const rect = section.getBoundingClientRect();
+    return rect.bottom > pane.top && rect.top < pane.bottom;
+  }, total, { timeout: 15000 });
+  check('연속 스크롤: 페이지 번호 입력 → 해당 페이지로 스크롤', true);
+
+  // 연동 끄기 → 원문을 움직여도 레일은 제자리
+  await page.click('#reader-sync');
+  await page.$eval('#reader-page-pane', (pane) => { pane.scrollTop = 0; });
+  await page.waitForTimeout(500);
+  const railBefore = await page.evaluate(() => document.getElementById('reader-content').scrollTop);
+  await page.$eval('#reader-page-pane', (pane) => { pane.scrollTop = pane.scrollHeight; });
+  await page.waitForTimeout(500);
+  const railAfter = await page.evaluate(() => document.getElementById('reader-content').scrollTop);
+  check('연속 스크롤: 연동 해제 시 레일 고정', railAfter === railBefore, `${railBefore} → ${railAfter}`);
+  if (layoutCap !== 'figure_only') {
+    check('연속 스크롤: 개별 모드의 보이는 rail 만 키보드 탐색', await page.evaluate(() => {
+      const rail = document.getElementById('reader-content');
+      const y = rail.getBoundingClientRect().top + rail.clientHeight * 0.28;
+      const visible = [...rail.querySelectorAll('.reader-rail-page')].find((section) => {
+        const rect = section.getBoundingClientRect();
+        return y >= rect.top && y < rect.bottom;
+      });
+      const visiblePage = Number(visible?.dataset.page) || 0;
+      const openPages = [...rail.querySelectorAll('.reader-map-locate[tabindex="0"]')]
+        .map((node) => Number(node.closest('.reader-map-card')?.dataset.page) || 0);
+      return visiblePage > 0 && openPages.length > 0
+        && openPages.every((n) => n === visiblePage);
+    }));
+  }
+
+  await page.click('#reader-sync'); // 기본(연동) 상태로 복원
+  await page.$eval('#reader-page-pane', (pane) => { pane.scrollTop = 0; });
+  await page.waitForFunction(() => document.getElementById('reader-page')?.value === '1');
+
+  // 번역 레일을 직접 굴려도 원문이 같은 페이지로 따라온다(역방향 동기화).
+  await page.waitForTimeout(350); // 연동 재활성화의 programmatic-scroll quiet 해제
+  await page.$eval('#reader-content', (rail) => { rail.scrollTop = rail.scrollHeight; });
+  await page.waitForFunction((n) =>
+    Number(document.getElementById('reader-page')?.value) === n, total, { timeout: 15000 });
+  check('연속 스크롤: 번역 레일 → 원문 역방향 연동', true, `total=${total}`);
+  await page.waitForTimeout(700); // URL 250ms + 이어읽기 400ms debounce
+  const persisted = await page.evaluate((n) => {
+    const params = new URLSearchParams(location.search);
+    const id = location.hash.replace(/^#/, '');
+    return {
+      urlPage: Number(params.get('page')),
+      viewer: params.get('viewer'),
+      saved: Number(localStorage.getItem(`uocr-reader-pos-${id}`)),
+      expected: n,
+    };
+  }, total);
+  check('연속 스크롤: 역방향 이동을 URL·이어읽기에 저장',
+    persisted.viewer === '1' && persisted.urlPage === total && persisted.saved === total,
+    JSON.stringify(persisted));
+}
+
+// 줌·패널 접기로 source 폭/높이가 바뀌어도 페이지 번호뿐 아니라
+// 실제로 읽던 줄(페이지 내 fraction)을 보존한다.
+const resizeAnchorPage = 1;
+await page.fill('#reader-page', String(resizeAnchorPage));
+await page.press('#reader-page', 'Enter');
+await page.waitForFunction((n) =>
+  Number(document.getElementById('reader-page')?.value) === n, resizeAnchorPage);
+await page.waitForTimeout(400);
+await page.$eval('#reader-page-pane', (pane, target) => {
+  const section = document.querySelector(`.reader-page[data-page="${target.page}"]`);
+  const paneRect = pane.getBoundingClientRect();
+  const rect = section.getBoundingClientRect();
+  const top = rect.top - paneRect.top + pane.scrollTop;
+  pane.scrollTop = Math.max(0, top + rect.height * target.fraction - pane.clientHeight * 0.28);
+}, { page: resizeAnchorPage, fraction: 0.48 });
+await page.waitForTimeout(350);
+const semanticAnchor = await readerSemanticFocus();
+
+await page.click('#reader-zoom-in');
+await page.waitForTimeout(450);
+const afterZoom = await readerSemanticFocus();
+check('프로덕션 뷰어: 줌 변경 뒤 읽던 줄 보존',
+  afterZoom.page === semanticAnchor.page
+    && Math.abs(afterZoom.fraction - semanticAnchor.fraction) < 0.02,
+  `${JSON.stringify(semanticAnchor)} → ${JSON.stringify(afterZoom)}`);
+
+await page.click('#reader-fit-width');
+await page.waitForTimeout(450);
+const afterFit = await readerSemanticFocus();
+check('프로덕션 뷰어: 너비 맞춤 뒤 읽던 줄 보존',
+  afterFit.page === semanticAnchor.page
+    && Math.abs(afterFit.fraction - semanticAnchor.fraction) < 0.02,
+  `${JSON.stringify(semanticAnchor)} → ${JSON.stringify(afterFit)}`);
+
 await page.click('#viewer-toggle-nav');
+await page.waitForTimeout(450);
 check('프로덕션 뷰어: navigator 접힘 상태', await page.evaluate(() => {
   const root = document.getElementById('production-viewer');
   const toggle = document.getElementById('viewer-toggle-nav');
   return root?.classList.contains('nav-collapsed')
     && toggle?.getAttribute('aria-pressed') === 'false';
 }));
+check('프로덕션 뷰어: navigator 접기 뒤 읽던 페이지 보존',
+  Number(await page.inputValue('#reader-page')) === resizeAnchorPage);
+const afterNav = await readerSemanticFocus();
+check('프로덕션 뷰어: navigator 접기 뒤 읽던 줄 보존',
+  afterNav.page === semanticAnchor.page
+    && Math.abs(afterNav.fraction - semanticAnchor.fraction) < 0.02,
+  `${JSON.stringify(semanticAnchor)} → ${JSON.stringify(afterNav)}`);
 await page.click('#viewer-toggle-rail');
+await page.waitForTimeout(450);
 check('프로덕션 뷰어: translation rail 접힘 상태', await page.evaluate(() => {
   const root = document.getElementById('production-viewer');
   const toggle = document.getElementById('viewer-toggle-rail');
   return root?.classList.contains('rail-collapsed')
     && toggle?.getAttribute('aria-pressed') === 'false';
 }));
+check('프로덕션 뷰어: translation rail 접기 뒤 읽던 페이지 보존',
+  Number(await page.inputValue('#reader-page')) === resizeAnchorPage);
+const afterRail = await readerSemanticFocus();
+check('프로덕션 뷰어: translation rail 접기 뒤 읽던 줄 보존',
+  afterRail.page === semanticAnchor.page
+    && Math.abs(afterRail.fraction - semanticAnchor.fraction) < 0.02,
+  `${JSON.stringify(semanticAnchor)} → ${JSON.stringify(afterRail)}`);
 // 후속 검증과 스크린샷은 전체 3열 상태로 남긴다.
 await page.click('#viewer-toggle-nav');
+await page.waitForTimeout(350);
 await page.click('#viewer-toggle-rail');
+await page.waitForTimeout(350);
+await page.$eval('#reader-content', (rail, style) => {
+  if (style) rail.setAttribute('style', style);
+  else rail.removeAttribute('style');
+}, readerRailStyle);
 await page.screenshot({ path: path.join(OUT, 'reader.png') });
+
+// 전체화면 toolbar에서 Q&A로 바로 이동: modal/inert를 먼저 해제하고
+// 현재 페이지를 보존한다. 이전에는 hidden QA에 포커스를 보내 무반응처럼 보였다.
+const beforeQaJump = await readerSemanticFocus();
+await page.click('.reader-tools-wrap > summary');
+await page.click('#reader-summary');
+await page.waitForFunction(() => {
+  const qa = document.querySelector('.tab-panel[data-panel="qa"]');
+  return qa && !qa.hidden && !document.body.classList.contains('viewer-mode');
+});
+const qaJump = await page.evaluate(() => {
+  const qa = document.querySelector('.tab-panel[data-panel="qa"]');
+  return {
+    viewerOpen: document.getElementById('production-viewer')?.classList.contains('is-open'),
+    bodyMode: document.body.classList.contains('viewer-mode'),
+    inert: qa?.inert === true,
+    page: Number(document.getElementById('qa-page')?.value),
+    prompt: document.getElementById('qa-input')?.value || '',
+    focused: document.activeElement === document.getElementById('qa-input'),
+  };
+});
+check('프로덕션 뷰어: 페이지 요약 → Q&A modal·inert 정상 해제',
+  !qaJump.viewerOpen && !qaJump.bodyMode && !qaJump.inert && qaJump.focused,
+  JSON.stringify(qaJump));
+check('프로덕션 뷰어: 페이지 요약 Q&A에 현재 페이지·프롬프트 전달',
+  qaJump.page === beforeQaJump.page && qaJump.prompt.includes('핵심 주장'),
+  JSON.stringify(qaJump));
+
+// reader가 hidden인 Q&A 탭에서 다시 전체화면을 열어도 읽던 줄로 복원.
+await page.click('#viewer-open');
+await page.waitForSelector('#production-viewer.is-open');
+await page.waitForTimeout(450);
+const afterHiddenOpen = await readerSemanticFocus();
+check('프로덕션 뷰어: 다른 탭에서 재진입해도 읽던 줄 복원',
+  afterHiddenOpen.page === beforeQaJump.page
+    && Math.abs(afterHiddenOpen.fraction - beforeQaJump.fraction) < 0.02,
+  `${JSON.stringify(beforeQaJump)} → ${JSON.stringify(afterHiddenOpen)}`);
 
 await page.keyboard.press('Escape');
 await page.waitForFunction(() => !document.getElementById('production-viewer')?.classList.contains('is-open'));
@@ -281,11 +511,12 @@ if (VERIFY_MOCK_LLM) {
     const image = document.getElementById('reader-image')?.getAttribute('src') || '';
     return /[가-힣]/.test(text) && !image.includes('lang=ko');
   }));
-  check('mock 번역 뷰어: source/translation 블록 ID 1:1', await page.evaluate(() => {
+  check('mock 번역 뷰어: source/translation 블록 ID 1:1 (현재 페이지)', await page.evaluate(() => {
+    const n = document.getElementById('reader-page')?.value || '1';
     const ids = (selector) => [...document.querySelectorAll(selector)]
       .map((node) => node.dataset.blockId).filter(Boolean).sort();
-    const source = ids('#reader-map-overlay .reader-map-box');
-    const translated = ids('#reader-content .reader-map-card');
+    const source = ids(`.reader-page[data-page="${n}"] .reader-map-box`);
+    const translated = ids(`.reader-rail-page[data-page="${n}"] .reader-map-card`);
     return source.length > 0 && source.length === new Set(source).size
       && translated.length === new Set(translated).size
       && JSON.stringify(source) === JSON.stringify(translated);
@@ -326,6 +557,98 @@ if (VERIFY_MOCK_LLM) {
   check('mock Q&A: 브라우저 답변 렌더', await page.evaluate(() =>
     document.getElementById('qa-log').innerText.includes('모의 Q&A 응답')));
   await page.screenshot({ path: path.join(OUT, 'mock-translation-qa.png') });
+
+  // 정렬 API만 일시 장애여도 본문 자체는 /html 폴백으로 읽을 수 있어야 하며,
+  // 재시도는 0.8/1.6초 두 번으로 제한되어 빠른 5xx 요청 루프가 생기면 안 된다.
+  const failureCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  let failedBatchCalls = 0;
+  let failedSingleCalls = 0;
+  let failureHtmlCalls = 0;
+  const failedRequestDetails = [];
+  const failureStartedAt = Date.now();
+  await failureCtx.route('**/*', async (route) => {
+    const url = new URL(route.request().url());
+    const batchAlignment = url.pathname.endsWith('/viewer/pages')
+      && (url.searchParams.get('include') || '').split(',').includes('alignment');
+    const singleAlignment = url.pathname.endsWith('/alignment');
+    if (url.pathname.endsWith('/html')) failureHtmlCalls += 1;
+    if (batchAlignment || singleAlignment) {
+      failedRequestDetails.push(`${Date.now() - failureStartedAt}ms ${batchAlignment ? 'batch' : 'single'} ${url.search}`);
+      if (batchAlignment) failedBatchCalls += 1;
+      else failedSingleCalls += 1;
+      await route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'e2e temporary alignment failure' }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+  const failurePage = await failureCtx.newPage();
+  await failurePage.goto(`${BASE}/${jobHash}`, { waitUntil: 'domcontentloaded' });
+  await failurePage.waitForSelector('.reader-rail-retry-note', { timeout: 15_000 });
+  const fallbackRail = await failurePage.evaluate(() => ({
+    note: document.querySelector('.reader-rail-retry-note')?.textContent || '',
+    noteRole: document.querySelector('.reader-rail-retry-note')?.getAttribute('role') || '',
+    noteLive: document.querySelector('.reader-rail-retry-note')?.getAttribute('aria-live') || '',
+    textLen: (document.getElementById('reader-content')?.innerText || '').length,
+    pending: document.querySelectorAll('.reader-rail-pending').length,
+  }));
+  check('정렬 API 일시 장애: 좌표 없이도 본문 rail 즉시 표시',
+    fallbackRail.note.includes('본문은 표시했습니다') && fallbackRail.textLen > 100
+      && fallbackRail.noteRole === 'status' && fallbackRail.noteLive === 'polite',
+    JSON.stringify(fallbackRail));
+  await failurePage.waitForTimeout(3_800);
+  check('정렬 API 일시 장애: 최초 + 정확히 두 번의 bounded backoff',
+    failedBatchCalls === 3 && failedSingleCalls === 6,
+    `batch=${failedBatchCalls}, single=${failedSingleCalls}, html=${failureHtmlCalls} | ${failedRequestDetails.join(' | ')}`);
+  const callsAtExhaustion = failedBatchCalls + failedSingleCalls;
+  await failurePage.waitForTimeout(800);
+  check('정렬 API 일시 장애: 재시도 소진 뒤 quiet window 유지',
+    failedBatchCalls + failedSingleCalls === callsAtExhaustion,
+    `calls=${failedBatchCalls + failedSingleCalls}`);
+  await failureCtx.close();
+
+  // transient가 풀리면 flow 안내를 걷고 원문 bbox ↔ 카드 정렬 모드로 복귀한다.
+  const recoveryCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  let recoveryBatchCalls = 0;
+  let recoverySingleCalls = 0;
+  const recoveryBatchAt = [];
+  await recoveryCtx.route('**/*', async (route) => {
+    const url = new URL(route.request().url());
+    const batchAlignment = url.pathname.endsWith('/viewer/pages')
+      && (url.searchParams.get('include') || '').split(',').includes('alignment');
+    const singleAlignment = url.pathname.endsWith('/alignment');
+    if (batchAlignment) {
+      recoveryBatchCalls += 1;
+      recoveryBatchAt.push(Date.now());
+      if (recoveryBatchCalls === 1) {
+        await route.fulfill({ status: 503, contentType: 'application/json', body: '{}' });
+        return;
+      }
+    } else if (singleAlignment && recoveryBatchCalls === 1) {
+      recoverySingleCalls += 1;
+      await route.fulfill({ status: 503, contentType: 'application/json', body: '{}' });
+      return;
+    }
+    await route.continue();
+  });
+  const recoveryPage = await recoveryCtx.newPage();
+  await recoveryPage.goto(`${BASE}/${jobHash}`, { waitUntil: 'domcontentloaded' });
+  await recoveryPage.waitForSelector('.reader-rail-retry-note', { timeout: 15_000 });
+  await recoveryPage.waitForSelector('.reader-map-card', { timeout: 15_000 });
+  const recovered = await recoveryPage.evaluate(() => ({
+    note: !!document.querySelector('.reader-rail-retry-note'),
+    cards: document.querySelectorAll('.reader-rail-page[data-page="1"] .reader-map-card').length,
+    boxes: document.querySelectorAll('.reader-page[data-page="1"] .reader-map-box').length,
+  }));
+  check('정렬 API 일시 장애: 다음 backoff에서 정렬 카드·bbox로 회복',
+    !recovered.note && recovered.cards > 0 && recovered.cards === recovered.boxes
+      && recoveryBatchCalls === 2 && recoverySingleCalls === 2
+      && recoveryBatchAt[1] - recoveryBatchAt[0] >= 600,
+    `${JSON.stringify(recovered)}, batch=${recoveryBatchCalls}, single=${recoverySingleCalls}`);
+  await recoveryCtx.close();
 }
 
 check('프로덕션 뷰어 포함 콘솔 에러/HTTP 4xx·5xx 없음',

@@ -512,3 +512,260 @@ def test_초대형_표유닛은_행경계_분할로_복구(tmp_path, cfg):
     assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == md
     rep = _json.loads((tmp_path / "translations" / "ko" / "report.json").read_text(encoding="utf-8"))
     assert rep["split"] == 1
+
+
+def test_중복_유닛은_한_번만_API를_탄다_single_flight(tmp_path, cfg):
+    """같은 문단이 문서에 두 번 나오면 API 왕복도 한 번이어야 한다.
+
+    예전에는 '먼저 끝난 유닛이 메인 루프에서 캐시에 기록되고 늦게 시작한 중복이
+    그걸 읽는' 레이스에 기대고 있어, 동시성을 올릴수록 같은 문단을 두 번 번역했다.
+    두 워커가 확실히 겹치도록 응답을 지연시켜 그 창을 강제로 연다."""
+    from dataclasses import replace
+
+    import threading as _th
+    import time as _time
+
+    class SlowEcho(EchoClient):
+        def __init__(self):
+            super().__init__()
+            self.lock = _th.Lock()
+            self.unit_calls = 0
+
+        def complete(self, system, user, *, max_tokens):
+            src = _marker(user)
+            if src is not None:
+                with self.lock:
+                    self.unit_calls += 1
+                # waiter의 옛 deadline(아래 timeout_s=0.05)보다 길게 붙잡는다.
+                # deadline이 있으면 0.5초 첫 poll 뒤 같은 원문을 다시 API로 보낸다.
+                _time.sleep(0.65)
+            return super().complete(system, user, max_tokens=max_tokens)
+
+    dup = "The accuracy improved a lot on every benchmark we tried."
+    unique = "A separate paragraph explains the evaluation protocol in detail."
+    # 첫 두 target을 같은 키로 둬 concurrency=2의 두 worker가 owner/waiter로
+    # 반드시 겹치게 한다. 제목 사이에 끼우면 실행 순서에 따라 cache hit만 검증된다.
+    md = f"{dup}\n\n{dup}\n\n{unique}\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+
+    client = SlowEcho()
+    res = run_translation(
+        tmp_path, "ko", replace(cfg, timeout_s=0.05), client=client,
+    )
+
+    assert res.status == "done"
+    assert res.cached == 1, f"중복 유닛이 캐시로 처리되지 않았다 (cached={res.cached})"
+    # 고유 유닛은 2개 — 중복 본문이 두 번 호출되면 3이 된다.
+    assert client.unit_calls == 2, f"중복 유닛이 API를 두 번 탔다 (calls={client.unit_calls})"
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == md
+
+
+def test_마스킹_미리보기가_같은_다른_수식은_캐시를_공유하지_않음(tmp_path, cfg):
+    """긴 수식의 첫 12자가 같아 masked source가 동일해도 원문 전체를
+    키에 포함해야 다른 복원 결과를 single-flight/cache로 재사용하지 않는다.
+
+    종전 키는 두 문단을 같게 봐 API를 1회만 호출하고, 두 번째의
+    ``+2`` 수식을 첫 번째의 ``+1``로 바꾸는 실제 데이터 훼손을 일으켰다.
+    """
+    class FormulaEcho:
+        api_mode_used = "chat"
+
+        def __init__(self):
+            self.unit_calls = 0
+
+        def complete(self, system, user, *, max_tokens):
+            src = _marker(user)
+            if src is None:
+                return ""
+            self.unit_calls += 1
+            return src
+
+    first = "This method carefully uses $abcdefghijklm+1$ in every evaluation."
+    second = "This method carefully uses $abcdefghijklm+2$ in every evaluation."
+    md = f"{first}\n\n{second}\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    client = FormulaEcho()
+
+    res = run_translation(tmp_path, "ko", cfg, client=client)
+
+    assert res.status == "done"
+    assert res.translated == 2 and res.cached == 0
+    assert client.unit_calls == 2
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == md
+
+
+def test_같은_문장이라도_직전_문맥이_다르면_캐시를_공유하지_않음(tmp_path, cfg):
+    """context_tail은 실제 프롬프트 입력이므로 single-flight/cache 키에 포함한다."""
+    from dataclasses import replace
+
+    class ContextEcho:
+        api_mode_used = "chat"
+
+        def __init__(self):
+            self.unit_calls = 0
+
+        def complete(self, system, user, *, max_tokens):
+            src = _marker(user)
+            if src is None:
+                return ""
+            self.unit_calls += 1
+            return src
+
+    repeated = "This ambiguous result should be interpreted using its preceding context."
+    md = (
+        "The first experiment concerns image classification accuracy.\n\n"
+        f"{repeated}\n\n"
+        "The second experiment concerns language-model calibration error.\n\n"
+        f"{repeated}\n"
+    )
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    client = ContextEcho()
+
+    res = run_translation(
+        tmp_path, "ko", replace(cfg, context=True), client=client,
+    )
+
+    assert res.status == "done"
+    assert res.translated == 4 and res.cached == 0
+    assert client.unit_calls == 4
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == md
+
+
+def test_single_flight_owner_API오류도_waiter가_중복호출하지_않음(tmp_path, cfg):
+    """owner의 치명 오류는 waiter에게 공유되어 같은 죽은 endpoint를 다시 치지 않는다."""
+    import time as _time
+
+    from app.translate.types import TranslateAPIError, TranslateError
+
+    class FailingClient(EchoClient):
+        def __init__(self):
+            super().__init__()
+            self.lock = threading.Lock()
+            self.unit_calls = 0
+
+        def complete(self, system, user, *, max_tokens):
+            if _marker(user) is None:
+                return ""  # glossary seed 폴백
+            with self.lock:
+                self.unit_calls += 1
+            _time.sleep(0.05)  # 두 번째 worker가 flight waiter가 될 틈
+            raise TranslateAPIError("dead endpoint")
+
+    dup = "The same paragraph reaches a temporarily unavailable translation endpoint."
+    (tmp_path / "result.md").write_text(f"{dup}\n\n{dup}\n", encoding="utf-8")
+    client = FailingClient()
+
+    with pytest.raises(TranslateError, match="dead endpoint"):
+        run_translation(tmp_path, "ko", cfg, client=client)
+
+    assert client.unit_calls == 1, "waiter가 owner 오류 뒤 같은 API 요청을 다시 시작했다"
+
+
+def test_single_flight_cache_flush가_worker_publish와_경쟁하지_않음(
+    tmp_path, cfg, monkeypatch,
+):
+    """주기 units.json 저장은 live dict가 아닌 잠금 아래 snapshot을 직렬화한다."""
+    from dataclasses import replace
+    import time as _time
+
+    import app.translate.engine as engine
+
+    release = threading.Event()
+    triggered = threading.Event()
+
+    class Coordinated(EchoClient):
+        def __init__(self):
+            super().__init__()
+            self.lock = threading.Lock()
+            self.unit_calls = 0
+
+        def complete(self, system, user, *, max_tokens):
+            src = _marker(user)
+            if src is None:
+                return ""
+            with self.lock:
+                self.unit_calls += 1
+                n = self.unit_calls
+            if n > 10:
+                assert release.wait(3), "periodic units.json flush가 오지 않았다"
+            return src
+
+    original_write = engine._atomic_write_json
+
+    def coordinated_write(path, obj):
+        if path.name == "units.json" and len(obj) >= 10 and not triggered.is_set():
+            triggered.set()
+            iterator = iter(obj)
+            next(iterator)
+            initial = len(obj)
+            release.set()  # 나머지 worker의 cache publish를 flush 도중 겹치게 한다
+            deadline = _time.monotonic() + 0.2
+            while len(obj) == initial and _time.monotonic() < deadline:
+                _time.sleep(0.005)
+            # live cache였다면 worker의 key 추가 뒤 RuntimeError, snapshot이면 안정적.
+            list(iterator)
+        original_write(path, obj)
+
+    monkeypatch.setattr(engine, "_atomic_write_json", coordinated_write)
+    words = [f"token{chr(97 + i // 26)}{chr(97 + i % 26)}" for i in range(30)]
+    md = SEP.join(
+        f"This {word} describes a unique translation procedure carefully."
+        for word in words
+    )
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    client = Coordinated()
+    try:
+        res = run_translation(
+            tmp_path, "ko", replace(cfg, concurrency=8), client=client,
+        )
+    finally:
+        release.set()  # assertion/error 경로에서도 대기 worker를 회수한다
+
+    assert triggered.is_set()
+    assert res.status == "done" and res.translated == 30
+    assert client.unit_calls == 30
+    units = json.loads(
+        (tmp_path / "translations" / "ko" / "units.json").read_text(encoding="utf-8")
+    )
+    assert len(units) == 30
+
+
+def test_single_flight_대기중_취소는_추가_API를_시작하지_않음(tmp_path, cfg):
+    """선점 스레드를 기다리는 중복 유닛은 취소 뒤 별도 API 요청을 시작하지 않는다."""
+    import threading as _th
+    import time as _time
+
+    ev = _th.Event()
+
+    class BlockingEcho(EchoClient):
+        def __init__(self):
+            super().__init__()
+            self.lock = _th.Lock()
+            self.unit_calls = 0
+
+        def complete(self, system, user, *, max_tokens):
+            if _marker(user) is not None:
+                with self.lock:
+                    self.unit_calls += 1
+                ev.set()        # 유닛 번역 진입을 알리고
+                _time.sleep(1.2)  # 대기자가 취소를 만나도록 붙잡아 둔다
+            return super().complete(system, user, max_tokens=max_tokens)
+
+    dup = "The accuracy improved a lot on every benchmark we tried."
+    md = f"{dup}\n\n{dup}\n\nA final unique paragraph remains.\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+
+    cancel = _th.Event()
+    stop = _th.Timer(0.3, cancel.set)
+    stop.start()
+    started = _time.monotonic()
+    client = BlockingEcho()
+    res = run_translation(tmp_path, "ko", cfg, client=client, cancel=cancel)
+    stop.cancel()
+
+    assert res.status == "canceled"
+    assert ev.is_set(), "owner가 API에 진입하기 전에 테스트가 취소됐다"
+    assert client.unit_calls == 1, "대기 중복 유닛이 별도 API 요청을 시작했다"
+    # requests의 이미 진행 중인 owner 호출 자체는 중단할 수 없지만, waiter는 새 호출을
+    # 만들지 않고 executor가 owner를 회수한 뒤 제한 시간 안에 canceled로 끝난다.
+    assert _time.monotonic() - started < 5

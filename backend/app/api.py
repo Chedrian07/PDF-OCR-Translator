@@ -39,9 +39,10 @@ from .pipeline.layout import (
     render_layout_standalone,
 )
 from .pipeline.render import render_document_html, render_markdown_html
-# 번역 코어는 아직 스켈레톤(run_translation은 NotImplementedError)이지만 import는 가능.
-# 테스트는 app.api.run_translation을 몽키패치로 대체한다.
+# 번역 API 스레드는 완성된 코어를 호출한다. API 레이어 테스트는 상태·SSE 계약을
+# 고립시키기 위해 이 심(run_translation)을 페이크로 교체한다.
 from .translate import SUPPORTED_LANGS, TranslateConfig, TranslateError, run_translation
+from .translate.client import OpenAICompatClient
 from .llm import LlmError
 from .qa import AskRequest, get_page_context
 
@@ -154,12 +155,14 @@ def _run_translate_thread(
         })
 
     try:
+        client = OpenAICompatClient(cfg, request_semaphore=st.translate_api_slots)
         result = run_translation(
             job.dir, lang, cfg,
             page_separator=page_separator,
             progress=_progress,
             cancel=cancel,
             force=force,
+            client=client,
         )
         if getattr(result, "status", None) == "canceled":
             broker.publish(channel, "error", {

@@ -133,6 +133,10 @@ def run_translation(
     started = _now()
     total = 0
     done = 0
+    skipped = 0
+    translated_n = 0
+    cached_n = 0
+    kept_original: list[str] = []
 
     def write_state(status: str, current: int, total_: int, error: str | None = None) -> None:
         mode = getattr(client, "api_mode_used", "") or (cfg.api_mode if cfg.api_mode != "auto" else "")
@@ -146,6 +150,7 @@ def run_translation(
                 "model": cfg.model,
                 "api_mode": mode,
                 "prompt_v": PROMPT_V,
+                "context": cfg.context,
                 "started_at": started,
                 "finished_at": _now() if status in ("done", "error", "canceled") else None,
             })
@@ -195,7 +200,8 @@ def run_translation(
                 targets.append(u)
         total = len(targets)
 
-        # 직전 유닛 꼬리 컨텍스트 (같은 소스 내에서만; 프롬프트 참고용, 캐시 키엔 무영향)
+        # 직전 유닛 꼬리 컨텍스트 (같은 소스 내에서만). 실제 프롬프트 입력이므로
+        # 캐시 키에도 넣어 같은 문장이 다른 문맥의 번역을 잘못 공유하지 않게 한다.
         context_map: dict[str, str] = {}
         if cfg.context:
             for seq in (md_units, lay_units):
@@ -207,6 +213,12 @@ def run_translation(
 
         if client is None:
             client = OpenAICompatClient(cfg)
+        # OpenAICompatClient는 전역 HTTP 슬롯 대기·재시도 backoff·auto 협상 중에도
+        # 사용자 cancel과 내부 abort를 확인한다. 테스트/사용자 정의 client에는 이
+        # 선택 API가 없어도 기존 프로토콜(complete)만으로 그대로 동작한다.
+        set_cancel_check = getattr(client, "set_cancel_check", None)
+        if callable(set_cancel_check):
+            set_cancel_check(_halted)
         write_state("running", 0, total)
         logger.info("번역 시작: %s (lang=%s, 유닛 %d개, 건너뜀 %d)", job_dir.name, lang, total, skipped)
 
@@ -229,9 +241,43 @@ def run_translation(
             except Exception:
                 cache = {}
 
+        # 같은 캐시 키를 두 스레드가 동시에 API로 보내지 않기 위한 single-flight.
+        # 지금까지 중복 유닛 제거는 "먼저 끝난 유닛이 메인 루프에서 캐시에 기록되고,
+        # 늦게 시작한 중복이 그걸 읽는" 레이스에 기대고 있었다 — 동시성을 올릴수록
+        # 그 레이스가 덜 맞아 같은 문단을 두 번 번역하게 된다(문서별 중복률 4~16% 실측).
+        class _Flight:
+            __slots__ = ("event", "result", "error")
+
+            def __init__(self) -> None:
+                self.event = threading.Event()
+                self.result = None
+                self.error: tuple[type[BaseException], tuple] | None = None
+
+        # 완료 flight도 이 run 동안 보존한다. translated는 영속 cache로, kept는
+        # 메모리 outcome으로 후속 중복에 재사용해 실패한 같은 문단을 다시 두드리지 않는다.
+        inflight: dict[str, _Flight] = {}
+        inflight_lock = threading.Lock()
+        cache_lock = threading.Lock()
+
+        def read_cache(key: str) -> tuple[bool, str]:
+            """공유 캐시의 단일 키를 원자적으로 읽는다 (빈 문자열도 값으로 구분)."""
+            with cache_lock:
+                if key in cache:
+                    return True, cache[key]
+            return False, ""
+
+        def publish_cache(key: str, value: str) -> None:
+            with cache_lock:
+                cache[key] = value
+
         def flush_cache() -> None:
+            # worker가 single-flight 결과를 공개하는 동안 json.dumps(cache)가 dict를
+            # 순회하면 "dictionary changed size"로 잡 전체가 실패할 수 있다. 잠금은
+            # 메모리 스냅샷까지만 잡고 디스크 I/O 동안에는 worker를 막지 않는다.
+            with cache_lock:
+                snapshot = dict(cache)
             try:
-                _atomic_write_json(upath, cache)
+                _atomic_write_json(upath, snapshot)
             except FileNotFoundError:
                 pass  # 잡 삭제 경합 — 캐시는 잡과 함께 사라진다
 
@@ -298,20 +344,38 @@ def run_translation(
                 pass
             return None
 
-        def translate_unit(u):
-            stats = {"retried": 0, "repaired": 0, "split": 0, "sanitized": 0}
+        def _zero_stats() -> dict:
+            return {"retried": 0, "repaired": 0, "split": 0, "sanitized": 0}
+
+        def _unit_key(u):
+            """유닛의 마스킹·용어집 파생값과 캐시 키 (유닛당 ~1.5ms — API 왕복의 0.04%)."""
+            masked, mapping = mask(u.src)
+            pairs, first = glossary.for_unit(u.src, u.id)
+            keep = glossary.keep_terms(u.src)
+            ctx = context_map.get(u.id) if cfg.context else None
+            # keep(A 원형)도 출력 정책을 바꾸므로 캐시 키에 포함 — (k, k) 쌍으로 해시
+            key = cache_key(
+                masked,
+                cfg.model,
+                pairs + first + [(k, k) for k in keep],
+                original_src=u.src,
+                unit_kind=u.kind,
+                context_tail=ctx,
+            )
+            return masked, mapping, pairs, first, keep, key
+
+        def translate_unit(u, precomputed=None):
+            stats = _zero_stats()
             # 취소·abort 응답성: 이미 디스패치된 유닛도 API 호출·래더 단계 사이에서
             # 취소(사용자)·abort(치명 오류 전파)를 확인하고 "canceled" 센티널로 조기
             # 반환한다 (결과 미반영, kept 오염 없음).
             if _halted():
                 return u, u.src, "canceled", "", stats
-            masked, mapping = mask(u.src)
-            pairs, first = glossary.for_unit(u.src, u.id)
-            keep = glossary.keep_terms(u.src)
-            # keep(A 원형)도 출력 정책을 바꾸므로 캐시 키에 포함 — (k, k) 쌍으로 해시
-            key = cache_key(masked, cfg.model, pairs + first + [(k, k) for k in keep])
-            if not force and key in cache:
-                return u, cache[key], "cached", key, stats
+            masked, mapping, pairs, first, keep, key = precomputed or _unit_key(u)
+            if not force:
+                hit, cached_text = read_cache(key)
+                if hit:
+                    return u, cached_text, "cached", key, stats
             ctx = context_map.get(u.id) if cfg.context else None
             max_toks = _max_toks(masked)
             prompt = prompts.build_unit_prompt(
@@ -398,6 +462,64 @@ def run_translation(
                 return u, u.src, "canceled", key, stats
             return u, u.src, "kept", key, stats
 
+        def translate_unit_shared(u):
+            """중복 유닛 single-flight 래퍼. 선점 스레드가 번역을 끝내면 그 결과를
+            같이 쓰고(=cached), 선점 스레드가 실패·취소로 끝나면 오늘과 동일하게
+            같은 outcome/예외를 공유한다. force 경로는 캐시를 쓰지 않으므로 제외한다."""
+            if force:
+                return translate_unit(u)
+            if _halted():
+                return u, u.src, "canceled", "", _zero_stats()
+            precomputed = _unit_key(u)
+            key = precomputed[5]
+            owner = False
+            hit, cached_text = read_cache(key)
+            if hit:
+                return u, cached_text, "cached", key, _zero_stats()
+            with inflight_lock:
+                flight = inflight.get(key)
+                if flight is None:
+                    flight = inflight[key] = _Flight()
+                    owner = True
+            if not owner:
+                # 선점 스레드 완료까지 대기 — 취소 응답성을 위해 0.5초씩 끊어 확인한다.
+                # 한 유닛은 재시도·repair·분할로 cfg.timeout_s보다 오래 걸릴 수 있다.
+                # 여기서 임의 deadline을 두면 정상 owner가 도는 중 같은 API를 중복 호출한다.
+                # owner는 모든 종료 경로의 finally에서 event를 set하므로 별도 상한이 필요 없다.
+                while not flight.event.wait(0.5):
+                    if _halted():
+                        return u, u.src, "canceled", key, _zero_stats()
+                if flight.error is not None:
+                    error_type, error_args = flight.error
+                    try:
+                        cloned_error = error_type(*error_args)
+                    except TypeError as clone_error:
+                        raise RuntimeError("동일 번역 유닛 처리 중 오류가 발생했습니다") from clone_error
+                    raise cloned_error
+                hit, cached_text = read_cache(key)
+                if hit:
+                    return u, cached_text, "cached", key, _zero_stats()
+                if flight.result is not None:
+                    _owner_u, text, status, result_key, _stats = flight.result
+                    if status == "kept":
+                        return u, u.src, "kept", result_key, _zero_stats()
+                    if status == "canceled":
+                        return u, u.src, "canceled", result_key, _zero_stats()
+                    return u, text, "cached", result_key, _zero_stats()
+                # 방어 경로 — event는 result/error 중 하나를 공개한 뒤에만 set한다.
+                raise RuntimeError("동일 번역 유닛의 공유 결과가 없습니다")
+            try:
+                result = translate_unit(u, precomputed)
+                if result[2] == "translated":
+                    publish_cache(result[3], result[1])  # 대기 중인 중복에게 즉시 공개
+                flight.result = result
+                return result
+            except BaseException as exc:
+                flight.error = (type(exc), exc.args)
+                raise
+            finally:
+                flight.event.set()
+
         # 취소: 디스패치 전 선체크
         if _cancel_set():
             flush_cache()
@@ -416,7 +538,7 @@ def run_translation(
                     if _cancel_set():
                         canceled = True
                         break
-                    futures[ex.submit(translate_unit, u)] = u
+                    futures[ex.submit(translate_unit_shared, u)] = u
 
                 if not canceled:
                     for fut in cf.as_completed(futures):
@@ -451,7 +573,10 @@ def run_translation(
                             cached_n += 1
                         elif status == "translated":
                             translated_n += 1
-                            cache[key] = text
+                            # non-force owner는 waiter 공개 전에 이미 캐시에 썼다.
+                            # force 경로만 shared wrapper를 우회하므로 여기서 저장한다.
+                            if force:
+                                publish_cache(key, text)
                         elif status == "kept":
                             kept_original.append(u.id)
                             # 식별자만 기록 — 문서 원문·번역문 내용은 로그에 남기지 않는다
@@ -517,6 +642,15 @@ def run_translation(
         )
 
     except TranslateError as e:
+        # 전역 HTTP 슬롯/재시도 대기에서 cancel을 관찰한 client도 TranslateError
+        # 계열로 빠져나온다. 사용자가 이미 취소한 잡을 error로 덮어쓰지 않는다.
+        if _cancel_set():
+            write_state("canceled", done, total)
+            return TranslateResult(
+                status="canceled", total=total, translated=translated_n, cached=cached_n,
+                kept_original=kept_original, skipped=skipped,
+                api_mode=getattr(client, "api_mode_used", "") or cfg.api_mode,
+            )
         write_state("error", done, total, error=str(e))
         raise
     except Exception as e:  # noqa: BLE001 — 사용자용 메시지로 감싸 재발생

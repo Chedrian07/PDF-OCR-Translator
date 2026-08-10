@@ -1,6 +1,6 @@
 """번역 API 레이어 테스트.
 
-translate 코어(run_translation)는 아직 스켈레톤이므로 app.api.run_translation을
+API 레이어의 상태·SSE·산출물 계약을 고립해 검증하도록 app.api.run_translation을
 몽키패치로 대체한다. 페이크는 계약대로 동작한다: progress 콜백 호출,
 translations/{lang}/state.json·result.ko.md·layout.ko.json 기록, TranslateResult 반환.
 """
@@ -15,7 +15,9 @@ from pathlib import Path
 import pytest
 from conftest import wait_done
 
+from app.config import Settings
 from app.translate import TranslateResult
+from app.main import create_app
 
 
 # ── 페이크 run_translation ────────────────────────────────────────────────
@@ -147,7 +149,27 @@ def _collect_sse(client, url, max_lines=500):
     return out
 
 
+def test_translate_global_concurrency가_프로세스_세마포어_용량을_결정(settings):
+    settings.translate_global_concurrency = 2
+    slots = create_app(settings).state.translate_api_slots
+    assert slots.acquire(blocking=False)
+    assert slots.acquire(blocking=False)
+    assert not slots.acquire(blocking=False)
+    slots.release()
+    slots.release()
+
+
 # ── 1. POST → 202 → events SSE progress…done ──────────────────────────────
+def test_translate_global_concurrency_빈값은_잡당_설정으로_fallback(monkeypatch):
+    """Compose가 빈 전역 키를 전달해도 잡당 값을 따라가며, 명시 값은 분리된다."""
+    monkeypatch.setenv("TRANSLATE_CONCURRENCY", "3")
+    monkeypatch.setenv("TRANSLATE_GLOBAL_CONCURRENCY", "")
+    assert Settings.from_env().translate_global_concurrency == 3
+
+    monkeypatch.setenv("TRANSLATE_GLOBAL_CONCURRENCY", "2")
+    assert Settings.from_env().translate_global_concurrency == 2
+
+
 def test_translate_post_then_events_stream(client, sample_pdf, provider_env, monkeypatch):
     gate = threading.Event()
     monkeypatch.setattr("app.api.run_translation", _make_fake(gate=gate))

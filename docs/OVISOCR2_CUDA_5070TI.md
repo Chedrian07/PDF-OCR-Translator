@@ -67,6 +67,19 @@ docker compose --profile ovis down            # 볼륨 외 전체 정리 (ocr-cp
 docker volume rm pdf_markdown_unlimited-ocr_ovis-hf-cache
 ```
 
+⚠ **비루트 실행(uid 1000)으로 전환됨** (`services/ovisocr2/Dockerfile`). 비어 있는
+볼륨은 이미지의 chown 결과를 물려받지만, **이미 root 소유로 채워진 기존 캐시 볼륨은
+자동으로 바뀌지 않는다** — 업그레이드 후 캐시 쓰기가 실패하면 한 번만 실행한다
+(또는 위 `docker volume rm`으로 지우고 다시 받는다):
+
+```bash
+docker run --rm -v pdf_markdown_unlimited-ocr_ovis-hf-cache:/v alpine chown -R 1000:1000 /v
+```
+
+compose는 이 sidecar에 로그 로테이션(json-file 10MB×3)과 호스트 RAM 상한
+`OVIS_MEM_LIMIT`(기본 24g)을 건다 — VRAM과 무관한 안전판이며 호스트 RAM이 작으면
+`.env`로 낮춘다.
+
 ## 출력 파싱 (strict)
 
 `services/ovisocr2/app/parser.py` — 다음 형식만 figure로 인정:
@@ -105,6 +118,7 @@ CPU offload는 사용하지 않는다.
 | 첫 잡이 `아직 모델을 로드하지` 오류 | 최초 다운로드 중 — 로그로 진행 확인 후 재시도 |
 | Triton/GDN 관련 크래시 | `OVIS_GDN_PREFILL_BACKEND=triton` 유지 확인 (sm_120에서 flashinfer 불가) |
 | 응답 시간 초과 | 페이지 해상도↓(`RENDER_DPI`) 또는 `OCR_SIDECAR_READ_TIMEOUT_S`↑ |
+| 캐시/HF 다운로드 `Permission denied` | 비루트(uid 1000) 전환 전에 만들어진 볼륨 소유권 — 위 §캐시 삭제의 chown 1회 |
 
 ## Known limitations
 

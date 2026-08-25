@@ -177,6 +177,14 @@ OvisOCR2/PaddleOCR-VL 대비 명백한 이점이 확인되지 않거나(한국�
   CPU offload는 기본 비활성.
 - 동시 profile 기동은 VRAM 경쟁을 일으키므로 문서로 금지하고, 포트(8001/8002/8003)를
   분리해 실수로 겹쳐도 즉시 드러나게 한다.
+- **호스트 자원(VRAM 외)**: compose가 전 서비스에 json-file 로그 로테이션(10MB×3)과
+  메모리 상한(`OVIS_MEM_LIMIT`/`PADDLE_MEM_LIMIT` 기본 24g,
+  `OCR_CPU_MEM_LIMIT`/`OCR_CUDA_MEM_LIMIT`/`OCR_WEB_MEM_LIMIT`)을 건다. CPU는 상한
+  대신 `OCR_CPU_THREADS`로 조절한다 — 코어를 묶으면 렌더/OCR 지연이 커진다.
+- **sidecar 컨테이너는 비루트(uid 1000)로 실행**되고 `no-new-privileges:true`를 유지한다.
+  기존 캐시 볼륨의 소유권 마이그레이션은 각 엔진 문서 §캐시 참조.
+- 잡 데이터·HF 캐시 볼륨(`ocr-data`/`hf-cache`)은 backend 4개 서비스가 공유한다 —
+  profile로 엔진을 바꿔도 잡 이력이 유지된다(sidecar 모델 캐시만 런타임별 분리).
 
 ## 6. 오류·취소 정책 (sidecar 엔진)
 

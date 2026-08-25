@@ -45,7 +45,7 @@ backend는 `protocol_version==1`과 `engine`이 설정된 엔진과 일치하는
 
 | 필드 | 타입 | 설명 |
 |---|---|---|
-| `file` | file | 페이지 이미지 1장 (PNG/JPEG, 기본 상한 30MB·60M픽셀) |
+| `file` | file | 페이지 이미지 1장 (PNG/JPEG, 기본 상한 **128MB**(`OVIS_MAX_UPLOAD_MB`/`PADDLEOCR_MAX_UPLOAD_MB`)·60M픽셀) |
 | `page_index` | int | 청크 내 로컬 페이지 인덱스 (에코백용) |
 | `request_id` | str | 로그 상관관계용 (내용 로깅 금지) |
 | `options` | JSON str | 제한된 스키마 — 미지 키는 422. 허용: `max_pixels`, (ovis) `max_output_tokens` |
@@ -72,7 +72,8 @@ backend는 `protocol_version==1`과 `engine`이 설정된 엔진과 일치하는
 }
 ```
 
-오류: `503`(모델 미로드 — detail에 사유) · `422`(요청/옵션 스키마 위반) ·
+오류: `503`(모델 미로드 — detail에 사유. backend는 이를 **일시적**으로 보고 대기 후
+재시도한다 — 아래 §재시작·모델 재로드 참조) · `422`(요청/옵션 스키마 위반) ·
 `400/413`(이미지 이상/크기) · `502`(추론 실패 — OOM 1회 강등 재시도 후에도 실패).
 
 ### block type (정규화 어휘)
@@ -87,6 +88,11 @@ backend `protocol.TYPE_ALIASES`가 정규화한다. figure/image는 내부적으
 
 - figure 자리는 `[[FIGURE:n]]`만 허용 (`n` = 0–999, 페이지당 최대 64개).
   최종 `![](images/…)` 치환은 backend materializer의 몫.
+- `[[FIGURE:n]]`은 **앱이 소유한 참조 문법**이다(`<PAGE>`와 동일). 살아남은 image
+  블록 index당 **첫 placeholder 하나만** 유효하고, 대응 crop이 없거나 중복된
+  placeholder(문서 본문에 리터럴로 실려 모델이 그대로 옮겨 적은 경우 포함)는
+  `protocol.sanitize_page`가 제거하고 warning을 남긴다 — figure 위치 납치·중복
+  삽입 방지.
 - 표는 HTML `<table>…</table>`, 수식은 LaTeX(`\(…\)`/`\[…\]`/`$$`), 나머지는
   표준 Markdown. `<|…|>` 특수 토큰 패턴은 backend가 제거한다.
 
@@ -106,10 +112,17 @@ sidecar가 추론을 내부에서 직렬화하므로(Ovis `max_num_seqs=1`+락, 
 스레드) **속도 이득은 없다**(c1 48.3s vs c4 48.7s). 동시성>1은 "안전하지만 무익"
 하며 기본값 1이 옳다.
 
-오류 분류: `SidecarUnavailableError`(연결·타임아웃 — provider 다운) vs
-`SidecarError`(5xx 추론 실패) vs `SidecarProtocolError`(스키마/크기/버전 위반 —
-malformed provider response). 세 가지 모두 `EngineError` 서브클래스라 runner의
-페이지 격리·placeholder·내장 텍스트 fallback 경로를 그대로 탄다.
+오류 분류:
+
+| 예외 | 조건 | 성질 |
+|---|---|---|
+| `SidecarUnavailableError` | 연결 실패 · **HTTP 503**(재시작/모델 재로드 중) | `transient=True` — 대기하면 풀린다 |
+| `SidecarTimeoutError` | 읽기 응답 시간 초과 (`SidecarUnavailableError` 서브클래스) | provider는 살아서 그 페이지를 계속 추론 중일 수 있다 — **엔진의 복귀-대기 재시도에서 제외**(같은 페이지 즉시 재요청 = GPU 중복 추론). 상위 runner의 청크 재시도만 담당 |
+| `SidecarError` | 5xx 추론 실패(503 제외) | 하드 실패 |
+| `SidecarProtocolError` | 스키마/크기/버전 위반, 4xx 요청 거부 — malformed provider response | 하드 실패(대기 무의미) |
+
+넷 모두 `EngineError` 서브클래스라 runner의 페이지 격리·placeholder·내장 텍스트
+fallback 경로를 그대로 탄다.
 
 ## 취소 의미론과 한계
 
@@ -159,6 +172,49 @@ sidecar의 첫 모델 로드는 다운로드 + (Ovis) vLLM 컴파일로 수 분 
 - sidecar가 준비되면 자동으로 진행. 사용자가 취소하면 즉시 중단(JobCanceled).
 - **하드 실패 구분**: sidecar가 `status:"error"`(예: CUDA 가드 트립, `load_error` 포함)를
   보고하면 대기하지 않고 즉시 잡 오류로 표면화한다(대기해도 안 풀리므로).
+- 프리로드(`main.create_app`)는 `transient=True` 예외를 traceback 없이 info로만
+  남긴다 — sidecar가 아직 준비 중인 것은 정상적인 기동 과정이다.
+
+### 잡 도중 재시작·모델 재로드 (HTTP 503)
+
+`restart: unless-stopped`로 sidecar가 재기동되면 그 창의 페이지 요청은 연결 실패
+또는 **HTTP 503**을 받는다. 이를 바로 실패로 확정하면 재기동+모델 로드 시간 동안의
+페이지가 **전부 플레이스홀더**가 된다. 그래서 `SidecarEngine._parse_one`은:
+
+1. `SidecarUnavailableError`(연결 실패·503)를 잡아 health 캐시를 무효화하고
+   (stale `loaded=True`가 남으면 대기가 즉시 반환돼 무효화된다),
+2. `"sidecar 재시작/모델 재로드 대기 중… (해당 페이지는 복귀 후 재시도)"` 경고를
+   잡에 적재한 뒤,
+3. `wait_until_ready`(취소 가능, 상한 `OCR_SIDECAR_MODEL_WAIT_S`)로 복귀를 기다리고,
+4. **그 페이지만 1회** 재요청한다(`request_id`에 `r` 접미사). 재요청도 실패하면
+   그대로 전파해 기존 페이지 격리 경로를 탄다.
+
+예외: `SidecarTimeoutError`(읽기 타임아웃)는 이 경로에서 제외된다 — provider가
+그 페이지를 아직 추론 중일 수 있어 즉시 재요청하면 GPU에서 같은 페이지를 두 번
+돌린다. 하드 실패(`status:"error"`·프로토콜 불일치)는 대기 없이 즉시 전파된다.
+
+## 운영 — sidecar 컨테이너
+
+- **비루트 실행 (uid 1000)**: 두 sidecar 이미지는 `USER 1000`으로 돈다
+  (`services/*/Dockerfile`). 사용자가 올린 임의 PDF의 렌더 이미지를 파서에 먹이는
+  쪽이라 backend보다 신뢰 경계가 바깥이고, uid는 backend 이미지와 동일하다.
+  `no-new-privileges:true`는 그대로 유지된다.
+- **볼륨 소유권 (1회 마이그레이션)**: 비어 있는 named volume은 이미지의 chown 결과
+  (uid 1000)를 물려받지만, **이미 root 소유로 채워진 기존 캐시 볼륨은 자동으로
+  바뀌지 않는다**. 한 번만 손봐야 한다(또는 볼륨을 지우고 모델 재다운로드):
+
+  ```bash
+  docker run --rm -v ovis-hf-cache:/v alpine chown -R 1000:1000 /v
+  docker run --rm -v paddle-hf-cache:/a -v paddle-x-cache:/b alpine chown -R 1000:1000 /a /b
+  ```
+
+- PaddleX 캐시 경로가 `$HOME` 기준이라 `/root/.paddlex` → **`/home/app/.paddlex`**로
+  바뀌었다(compose의 `paddle-x-cache` 마운트도 함께 변경됨).
+- **로그 로테이션·메모리 상한**: compose가 전 서비스에 json-file 10MB×3 로테이션을
+  걸고, sidecar에는 `OVIS_MEM_LIMIT`/`PADDLE_MEM_LIMIT`(기본 24g) 메모리 상한을 둔다
+  (가중치는 VRAM이고 이 상한은 호스트 RAM 안전판이다).
+- 잡 데이터 볼륨은 네 backend가 `ocr-data`/`hf-cache`를 공유한다(엔진을 바꿔도 잡
+  이력 유지). sidecar 모델 캐시만 런타임별로 분리 유지한다.
 
 ## 파이프라인 연결 (backend 내부)
 

@@ -82,6 +82,22 @@ docker volume rm pdf_markdown_unlimited-ocr_paddle-hf-cache \
                  pdf_markdown_unlimited-ocr_paddle-x-cache
 ```
 
+⚠ **비루트 실행(uid 1000)으로 전환됨** (`services/paddleocr_vl/Dockerfile`).
+PaddleX 캐시는 `$HOME` 기준이라 컨테이너 마운트 지점이 `/root/.paddlex` →
+**`/home/app/.paddlex`** 로 바뀌었다(볼륨 이름 `paddle-x-cache`는 그대로). 비어 있는
+볼륨은 이미지의 chown 결과를 물려받지만, **이미 root 소유로 채워진 기존 볼륨은
+자동으로 바뀌지 않는다** — 업그레이드 후 캐시 쓰기가 실패하면 한 번만:
+
+```bash
+docker run --rm -v pdf_markdown_unlimited-ocr_paddle-hf-cache:/a \
+                 -v pdf_markdown_unlimited-ocr_paddle-x-cache:/b alpine \
+  chown -R 1000:1000 /a /b
+```
+
+compose는 이 sidecar에 로그 로테이션(json-file 10MB×3)과 호스트 RAM 상한
+`PADDLE_MEM_LIMIT`(기본 24g)을 건다 — VRAM과 무관한 안전판이며 호스트 RAM이 작으면
+`.env`로 낮춘다.
+
 ## 결과 스키마 → 프로토콜 변환
 
 `services/paddleocr_vl/app/adapter.py`가 공식 결과(`res.json`)의
@@ -117,6 +133,7 @@ docker volume rm pdf_markdown_unlimited-ocr_paddle-hf-cache \
 | health `status:error` | `docker compose --profile paddle logs paddleocr-vl` (paddle import/CUDA 오류가 흔함) |
 | `The GPU architecture is not supported` 류 | 드라이버가 CUDA 12.9+ 지원인지, wheel이 cu129 인덱스인지 확인 |
 | 모델 다운로드 실패 | `PADDLE_PDX_MODEL_SOURCE=huggingface`, HF_TOKEN(프라이빗 미러 시), 네트워크 |
+| 캐시 쓰기 `Permission denied` | 비루트(uid 1000) 전환 전에 만들어진 볼륨 소유권 — 위 §캐시 삭제의 chown 1회 |
 | 한글 깨짐/누락 | smoke를 `--pdf 한국어문서.pdf`로 실행해 재현 — adapter는 무변형 보존이므로 모델/렌더 단 확인 |
 
 ## 실행 스레드 정책 (중요 — 실측 기반)

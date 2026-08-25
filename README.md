@@ -3,9 +3,13 @@
 > 이 리포는 **Unlimited-OCR(PDF→Markdown)** 와 **Localight(로컬 우선 논문 리더)** 를
 > 병합한 워크스페이스입니다 — textlayer 엔진과 페이지 Q&A('질문' 탭)가 Localight에서 이식되었습니다.
 
-<!-- CI 배지 — 병합 리포의 원격 주소 확정 후 <OWNER>/<REPO>를 실제 경로로 교체:
-[![CI](https://github.com/<OWNER>/<REPO>/actions/workflows/ci.yml/badge.svg)](https://github.com/<OWNER>/<REPO>/actions/workflows/ci.yml) -->
-CI는 push/PR마다 backend pytest·ruff·frontend·native 패리티 테스트를 실행합니다.
+[![CI](https://github.com/Chedrian07/PDF-OCR-Translator/actions/workflows/ci.yml/badge.svg)](https://github.com/Chedrian07/PDF-OCR-Translator/actions/workflows/ci.yml)
+
+CI는 push/PR마다 backend pytest(+커버리지 아티팩트) · ruff(backend·services) ·
+frontend `node --test` · native 패리티 · sidecar 파서 테스트를 실행합니다. 러너 시간이
+큰 hermetic 브라우저 E2E(`e2e-mock` — mock LLM + FakeEngine)는 PR을 막지 않고 main
+push·nightly(18:00 UTC)·수동 실행에서만 돕니다. 배지 URL은 이 리포의 원격
+(`Chedrian07/PDF-OCR-Translator`) 기준입니다 — 포크·이전했다면 두 URL의 경로를 바꾸세요.
 
 웹에서 PDF를 업로드하면 로컬 비전-언어 OCR 모델로 **이미지(figure)까지 추출된
 Markdown**을 만들어 주는 셀프호스팅 서비스입니다. 기본 엔진은
@@ -71,7 +75,11 @@ docker compose --profile paddle up -d --build paddleocr-vl ocr-paddle  # → htt
 - 최초 실행 시 모델 가중치(~6.7GB)를 `hf-cache` 볼륨에 1회 다운로드합니다
   (진행 상황: `docker compose logs -f`). CPU/CUDA 서비스가 캐시를 공유합니다.
 - 모델 로딩 여부는 헤더 배지 또는 `GET /api/health`의 `model_loaded`로 확인.
-- 한국어 번역 기능을 쓰려면 `cp .env.example .env` 후 API 키를 설정 — 아래 §한국어 번역 참조.
+  같은 응답의 `worker_alive`(잡 처리 스레드 생존) · `translate_available` ·
+  `qa_available`로 나머지 구성 상태도 볼 수 있습니다.
+- 한국어 번역·페이지 Q&A를 쓰려면 `cp .env.example .env` 후 키를 설정합니다 — 번역은
+  `OPENAI_API_KEY`, Q&A는 **별도의** `LLM_OPENAI_API_KEY`입니다(`.env.example`에서
+  주석 처리돼 있으니 `#`을 지우고 값을 넣으세요). 아래 §한국어 번역 · §페이지 Q&A 참조.
 
 Docker 없이 로컬(uv)로 바로 시작할 수도 있습니다:
 
@@ -103,6 +111,32 @@ compose 기본값은 **외부 노출**입니다: 포트를 `0.0.0.0`에 바인�
 2. `ALLOWED_HOSTS=localhost,127.0.0.1` — Host 헤더 화이트리스트 복원
    (DNS rebinding 방어 — 도메인/IP로 접속한다면 그 값을 목록에 추가.
    포트는 비교 시 무시됨). compose가 컨테이너로 전달합니다.
+
+⚠ **둘 다** 설정하세요. `BIND_HOST`만 바꾸면 compose 기본 `ALLOWED_HOSTS=*`가 그대로
+남아 DNS rebinding 경로가 열려 있습니다.
+
+### 남용 방어 (레이트리밋) — 인증의 대체가 아님
+
+Q&A·번역 엔드포인트에는 잡·클라이언트 IP 단위 슬라이딩 윈도우(60초) 레이트리밋과
+동시 실행 상한이 있습니다. 초과하면 `429`와 `Retry-After` 헤더로 거절합니다.
+
+| 환경변수 | 기본 | 적용 대상 | 초과 시 |
+|---|---|---|---|
+| `QA_RATE_LIMIT_PER_MIN` | 30 | `POST /api/jobs/{id}/qa` 분당 요청 | 429 + `Retry-After`(남은 창 초) |
+| `QA_MAX_CONCURRENT` | 4 | 동시에 처리 중인 질문 수 | 429 + `Retry-After: 5` |
+| `TRANSLATE_RATE_LIMIT_PER_MIN` | 12 | `POST /api/jobs/{id}/translate` 분당 요청 | 429 + `Retry-After`(남은 창 초) |
+| `TRANSLATE_MAX_ACTIVE` | 4 | 동시에 실행 중인 번역 잡 수 | 429 + `Retry-After: 30` |
+
+0 이하로 두면 해당 상한이 비활성화되고, 정수가 아닌 값은 경고 로그와 함께 기본값으로
+강등됩니다. 기본값은 1인 로컬 사용을 방해하지 않는 수준입니다.
+
+이 상한은 **실수와 경미한 남용**(운영자의 유료 LLM 키 소진, 200페이지 번역 반복
+트리거)의 비용 상한일 뿐 **인증의 대체가 아닙니다** — 여전히 누구나 문서를 열람·삭제할
+수 있습니다. 신뢰 네트워크 밖에 두려면 인증 리버스 프록시가 필요합니다.
+
+네 변수는 아직 `docker-compose.yml`의 `environment`에 스레딩돼 있지 않습니다 — 컨테이너
+배포는 위 기본값으로 동작하고, `.env`로 조정하려면 로컬(uv) 실행이거나 compose에 직접
+추가해야 합니다.
 
 ### 원격 접속 (Tailscale) — HTTPS 권장
 
@@ -241,8 +275,14 @@ AI에게 물을 수 있습니다 (Localight에서 이식). 공급자는 셋 중 
 
 - API: `GET /api/providers`(공급자·모델 목록) · `POST /api/jobs/{id}/qa`(페이지 질의).
   활성 여부는 `GET /api/health`의 `qa_available`·`llm_default_provider`로 확인합니다.
-- OpenAI 인증은 번역과 **같은 `OPENAI_API_KEY`를 공유**합니다.
-  `LLM_OPENAI_BASE_URL`은 공식 `https://api.openai.com` 호스트만 허용됩니다.
+- OpenAI 인증은 **Q&A 전용 `LLM_OPENAI_API_KEY`**를 씁니다 — 번역용 `OPENAI_API_KEY`는
+  폴백으로도 재사용하지 않습니다. `LLM_OPENAI_BASE_URL`이 공식 `https://api.openai.com`
+  호스트로 고정돼 있어, OpenRouter·로컬 게이트웨이용 번역 키를 공유하면 그 키가 무관한
+  제3자(OpenAI)로 전송되기 때문입니다. `.env`에 `LLM_OPENAI_API_KEY=`를 채우고
+  `docker compose up -d`로 재기동하면 됩니다(compose가 네 backend 서비스 모두에 전달).
+  미설정이면 `openai-*` 공급자는 `/api/providers`에서 `available:false`,
+  `/api/health`의 `qa_available`도 false가 되고 UI가 키 설정을 안내합니다 — Ollama
+  공급자는 이 키 없이 동작합니다.
 - 지원 effort는 모델마다 다르므로 API가 거부하는 조합은 UI 오류로 그대로 안내합니다.
 
 **프라이버시 약속** (Localight에서 승계):
@@ -300,6 +340,26 @@ uv run python ../scripts/benchmark_ocr_engines.py \
   --endpoint ovis=http://127.0.0.1:8002 --input ../benchmark_docs/ --out ../bench_out/
 ```
 
+### 전 구간 검증 하네스 (외부 API 없이)
+
+`smoke_e2e.sh`는 업로드→OCR→마크다운/zip에서 끝납니다. 그 뒤의 번역 · 레이아웃 보존
+PDF 내보내기 · 뷰어 계약 · Q&A 키 분리 · 워커 복원력까지 한 번에 점검하려면
+(`make setup` 이후):
+
+```bash
+make verify-e2e                          # 기본 sample/2504.19874v1.pdf 전체
+VERIFY_ARGS="--pages 4" make verify-e2e  # 앞 4페이지만 (빠른 확인)
+```
+
+`scripts/verify_e2e.py`가 빈 포트를 골라 mock LLM(`scripts/mock_llm.py`)과
+`OCR_ENGINE=textlayer` 백엔드를 직접 띄우므로 **모델 다운로드도 유료 키도 필요
+없고** 개발 서버(8000)와 충돌하지 않습니다. 서버 로그·내보낸 PDF 등 산출물은
+`tmp/verify-e2e/`에 남습니다(`--work DIR`로 변경, `--skip faults,worker,cropbox`로
+단계 생략).
+
+브라우저까지 포함한 hermetic 전체 흐름(mock OpenAI + FakeEngine)은
+`make e2e-mock`입니다 — playwright chromium을 처음 한 번 내려받습니다.
+
 ## 로컬 개발 (uv)
 
 ```bash
@@ -336,7 +396,10 @@ npm test --prefix frontend
 | `make dev` | 개발 서버 — `127.0.0.1:8000`, `--reload` |
 | `make dev-textlayer` | `OCR_ENGINE=textlayer`로 개발 서버 (모델 불필요) |
 | `make test` | 핵심 로컬 검사 — backend pytest · ruff · frontend 테스트 |
+| `make coverage` | backend 커버리지 (`pytest-cov`를 `--with`로 임시 설치 — `uv.lock` 무변경) |
 | `make e2e` | `./scripts/smoke_e2e.sh` (기동된 백엔드 필요) |
+| `make verify-e2e` | 실 PDF 전 구간 점검 — 업로드→OCR→번역→PDF→뷰어→보안 (서버를 직접 띄움, 외부 API 없음) |
+| `make e2e-mock` | hermetic 브라우저 E2E — mock OpenAI + FakeEngine (playwright chromium 설치) |
 | `make docker-up` / `make docker-down` | CPU 스택(ocr-cpu) 기동/정리 |
 | `make docker-up-ollama` / `make docker-down-ollama` | ocr-cpu + Ollama 컨테이너 (overlay) |
 | `make docker-pull-model` | 컨테이너 Ollama 모델 다운로드 (`MODEL=qwen3:8b` 기본) |

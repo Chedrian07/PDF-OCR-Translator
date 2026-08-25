@@ -1647,6 +1647,8 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
   background: color-mix(in srgb, var(--bg-elev) 97%, var(--accent));
   font-size: 13px;
 }
+/* 키보드 스크롤용 tabindex — 원문 면과 같은 포커스 표시를 준다. */
+.reader-content:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: -3px; }
 
 /* 번역 레일도 전 페이지가 이어진 하나의 스크롤이다 — 페이지 머리표가 붙어 다녀
    지금 읽는 대목이 몇 쪽인지 항상 보인다. */

@@ -17,8 +17,12 @@ import {
   readerFocusAt,
   readerHydrationWindow,
   alignmentBatchPlan,
+  alignmentFailureIsPermanent,
   blockAtFraction,
   splitInlineMath,
+  readerRailBandAt,
+  railAnchorFrom,
+  railAnchorTarget,
 } from '../app.js';
 
 /* ---------------- readerPageBands ---------------- */
@@ -191,4 +195,73 @@ test('splitInlineMath: 여러 수식과 빈 수식', () => {
     { type: 'text', value: '앞 ' },
     { type: 'text', value: ' 뒤' },
   ]);
+});
+
+/* ---------------- readerRailBandAt ---------------- */
+
+const RAIL_BANDS = [
+  { page: 1, top: 0, height: 100 },
+  { page: 2, top: 100, height: 300 },
+  { page: 3, top: 400, height: 150 },
+];
+
+test('readerRailBandAt: 오프셋을 지나온 마지막 밴드', () => {
+  assert.equal(readerRailBandAt(RAIL_BANDS, 0).page, 1);
+  assert.equal(readerRailBandAt(RAIL_BANDS, 99).page, 1);
+  assert.equal(readerRailBandAt(RAIL_BANDS, 100).page, 2);
+  assert.equal(readerRailBandAt(RAIL_BANDS, 9999).page, 3);
+  assert.equal(readerRailBandAt(RAIL_BANDS, -50).page, 1, '위쪽 바깥은 첫 밴드');
+  assert.equal(readerRailBandAt([], 10), null);
+  assert.equal(readerRailBandAt(null, 10), null, '방어: 밴드 미측정');
+});
+
+/* ---------------- railAnchorFrom / railAnchorTarget ---------------- */
+// 개별(sync off) 스크롤에서 위쪽 페이지가 뒤늦게 채워져도 레일이 밀리지 않게
+// 하는 계약: 렌더 전 앵커 → 렌더 후 같은 밴드 오프셋으로 복원.
+
+test('railAnchorFrom: 눈높이 밴드와 그 밴드 기준 스크롤 오프셋', () => {
+  // scrollTop 150 + 뷰포트 200 * 0.25 = 200 → page 2 (top 100)
+  assert.deepEqual(railAnchorFrom(RAIL_BANDS, 150, 200, 0.25), { page: 2, offset: 50 });
+  assert.deepEqual(railAnchorFrom(RAIL_BANDS, 0, 200, 0.25), { page: 1, offset: 0 });
+  assert.equal(railAnchorFrom([], 150, 200, 0.25), null, '밴드가 없으면 앵커도 없다');
+});
+
+test('railAnchorTarget: 위쪽 페이지가 커져도 같은 문단이 같은 눈높이에 남는다', () => {
+  const anchor = railAnchorFrom(RAIL_BANDS, 150, 200, 0.25); // page 2 + 50
+  // 1페이지가 100 → 400으로 늘어난 뒤의 밴드
+  const grown = [
+    { page: 1, top: 0, height: 400 },
+    { page: 2, top: 400, height: 300 },
+    { page: 3, top: 700, height: 150 },
+  ];
+  assert.equal(railAnchorTarget(grown, anchor), 450, '밀린 300px만큼 되잡는다');
+  assert.equal(railAnchorTarget(RAIL_BANDS, anchor), 150, '레이아웃이 그대로면 그대로');
+});
+
+test('railAnchorTarget: 앵커 페이지가 사라졌거나 앵커가 없으면 복원하지 않는다', () => {
+  assert.equal(railAnchorTarget(RAIL_BANDS, null), null);
+  assert.equal(railAnchorTarget([], { page: 2, offset: 50 }), null);
+  assert.equal(railAnchorTarget(RAIL_BANDS, { page: 9, offset: 50 }), null);
+});
+
+test('railAnchorTarget: 음수 스크롤로 내려가지 않는다', () => {
+  assert.equal(railAnchorTarget(RAIL_BANDS, { page: 1, offset: -80 }), 0);
+});
+
+/* ---------------- alignmentFailureIsPermanent ---------------- */
+
+test('alignmentFailureIsPermanent: 409 레이아웃 불일치는 재시도해도 소용없다', () => {
+  assert.equal(alignmentFailureIsPermanent(409), true, '블록/페이지 대응 불일치 — 영구');
+  assert.equal(alignmentFailureIsPermanent(404), true, '좌표 없는 페이지 — 영구');
+  assert.equal(alignmentFailureIsPermanent(422), true, '잘못된 페이지 번호 — 영구');
+  assert.equal(alignmentFailureIsPermanent(403), true);
+});
+
+test('alignmentFailureIsPermanent: 일시 실패는 재시도 대상으로 남긴다', () => {
+  assert.equal(alignmentFailureIsPermanent(500), false);
+  assert.equal(alignmentFailureIsPermanent(502), false);
+  assert.equal(alignmentFailureIsPermanent(408), false, '요청 타임아웃');
+  assert.equal(alignmentFailureIsPermanent(429), false, '스로틀');
+  assert.equal(alignmentFailureIsPermanent(0), false, '네트워크 오류');
+  assert.equal(alignmentFailureIsPermanent(undefined), false, '방어: 상태 미상');
 });

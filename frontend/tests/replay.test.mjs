@@ -28,6 +28,8 @@ import {
   scanQuads,
   ssePromoteDelay,
   syncedStreamPageNo,
+  streamPaneTrimCount,
+  replayExtendsRaw,
   withLangUrl,
   translateUiStateFor,
   armTransition,
@@ -906,8 +908,10 @@ test('pickQaModels: 미지 공급자·비정상 카탈로그는 빈 값/false �
 });
 
 test('qaProviderHint: 공급자별 한국어 미설정 안내', () => {
-  assert.ok(qaProviderHint('openai-responses').includes('OPENAI_API_KEY가 설정되지 않았습니다'));
-  assert.ok(qaProviderHint('openai-chat').includes('OPENAI_API_KEY가 설정되지 않았습니다'));
+  assert.ok(qaProviderHint('openai-responses').includes('LLM_OPENAI_API_KEY가 설정되지 않았습니다'));
+  assert.ok(qaProviderHint('openai-chat').includes('LLM_OPENAI_API_KEY가 설정되지 않았습니다'));
+  // 번역용 OPENAI_API_KEY 재사용 안내로 되돌아가지 않게 못 박는다 (자격증명 유출 경로)
+  assert.ok(!/[^_]OPENAI_API_KEY/.test(qaProviderHint('openai-chat')), qaProviderHint('openai-chat'));
   const ollama = qaProviderHint('ollama');
   assert.ok(ollama.includes('ollama serve'), 'ollama serve 실행 안내');
   assert.ok(ollama.includes('ollama pull qwen3:8b'), '모델 pull 안내');
@@ -1136,4 +1140,60 @@ test('pdfReportMessage: 표 셀·재배치·원문 보존을 숫자형 리포트
     'PDF 생성 완료: 번역 0개 블록',
     '비정상 헤더는 0으로 방어',
   );
+});
+
+/* ================= raw pane 상한 (streamPaneTrimCount) ================= */
+
+test('streamPaneTrimCount: 상한 이하에서는 아무것도 걷지 않는다', () => {
+  assert.equal(streamPaneTrimCount(0, 3000, 600), 0);
+  assert.equal(streamPaneTrimCount(2999, 3000, 600), 0);
+  assert.equal(streamPaneTrimCount(3000, 3000, 600), 0, '상한과 같으면 유지');
+});
+
+test('streamPaneTrimCount: 상한을 넘으면 여유분까지 한 번에 덜어낸다', () => {
+  // 매 프레임 한 노드씩 잘라내면 프레임마다 O(n) 삭제가 반복된다 — slack만큼 더 자른다.
+  assert.equal(streamPaneTrimCount(3001, 3000, 600), 601);
+  assert.equal(streamPaneTrimCount(3600, 3000, 600), 1200);
+});
+
+test('streamPaneTrimCount: 잘라낸 뒤 다시 상한 아래로 내려가 매 프레임 삭제가 없다', () => {
+  let count = 4000;
+  const drop = streamPaneTrimCount(count, 3000, 600);
+  count -= drop;
+  assert.ok(count < 3000, `남은 노드=${count}`);
+  assert.equal(streamPaneTrimCount(count, 3000, 600), 0, '바로 다음 프레임은 무삭제');
+});
+
+test('streamPaneTrimCount: 최소 한 노드는 남기고, 비정상 입력을 방어한다', () => {
+  assert.equal(streamPaneTrimCount(5, 1, 600), 4, '안내 줄 한 개는 남는다');
+  assert.equal(streamPaneTrimCount(NaN, 3000, 600), 0);
+  assert.equal(streamPaneTrimCount(3600, 0, 0), 3599);
+  assert.equal(streamPaneTrimCount(-10, 3000, 600), 0);
+});
+
+/* ================= 재연결 replay의 확정 페이지 캐시 재사용 ================= */
+
+test('replayExtendsRaw: 이어받은 replay면 확정 페이지 캐시를 유지한다', () => {
+  const raw = `${PAGE_MARKER}page one${PAGE_MARKER}page two`;
+  assert.equal(replayExtendsRaw(raw, raw), true, '동일 원문 — 재POST 불필요');
+  assert.equal(replayExtendsRaw(raw, raw + ' more'), true, '뒤에 이어붙은 재연결');
+});
+
+test('replayExtendsRaw: 원문이 어긋나면 캐시를 버린다 (잘못된 화면 방지)', () => {
+  const raw = `${PAGE_MARKER}page one`;
+  assert.equal(replayExtendsRaw(raw, `${PAGE_MARKER}다른 원문`), false);
+  assert.equal(replayExtendsRaw(raw, `${PAGE_MARKER}page`), false, 'replay가 더 짧다');
+  assert.equal(replayExtendsRaw('', raw), false, '최초 연결 — 캐시 자체가 없다');
+  assert.equal(replayExtendsRaw(raw, null), false);
+  assert.equal(replayExtendsRaw(raw, undefined), false);
+});
+
+test('replayExtendsRaw: 이어받은 replay의 확정 페이지 경계는 그대로다', () => {
+  // 캐시 유효성의 근거 — 확정 세그먼트는 append-only라 위치가 바뀌지 않는다.
+  const before = `${PAGE_MARKER}one${PAGE_MARKER}two`;
+  const after = `${before} tail${PAGE_MARKER}three`;
+  assert.equal(replayExtendsRaw(before, after), true);
+  const oldPages = splitPreviewPages(before).pages;
+  const newPages = splitPreviewPages(after).pages;
+  assert.deepEqual(newPages.slice(0, oldPages.length), oldPages);
 });

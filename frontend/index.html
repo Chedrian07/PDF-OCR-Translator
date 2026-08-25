@@ -368,7 +368,10 @@
                     <strong id="reader-map-status">좌표 연결 준비 중</strong>
                     <span id="reader-activity">0개 블록</span>
                   </div>
-                  <div id="reader-content" class="markdown-body reader-content"></div>
+                  <!-- 번역 레일도 독립 스크롤 면이다 — 왼쪽 원문 면과 같이
+                       tabindex를 둬야 키보드(Space/PageDown)로 번역문을 굴릴 수 있다. -->
+                  <div id="reader-content" class="markdown-body reader-content" tabindex="0"
+                       role="region" aria-labelledby="reader-rail-title"></div>
                   <details class="reader-tools-wrap">
                     <summary>선택 문장 도구</summary>
                     <div class="reader-tool-grid">

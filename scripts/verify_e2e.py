@@ -1,0 +1,638 @@
+"""실제 PDF 기반 전 구간 기능 점검 하네스.
+
+scripts/smoke_e2e.sh 는 업로드→OCR→markdown/zip 에서 끝난다. 이 스크립트는 그 뒤의
+번역 · 레이아웃 보존 PDF 내보내기 · 뷰어 계약 · Q&A 키 분리 · 워커 복원력까지
+**실제 서버를 띄워** 검증한다. 모델 다운로드 없이 돌도록 OCR_ENGINE=textlayer 를 쓰며,
+샘플 PDF(arXiv 논문)는 텍스트 레이어가 충분해 tesseract 없이 전 페이지가 처리된다.
+
+사용 (= make verify-e2e):
+    uv run --project backend python scripts/verify_e2e.py [--pdf PATH] [--pages N]
+
+산출물(서버 로그·내보낸 PDF 등)은 기본으로 리포의 tmp/verify-e2e/ 에 남는다
+(.gitignore 대상). `--work DIR` 로 옮길 수 있다. 포트는 매 실행마다 비어 있는
+포트를 잡으므로 개발 서버(8000)와 충돌하지 않는다.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+# 하드코딩 금지 — 이 파일 위치(scripts/)에서 리포 루트를 유도한다.
+REPO = Path(__file__).resolve().parents[1]
+MOCK_SERVER = Path(__file__).resolve().with_name("mock_llm.py")
+
+# main()에서 실제 값으로 채운다 (작업 디렉터리·포트는 실행 시점에 정해진다).
+WORK = REPO / "tmp" / "verify-e2e"
+MOCK_PORT = 0
+API_PORT = 0
+BASE = ""
+MOCK = ""
+
+
+def _free_port() -> int:
+    """OS가 비어 있다고 알려주는 포트를 하나 잡는다 (고정 포트 충돌 회피)."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _python() -> str:
+    """백엔드 venv 인터프리터 — uv run으로 들어왔으면 현재 인터프리터가 곧 그것이다."""
+    venv = REPO / "backend" / ".venv" / "bin" / "python"
+    return str(venv) if venv.is_file() else sys.executable
+
+PASS: list[str] = []
+FAIL: list[str] = []
+INFO: list[str] = []
+
+
+def layout_pages(obj) -> list:
+    """layout.json은 페이지 리스트다. 혹시 모를 dict 래핑도 함께 받아준다."""
+    if isinstance(obj, list):
+        return obj
+    if isinstance(obj, dict):
+        return obj.get("pages", [])
+    return []
+
+
+def check(name: str, ok: bool, detail: str = "") -> bool:
+    (PASS if ok else FAIL).append(f"{name}" + (f" — {detail}" if detail else ""))
+    print(("  PASS  " if ok else "  FAIL  ") + name + (f" — {detail}" if detail else ""), flush=True)
+    return ok
+
+
+def info(msg: str) -> None:
+    INFO.append(msg)
+    print("  ....  " + msg, flush=True)
+
+
+def req(method: str, path: str, *, body=None, headers=None, raw=False, timeout=120):
+    url = path if path.startswith("http") else BASE + path
+    data = None
+    hdrs = dict(headers or {})
+    if body is not None:
+        if isinstance(body, (bytes, bytearray)):
+            data = bytes(body)
+        else:
+            data = json.dumps(body).encode()
+            hdrs.setdefault("Content-Type", "application/json")
+    r = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+    try:
+        with urllib.request.urlopen(r, timeout=timeout) as resp:
+            payload = resp.read()
+            if raw:
+                return resp.status, payload, dict(resp.headers)
+            try:
+                return resp.status, json.loads(payload or b"{}"), dict(resp.headers)
+            except json.JSONDecodeError:
+                return resp.status, payload.decode("utf-8", "replace"), dict(resp.headers)
+    except urllib.error.HTTPError as e:
+        payload = e.read()
+        if raw:
+            return e.code, payload, dict(e.headers)
+        try:
+            return e.code, json.loads(payload or b"{}"), dict(e.headers)
+        except json.JSONDecodeError:
+            return e.code, payload.decode("utf-8", "replace"), dict(e.headers)
+
+
+def post_pdf(pdf: Path, dpi: int = 150) -> tuple[int, dict]:
+    """POST /api/jobs — 상태 코드를 그대로 돌려준다(거부 경로 검증용)."""
+    boundary = "----uocrverify"
+    parts = []
+    for key, val in (("mode", "multi"), ("dpi", str(dpi))):
+        parts.append(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{val}\r\n".encode()
+        )
+    parts.append(
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+        f"filename=\"{pdf.name}\"\r\nContent-Type: application/pdf\r\n\r\n".encode()
+    )
+    parts.append(pdf.read_bytes())
+    parts.append(f"\r\n--{boundary}--\r\n".encode())
+    payload = b"".join(parts)
+    status, js, _ = req("POST", "/api/jobs", body=payload,
+                        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    return status, js
+
+
+def upload(pdf: Path, dpi: int = 150) -> str:
+    status, js = post_pdf(pdf, dpi)
+    if status != 202:
+        raise SystemExit(f"업로드 실패 {status}: {js}")
+    return js["job_id"]
+
+
+def wait_job(job_id: str, timeout: float = 900) -> dict:
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        _, js, _ = req("GET", f"/api/jobs/{job_id}")
+        last = js
+        if js.get("status") in ("done", "error", "canceled"):
+            return js
+        time.sleep(1.5)
+    raise SystemExit(f"잡 타임아웃: {last}")
+
+
+def wait_translate(job_id: str, timeout: float = 900) -> dict:
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        _, js, _ = req("GET", f"/api/jobs/{job_id}/translate/state?lang=ko")
+        last = js
+        if js.get("status") in ("done", "error", "canceled"):
+            return js
+        time.sleep(1.0)
+    raise SystemExit(f"번역 타임아웃: {last}")
+
+
+def wait_http(url: str, timeout: float = 90) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen(url, timeout=3).read()
+            return True
+        except Exception:
+            time.sleep(0.5)
+    return False
+
+
+class Servers:
+    def __init__(self, data_dir: Path, env_extra: dict[str, str]):
+        self.data_dir = data_dir
+        self.env_extra = env_extra
+        self.mock = None
+        self.api = None
+        self.api_log = None
+
+    def __enter__(self):
+        py = _python()
+        # FAULT는 **목 서버**가 읽는 결함 주입 스위치다 — 백엔드 env로만 넣으면
+        # 목에 닿지 않아 [8] 결함 주입 단계가 조용히 무력화된다. 목에도 전달한다.
+        mock_env = dict(os.environ)
+        mock_env["FAULT"] = self.env_extra.get("FAULT", "")
+        self.mock = subprocess.Popen(
+            [py, str(MOCK_SERVER), str(MOCK_PORT)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=mock_env,
+        )
+        if not wait_http(f"{MOCK}/__stats"):
+            raise SystemExit("목 LLM 기동 실패")
+
+        env = dict(os.environ)
+        # .env 자동 로딩이 실키를 끌어오지 않도록 명시적으로 덮어쓴다.
+        env.update({
+            "OCR_ENGINE": "textlayer",
+            "OCR_DEVICE": "cpu",
+            "PRELOAD_MODEL": "0",
+            "DATA_DIR": str(self.data_dir),
+            "ALLOWED_HOSTS": "localhost,127.0.0.1",
+            "OPENAI_BASE_URL": f"{MOCK}/v1",
+            "OPENAI_API_KEY": "sk-mock-translation-key",
+            "OPENAI_MODEL": "mock-model",
+            "TRANSLATE_API_MODE": "chat",
+            "TRANSLATE_CONCURRENCY": "4",
+            "TRANSLATE_TIMEOUT_S": "60",
+            "TRANSLATE_MAX_RETRIES": "1",
+            "PYTHONUNBUFFERED": "1",
+        })
+        env.update(self.env_extra)
+        self.api_log = open(WORK / "api.log", "w")
+        self.api = subprocess.Popen(
+            [py, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(API_PORT)],
+            cwd=str(REPO / "backend"), env=env,
+            stdout=self.api_log, stderr=subprocess.STDOUT,
+        )
+        if not wait_http(f"{BASE}/api/health", timeout=120):
+            print((WORK / "api.log").read_text()[-4000:])
+            raise SystemExit("백엔드 기동 실패")
+        return self
+
+    def __exit__(self, *exc):
+        for p in (self.api, self.mock):
+            if p and p.poll() is None:
+                p.send_signal(signal.SIGTERM)
+                try:
+                    p.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+        if self.api_log:
+            self.api_log.close()
+
+
+# ─────────────────────────── 개별 검증 ───────────────────────────
+
+def verify_ocr(job_id: str, job: dict, data_dir: Path, expect_pages: int) -> Path:
+    print("\n[2] OCR 산출물")
+    jd = data_dir / "jobs" / job_id
+    check("잡이 done으로 끝남", job.get("status") == "done", str(job.get("error")))
+    md = jd / "result.md"
+    check("result.md 생성", md.is_file())
+    text = md.read_text(encoding="utf-8") if md.is_file() else ""
+    check("result.md 내용이 비어있지 않음", len(text) > 500, f"{len(text)}자")
+    lay = jd / "layout.json"
+    check("layout.json 생성", lay.is_file())
+    if lay.is_file():
+        pages = layout_pages(json.loads(lay.read_text()))
+        check("layout 페이지 수 == 원본 페이지 수", len(pages) == expect_pages,
+              f"layout={len(pages)} pdf={expect_pages}")
+        nblocks = sum(len(p.get("blocks", [])) for p in pages)
+        check("layout 블록이 충분히 추출됨", nblocks > expect_pages * 3, f"{nblocks} blocks")
+    seps = text.count("\n\n---\n\n")
+    check("result.md 페이지 구분자 수 == 페이지-1 (Q&A 페이지 인덱스 계약)",
+          seps == expect_pages - 1, f"구분자 {seps}, 기대 {expect_pages - 1}")
+    return jd
+
+
+def verify_translation(job_id: str, jd: Path, expect_pages: int) -> None:
+    print("\n[3] 번역 파이프라인")
+    req("GET", f"{MOCK}/__reset")
+    status, js, _ = req("POST", f"/api/jobs/{job_id}/translate", body={"lang": "ko"})
+    check("POST /translate 202", status == 202, f"{status} {js}")
+    st = wait_translate(job_id)
+    check("번역 state=done", st.get("status") == "done", json.dumps(st, ensure_ascii=False)[:300])
+
+    _, stats, _ = req("GET", f"{MOCK}/__stats")
+    calls = stats["calls"]
+    dupes = {k: v for k, v in stats["by_text"].items() if v > 1}
+    # D-1은 문서 모양에 따라 분기한다. reconcile이 성공하면 md 유닛 번역이 폐기되므로
+    # md 유닛은 애초에 1차에서 빠져야 하고(중복 0), 폴백이면 md 번역이 실제로
+    # result.ko.md에 쓰이므로 중복은 낭비가 아니다. 로그로 어느 분기인지 판정한다.
+    log_text = (WORK / "api.log").read_text(errors="replace") if (WORK / "api.log").is_file() else ""
+    fell_back = "reconcile 폴백" in log_text
+    info(f"LLM 호출 {calls}회, 동일 원문 중복 {len(dupes)}종, reconcile={'폴백' if fell_back else '성공'}")
+    if fell_back:
+        deferred_logged = "지연 md 유닛" in log_text
+        check("D-1(폴백 분기): 지연된 md 유닛이 2차 패스로 실제 번역됨", deferred_logged,
+              "2차 패스 로그 확인됨" if deferred_logged else "폴백인데 2차 패스 로그가 없음")
+        check("D-1(폴백 분기): 중복 번역분이 result.ko.md에 실제로 반영됨 (낭비 아님)",
+              (jd / "result.ko.md").is_file()
+              and sum("가" <= c <= "힣" for c in (jd / "result.ko.md").read_text()) > 200)
+    else:
+        check("D-1(성공 분기): 동일 원문에 대한 중복 LLM 호출 없음", len(dupes) == 0,
+              f"중복 {len(dupes)}종 (예: {list(dupes)[:1]})")
+
+    ko = jd / "result.ko.md"
+    check("result.ko.md 생성", ko.is_file())
+    if ko.is_file():
+        kt = ko.read_text(encoding="utf-8")
+        hangul = sum("가" <= c <= "힣" for c in kt)
+        check("번역문에 한글이 실제로 들어있음", hangul > 200, f"한글 {hangul}자")
+        check("번역본 페이지 구분자 수 보존", kt.count("\n\n---\n\n") == expect_pages - 1,
+              f"{kt.count(chr(10)+chr(10)+'---'+chr(10)+chr(10))}")
+    kl = jd / "layout.ko.json"
+    check("layout.ko.json 생성", kl.is_file())
+    if kl.is_file() and (jd / "layout.json").is_file():
+        pa = layout_pages(json.loads((jd / "layout.json").read_text()))
+        pb = layout_pages(json.loads(kl.read_text()))
+        check("원문/번역 layout 페이지 수 동일", len(pa) == len(pb), f"{len(pa)} vs {len(pb)}")
+        same_blocks = all(len(x.get("blocks", [])) == len(y.get("blocks", []))
+                          for x, y in zip(pa, pb))
+        check("원문/번역 layout 블록 수 전 페이지 동일", same_blocks)
+    rep = jd / "translations/ko/report.json"
+    if rep.is_file():
+        r = json.loads(rep.read_text())
+        info(f"report: kept_original={len(r.get('kept_original', []))} retried={r.get('retried')}")
+
+
+def verify_pdf_export(job_id: str, jd: Path, expect_pages: int) -> None:
+    print("\n[4] 레이아웃 보존 번역 PDF")
+    import pymupdf
+
+    status, payload, hdrs = req("GET", f"/api/jobs/{job_id}/pdf?lang=ko", raw=True, timeout=600)
+    if not check("GET /pdf?lang=ko 200", status == 200, f"{status}"):
+        return
+    out = WORK / "export.ko.pdf"
+    out.write_bytes(payload)
+    # HTTP 헤더 이름은 대소문자를 가리지 않는다 — 서버/프록시에 따라 표기가 달라지므로
+    # 소문자로 접어서 찾는다(대소문자 그대로 비교하면 조용히 빈 줄만 찍힌다).
+    uocr = {k: v for k, v in hdrs.items() if k.lower().startswith("x-uocr")}
+    info("내보내기 헤더: " + (", ".join(f"{k}={v}" for k, v in sorted(uocr.items())) or "(없음)"))
+
+    doc = pymupdf.open(out)
+    check("번역 PDF 페이지 수 보존", doc.page_count == expect_pages,
+          f"{doc.page_count} vs {expect_pages}")
+
+    total_hangul = 0
+    outside = []
+    tofu = 0
+    for pno in range(doc.page_count):
+        page = doc[pno]
+        txt = page.get_text()
+        total_hangul += sum("가" <= c <= "힣" for c in txt)
+        tofu += txt.count("�") + txt.count("□")
+        pr = page.rect
+        for blk in page.get_text("dict")["blocks"]:
+            for line in blk.get("lines", []):
+                x0, y0, x1, y1 = line["bbox"]
+                # 1pt 여유 — 조판 반올림 허용
+                if y1 > pr.y1 + 1 or y0 < pr.y0 - 1 or x1 > pr.x1 + 1 or x0 < pr.x0 - 1:
+                    outside.append((pno + 1, [round(v, 1) for v in line["bbox"]]))
+    check("번역 PDF에 한글이 실제로 조판됨", total_hangul > 200, f"한글 {total_hangul}자")
+    check("A-2: 모든 텍스트 줄이 페이지 표시 영역 안에 있음", not outside,
+          f"이탈 {len(outside)}줄 (예: {outside[:2]})")
+    check("폰트 폴백 tofu 없음", tofu == 0, f"tofu {tofu}자")
+    doc.close()
+
+    status, payload, hdrs = req("GET", f"/api/jobs/{job_id}/pdf?lang=ko&view=dual",
+                                raw=True, timeout=600)
+    if check("GET /pdf?view=dual 200", status == 200, f"{status}"):
+        dual = WORK / "export.ko.dual.pdf"
+        dual.write_bytes(payload)
+        d = pymupdf.open(dual)
+        check("대조판 페이지 수 == 원본", d.page_count == expect_pages, f"{d.page_count}")
+        if d.page_count:
+            w, h = d[0].rect.width, d[0].rect.height
+            check("대조판이 가로로 2배 폭", w > h, f"{round(w)}x{round(h)}")
+        d.close()
+
+
+def verify_cropbox(jd: Path, expect_pages: int) -> None:
+    """A-2 실증 — 실제 논문 PDF에 CropBox를 씌워 하단 가드를 강제로 태운다."""
+    print("\n[5] A-2 CropBox≠MediaBox 실증 (실제 논문 사본)")
+    import pymupdf
+
+    from app.pipeline.pdf_export import build_translated_pdf
+
+    src = jd / "source.pdf"
+    if not src.is_file():
+        check("source.pdf 존재", False)
+        return
+    cropped = WORK / "cropped-source.pdf"
+    doc = pymupdf.open(src)
+    for page in doc:
+        r = page.rect
+        # 하단 90pt·상단 30pt를 표시 영역에서 제외 — 저널 후처리본에서 흔한 형태
+        page.set_cropbox(pymupdf.Rect(r.x0 + 15, r.y0 + 30, r.x1 - 15, r.y1 - 90))
+    doc.save(cropped)
+    doc.close()
+
+    work = WORK / "cropbox-job"
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    shutil.copy(cropped, work / "source.pdf")
+    for name in ("layout.json", "layout.ko.json", "result.md", "result.ko.md"):
+        if (jd / name).is_file():
+            shutil.copy(jd / name, work / name)
+
+    try:
+        report = build_translated_pdf(work, "ko")
+    except Exception as e:  # noqa: BLE001 — 하네스
+        check("CropBox PDF 내보내기 성공", False, f"{type(e).__name__}: {e}")
+        return
+    check("CropBox PDF 내보내기 성공", True,
+          f"replaced={getattr(report, 'replaced', '?')} kept={getattr(report, 'kept', '?')}")
+
+    out = work / "export.ko.pdf"
+    if not out.is_file():
+        check("CropBox export.ko.pdf 생성", False)
+        return
+    d = pymupdf.open(out)
+    outside = []
+    extracted = 0
+    for pno in range(d.page_count):
+        page = d[pno]
+        extracted += len(page.get_text().strip())
+        pr = page.rect
+        for blk in page.get_text("dict")["blocks"]:
+            for line in blk.get("lines", []):
+                x0, y0, x1, y1 = line["bbox"]
+                if y1 > pr.y1 + 1 or y0 < pr.y0 - 1:
+                    outside.append((pno + 1, round(y1, 1), round(pr.y1, 1)))
+    d.close()
+    check("A-2: CropBox 문서에서도 모든 줄이 표시 영역 안", not outside,
+          f"이탈 {len(outside)}줄 (예: {outside[:3]})")
+    check("A-2: CropBox 문서에서 텍스트가 정상 추출됨", extracted > 500, f"{extracted}자")
+
+
+def verify_viewer(job_id: str, expect_pages: int) -> None:
+    print("\n[6] 뷰어/리더 계약")
+    status, man, hdrs = req("GET", f"/api/jobs/{job_id}/viewer-manifest?lang=ko")
+    if check("GET /viewer-manifest 200", status == 200, f"{status}"):
+        doc = man.get("document", {})
+        check("manifest 페이지 수 일치", doc.get("page_count") == expect_pages,
+              f"{doc.get('page_count')}")
+        check("manifest capabilities.alignment 활성",
+              man.get("capabilities", {}).get("alignment") is True,
+              json.dumps(man.get("capabilities", {}), ensure_ascii=False))
+        info(f"manifest quality={json.dumps(man.get('quality', {}), ensure_ascii=False)[:200]}")
+        check("manifest ETag 제공", "etag" in {k.lower() for k in hdrs})
+        etag = hdrs.get("etag") or hdrs.get("ETag")
+        if etag:
+            s2, _, _ = req("GET", f"/api/jobs/{job_id}/viewer-manifest?lang=ko",
+                           headers={"If-None-Match": etag})
+            check("If-None-Match → 304", s2 == 304, f"{s2}")
+
+    status, out, _ = req("GET", f"/api/jobs/{job_id}/outline?lang=ko")
+    check("GET /outline 200", status == 200, f"{status}")
+
+    status, al, _ = req("GET", f"/api/jobs/{job_id}/alignment?page=1&lang=ko")
+    check("GET /alignment?page=1 200 (409면 대응 불변식 위반)", status == 200, f"{status}")
+    if status == 200:
+        blocks = al.get("blocks", [])
+        check("alignment 블록이 원문/번역 쌍을 제공", bool(blocks), f"{len(blocks)} blocks")
+        # 프롬프트 스캐폴딩이 번역 결과로 새면 안 된다 (마스킹/복원 계약).
+        leaked = [b["id"] for b in blocks
+                  if any(m in (b.get("target") or "")
+                         for m in ("[번역할 원문]", "[직전 문맥", "[용어집", "[원문 유지"))]
+        check("프롬프트 스캐폴딩이 번역 결과로 새지 않음", not leaked, f"오염 {len(leaked)}블록")
+
+    status, vp, _ = req("GET", f"/api/jobs/{job_id}/viewer/pages?start=1&limit=4&lang=ko&include=alignment")
+    if check("GET /viewer/pages 200", status == 200, f"{status}"):
+        items = vp.get("items", [])
+        check("viewer/pages 배치 크기", 1 <= len(items) <= 4, f"{len(items)}")
+
+    status, _, _ = req("GET", f"/api/jobs/{job_id}/viewer/pages?start=1&limit=99&lang=ko")
+    check("viewer/pages limit 경계 422", status == 422, f"{status}")
+
+    status, payload, _ = req("GET", f"/api/jobs/{job_id}/page/1?lang=ko", raw=True, timeout=300)
+    check("GET /page/1?lang=ko 200 (번역 facsimile 래스터)", status == 200, f"{status}")
+    if status == 200:
+        check("페이지 PNG가 유효", payload[:8] == b"\x89PNG\r\n\x1a\n", f"{payload[:8]!r}")
+
+
+def verify_security(job_id: str) -> None:
+    print("\n[7] 보안 — C-1 키 분리 · 경로 탈출")
+    status, prov, _ = req("GET", "/api/providers")
+    info(f"/api/providers → {json.dumps(prov, ensure_ascii=False)[:300]}")
+
+    # C-1: LLM_OPENAI_API_KEY 미설정 상태에서 번역 키가 Q&A로 새면 안 된다.
+    status, js, _ = req("POST", f"/api/jobs/{job_id}/qa",
+                        body={"page": 1, "question": "이 페이지의 주제는?",
+                              "provider": "openai-responses"})
+    check("C-1: LLM_OPENAI_API_KEY 미설정 시 Q&A가 번역 키로 실행되지 않음",
+          status in (400, 422, 503), f"status={status} {str(js)[:200]}")
+
+    # 경로 탈출 — 잡 디렉터리 밖/원본 PDF 서빙 금지
+    for probe in ("../../../etc/passwd", "..%2f..%2fsource.pdf", "source.pdf",
+                  "pages/../source.pdf", "translations/ko/units.json"):
+        status, _, _ = req("GET", f"/api/jobs/{job_id}/files/{probe}", raw=True)
+        check(f"/files 경로 차단: {probe}", status in (400, 403, 404), f"status={status}")
+
+    # 호스트 화이트리스트
+    status, _, _ = req("GET", "/api/health", headers={"Host": "evil.example.com"})
+    check("ALLOWED_HOSTS 위반 Host 거절", status == 400, f"status={status}")
+
+
+def verify_translation_faults(pdf: Path, data_dir: Path) -> None:
+    """A-1 실증 — 거부문/echo/플레이스홀더 유실을 주입하고 무성 손실이 없는지 본다."""
+    print("\n[8] A-1 번역 결함 주입 (거부문 · echo · 플레이스홀더 유실)")
+    for fault, label in (("refusal", "영문 거부문"), ("refusal_ko", "한국어 거부문"),
+                         ("echo", "원문 echo"), ("summary", "한 줄 요약")):
+        dd = data_dir.parent / f"fault-{fault}"
+        if dd.exists():
+            shutil.rmtree(dd)
+        with Servers(dd, {"FAULT": fault, "TRANSLATE_MAX_RETRIES": "0"}):
+            job_id = upload(pdf, dpi=100)
+            job = wait_job(job_id)
+            if job.get("status") != "done":
+                check(f"A-1[{label}]: 사전 OCR 성공", False, str(job.get("error")))
+                continue
+            req("POST", f"/api/jobs/{job_id}/translate", body={"lang": "ko"})
+            st = wait_translate(job_id)
+            jd = dd / "jobs" / job_id
+            rep = jd / "translations/ko/report.json"
+            units = jd / "translations/ko/units.json"
+            kept = []
+            if rep.is_file():
+                kept = json.loads(rep.read_text()).get("kept_original", [])
+            n_units = len(json.loads(units.read_text())) if units.is_file() else 0
+            ko = (jd / "result.ko.md")
+            body = ko.read_text(encoding="utf-8") if ko.is_file() else ""
+            leaked = ("cannot translate" in body.lower()
+                      or "죄송합니다, 번역할 수 없습니다" in body
+                      or body.strip() == "요약입니다.")
+            check(f"A-1[{label}]: 손상 출력이 result.ko.md에 반영되지 않음", not leaked,
+                  f"state={st.get('status')}")
+            check(f"A-1[{label}]: kept_original에 기록되어 관측 가능", len(kept) > 0,
+                  f"kept={len(kept)} units_cached={n_units}")
+
+    # 결정적 4xx — 잡 전체가 죽지 않고 강등되는지
+    dd = data_dir.parent / "fault-http400"
+    if dd.exists():
+        shutil.rmtree(dd)
+    with Servers(dd, {"FAULT": "http400", "TRANSLATE_MAX_RETRIES": "0"}):
+        job_id = upload(pdf, dpi=100)
+        if wait_job(job_id).get("status") == "done":
+            req("POST", f"/api/jobs/{job_id}/translate", body={"lang": "ko"})
+            st = wait_translate(job_id)
+            info(f"결정적 400 주입 시 번역 state={st.get('status')} error={str(st.get('error'))[:120]}")
+            check("결정적 4xx가 서버를 죽이지 않고 상태로 마감됨",
+                  st.get("status") in ("error", "done"), f"{st.get('status')}")
+
+
+def verify_worker_resilience(pdf: Path, data_dir: Path) -> None:
+    """B-1 실증 — 손상 업로드가 있어도 서버·워커가 살아 다음 잡을 처리하는지.
+
+    백엔드에 테스트 전용 예외 주입 훅은 없다. 있는 척(존재하지 않는 env 이름을
+    넘기는 식)하면 1번 잡이 그냥 성공해 이 단계가 조용히 무력화되므로, 공개 API로
+    관측 가능한 경로만 쓴다 — 헤더는 %PDF-라 5바이트 검사를 통과하지만 본문이
+    깨져 파싱에서 거부되는 파일을 올리고, 그 뒤 정상 잡이 끝까지 가는지 본다.
+    """
+    print("\n[9] B-1 워커 복원력 (손상 업로드 거부 후 후속 잡 처리)")
+    dd = data_dir.parent / "worker-resilience"
+    if dd.exists():
+        shutil.rmtree(dd)
+    broken = WORK / "broken-header-only.pdf"
+    broken.write_bytes(b"%PDF-1.7\n" + b"\x00 not a real pdf body \x00" * 64)
+    with Servers(dd, {}):
+        status, js = post_pdf(broken, dpi=100)
+        check("B-1: 손상 PDF는 5xx가 아니라 4xx로 거부됨",
+              400 <= status < 500, f"status={status} {str(js)[:120]}")
+        second = upload(pdf, dpi=100)
+        j2 = wait_job(second, timeout=300)
+        check("B-1: 앞 잡이 실패해도 워커가 살아 다음 잡을 완료함",
+              j2.get("status") == "done", f"2번 잡 status={j2.get('status')}")
+        s, health, _ = req("GET", "/api/health")
+        if isinstance(health, dict) and "worker_alive" in health:
+            check("health.worker_alive 노출 및 True", health.get("worker_alive") is True,
+                  str(health.get("worker_alive")))
+        else:
+            info("health에 worker_alive 필드 없음 (선택 항목)")
+
+
+def main() -> int:
+    global WORK, MOCK_PORT, API_PORT, BASE, MOCK
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--pdf", default=str(REPO / "sample/2504.19874v1.pdf"))
+    ap.add_argument("--pages", type=int, default=0, help="앞 N페이지만 사용 (0=전체)")
+    ap.add_argument("--skip", default="", help="건너뛸 단계 쉼표 구분 (faults,worker,cropbox)")
+    ap.add_argument("--work", default=str(REPO / "tmp" / "verify-e2e"),
+                    help="산출물/서버 로그 디렉터리 (기본 <repo>/tmp/verify-e2e)")
+    args = ap.parse_args()
+
+    WORK = Path(args.work).resolve()
+    MOCK_PORT = _free_port()
+    API_PORT = _free_port()
+    BASE = f"http://127.0.0.1:{API_PORT}"
+    MOCK = f"http://127.0.0.1:{MOCK_PORT}"
+
+    WORK.mkdir(parents=True, exist_ok=True)
+    sys.path.insert(0, str(REPO / "backend"))
+    import pymupdf
+
+    src = Path(args.pdf)
+    if not src.is_file():
+        print(f"대상 PDF가 없습니다: {src}", file=sys.stderr)
+        return 2
+    pdf = src
+    if args.pages:
+        pdf = WORK / f"trimmed-{args.pages}p.pdf"
+        d = pymupdf.open(src)
+        d.select(list(range(min(args.pages, d.page_count))))
+        d.save(pdf)
+        d.close()
+    n_pages = pymupdf.open(pdf).page_count
+    skip = {s.strip() for s in args.skip.split(",") if s.strip()}
+
+    print(f"대상 PDF: {pdf} ({n_pages}페이지)")
+    data_dir = WORK / "data-main"
+    if data_dir.exists():
+        shutil.rmtree(data_dir)
+
+    print("\n[1] 서버 기동 + 업로드/OCR")
+    with Servers(data_dir, {}):
+        s, health, _ = req("GET", "/api/health")
+        check("GET /api/health 200", s == 200, json.dumps(health, ensure_ascii=False)[:200])
+        check("엔진이 textlayer", health.get("engine") == "textlayer", str(health.get("engine")))
+        check("번역 프로바이더 활성", health.get("translate_available") is True)
+
+        job_id = upload(pdf, dpi=150)
+        job = wait_job(job_id)
+        jd = verify_ocr(job_id, job, data_dir, n_pages)
+        verify_translation(job_id, jd, n_pages)
+        verify_pdf_export(job_id, jd, n_pages)
+        verify_viewer(job_id, n_pages)
+        verify_security(job_id)
+
+    if "cropbox" not in skip:
+        verify_cropbox(data_dir / "jobs" / job_id, n_pages)
+    if "faults" not in skip:
+        verify_translation_faults(pdf, data_dir)
+    if "worker" not in skip:
+        verify_worker_resilience(pdf, data_dir)
+
+    print("\n" + "=" * 70)
+    print(f"통과 {len(PASS)} / 실패 {len(FAIL)}")
+    if FAIL:
+        print("\n실패 항목:")
+        for f in FAIL:
+            print("  ✗ " + f)
+    print("=" * 70)
+    return 1 if FAIL else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

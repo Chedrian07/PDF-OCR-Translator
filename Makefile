@@ -8,7 +8,7 @@
 #   전환(정지):    docker compose stop ovisocr2 ocr-ovis
 #                  (`--profile … down`은 프로필 없는 ocr-cpu까지 지우므로 전체 정리용으로만)
 
-.PHONY: setup setup-metal setup-native dev dev-textlayer test e2e \
+.PHONY: setup setup-metal setup-native dev dev-textlayer test coverage e2e e2e-mock verify-e2e \
 	docker-up docker-down docker-up-ollama docker-pull-model docker-down-ollama
 
 setup:            ## backend 의존성 설치 (torch CPU)
@@ -31,8 +31,17 @@ test:             ## 핵심 로컬 3종 — backend pytest · ruff · frontend (
 	cd backend && uv run --only-group dev ruff check .
 	npm test --prefix frontend
 
+coverage:         ## backend 커버리지 (pytest-cov는 --with로 임시 설치 — uv.lock 무변경)
+	cd backend && uv run --locked --with pytest-cov pytest --cov --cov-report=term
+
 e2e:              ## 실서버 스모크 (기동된 백엔드 필요 — README §E2E)
 	./scripts/smoke_e2e.sh
+
+e2e-mock:         ## hermetic 브라우저 E2E — mock OpenAI + FakeEngine 백엔드를 직접 띄운다
+	cd frontend && npm i && npx playwright install chromium && npm run test:e2e-mock
+
+verify-e2e:       ## 실 PDF 전 구간 점검 — 업로드→OCR→번역→PDF→뷰어→보안 (외부 API 없음)
+	cd backend && uv run python ../scripts/verify_e2e.py $(VERIFY_ARGS)
 
 docker-up:        ## CPU 스택 기동 (프로필 없는 ocr-cpu만 — .env 불필요)
 	docker compose up -d --build

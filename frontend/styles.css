@@ -932,6 +932,26 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
 .lang-seg:hover { color: var(--text); }
 .lang-seg.active { background: var(--bg-elev); color: var(--accent); box-shadow: var(--shadow-sm); }
 
+/* 번역 결과 요약 칩 — 원문 그대로 남은 문단 수/사유 (클릭 시 상세 토스트) */
+.translate-summary {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.translate-summary:hover { color: var(--text); }
+.translate-summary.is-warn { color: var(--warn); border-color: var(--warn); background: var(--warn-weak); }
+
 /* ---- Markdown preview --------------------------------------------------- */
 .markdown-body { font-size: 14px; line-height: 1.7; color: var(--text); word-wrap: break-word; }
 .markdown-body > *:first-child { margin-top: 0; }

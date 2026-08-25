@@ -277,6 +277,8 @@
                 <button id="lang-orig" class="lang-seg active" type="button" data-lang="orig" aria-pressed="true">원문</button>
                 <button id="lang-ko" class="lang-seg" type="button" data-lang="ko" aria-pressed="false">한국어</button>
               </div>
+              <!-- 번역 결과 요약 — 원문 그대로 남은 문단 수/사유 (JS가 표시/숨김) -->
+              <button id="translate-summary" class="translate-summary" type="button" hidden></button>
             </div>
           </div>
 
@@ -318,6 +320,8 @@
                   <button id="viewer-lang-orig" class="lang-seg active" type="button" aria-pressed="true">원문</button>
                   <button id="viewer-lang-ko" class="lang-seg" type="button" aria-pressed="false">한국어</button>
                 </div>
+                <!-- 뷰어에서도 같은 요약을 본다 — 읽는 도중 영어 문단을 만났을 때의 설명 -->
+                <button id="viewer-translate-summary" class="translate-summary viewer-only" type="button" hidden></button>
                 <a id="viewer-dl-html" class="btn btn-small viewer-only" download>HTML</a>
                 <a id="viewer-dl-pdf" class="btn btn-small viewer-only" download hidden>대조 PDF</a>
                 <button id="viewer-toggle-rail" class="btn btn-small viewer-only viewer-panel-toggle" type="button" aria-pressed="true" aria-controls="viewer-translation">번역문</button>

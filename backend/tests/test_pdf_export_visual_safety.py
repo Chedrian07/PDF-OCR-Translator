@@ -19,6 +19,7 @@ from app.pipeline import pdf_export as pdf_export_module
 from app.pipeline.pdf_export import (
     _SourceSpan,
     _block_rect,
+    _listing_segments,
     _load_pages,
     _plain_text,
     _noto_visible_ink_bounds,
@@ -1148,6 +1149,48 @@ def test_failed_table_reports_every_changed_cell_as_preserved(
     assert result.kept == 2, result.report()
 
 
+@pytest.mark.parametrize(
+    ("found_cells", "expect_trusted"),
+    [
+        (("A1", "A2"), True),    # 4셀 중 2셀 = 정확히 50% → 신뢰
+        (("A1",), False),        # 4셀 중 1셀 = 25% → 불신
+        (("A1", "A2", "B1"), True),
+    ],
+)
+def test_표_격자_신뢰_게이트의_경계는_원문_셀_검색_50퍼센트다(
+    tmp_path: Path, found_cells: tuple[str, ...], expect_trusted: bool,
+):
+    """임계값을 아무 테스트도 고정하지 않으면 60%·40%로 바뀌어도 조용히 통과한다.
+
+    50%는 "번역문이 엉뚱한 셀에 찍히고 인접 셀 원문이 리댁션되는" 사고와
+    "정상 표를 통째로 보존해 미번역으로 보이는" 사고 사이의 경계다.
+    """
+    import fitz
+
+    positions = {
+        "A1": (65, 95), "A2": (300, 95), "B1": (65, 115), "B2": (300, 115),
+    }
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    for name in found_cells:
+        page.insert_text(positions[name], name, fontsize=9)
+    doc.save(tmp_path / "grid.pdf")
+    doc.close()
+
+    parsed = _table_cells(
+        "<table><tr><td>A1</td><td>A2</td></tr>"
+        "<tr><td>B1</td><td>B2</td></tr></table>"
+    )
+    assert parsed is not None
+    cells, rows, cols = parsed
+    with fitz.open(tmp_path / "grid.pdf") as source:
+        _rects, grid_trusted = _table_cell_rects(
+            source[0], fitz.Rect(60, 85, 530, 125), cells, rows, cols,
+        )
+
+    assert grid_trusted is expect_trusted
+
+
 def test_원문_셀_검색이_전부_빗나간_표는_균등격자로_강행하지_않는다(
     tmp_path: Path,
     real_cjk_fontfile: str,
@@ -1542,6 +1585,54 @@ def test_원문_span이_없으면_리플로우하지_않는다():
     assert _reflow_flattened_text("A\nB", "가\n나", [], 9.3) is None
 
 
+def test_리스팅_세그먼트가_들여쓰기와_열_경계를_보존한다():
+    """의사코드는 줄 구조와 들여쓰기가 곧 의미다 — 원문 x 좌표를 그대로 쓴다."""
+    spans = [
+        _span("1:", 60, 100),
+        _span("procedure Main", 80, 100),
+        _span("2:", 60, 112),
+        _span("x ←1", 100, 112),
+        _span("▷comment", 300, 112),
+    ]
+
+    segments = _listing_segments(
+        "1:\nprocedure Main\n2:\nx ←1\n▷comment",
+        "1:\n프로시저 메인\n2:\nx ←1\n▷주석",
+        spans,
+        9.3,
+        430.0,
+    )
+
+    # 두 번째 시각 줄의 코드가 더 깊게(60 → 100) 들여쓰여 있음이 보존된다.
+    assert [round(segment.x0) for segment in segments] == [60, 80, 60, 100, 300]
+    # 각 세그먼트의 오른쪽 한계는 같은 줄 다음 세그먼트의 시작 x(마지막은 블록 우변).
+    assert [round(segment.x1) for segment in segments] == [80, 430, 100, 300, 430]
+    assert [round(segment.baseline) for segment in segments] == [100, 100, 112, 112, 112]
+    assert [segment.text for segment in segments] == [
+        "1:", "프로시저 메인", "2:", "x ←1", "▷주석",
+    ]
+
+
+def test_원문_span_한가운데를_가르는_줄은_세그먼트로_만들지_않는다():
+    """span을 통째로 리댁션하면 옆 줄 원문까지 지워진다 — 그 시각 줄만 버린다."""
+    spans = [
+        _span("AlphaBeta", 60, 100),
+        _span("Gamma", 200, 112),
+        _span("Delta", 300, 112),
+    ]
+
+    segments = _listing_segments(
+        "Alpha\nBeta\nGamma\nDelta",
+        "알파\n베타\n감마\n델타",
+        spans,
+        9.3,
+        430.0,
+    )
+
+    # 첫 시각 줄은 span 하나를 두 OCR 줄이 나눠 가지므로 통째로 보존한다.
+    assert [segment.text for segment in segments] == ["감마", "델타"]
+
+
 def _flattened_header_job(
     job_dir: Path,
     translated: list[str],
@@ -1608,14 +1699,151 @@ def test_평탄화된_표_헤더가_얕은_bbox에서도_번역된다(
     with fitz.open(result.path) as exported:
         text = exported[0].get_text().replace("\xa0", " ")
 
-    assert result.replaced == 1, result.report()
-    assert "데이터셋 긴 평가 짧은 평가" in text, text
+    # 각 셀이 원문 열 좌표에 그대로 들어가므로 셀 수만큼 교체된다(이전에는 한
+    # 상자에 흘려 넣어 1건이었고 열 정렬이 사라졌다).
+    assert result.replaced == 3, result.report()
+    assert result.listing_lines_replaced == 3, result.report()
+    for cell in ("데이터셋", "긴 평가", "짧은 평가"):
+        assert cell in text, text
     assert "Long Evaluation" not in text, text
     # 아래 보존 블록의 원문은 그대로 남아야 한다.
     assert "PRESERVED FOOTNOTE LINE" in text, text
 
 
-def test_리플로우로도_못_들어가는_평탄화_블록은_사유가_구분된다(
+def test_평탄화된_표_헤더가_원문_열_x좌표를_유지한다(
+    tmp_path: Path, real_cjk_fontfile: str,
+):
+    """리플로우는 번역은 되지만 열 정렬을 잃고 왼쪽 한 줄로 흘렀다 — 열을 지킨다."""
+    import fitz
+
+    job_dir = tmp_path / "flattened-columns"
+    job_dir.mkdir()
+    _flattened_header_job(
+        job_dir,
+        [
+            "PRESERVED CAPTION LINE",
+            "데이터셋\n긴 평가\n짧은 평가",
+            "PRESERVED FOOTNOTE LINE",
+        ],
+    )
+
+    result = build_translated_pdf(job_dir, "ko", fontfile=real_cjk_fontfile)
+    starts: dict[str, float] = {}
+    with fitz.open(result.path) as exported:
+        for block in exported[0].get_text("dict").get("blocks", ()):
+            for line in block.get("lines", ()):
+                for span in line.get("spans", ()):
+                    body = span.get("text", "").strip()
+                    if body:
+                        starts.setdefault(body, span["bbox"][0])
+
+    assert result.replaced == 3, result.report()
+    # 원문 셀은 x0 = 60/160/300에 있었다. 번역 셀이 같은 열에서 시작해야 한다.
+    for cell, expected in (("데이터셋", 60.0), ("긴 평가", 160.0), ("짧은 평가", 300.0)):
+        assert cell in starts, starts
+        assert abs(starts[cell] - expected) <= 1.5, (cell, starts[cell], expected)
+
+
+def test_한_열이_안_들어가도_나머지_열은_회수된다(
+    tmp_path: Path, real_cjk_fontfile: str,
+):
+    """전부-아니면-전무를 없앤다 — 폭이 모자란 줄만 원문으로 남기고 사유를 남긴다."""
+    import fitz
+
+    job_dir = tmp_path / "flattened-partial"
+    job_dir.mkdir()
+    _flattened_header_job(
+        job_dir,
+        [
+            "PRESERVED CAPTION LINE",
+            "매우긴번역문장" * 60 + "\n두번째\n세번째",
+            "PRESERVED FOOTNOTE LINE",
+        ],
+    )
+
+    result = build_translated_pdf(job_dir, "ko", fontfile=real_cjk_fontfile)
+    with fitz.open(result.path) as exported:
+        text = exported[0].get_text().replace("\xa0", " ")
+
+    assert result.replaced == 2, result.report()
+    assert result.kept_reasons.get("listing_line_no_fit") == 1, result.report()
+    assert any("줄 폭 부족" in warning for warning in result.warnings), result.warnings
+    # 회수한 두 열은 번역되고, 못 들어간 첫 열만 원문으로 남는다.
+    assert "두번째" in text and "세번째" in text, text
+    assert "Dataset" in text, text
+    assert "Long Evaluation" not in text, text
+
+
+def test_의사코드_리스팅이_줄과_들여쓰기를_지킨_채_번역된다(
+    tmp_path: Path, real_cjk_fontfile: str,
+):
+    """사용자 문서에 영어로 남던 알고리즘 블록.
+
+    원문 4줄 ↔ OCR 10줄이라 상자 조판은 어떤 크기로도 실패하고, 한 줄로 뭉치면
+    리스팅 구조가 무너진다. 줄·열 좌표를 그대로 두고 줄별로 조판해야 한다.
+    """
+    import fitz
+
+    job_dir = tmp_path / "pseudocode"
+    job_dir.mkdir()
+    source = fitz.open()
+    page = source.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    listing = (
+        (100, (("1:", 60), ("procedure Build", 80))),
+        (112, (("2:", 60), ("while i < n do", 95))),
+        (124, (("3:", 60), ("x = f(i)", 115), ("comment here", 300))),
+        (136, (("4:", 60), ("end while", 95))),
+    )
+    for baseline, cells in listing:
+        for text, x0 in cells:
+            page.insert_text((x0, baseline), text, fontsize=9)
+    source.save(job_dir / "source.pdf")
+    source.close()
+
+    ocr_lines = [text for _, cells in listing for text, _ in cells]
+    translated_lines = [
+        "1:", "프로시저 빌드",
+        "2:", "동안 i < n 반복",
+        "3:", "x = f(i)", "여기 주석",
+        "4:", "반복 끝",
+    ]
+    original = [{
+        "type": "text",
+        "bbox": _layout_bbox(fitz.Rect(55, 90, 430, 140)),
+        "content": "\n".join(ocr_lines),
+        "fs": 9 / PAGE_WIDTH * 100,
+    }]
+    _write_layout_pair(job_dir, original, ["\n".join(translated_lines)])
+
+    result = build_translated_pdf(job_dir, "ko", fontfile=real_cjk_fontfile)
+
+    placed: dict[str, tuple[float, float]] = {}
+    with fitz.open(result.path) as exported:
+        for block in exported[0].get_text("dict").get("blocks", ()):
+            for line in block.get("lines", ()):
+                for span in line.get("spans", ()):
+                    body = span.get("text", "").strip()
+                    if body:
+                        placed.setdefault(body, (span["bbox"][0], span["origin"][1]))
+
+    assert result.listing_lines_replaced == 4, result.report()
+    assert result.kept_reasons.get("flattened_no_fit") is None, result.report()
+    # 각 번역 줄이 원문 줄의 baseline과 들여쓰기 x에 그대로 놓인다.
+    for text, expected_x, expected_y in (
+        ("프로시저 빌드", 80.0, 100.0),
+        ("동안 i < n 반복", 95.0, 112.0),
+        ("여기 주석", 300.0, 124.0),
+        ("반복 끝", 95.0, 136.0),
+    ):
+        assert text in placed, placed
+        x0, baseline = placed[text]
+        assert abs(x0 - expected_x) <= 1.5, (text, x0, expected_x)
+        assert abs(baseline - expected_y) <= 1.5, (text, baseline, expected_y)
+    # 줄 번호와 바뀌지 않은 코드 줄은 원문 그대로 남는다.
+    assert "1:" in placed and "x = f(i)" in placed, placed
+
+
+def test_어느_줄도_못_들어가는_평탄화_블록은_사유가_구분된다(
     tmp_path: Path, real_cjk_fontfile: str,
 ):
     """'공간 부족'과 '가로 평탄화'를 한 문구로 뭉뚱그리면 다음 신고를 진단할 수 없다."""
@@ -1625,7 +1853,7 @@ def test_리플로우로도_못_들어가는_평탄화_블록은_사유가_구�
         job_dir,
         [
             "PRESERVED CAPTION LINE",
-            "매우긴번역문장" * 60 + "\n두번째\n세번째",
+            "\n".join(["매우긴번역문장" * 60] * 3),
             "PRESERVED FOOTNOTE LINE",
         ],
     )

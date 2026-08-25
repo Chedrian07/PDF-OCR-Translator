@@ -9,8 +9,11 @@
 
 업스트림 코드는 CUDA 전용(`.cuda()`/`torch.autocast("cuda")` 하드코딩)이라
 CPU 백엔드 지원을 위해 벤더링 후 아래 패치를 적용했다.
-**P1–P15는 `modeling_unlimitedocr.py`**, **P16–P20은 `modeling_deepseekv2.py`**를
-수정했으며 나머지 파일은 원본 그대로다.
+수정 대상 파일: **P1–P15는 `modeling_unlimitedocr.py`**, **P16–P20은
+`modeling_deepseekv2.py`**, **P21은 `modeling_unlimitedocr.py` + `deepencoder.py`**.
+`configuration_deepseek_v2.py`·`conversation.py`는 원본 그대로다.
+(패치 지점은 소스에서 `grep -n "vendor patch P" *.py`로 전수 확인할 수 있다 —
+업스트림 갱신 시 이 목록이 아니라 grep 결과를 진리원으로 삼을 것.)
 
 ## 패치 목록
 
@@ -37,5 +40,7 @@ CPU 백엔드 지원을 위해 벤더링 후 아래 패치를 적용했다.
 | P19 | (`modeling_deepseekv2.py`) `SlidingWindowLlamaAttention`에 rotary cos/sin 스텝 캐시(`_rope_cached`) 추가 — layer 0가 계산해 캐시 객체(past_kv)에 스태시, 레이어 1+는 **동일 텐서를 재사용** | rotary 출력은 position_ids·dtype에만 의존해 한 스텝의 전 레이어가 같은 값을 중복 계산 → 스텝당 rotary 계산을 레이어 수회에서 1회로 축소. **동일 텐서 재사용이라 결과 비트 동일**. layer 0는 키 일치와 무관하게 항상 재계산·갱신하므로 스텝 간 `id()` 재사용 충돌에도 안전(레이어 실행 순서 항상 0→N). 게이트 없이 전 디바이스 적용 |
 
 | P20 | (`modeling_deepseekv2.py`) `SlidingWindowLlamaAttention.forward`의 **디코드 정상상태(링) 분기**에서 링 위치 상태를 파이썬 int(`past_kv._ring_pos` dict)에서 **디바이스 상주 0-dim int64 텐서**(`past_kv._ring_pos_t` dict)로 전환. 캐시 슬롯 쓰기를 슬라이스 대입(`kcache[:, :, slot:slot+1] = …`)에서 `kcache.index_copy_(2, (ring_pos_t+prefill_len).view(1), …)`로, 슬롯 갱신을 `ring_pos_t.add_(1).remainder_(W)`(텐서 in-place)로 재구성. 파이썬 int 경로는 **폴백 없이 폐기·단일화**(이중 상태 = 버그 온상). `_prefill_length`는 캡처 시점 고정 상수라 int dict 유지 | app/engine/fast_decode.py의 **CUDA Graph 디코드 캡처(U2)**가 성립하려면 링 슬롯 인덱싱·갱신이 캡처 안에서 재생 가능한 텐서 연산이어야 함(파이썬 int 갱신은 캡처에 기록되지 않아 리플레이 시 같은 슬롯만 덮어씀). `index_copy_`는 슬라이스 대입과 **저장 값 동일**, `remainder_`는 `%`와 동일 → **CPU/MPS/CUDA 전 백엔드 공통 적용, 출력 불변**. P16(SDPA)·P17/P18(MoE)·P19(rotary 캐시)와 무접촉 — P19의 `_rope_cached` 호출·어텐션 스코어 경로 그대로. 그래프 캡처 자체는 CUDA·정상상태 한정(`OCR_CUDA_GRAPHS` 킬스위치, 실패 시 eager 폴백)이라 이 텐서화만으로 비CUDA/비그래프 동작은 값 불변 |
+
+| P21 | 추론 경로의 죽은 계산·중간 텐서 3곳 제거 — (a) (`modeling_unlimitedocr.py`) `forward`에서 `labels is None`이고 `q_len>1`(프리필)이면 `lm_head` 전에 `hidden_states[:, -1:, :]`로 자른다, (b) (`modeling_unlimitedocr.py`) `prepare_inputs_for_generation`의 `cache_position` 계산 삭제(`model_inputs`에 포함되지 않던 죽은 값), (c) (`deepencoder.py`) `SAM` neck 뒤 `net_2` 출력의 불필요한 `clone()` 제거(`net_3`은 입력을 in-place 변경하지 않고 `x2`는 이후 미사용) | (a) 프리필이 (시퀀스 × vocab) fp32 logits를 통째로 실체화해 페이지당 ~1GB급 VRAM 스파이크를 냈다 — 추론(HF generate·fast_decode)은 `[:, -1, :]`만 소비하므로 **출력 불변**, 학습(labels) 경로는 전체 유지. (b) 디코드 스텝마다 버려지는 `torch.arange` 디바이스 할당 제거 — 소비처가 없어 **동작 불변**. (c) 값이 같은 복사본 제거 — **비트 동일** |
 
 업스트림 갱신 시: 새 revision을 받아 이 패치들을 재적용하고 이 문서를 갱신할 것.

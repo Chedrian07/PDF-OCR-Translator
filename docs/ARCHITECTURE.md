@@ -655,8 +655,14 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
   CPU는 상한 대신 `OCR_CPU_THREADS`로 조절한다.
 - **compose 스레딩**: `.env`는 `.dockerignore`로 이미지·컨테이너 안에 없으므로,
   compose `environment`에 명시하지 않은 키는 컨테이너에서 조용히 무시된다.
-  이번 사이클에 `MAX_LENGTH`·`PAGE_SEPARATOR`·`LLM_OPENAI_API_KEY`가 4개 backend
-  서비스 전부에 추가됐다.
+  `LLM_OPENAI_API_KEY`·`PAGE_SEPARATOR`는 backend 4개 서비스
+  (`ocr-cpu`/`ocr-cuda`/`ocr-ovis`/`ocr-paddle`) **전부**에 있다.
+  `MAX_LENGTH`는 일부러 `ocr-cpu`·`ocr-cuda`에만 둔다 — 소비처가
+  `engine/unlimited.py`(로컬 생성 상한) 하나뿐이라 sidecar 스택에서는 아무 효과가
+  없다. 반대로 `PAGE_SEPARATOR`는 **엔진과 무관**하다(`merge.py`의 result.md 조립,
+  `render.py`의 doc-page 분할, `qa.py`의 페이지 컨텍스트가 전부 이 값으로 split).
+  ⚠ 노브를 추가할 때는 "어느 코드가 읽는가"를 먼저 보고 그 코드를 도는 서비스에만
+  넣는다 — 전부에 복붙하면 소비되지 않는 값이 문서와 함께 굳어진다.
 - **Ollama 컨테이너(선택)는 overlay로만**: `compose.ollama.yaml`은 프로필 없는
   `ollama` 서비스를 추가하고 ocr-cpu의 `OLLAMA_BASE_URL`을 `http://ollama:11434`로
   덮어쓴다. 본 파일에 병합하면 기본 경로(`docker compose up`)에서도 함께 기동돼
@@ -666,8 +672,16 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
 
 ## 9. C++ 네이티브 모듈 (`native/`, 모듈명 `uocr_native`)
 
-목적: 토큰 생성 핫패스(no-repeat-ngram 배닝)와 figure 크롭의 C++ 가속.
+목적: 토큰 생성 핫패스(no-repeat-ngram 배닝)의 C++ 가속.
 **없어도 앱은 동작해야 한다** — `app/native_ops.py`가 임포트 실패 시 순수 파이썬 폴백 사용.
+
+⚠ **앱이 실제로 쓰는 함수는 `banned_ngram_tokens` 하나뿐이다.** `crop_regions`는
+`native/tests/test_parity.py` 말고는 호출자가 없다 — 앱의 figure 크롭은 두 개의
+서로 다른 **파이썬** 경로로 일어난다: sidecar 스택은 `sidecar/materializer.py`의
+PIL `Image.crop`, Unlimited 엔진은 벤더 코드
+`vendor/unlimited_ocr/modeling_unlimitedocr.py`의 PIL `crop`. 두 경로 모두
+`uocr_native`를 import하지 않는다. 아래 9.2는 **모듈의 계약 명세**이지 앱 가속
+경로의 서술이 아니다(잘못 읽으면 "네이티브를 깔면 크롭이 빨라진다"는 오해가 된다).
 
 ### 9.1 `banned_ngram_tokens(sequence, ngram_size, window) -> ndarray[int64]`
 - 입력: `sequence` 1-D `int64` C-contiguous ndarray (지금까지 생성된 토큰열),
@@ -702,6 +716,13 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
 - scikit-build-core + pybind11 + CMake(C++17, `-O3`), Python 3.12
 - `native/tests/test_parity.py`: 랜덤 케이스에서 레퍼런스와 완전 일치 검증 (경계: 빈 시퀀스,
   window > len, ngram_size=1, 좌표 0/999, 퇴화 박스)
+- **빌드 의존성은 `==`로 정확 고정**한다(`native/pyproject.toml`). `backend/Dockerfile`이
+  이미지 빌드 시점에 `uv pip install /src/native`로 PEP 517 격리 빌드를 돌리므로,
+  상한 없는 `>=`면 같은 커밋이 날마다 다른 툴체인으로 컴파일된다. 실측(2026-08):
+  기존 `scikit-build-core>=0.10`·`pybind11>=2.12`가 **1.0.3·3.1.0**으로 해석됐다
+  (둘 다 메이저 2번 건너뜀). 올릴 때는 핀을 고치고 패리티 테스트를 통과시킨 뒤 커밋한다.
+- CI에서 이 모듈이 걸리는 곳은 **두 잡**이다: `native`(모듈 자체 패리티) +
+  `backend-native`(모듈이 설치된 상태의 backend 스위트, §11.2).
 
 ## 10. 프론트엔드 (frontend/, 정적 SPA)
 
@@ -744,28 +765,50 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
 - `OCR_ENGINE=textlayer`로 backend를 띄우고, 번역 프로바이더로는 같은 하네스가 띄운
   `scripts/mock_llm.py`(OpenAI 호환 목 서버)를 가리킨다. 목 서버는 마스킹
   플레이스홀더를 보존한 채 결정적으로 "번역"하므로 복원·layout 정렬·PDF 조판까지
-  실제 경로가 전부 돈다. `?fault=refusal|echo|drop_placeholder|http400|http429`
-  쿼리(또는 `FAULT` 환경변수)로 **결함 주입**도 한다.
+  실제 경로가 전부 돈다.
+  `?fault=refusal|refusal_ko|echo|summary|drop_placeholder|http400|http429`
+  쿼리(또는 `FAULT` 환경변수)로 **결함 주입**도 한다. 쿼리 경로는
+  `OPENAI_BASE_URL=…/v1?fault=echo` 형태로 쓴다 — `client._endpoint_url()`이 base의
+  query를 보존하므로 실제로 도달한다. 하네스는 `drop_placeholder`를 **쿼리 경로로**
+  주입해 두 방식이 모두 살아 있음을 매 실행 증명한다(문서만의 주장이 되지 않게).
+  ⚠ 목의 플레이스홀더 정규식 접두 집합은 `masking.py`와 반드시 같아야 한다
+  (`[mkgucft]`). 예전에는 `<m…>`(수식)만 봐서 수식이 없는 문서에서
+  `drop_placeholder`가 완전 no-op이었다(실측: 논문 6페이지 = c 23·f 5·u 4·m 0).
 - 단계: 서버 기동/health → 업로드·OCR(`verify_ocr`) → 번역(`verify_translation`) →
   PDF 내보내기(`verify_pdf_export`) → CropBox(`verify_cropbox`) → 뷰어 계약
   (`verify_viewer`) → 보안(`verify_security` — `/files` 경로 탈출 등) →
   번역 결함 주입(`verify_translation_faults`) → 워커 복원력(`verify_worker_resilience`).
-  총 60개 안팎의 `check()` 단언을 세고 마지막에 `통과 N / 실패 M`을 출력한다
-  (실패가 있으면 종료코드 1).
+  총 80개 안팎의 `check()` 단언을 세고 마지막에 `통과 N / 실패 M`을 출력한다
+  (실패가 있으면 종료코드 1). `--pages 6` 기준 로컬 실측 ≈120초(단언 82개 — 그중 61초가 429 백오프 실증이다).
 - 옵션: `--pdf PATH`(기본 `sample/2504.19874v1.pdf`) · `--pages N`(앞 N페이지만) ·
   `--skip faults,worker,cropbox` · `--work DIR`(기본 `tmp/verify-e2e`).
   포트는 매 실행마다 빈 포트를 잡아 개발 서버(8000)와 충돌하지 않는다.
   `make verify-e2e VERIFY_ARGS="--pages 4"` 형태로 인자를 넘긴다.
+- **작업 디렉터리는 포트처럼 자동으로 갈라지지 않는다.** `api.log`·`data-main`·
+  `fault-*`는 고정 이름이고 각 단계가 시작할 때 `rmtree`한다 — 같은 `--work`로 두
+  실행이 겹치면 뒤 실행이 앞 실행의 잡을 지운다. 그래서 `--work`에 배타 락
+  (`.harness.lock`, pid 기록)을 걸고, 살아 있는 실행이 잡고 있으면 "다른 `--work`를
+  쓰라"는 메시지와 함께 **종료코드 2**로 즉시 멈춘다. 죽은 프로세스가 남긴 락은
+  stale로 보고 인수한다.
+- 결함 주입 단계는 `refusal`·`refusal_ko`·`echo`·`summary`·`drop_placeholder`와
+  HTTP 오류 2종(`http400` 결정적 4xx / `http429` 재시도성)을 모두 돌린다.
+  429는 `Retry-After: 86400`을 함께 보내므로 상한(`_MAX_BACKOFF_S=30`)이 없으면
+  워커가 하루 묶인다 — 하네스는 벽시계로 **20초 이상 300초 미만**을 단언해 상·하한을
+  동시에 지킨다(하한이 없으면 "재시도를 아예 안 하는" 퇴화도 통과한다).
+  `drop_placeholder`는 `kept_original` 기록 여부에 더해 **보호 토큰 수**
+  (`masking.mask()`로 원문/번역본을 같은 자로 잰다)와 잔여 `<c1`류 태그를 본다.
 
 ### 11.2 CI 잡 구성 (`.github/workflows/ci.yml`)
 
 | 잡 | 내용 |
 |---|---|
-| `backend` | `uv sync --locked --extra cpu` → Noto CJK 설치 → `pytest --cov`(term+xml), coverage.xml 아티팩트 업로드 |
+| `backend` | `uv sync --locked --extra cpu` → Noto CJK 설치 → `pytest --cov`(term+xml), coverage.xml 아티팩트 업로드. **네이티브 미설치 = 순수 파이썬 폴백 경로** |
+| `backend-native` | 같은 스위트를 `uv pip install ../native` 후 `.venv/bin/python -m pytest`로 다시 돌린다 — **프로덕션 컨테이너가 실제로 쓰는 조합**. `uocr-native`는 backend 의존성 그래프 밖이라 이 잡이 없으면 `HAVE_NATIVE=True` 경로가 CI에서 0회 실행된다(`test_native_ops.py`의 패리티 검사가 통째로 skip). 설치가 조용히 되돌려지는 것을 막으려고 pytest 앞에 `HAVE_NATIVE` 단언 스텝을 둔다 |
 | `lint` | `ruff check . ../services` — sidecar는 backend uv.lock에 고정된 ruff를 재사용 |
 | `frontend` | `node --test` 단위 테스트 |
-| `native` | C++ 빌드 + 패리티 pytest |
+| `native` | C++ 빌드 + 패리티 pytest (`native/tests` — 모듈 자체의 의미론) |
 | `sidecar` | matrix(`ovisocr2`,`paddleocr_vl`) 파서/어댑터 pytest |
+| `verify-e2e` | §11.1 하네스를 `--pages 6`으로 실행 (업로드→OCR→번역→PDF→뷰어→보안→결함 주입→워커 복원력). 실패 시 `api.log`·내보낸 PDF 아티팩트 업로드 |
 | `e2e-mock` | mock OpenAI + FakeEngine 백엔드 hermetic 브라우저 E2E. 러너 시간이 커서 **PR에서는 돌지 않고** nightly(`schedule: 0 18 * * *`)·`workflow_dispatch`에서만 실행, 실패 시 스크린샷 아티팩트 업로드 |
 
 - **`--locked`가 계약**: lock 드리프트(pyproject만 고치고 uv.lock 커밋 누락)를 CI에서
@@ -773,6 +816,11 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
   의존성을 빠뜨린 채 빌드해 컨테이너 기동 시 ImportError로 드러난다.
 - 커버리지는 게이트가 아니라 관측용이다 — `pytest-cov`는 lock을 건드리지 않도록
   `uv run --with`로 임시 설치한다(`make coverage`도 동일).
+- **`backend-native`·`verify-e2e`에서는 `uv run`을 쓰지 않는다**: `uv run`은 환경을
+  `uv.lock`에 맞춰 재동기화한다. `uocr-native`는 lock 밖 패키지라 정리 대상이 될지가
+  uv 버전·설정에 달려 있어, 의존하지 않고 `uv sync` 뒤 `.venv/bin/python`을 직접
+  부른다(하네스가 `_python()`으로 고르는 인터프리터와 같다). 진짜 가드는
+  pytest 앞의 `HAVE_NATIVE` 단언 스텝이다 — 설치가 되돌려지면 거기서 붉어진다.
 
 ## 12. 로드맵
 
@@ -986,6 +1034,14 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
   meta.json mtime이 N일보다 오래된 잡을 DELETE 엔드포인트와 같은 경로
   (`JobStore.delete_dir`)로 제거한다(삭제마다 `logger.info` 1줄).
   queued/running 잡과 번역 스레드가 실행 중인 잡은 절대 삭제되지 않는다.
+- **⚠ `output/` 추적 해제는 다른 클론에서 "파일 삭제"로 나타난다**: `fd478ce`가
+  일회성 변환 산출물 40MB(6개 파일)를 `.gitignore` + `git rm -r --cached output/`으로
+  뺐다. `--cached`는 **인덱스에서만** 지우지만 커밋에는 삭제로 기록되므로, 파일이
+  남는 것은 명령을 실행한 작업 트리뿐이고 그 커밋을 pull 하는 다른 클론에서는
+  `output/`이 통째로 사라진다. 필요하면 `git checkout fd478ce^ -- output/`으로
+  파일만 되살린다(추적은 되지 않는다). `output/`은 재생성 가능한 산출물이므로
+  보관이 필요하면 리포 밖에 둔다. 앞으로 추적 중인 디렉터리를 무시 목록에 넣을
+  때는 커밋 메시지에 "다른 클론에서는 삭제된다"를 반드시 적을 것.
 
 ## 16. textlayer 엔진 (Localight 통합)
 

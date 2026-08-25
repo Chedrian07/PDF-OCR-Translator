@@ -27,6 +27,10 @@ _FILE_MULTI = re.compile(r"^page_(\d+)_(\d+)\.jpg$")
 _FILE_SINGLE = re.compile(r"^(\d+)\.jpg$")
 _BOXES_FILE = re.compile(r"^result_with_boxes_(\d+)\.jpg$")
 _SPECIAL_TOKEN = re.compile(r"<\|[^|>]{0,64}\|>")
+# 코드펜스(``` / ~~~) 여닫이 줄 — 최대 3칸 들여쓰기까지 펜스로 인정(CommonMark)
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+# 렌더 단계가 남긴 경고를 잡 경고로 승계할 때의 상한 (runner의 40칸 예산 보호)
+_MAX_RENDER_WARNINGS = 5
 
 
 def split_pages(markdown: str) -> list[str]:
@@ -51,6 +55,35 @@ def _neutralized_marker(core: str) -> str:
     return core + " "  # 그 외 구분자: 후행 공백으로 리터럴 일치만 깬다
 
 
+def _fenced_lines(lines: list[str]) -> list[bool]:
+    """각 줄이 코드펜스 **내부**인지 여부 (펜스 줄 자체는 False).
+
+    펜스 안의 텍스트는 렌더 결과가 곧 원문이라 `---`→`***` 치환이 곧 내용 변조다
+    (YAML 문서 구분자·구분선 예제가 조용히 깨진다). 페이지 단위로 판정하므로
+    닫히지 않은 펜스는 그 페이지 끝까지만 영향을 준다.
+    """
+    inside: list[bool] = []
+    opener: str | None = None
+    for line in lines:
+        m = _FENCE.match(line)
+        if opener is None:
+            # 여는 펜스: 백틱 펜스의 info string에는 백틱이 올 수 없다(CommonMark)
+            if m is not None and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                opener = m.group(1)
+            inside.append(False)
+            continue
+        closing = (
+            m is not None
+            and m.group(1)[0] == opener[0]
+            and len(m.group(1)) >= len(opener)
+            and not m.group(2).strip()      # 닫는 펜스는 info string을 갖지 않는다
+        )
+        inside.append(not closing)
+        if closing:
+            opener = None
+    return inside
+
+
 def _neutralize_separator(page_md: str, page_separator: str) -> str:
     """페이지 본문에서 page_separator와 리터럴로 충돌하는 줄을 무해화한다.
 
@@ -61,6 +94,11 @@ def _neutralize_separator(page_md: str, page_separator: str) -> str:
 
     실제로 충돌할 수 있는 줄만 바꾼다 — 구분자가 요구하는 빈 줄 패딩까지 갖춘
     경우. 덕분에 setext 제목의 밑줄(`제목` 다음 줄의 `---`)은 건드리지 않는다.
+
+    코드펜스 **안**에서는 구분선 문자 치환(`---`→`***`)을 쓰지 않는다 — 펜스 안은
+    렌더 결과가 곧 원문이라 문자를 바꾸면 YAML 문서 구분자·구분선 예제가 조용히
+    깨진다(result.md 포터빌리티 계약 위반). 대신 후행 공백만 붙여 리터럴 일치를
+    깬다 — 렌더·YAML 의미는 보존되면서 페이지 경계 불변식은 그대로 지켜진다.
     """
     core = page_separator.strip("\n")
     if not core or "\n" in core:
@@ -70,6 +108,7 @@ def _neutralize_separator(page_md: str, page_separator: str) -> str:
     if safe == core:
         return page_md
     lines = page_md.split("\n")
+    fenced = _fenced_lines(lines)
     prev_needs_blank = page_separator.startswith("\n\n")
     next_needs_blank = page_separator.endswith("\n\n")
     out = list(lines)
@@ -80,7 +119,7 @@ def _neutralize_separator(page_md: str, page_separator: str) -> str:
         prev_ok = not prev_needs_blank or i == 0 or not lines[i - 1].strip()
         next_ok = not next_needs_blank or i == len(lines) - 1 or not lines[i + 1].strip()
         if prev_ok and next_ok:
-            out[i] = safe
+            out[i] = core + " " if fenced[i] else safe
     return "\n".join(out)
 
 
@@ -98,6 +137,24 @@ def _atomic_write_json(path: Path, obj, indent: int | None = None) -> None:
     tmp = path.parent / f".{path.name}.tmp"
     tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=indent), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _render_warnings(job_dir: Path) -> list[str]:
+    """렌더 단계(pdf.render_pdf_pages)가 남긴 경고를 잡 경고로 승계한다.
+
+    페이지 렌더 실패는 흰 페이지로 격리되는데, 렌더는 잡 경고 채널(=이 병합기)이
+    만들어지기 **전**에 끝나므로 pages/render_warnings.json이 유일한 인계 지점이다.
+    승계하지 않으면 흰 페이지에서 나온 빈 결과가 quality.state="ok"로 남아
+    사용자가 정상 변환으로 오인한다.
+    """
+    path = job_dir / "pages" / "render_warnings.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(m) for m in data[:_MAX_RENDER_WARNINGS]]
 
 
 @dataclass
@@ -118,7 +175,8 @@ class IncrementalMerger:
         self.images_dir.mkdir(parents=True, exist_ok=True)
         self.layout_dir.mkdir(parents=True, exist_ok=True)
         self.pages_md: list[str] = []
-        self.warnings: list[str] = []
+        # 렌더 단계의 경고(흰 페이지 대체 등)를 잡 경고의 첫 항목으로 승계한다
+        self.warnings: list[str] = _render_warnings(job_dir)
         # 글로벌 이미지명 → figure bbox 메타 (벤더 P13의 boxes.json — 렌더 폭 계산용)
         self.figure_boxes: dict[str, dict] = {}
         # 레이아웃 뷰용 페이지 블록 (벤더 P14의 raw_pages.json → layout.json)

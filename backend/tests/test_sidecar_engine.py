@@ -698,3 +698,24 @@ def test_capability_chunk_size_fake_engine_unchanged(client, sample_pdf):
     assert body["progress"]["total_chunks"] == 1
     assert body["engine"] == "fake"  # 잡 메타는 fake 엔진에도 기록된다
     assert not any("페이지 단위 모델" in w for w in body["warnings"])
+
+
+def test_repeated_wait_note_does_not_evict_loss_warnings(tmp_path, stub):
+    """503 복귀 대기의 on_wait=self._note는 3초마다 **같은 문구**를 넣는다 —
+    적재 시점에 중복을 접지 않으면 그 한 문구가 40칸 예산을 통째로 먹고, 같은
+    청크의 손실 고지(정화로 버려진 표 등)가 전부 조용히 버려진다."""
+    from app.engine.sidecar import _MAX_JOB_WARNINGS
+
+    eng = build_engine(_settings(tmp_path, stub))
+    wait_note = "sidecar 재시작/모델 재로드 대기 중… (해당 페이지는 복귀 후 재시도)"
+    for _ in range(_MAX_JOB_WARNINGS + 20):
+        eng._note(wait_note)
+    eng._note("표 3개가 정화로 버려졌습니다")
+
+    drained = eng.drain_warnings()
+    assert drained == [wait_note, "표 3개가 정화로 버려졌습니다"]
+
+    # 상한 자체는 유지된다 — 서로 다른 경고는 여전히 40건에서 끊긴다
+    for i in range(_MAX_JOB_WARNINGS + 10):
+        eng._note(f"서로 다른 경고 {i}")
+    assert len(eng.drain_warnings()) == _MAX_JOB_WARNINGS

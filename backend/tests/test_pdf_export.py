@@ -316,15 +316,46 @@ def test_growth_stops_when_next_column_block_touches_current_bbox():
     assert grown == current
 
 
+def test_같은_폰트_파일은_resource_이름이_달라도_한_번만_파싱된다(tmp_path):
+    """캐시 키에 무시되는 fontname을 넣으면 18MB 파일이 최대 네 번 상주한다.
+
+    한 번의 내보내기가 같은 파일을 uocr-serif·uocr-sans·uocr-table·uocr-serif-2로
+    참조하므로 키를 정규화하지 않으면 파싱과 상주 비용이 그대로 곱해진다.
+    """
+    fontfile, _fontname = _resolve_font("")
+    if not fontfile:
+        pytest.skip("파일 한글 폰트가 없는 환경")
+    _metrics_font.cache_clear()
+
+    first = _metrics_font(fontfile, "uocr-serif")
+    assert _metrics_font(fontfile, "uocr-sans") is first
+    assert _metrics_font(fontfile, "uocr-table-2") is first
+    # 내장 CJK는 fontname이 실제로 폰트를 결정하므로 별개로 캐시된다.
+    assert _metrics_font(None, "korea") is not first
+    assert _metrics_font.cache_info().currsize == 2
+
+
+def test_폰트_파일을_같은_경로에_덮어쓰면_측정_캐시가_무효화된다(tmp_path):
+    """PDF_EXPORT_FONT 인플레이스 교체가 프로세스 재시작 없이 반영돼야 한다."""
+    import os
+
+    source, _fontname = _resolve_font("")
+    if not source:
+        pytest.skip("파일 한글 폰트가 없는 환경")
+    replaced = tmp_path / "deployed.ttf"
+    replaced.write_bytes(Path(source).read_bytes())
+    _metrics_font.cache_clear()
+
+    before = _metrics_font(str(replaced), "uocr-serif")
+    assert _metrics_font(str(replaced), "uocr-serif") is before
+    stat = replaced.stat()
+    os.utime(replaced, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))
+
+    assert _metrics_font(str(replaced), "uocr-serif") is not before
+
+
 def test_측정용_폰트를_재사용해도_조판_결과가_같다(tmp_path):
     """계획 함수의 fitz.Font는 블록마다 재파싱하지 않고 캐시를 공유한다."""
-    _metrics_font.cache_clear()
-    fontfile, fontname = _resolve_font("")
-    first = _metrics_font(fontfile, fontname)
-    assert _metrics_font(fontfile, fontname) is first
-    assert _metrics_font(None, "korea") is not first
-    assert _metrics_font.cache_info().hits >= 1
-
     job_dir = _unit_job(tmp_path)
     _metrics_font.cache_clear()
     cold = _pdf_text(build_translated_pdf(job_dir, "ko").path.read_bytes())

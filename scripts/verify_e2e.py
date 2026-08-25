@@ -11,6 +11,12 @@ scripts/smoke_e2e.sh 는 업로드→OCR→markdown/zip 에서 끝난다. 이 �
 산출물(서버 로그·내보낸 PDF 등)은 기본으로 리포의 tmp/verify-e2e/ 에 남는다
 (.gitignore 대상). `--work DIR` 로 옮길 수 있다. 포트는 매 실행마다 비어 있는
 포트를 잡으므로 개발 서버(8000)와 충돌하지 않는다.
+
+⚠ **작업 디렉터리는 포트와 달리 자동으로 갈라지지 않는다.** api.log·data-main·
+fault-* 는 전부 고정 이름이고 각 단계가 시작할 때 rmtree 한다. 같은 --work 로 두
+실행이 겹치면 뒤 실행이 앞 실행의 잡 데이터를 지워 앞쪽이 알 수 없는 이유로 깨진다.
+그래서 --work 에 배타 락(.harness.lock)을 걸고, 이미 살아 있는 실행이 잡고 있으면
+"다른 --work 를 쓰라"는 메시지와 함께 즉시 종료한다(종료코드 2).
 """
 from __future__ import annotations
 
@@ -51,6 +57,68 @@ def _python() -> str:
     """백엔드 venv 인터프리터 — uv run으로 들어왔으면 현재 인터프리터가 곧 그것이다."""
     venv = REPO / "backend" / ".venv" / "bin" / "python"
     return str(venv) if venv.is_file() else sys.executable
+
+
+LOCK_NAME = ".harness.lock"
+
+
+def _pid_alive(pid: int) -> bool:
+    """해당 pid가 살아 있는가 (신호 0 — 실제로 보내지 않고 존재만 확인)."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # 다른 사용자 소유지만 살아 있다
+    return True
+
+
+def acquire_work_lock(work: Path) -> Path:
+    """--work 디렉터리에 배타 락을 건다. 이미 살아 있는 실행이 잡고 있으면 SystemExit.
+
+    포트만 격리하고 작업 디렉터리는 공유하던 것이 결함이었다 — data-main·fault-* 는
+    각 단계 시작 시 rmtree 되므로 동시 실행이 서로의 잡을 지웠다. 죽은 프로세스가
+    남긴 락(정전·kill -9)은 stale로 보고 인수한다.
+    """
+    work.mkdir(parents=True, exist_ok=True)
+    lock = work / LOCK_NAME
+    payload = f"{os.getpid()} {time.time():.0f}\n".encode()
+    for _ in range(2):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            try:
+                owner = int(lock.read_text().split()[0])
+            except (OSError, ValueError, IndexError):
+                owner = -1
+            if owner != os.getpid() and _pid_alive(owner):
+                # 종료코드 2 = "단언 실패(1)가 아니라 실행 자체를 못 했다" — 스크립트를
+                # 감싸는 쪽이 재시도할지 보고할지 구분할 수 있어야 한다.
+                print(
+                    f"작업 디렉터리를 다른 하네스 실행(pid {owner})이 쓰고 있습니다: {work}\n"
+                    f"동시에 돌리려면 --work 로 다른 디렉터리를 주세요 "
+                    f"(예: --work {work}-2).",
+                    file=sys.stderr, flush=True,
+                )
+                raise SystemExit(2) from None
+            # stale 락 — 소유 프로세스가 이미 죽었다. 지우고 한 번 더 시도한다.
+            lock.unlink(missing_ok=True)
+            continue
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        return lock
+    raise SystemExit(f"작업 디렉터리 락을 잡지 못했습니다: {lock}")
+
+
+def release_work_lock(lock: Path) -> None:
+    """내가 잡은 락만 해제한다 (인수당한 경우 남의 락을 지우지 않게)."""
+    try:
+        if int(lock.read_text().split()[0]) == os.getpid():
+            lock.unlink(missing_ok=True)
+    except (OSError, ValueError, IndexError):
+        pass
 
 PASS: list[str] = []
 FAIL: list[str] = []
@@ -687,19 +755,50 @@ _FAULT_EXPECT: dict[str, tuple[str, tuple[str, ...]]] = {
     "refusal_ko": ("한국어 거부문", ("죄송합니다", "번역할 수 없습니다")),
     "echo": ("원문 echo", ()),  # echo는 문구가 아니라 구조(줄 수·라틴 문자)로 잡는다
     "summary": ("한 줄 요약", ("요약입니다",)),
+    # 목이 수식 플레이스홀더(<mN …/>)만 지운 응답을 낸다. 문구가 아니라 **보호 토큰
+    # 수**로 잡는다 — unmask가 missing을 보고하지 않고 통과시키면 수식·코드가
+    # 산출물에서 조용히 증발한다(문서가 주장하던 커버리지의 실제 대상).
+    "drop_placeholder": ("플레이스홀더 유실", ()),
 }
+
+# 이 fault들은 FAULT 환경변수 대신 **OPENAI_BASE_URL의 `?fault=` 쿼리**로 주입한다.
+# 문서(ARCHITECTURE §11.1)가 두 경로를 모두 주장하는데 하네스는 env만 썼다 —
+# client._endpoint_url()이 base의 query를 보존하므로 쿼리 경로도 실제로 살아 있고,
+# 여기서 한 번은 그 경로로 돌려 문서가 사실임을 실행으로 증명한다.
+_FAULT_VIA_URL = frozenset({"drop_placeholder"})
+
+
+def protected_token_count(text: str) -> int:
+    """masking.mask()가 보호하는 비언어 토큰 수 (수식·코드·이미지·URL·인용·참조).
+
+    하네스가 문구를 흉내 내지 않고 **실제 마스커**를 부른다 — 토큰 규칙이 바뀌어도
+    원문/번역본을 같은 자로 재므로 비교가 계속 유효하다.
+    """
+    from app.translate.masking import mask
+
+    return len(mask(text)[1])
 
 
 def verify_translation_faults(pdf: Path, data_dir: Path) -> None:
-    """A-1 실증 — 거부문/echo/플레이스홀더 유실을 주입하고 무성 손실이 없는지 본다."""
-    print("\n[8] A-1 번역 결함 주입 (거부문 · echo · 플레이스홀더 유실)")
+    """A-1 실증 — 거부문/echo/요약/플레이스홀더 유실/HTTP 오류를 주입하고 무성 손실을 본다.
+
+    mock_llm.py가 제공하는 결함 모드는 **전부** 여기서 돈다(tests/test_ci_ops_contracts.py
+    가 목록 일치를 강제한다). 코드만 있고 한 번도 실행되지 않는 결함 모드는
+    문서상의 커버리지만 부풀리고 아무것도 지키지 않는다.
+    """
+    print("\n[8] A-1 번역 결함 주입 (거부문 · echo · 플레이스홀더 유실 · HTTP 오류)")
     info(f"스캐폴딩 마커 {len(scaffolding_markers())}종: "
          + ", ".join(scaffolding_markers())[:200])
     for fault, (label, _) in _FAULT_EXPECT.items():
         dd = data_dir.parent / f"fault-{fault}"
         if dd.exists():
             shutil.rmtree(dd)
-        with Servers(dd, {"FAULT": fault, "TRANSLATE_MAX_RETRIES": "0"}):
+        if fault in _FAULT_VIA_URL:
+            env_extra = {"OPENAI_BASE_URL": f"{MOCK}/v1?fault={fault}",
+                         "TRANSLATE_MAX_RETRIES": "0"}
+        else:
+            env_extra = {"FAULT": fault, "TRANSLATE_MAX_RETRIES": "0"}
+        with Servers(dd, env_extra):
             job_id = upload(pdf, dpi=100)
             job = wait_job(job_id)
             if job.get("status") != "done":
@@ -740,21 +839,58 @@ def verify_translation_faults(pdf: Path, data_dir: Path) -> None:
                       ko_latin <= src_latin * 1.15 + 50,
                       f"원문 {src_latin}자 → {ko_latin}자")
 
+            # (d) drop_placeholder 전용 — 수식·코드가 조용히 증발하지 않았는가.
+            #     플레이스홀더가 사라진 응답을 그대로 채택하면 그 유닛의 보호 토큰이
+            #     통째로 없어진다. 원문 유지로 강등되면 1:1로 남는다.
+            if fault == "drop_placeholder" and src:
+                src_tok, ko_tok = protected_token_count(src), protected_token_count(body)
+                check(f"A-1[{label}]: 보호 토큰(수식·코드·인용)이 산출물에서 증발하지 않음",
+                      ko_tok >= src_tok * 0.9,
+                      f"원문 {src_tok}개 → 번역본 {ko_tok}개")
+                # 복원 실패 잔여물(`<m1` 류)이 사용자 문서에 그대로 남으면 안 된다.
+                residual = re.findall(r"<[mkgucft]\d+", body)
+                check(f"A-1[{label}]: 플레이스홀더 잔여물이 result.ko.md에 남지 않음",
+                      not residual, f"잔여 {len(residual)}개 (예: {residual[:3]})")
+
             check(f"A-1[{label}]: kept_original에 기록되어 관측 가능", len(kept) > 0,
                   f"kept={len(kept)} units_cached={n_units}")
 
-    # 결정적 4xx — 잡 전체가 죽지 않고 강등되는지
-    dd = data_dir.parent / "fault-http400"
-    if dd.exists():
-        shutil.rmtree(dd)
-    with Servers(dd, {"FAULT": "http400", "TRANSLATE_MAX_RETRIES": "0"}):
-        job_id = upload(pdf, dpi=100)
-        if wait_job(job_id).get("status") == "done":
+    # 결정적 4xx / 재시도성 429 — 잡 전체가 죽지 않고 상태로 마감되는지.
+    # 429는 Retry-After: 86400 을 함께 보낸다. 클라이언트가 상한(_MAX_BACKOFF_S)을
+    # 걸지 않고 헤더를 그대로 따르면 워커가 하루 묶여 "번역이 멈춘 것처럼" 보인다 —
+    # 그래서 벽시계 시간까지 함께 잰다(단언 없이 지나가면 관측되지 않는 결함이다).
+    for fault, label, extra in (
+        ("http400", "결정적 400", {"TRANSLATE_MAX_RETRIES": "0"}),
+        # 429는 재시도를 1회 허용해야 백오프 경로가 실제로 돈다. 동시성 1로 낮춰
+        # 30초(_MAX_BACKOFF_S) 대기를 **한 번만** 치른다 — 기본 4면 라운드가 겹쳐
+        # 하네스가 60초 이상 늘어난다(실측).
+        ("http429", "재시도성 429", {"TRANSLATE_MAX_RETRIES": "1",
+                                     "TRANSLATE_CONCURRENCY": "1"}),
+    ):
+        dd = data_dir.parent / f"fault-{fault}"
+        if dd.exists():
+            shutil.rmtree(dd)
+        with Servers(dd, {"FAULT": fault, **extra}):
+            job_id = upload(pdf, dpi=100)
+            if wait_job(job_id).get("status") != "done":
+                check(f"A-1[{label}]: 사전 OCR 성공", False)
+                continue
+            t0 = time.time()
             req("POST", f"/api/jobs/{job_id}/translate", body={"lang": "ko"})
-            st = wait_translate(job_id)
-            info(f"결정적 400 주입 시 번역 state={st.get('status')} error={str(st.get('error'))[:120]}")
-            check("결정적 4xx가 서버를 죽이지 않고 상태로 마감됨",
+            st = wait_translate(job_id, timeout=600)
+            elapsed = time.time() - t0
+            info(f"{label} 주입 시 번역 state={st.get('status')} "
+                 f"{elapsed:.0f}초 error={str(st.get('error'))[:120]}")
+            check(f"{label}가 서버를 죽이지 않고 상태로 마감됨",
                   st.get("status") in ("error", "done"), f"{st.get('status')}")
+            if fault == "http429":
+                # 양쪽 경계를 다 본다. 하한(20초)이 없으면 "429를 재시도조차 안 하게"
+                # 퇴화해도 통과하고, 상한(300초)이 없으면 Retry-After: 86400을 그대로
+                # 따라 워커가 하루 묶여도 통과한다.
+                check("429 재시도 백오프가 Retry-After 상한(30초) 안에서 실제로 일어남",
+                      20 <= elapsed < 300, f"{elapsed:.0f}초 (기대 20~300초)")
+            s, health, _ = req("GET", "/api/health")
+            check(f"{label} 뒤에도 백엔드가 살아 있음", s == 200, f"status={s}")
 
 
 def verify_worker_resilience(pdf: Path, data_dir: Path) -> None:
@@ -795,7 +931,8 @@ def main() -> int:
     ap.add_argument("--pages", type=int, default=0, help="앞 N페이지만 사용 (0=전체)")
     ap.add_argument("--skip", default="", help="건너뛸 단계 쉼표 구분 (faults,worker,cropbox)")
     ap.add_argument("--work", default=str(REPO / "tmp" / "verify-e2e"),
-                    help="산출물/서버 로그 디렉터리 (기본 <repo>/tmp/verify-e2e)")
+                    help="산출물/서버 로그 디렉터리 (기본 <repo>/tmp/verify-e2e). "
+                         "동시 실행하려면 실행마다 다른 값을 줘야 한다 — 배타 락이 걸린다")
     args = ap.parse_args()
 
     WORK = Path(args.work).resolve()
@@ -804,7 +941,16 @@ def main() -> int:
     BASE = f"http://127.0.0.1:{API_PORT}"
     MOCK = f"http://127.0.0.1:{MOCK_PORT}"
 
-    WORK.mkdir(parents=True, exist_ok=True)
+    # 포트는 매번 갈리지만 작업 디렉터리는 안 갈린다 — 동시 실행이 서로의 잡 데이터를
+    # rmtree 하지 못하도록 여기서 배타 락을 잡는다 (finally에서 해제).
+    lock = acquire_work_lock(WORK)
+    try:
+        return _run(args)
+    finally:
+        release_work_lock(lock)
+
+
+def _run(args) -> int:
     sys.path.insert(0, str(REPO / "backend"))
     import pymupdf
 

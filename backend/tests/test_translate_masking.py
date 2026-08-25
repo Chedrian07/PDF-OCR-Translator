@@ -369,3 +369,29 @@ def test_스캐폴딩_마커가_실제_프롬프트와_일치한다():
             assert _SCAFFOLD_RE.search(header), (
                 f"프롬프트 헤더 {header!r}가 _SCAFFOLD_RE에 없다 — 마커를 갱신하라"
             )
+
+
+def test_untranslated_reason이_규칙별_사유를_돌려준다():
+    """게이트 오탐 관측의 전제 — 어느 규칙이 걸었는지 구분할 수 있어야 한다."""
+    from app.translate.masking import looks_untranslated, untranslated_reason
+
+    src = "The accuracy improved on the benchmark dataset that we evaluated."
+    cases = {
+        "[번역할 원문]\n무언가": "scaffold",
+        "죄송합니다, 이 텍스트는 번역할 수 없습니다.": "refusal",
+        src: "hangul-ratio",
+    }
+    for out, expected in cases.items():
+        assert untranslated_reason(src, out, {}) == expected, out
+        assert looks_untranslated(src, out, {}) is True
+
+    # 한 줄 요약은 한글 비율을 통과하므로 길이비가 잡는다 (원문 80자 초과 → 하한 0.25)
+    long_src = (
+        "The accuracy improved on every benchmark dataset that we evaluated, and the "
+        "ablation study confirms that each component contributes to the final result."
+    )
+    assert untranslated_reason(long_src, "정확도가 올랐다.", {}) == "length-ratio"
+
+    ok = "우리가 평가한 벤치마크 데이터셋에서 정확도가 향상되었다."
+    assert untranslated_reason(src, ok, {}) == ""
+    assert looks_untranslated(src, ok, {}) is False

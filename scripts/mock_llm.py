@@ -4,8 +4,12 @@
   - 정상 모드(기본): 입력 텍스트를 결정적으로 "번역"한다. 마스킹 플레이스홀더
     (<m1 .../> 형태)는 **그대로 보존**하고 영문 단어만 한글로 치환하므로,
     복원 단계·layout 정렬·PDF 조판까지 실제 경로가 전부 돈다.
-  - 결함 주입 모드: ?fault=refusal|echo|drop_placeholder|http400|http429
+  - 결함 주입 모드: ?fault=refusal|refusal_ko|echo|summary|drop_placeholder|http400|http429
     쿼리 또는 FAULT 환경변수로 A-1(출력 검증) 회귀를 실증한다.
+    쿼리 경로는 `OPENAI_BASE_URL=http://host:port/v1?fault=echo` 로 쓴다 —
+    translate/client.py `_endpoint_url()`이 base의 query를 보존한 채 경로만 이어
+    붙이므로(`/v1/chat/completions?fault=echo`) 실제로 도달한다. verify_e2e.py는
+    drop_placeholder를 이 경로로 주입해 두 방식이 모두 살아 있음을 매 실행 증명한다.
 
 정상 모드는 **실제 한국어의 길이 압축률을 재현한다**(MOCK_TRANSLATE_RATIO, 기본 0.4).
 영→한 번역문은 원문의 0.3~0.5배 길이인데, 목이 길이를 보존하면
@@ -28,7 +32,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 STATS = {"calls": 0, "by_text": {}}
 _LOCK = threading.Lock()
 
-PLACEHOLDER_RE = re.compile(r"<m\d+\b[^>]*/>")
+# ⚠ 접두 문자는 masking.py `_PLACEHOLDER_RE`와 **같은 집합**이어야 한다
+# (m=수식 k=코드 g=이미지 u=URL c=인용 f=참조 t=HTML태그). 예전에는 `<m…>`만 봐서
+# ① 정상 모드에서 c/f/u 플레이스홀더의 v 속성이 한글로 뭉개졌고
+# ② drop_placeholder 결함이 수식 없는 문서에서 **완전 no-op**이었다
+#    (실측: 논문 6페이지 = c 23 · f 5 · u 4 · m 0 → 지울 것이 하나도 없었다).
+PLACEHOLDER_RE = re.compile(r"<[mkgucft]\d+\b[^>]*/>")
 
 # 결정적 사전 — 실제 번역기가 아니라 "영문이 한글로 바뀌었다"는 신호를 만드는 것이 목적.
 _DICT = {

@@ -1131,3 +1131,113 @@ def test_모든_유닛에_같은_출력을_주는_공급자는_축퇴로_원문_
     if units.is_file():
         import json
         assert "요약입니다." not in json.loads(units.read_text()).values(), "캐시 오염 금지"
+
+
+def test_캐시_적중만으로는_결정적_4xx_강등을_허용하지_않는다(tmp_path, cfg):
+    """progressed의 의미는 "이 run에서 엔드포인트가 실제로 동작했다"이다.
+
+    캐시 적중은 API를 한 번도 타지 않으므로 엔드포인트 건강의 증거가 될 수 없다.
+    캐시로 progressed가 서면, 모델명 오타·잘못된 payload로 전 요청이 400을 받는
+    죽은 엔드포인트에서도 신규 유닛이 전부 kept_original로 강등돼 잡이 조용히
+    done 된다(사용자는 새 문단만 영어인 산출물을 받는다). 전역 실패는 error여야 한다.
+    """
+    from dataclasses import replace
+
+    from app.translate.types import TranslateError, TranslateUnitRejected
+
+    class AlwaysRejectClient(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            if _marker(user) is None:
+                return ""
+            raise TranslateUnitRejected("번역 API 오류 (HTTP 400): unknown model")
+
+    warm = (
+        "The first paragraph explains the training procedure in detail.\n\n"
+        "The last paragraph summarizes the evaluation protocol briefly.\n"
+    )
+    seq = replace(cfg, concurrency=1)
+    _run_md(tmp_path, seq, warm, EchoClient())  # units.json 적재
+
+    # 같은 잡에 문단 하나가 추가된 상태로 재번역 — 앞 두 유닛은 캐시 적중.
+    grown = warm + "\nA newly appended paragraph describes the ablation study setup.\n"
+    (tmp_path / "result.md").write_text(grown, encoding="utf-8")
+    dead = AlwaysRejectClient()
+    with pytest.raises(TranslateError):
+        run_translation(tmp_path, "ko", seq, client=dead)
+    assert _state(tmp_path)["status"] == "error"
+
+
+def test_게이트_거부가_규칙별로_집계된다(tmp_path, cfg):
+    """게이트 오탐은 조용하다 — 래더 왕복만 늘리고 소진되면 문단이 영어로 남는다.
+
+    kept_reasons는 최종 결과(gate-rejected 1건)만 세므로 "어떤 규칙이 몇 번 걸었나"
+    "래더가 흡수한 거부는 몇 건인가"가 보이지 않았다. gate_reasons가 그 분포다.
+    """
+    class EnglishEchoClient(EchoClient):
+        """번역 프롬프트든 repair 프롬프트든 영문 원문을 그대로 되돌려준다."""
+
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            src = _marker(user)
+            if src is not None:
+                return src
+            head = "[원문 — 아래 꺾쇠 태그가 정답이다]\n"
+            if head in user:
+                return user.split(head, 1)[1].split("\n\n", 1)[0]
+            return ""
+
+    md = (
+        "The accuracy improved on the benchmark dataset that we evaluated. "
+        "The second sentence describes the ablation study in more detail.\n"
+    )
+    _res, report, _out = _run_md(tmp_path, cfg, md, EnglishEchoClient())
+
+    assert report["kept_reasons"] == {"gate-rejected": 1}
+    assert report["gate_reasons"].get("hangul-ratio", 0) >= 1
+    # 래더(repair·분할)가 흡수한 거부까지 세므로 최종 kept 1건보다 많다 = 오탐 비용
+    assert sum(report["gate_reasons"].values()) > 1
+
+
+def test_거부문_출력은_refusal_사유로_집계된다(tmp_path, cfg):
+    class RefusingClient(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            if _marker(user) is None:
+                return ""
+            return "죄송합니다, 이 텍스트는 번역할 수 없습니다."
+
+    md = "The accuracy improved on the benchmark dataset that we evaluated.\n"
+    _res, report, _out = _run_md(tmp_path, cfg, md, RefusingClient())
+    assert report["gate_reasons"].get("refusal", 0) >= 1
+    assert report["kept_reasons"] == {"gate-rejected": 1}
+
+
+def test_정상_번역이면_게이트_집계가_비어있다(tmp_path, cfg):
+    md = "The accuracy improved on the benchmark dataset that we evaluated.\n"
+    _res, report, _out = _run_md(tmp_path, cfg, md, EchoClient())
+    assert report["gate_reasons"] == {}
+
+
+def test_캐시_전량_무효화는_경고와_지표로_남는다(job, cfg):
+    """PROMPT_V·모델·샘플링을 바꾸면 units.json이 통째로 무효가 되어 전량 재번역된다.
+    비용이 드는 사건인데 종전에는 어디에도 기록이 없었다."""
+    from dataclasses import replace
+
+    run_translation(job, "ko", cfg, client=EchoClient())
+    warm = _report(job)
+    assert warm["cache_prior"] == 0                     # 첫 run — 기존 캐시 없음
+    assert not any("전량 재번역" in w for w in warm["warnings"])
+
+    run_translation(job, "ko", cfg, client=EchoClient())
+    hit = _report(job)
+    assert hit["cache_prior"] > 0 and hit["cache_reused"] == hit["cache_prior"]
+    assert not any("전량 재번역" in w for w in hit["warnings"])   # 전 유닛 적중 → 무경고
+
+    # 프롬프트 개정과 같은 효과 — 캐시 키 재료가 바뀌면 기존 키는 하나도 안 맞는다.
+    # 판정 기준은 cached가 아니라 cache_reused다: 문서 내 중복 유닛의 single-flight
+    # 재사용도 cached를 올려, 실 논문에서는 전량 무효인데도 cached==2였다(실측).
+    run_translation(job, "ko", replace(cfg, reasoning="high"), client=EchoClient())
+    invalidated = _report(job)
+    assert invalidated["cache_reused"] == 0 and invalidated["cache_prior"] > 0
+    assert any("전량 재번역" in w and "PROMPT_V" in w for w in invalidated["warnings"])

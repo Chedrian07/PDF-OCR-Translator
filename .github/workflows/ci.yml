@@ -1,5 +1,6 @@
-# CI — backend pytest(+커버리지)·native 패리티·frontend node --test·sidecar 파서
-# 테스트 + ruff 린트(backend·services). nightly/수동에서는 hermetic 브라우저 E2E까지.
+# CI — backend pytest(+커버리지)·backend×native 통합·native 패리티·frontend
+# node --test·sidecar 파서 테스트 + ruff 린트(backend·services) + 실 PDF 전 구간
+# 하네스(verify-e2e). nightly/수동에서는 hermetic 브라우저 E2E까지.
 # 실모델은 실행하지 않음: backend 테스트는 FakeEngine 기반, torch는 CPU 휠(uv 캐시 활용).
 name: CI
 
@@ -46,6 +47,44 @@ jobs:
           name: backend-coverage
           path: backend/coverage.xml
           if-no-files-found: ignore
+
+  # backend × uocr_native 통합 — **프로덕션이 실제로 쓰는 조합**이다.
+  # backend/Dockerfile이 `uv pip install /src/native`로 네이티브 모듈을 venv에 넣지만
+  # uocr-native는 backend/pyproject.toml의 의존성 그래프 밖이라, 위 backend 잡은
+  # 언제나 `HAVE_NATIVE=False`(순수 파이썬 폴백)로만 돌았다. 즉 컨테이너에서 도는
+  # 코드 경로는 CI에서 한 번도 실행되지 않았고, test_native_ops.py의 패리티 검사도
+  # skipif로 통째로 건너뛰었다(native 잡은 native/tests만 돈다 — 백엔드 래퍼 미검증).
+  backend-native:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install (torch CPU 휠)
+        run: uv sync --locked --extra cpu
+      - name: Install CJK fonts (Docker 런타임과 동일 경로)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+      # Dockerfile과 같은 방식으로 backend venv에 직접 설치한다. 이후 스텝은
+      # `uv run`(환경을 uv.lock에 맞춰 재동기화한다) 대신 .venv/bin/python을 직접
+      # 부른다 — uocr-native는 lock 밖 패키지라 정리 대상이 될지가 uv 버전·설정에
+      # 달려 있고, 조용히 되돌려지면 이 잡은 backend 잡의 복제가 된다.
+      - name: Install uocr_native into backend venv (backend/Dockerfile과 동일)
+        run: uv pip install --python .venv/bin/python ../native
+      # 게이트: 설치가 실패했거나 import가 깨졌는데 pytest가 skip으로 넘어가면
+      # 이 잡은 초록인 채 아무것도 검증하지 않는다. 먼저 단언한다.
+      - name: HAVE_NATIVE=True 단언 (조용한 skip 방지)
+        run: >-
+          .venv/bin/python -c
+          "from app.native_ops import HAVE_NATIVE;
+          assert HAVE_NATIVE, 'uocr_native 미설치 — 이 잡의 존재 이유가 사라진다';
+          print('uocr_native OK')"
+      - name: pytest (네이티브 설치 상태 전체 스위트)
+        run: .venv/bin/python -m pytest
 
   lint:
     runs-on: ubuntu-latest
@@ -112,6 +151,43 @@ jobs:
           uv venv --python 3.12 .venv
           uv pip install -p .venv/bin/python pytest
           .venv/bin/python -m pytest tests/
+
+  # 실 PDF 전 구간 하네스 (= make verify-e2e). 이 리포의 주요 안전망인데도 지금까지
+  # 어떤 자동 트리거에도 걸려 있지 않았다 — 사람이 로컬에서 기억해야만 돌았다.
+  # 외부 API·GPU·모델 다운로드 불필요(OCR_ENGINE=textlayer + scripts/mock_llm.py).
+  # 앞 6페이지만 써서 러너 시간을 억제한다(로컬 실측 ≈120초 · 단언 82개 —
+  # 그중 61초는 429 Retry-After 상한을 실제로 재는 백오프 대기다).
+  verify-e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install backend (torch CPU 휠)
+        run: uv sync --locked --extra cpu
+      # 하네스가 한국어 PDF를 조판·추출해 tofu(□)를 세므로 CJK 폰트가 필수다 —
+      # 없으면 "폰트 폴백 tofu 없음" 단언이 실패한다 (backend 잡과 동일 이유).
+      - name: Install CJK fonts (Docker 런타임과 동일 경로)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+      # 하네스는 backend/.venv/bin/python을 골라 서버·목을 띄운다. `uv run`을 거치면
+      # 재동기화가 일어날 수 있어 인터프리터를 직접 부른다.
+      # --work: 리포 밖(RUNNER_TEMP)에 두어 산출물이 작업 트리를 오염시키지 않게.
+      - name: verify-e2e (실 PDF 6페이지 · 업로드→OCR→번역→PDF→뷰어→보안→결함주입)
+        run: .venv/bin/python ../scripts/verify_e2e.py --pages 6 --work "$RUNNER_TEMP/verify-e2e"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: verify-e2e-artifacts
+          # 서버 로그·내보낸 PDF만 올린다(잡 데이터 전체는 수백 MB가 될 수 있다).
+          path: |
+            ${{ runner.temp }}/verify-e2e/api.log
+            ${{ runner.temp }}/verify-e2e/*.pdf
+          if-no-files-found: ignore
 
   # mock OpenAI(로컬 http) + FakeEngine 백엔드를 직접 띄우는 hermetic 브라우저 E2E.
   # GPU·외부 API 불필요하지만 러너 시간이 커서 PR을 막지 않는다 — nightly(schedule)와

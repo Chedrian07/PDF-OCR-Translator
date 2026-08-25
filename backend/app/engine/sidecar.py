@@ -324,8 +324,17 @@ class SidecarEngine(OCREngine):
     # ── 경고 채널 ───────────────────────────────────────────────
 
     def _note(self, message: str) -> None:
-        """사용자 노출용 경고 적재 (페이지 스레드에서도 호출되므로 락 보호)."""
+        """사용자 노출용 경고 적재 (페이지 스레드에서도 호출되므로 락 보호).
+
+        **중복은 적재 시점에 접는다.** drain_warnings가 어차피 중복을 1건으로
+        접으므로 손실은 없고, 접지 않으면 반복 호출되는 경고 하나가 40칸 예산을
+        통째로 먹는다 — 503 복귀 대기의 on_wait=self._note는 3초마다 같은 문구를
+        넣어 2분이면 버퍼를 채우고, 그 뒤 같은 청크의 손실 고지(정화로 버려진 표
+        등)가 전부 조용히 버려진다.
+        """
         with self._warn_lock:
+            if message in self._warnings:
+                return
             if len(self._warnings) < _MAX_JOB_WARNINGS:
                 self._warnings.append(message)
 

@@ -1,7 +1,12 @@
 import io
 import json
+import logging
+import os
+import shutil
 import threading
+import time
 import zipfile
+from pathlib import Path
 from types import SimpleNamespace
 
 from conftest import wait_done
@@ -37,6 +42,62 @@ def test_health_reports_worker_alive(client):
         assert client.get("/api/health").json()["worker_alive"] is False
     finally:
         client.app.state.worker = real
+
+
+def test_worker_death_is_logged_not_only_exposed(client, caplog):
+    """worker_alive 필드는 아무도 폴링하지 않으면 무성이다 — 사망은 서버 로그에도
+    남아야 한다. 다만 health 폴링마다 찍으면 로그가 잠기므로 전이에서만 남긴다."""
+
+    class _Dead:
+        def is_alive(self):
+            return False
+
+    real = client.app.state.worker
+    client.app.state.worker = _Dead()
+    try:
+        with caplog.at_level(logging.ERROR, logger="app.api"):
+            for _ in range(3):
+                assert client.get("/api/health").json()["worker_alive"] is False
+        dead = [r for r in caplog.records if "워커" in r.getMessage()]
+        assert len(dead) == 1, [r.getMessage() for r in dead]
+    finally:
+        client.app.state.worker = real
+        client.app.state.worker_alive_last = None
+
+
+def test_rate_limit_key_trusts_proxy_only_when_opted_in(monkeypatch):
+    """리버스 프록시 뒤에서는 client.host가 프록시 IP라 전원이 한 버킷으로 붕괴한다.
+    그렇다고 X-Forwarded-For를 무조건 믿으면 헤더 위조로 우회된다 — 신뢰 홉 수를
+    명시한 배포에서만 헤더를 읽고, 기본값(미설정)은 현행대로 헤더를 무시한다."""
+    import app.api as api_mod
+
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="10.0.0.9"),
+        # client(203.0.113.7) → 프록시A → 프록시B → 앱: 각 홉이 한 항목씩 덧붙인다
+        headers={"x-forwarded-for": "203.0.113.7, 10.0.0.9"},
+    )
+    monkeypatch.delenv("TRUSTED_PROXY_HOPS", raising=False)
+    assert api_mod._client_key(request) == "10.0.0.9"        # 기본: 헤더 무시
+
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+    assert api_mod._client_key(request) == "10.0.0.9"        # 신뢰 홉 1개 = 프록시A 주소
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "2")
+    assert api_mod._client_key(request) == "203.0.113.7"     # 실제 클라이언트
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "3")            # 체인이 홉 수보다 짧다
+    assert api_mod._client_key(request) == "10.0.0.9"        # → 헤더를 믿지 않는다
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "abc")          # 오타는 안전한 쪽으로
+    assert api_mod._client_key(request) == "10.0.0.9"
+
+    # 헤더가 없거나 비어 있어도 직접 주소로 폴백한다
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+    bare = SimpleNamespace(client=SimpleNamespace(host="10.0.0.9"), headers={})
+    assert api_mod._client_key(bare) == "10.0.0.9"
+    # 키가 무한히 길어지지 않는다 (레이트리밋 dict 메모리 방어)
+    long_header = SimpleNamespace(
+        client=SimpleNamespace(host="10.0.0.9"),
+        headers={"x-forwarded-for": "9" * 500},
+    )
+    assert len(api_mod._client_key(long_header)) == api_mod._XFF_KEY_MAX
 
 
 def test_health_reports_max_upload_mb(tmp_path):
@@ -412,8 +473,354 @@ def test_job_render_lock_is_per_job(client):
     lock_a = api_mod._job_render_lock("job-a")
     assert api_mod._job_render_lock("job-a") is lock_a
     assert api_mod._job_render_lock("job-b") is not lock_a
+    # 진입 컨텍스트도 같은 락을 재사용한다 (중복 빌드 방지의 실제 경로)
+    with api_mod._job_render_guard("job-a"):
+        assert api_mod._FACSIMILE_LOCKS["job-a"] is lock_a
     api_mod._forget_job_caches("job-a")
     api_mod._forget_job_caches("job-b")
+
+
+def test_job_render_lock_cache_is_bounded_but_never_drops_in_use(monkeypatch):
+    """락 dict은 잡마다 커지고 TTL GC로 사라진 잡은 DELETE 훅도 타지 않는다 —
+    상한을 두되, **사용 중** 항목은 절대 버리지 않는다(버리면 같은 잡에 락이 둘
+    생겨 중복 빌드가 되살아난다)."""
+    import app.api as api_mod
+    from app.pipeline import derived  # 상한 상수의 소유자 (api는 같은 dict을 재노출)
+
+    monkeypatch.setattr(derived, "_FACSIMILE_LOCKS_MAX", 8)
+    api_mod._FACSIMILE_LOCKS.clear()
+    api_mod._JOB_LOCK_REFS.clear()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _hold():
+        with api_mod._job_render_guard("job-held"):
+            entered.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=_hold, daemon=True)
+    holder.start()
+    try:
+        assert entered.wait(5)
+        held_lock = api_mod._FACSIMILE_LOCKS["job-held"]
+        for index in range(50):
+            with api_mod._job_render_guard(f"job-{index}"):
+                pass
+        assert len(api_mod._FACSIMILE_LOCKS) <= 8
+        assert api_mod._FACSIMILE_LOCKS.get("job-held") is held_lock
+    finally:
+        release.set()
+        holder.join(5)
+        api_mod._FACSIMILE_LOCKS.clear()
+        api_mod._JOB_LOCK_REFS.clear()
+
+
+def test_facsimile_memo_is_bounded_and_expires(monkeypatch):
+    """검증 메모는 상한이 있고(잡이 늘어도 무한 증가하지 않는다) TTL이 지나면
+    디스크 재검증으로 되돌아간다 — marker는 그대로인데 PNG만 사라진 경우 대비."""
+    import app.api as api_mod
+    from app.pipeline import derived  # 상한·TTL 상수의 소유자 (api는 같은 dict을 재노출)
+
+    monkeypatch.setattr(derived, "_FACSIMILE_VERIFIED_MAX", 4)
+    api_mod._FACSIMILE_VERIFIED.clear()
+    try:
+        for index in range(20):
+            api_mod._facsimile_memo_set((f"job-{index}", "ko"), {"pages": index}, (1, index))
+        assert len(api_mod._FACSIMILE_VERIFIED) <= 4
+        assert api_mod._facsimile_memo_get(("job-19", "ko")) == ({"pages": 19}, (1, 19))
+        monkeypatch.setattr(derived, "_FACSIMILE_MEMO_TTL_S", 0.0)
+        assert api_mod._facsimile_memo_get(("job-19", "ko")) is None
+    finally:
+        api_mod._FACSIMILE_VERIFIED.clear()
+
+
+def test_forget_job_caches_survives_concurrent_memo_writes():
+    """DELETE가 캐시를 버리는 동안 다른 잡의 facsimile 준비가 같은 dict에 쓰면
+    락 없는 순회는 RuntimeError('dictionary changed size during iteration')로
+    204여야 할 DELETE를 500으로 만든다 (실측: 3000회 중 216회)."""
+    import app.api as api_mod
+
+    stop = threading.Event()
+    errors: list[str] = []
+
+    def _writer():
+        index = 0
+        while not stop.is_set():
+            api_mod._facsimile_memo_set((f"other-{index}", "ko"), {"n": index}, (1, index))
+            index = (index + 1) % 5000
+
+    writer = threading.Thread(target=_writer, daemon=True)
+    writer.start()
+    try:
+        for _ in range(3000):
+            try:
+                api_mod._forget_job_caches("job-x")
+            except RuntimeError as e:  # noqa: PERF203 — 회귀 재현이 목적
+                errors.append(str(e))
+    finally:
+        stop.set()
+        writer.join(5)
+        api_mod._FACSIMILE_VERIFIED.clear()
+    assert errors == []
+
+
+def test_stale_facsimile_staging_is_swept(tmp_path):
+    """staging 임시 디렉터리는 정상 경로에서만 지워진다 — 강제 종료로 남은 잔해가
+    어느 경로에서도 청소되지 않아 영구 잔존했다."""
+    import app.api as api_mod
+
+    rendered = tmp_path / "rendered"
+    rendered.mkdir()
+    orphan = rendered / ".ko.deadbeef.tmp"
+    orphan.mkdir()
+    (orphan / "page_0001.png").write_bytes(b"x")
+    fresh = rendered / ".ko.feedface.tmp"
+    fresh.mkdir()
+    old = time.time() - api_mod._STAGING_STALE_S - 60
+    os.utime(orphan, (old, old))
+
+    assert api_mod._sweep_stale_staging(rendered, "ko") == 1
+    assert not orphan.exists()
+    assert fresh.is_dir()                       # 진행 중일 수 있는 최근 것은 남긴다
+    assert api_mod._sweep_stale_staging(rendered, "en") == 0   # 다른 언어는 무관
+    assert api_mod._sweep_stale_staging(tmp_path / "없음", "ko") == 0
+
+
+def test_missing_file_at_send_time_is_404_not_500(tmp_path):
+    """is_file() 검사와 실제 전송 사이에 잡이 삭제되면(DELETE·TTL GC) Starlette
+    FileResponse는 RuntimeError를 던져 500이 된다 — 이 경합의 답은 404다."""
+    import anyio
+    import pytest
+    from starlette.responses import FileResponse
+
+    import app.api as api_mod
+
+    target = tmp_path / "page_0001.png"
+
+    async def _drive(response):
+        sent: list[dict] = []
+
+        async def receive():
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+
+        await response({"type": "http", "method": "GET", "headers": []}, receive, send)
+        return sent
+
+    target.write_bytes(b"x")
+    stock = FileResponse(target)
+    target.unlink()
+    with pytest.raises(RuntimeError):           # 기존 동작(=500)을 고정
+        anyio.run(_drive, stock)
+
+    target.write_bytes(b"x")
+    guarded = api_mod._JobFileResponse(target)
+    target.unlink()
+    sent = anyio.run(_drive, guarded)
+    starts = [m["status"] for m in sent if m["type"] == "http.response.start"]
+    assert starts == [404]
+
+    # 정상 파일은 그대로 200
+    target.write_bytes(b"x")
+    sent = anyio.run(_drive, api_mod._JobFileResponse(target))
+    assert [m["status"] for m in sent if m["type"] == "http.response.start"] == [200]
+
+
+def test_dual_pdf_is_built_once_under_concurrent_first_requests(tmp_path, monkeypatch):
+    """대조(dual) PDF 빌드만 잡 단위 락 밖에 남아, 프런트 기본 다운로드 경로의
+    동시 첫 요청이 같은 PDF를 중복으로 만들었다 (실측: 3스레드 → 3회 빌드)."""
+    import app.api as api_mod
+
+    job = SimpleNamespace(id="job-dual", dir=tmp_path)
+    (tmp_path / "source.pdf").write_bytes(b"%PDF-1.4 source")
+    translated = tmp_path / "export.ko.pdf"
+    translated.write_bytes(b"%PDF-1.4 translated")
+
+    builds: list[int] = []
+
+    def _slow_build(source_pdf, translated_pdf, out):
+        builds.append(1)
+        time.sleep(0.2)                          # 동시 진입 창을 넓힌다
+        out.write_bytes(b"%PDF-1.4 dual")
+        return out
+
+    monkeypatch.setattr(api_mod, "build_dual_pdf", _slow_build)
+    results: list[Path] = []
+    threads = [
+        threading.Thread(
+            target=lambda: results.append(api_mod._ensure_dual_pdf(job, "ko", translated))
+        )
+        for _ in range(3)
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert len(builds) == 1, builds
+        assert results == [tmp_path / "export.ko.dual.pdf"] * 3
+    finally:
+        api_mod._forget_job_caches("job-dual")
+
+
+def _dual_job(tmp_path: Path, name: str) -> tuple[SimpleNamespace, Path]:
+    """대조 PDF 빌드에 필요한 최소 입력만 갖춘 가짜 잡."""
+    job_dir = tmp_path / name
+    job_dir.mkdir()
+    (job_dir / "source.pdf").write_bytes(b"%PDF-1.4 source")
+    translated = job_dir / "export.ko.pdf"
+    translated.write_bytes(b"%PDF-1.4 translated")
+    return SimpleNamespace(id=name, dir=job_dir), translated
+
+
+def test_pdf_export_builds_are_globally_capped(tmp_path, monkeypatch):
+    """잡 단위 락은 **같은 잡**의 중복 빌드만 막는다 — 서로 다른 잡 N개가 동시에
+    요청되면 N개 빌드가 함께 돌았다(1건당 실측 9.4s/16p, CPU 포화).
+    PDF_EXPORT_FORMAT_VERSION이 오르면 기존 배포의 전 캐시가 한꺼번에 무효화되므로
+    업그레이드 직후 이 폭주가 실제로 일어난다."""
+    import app.api as api_mod
+
+    monkeypatch.setenv("PDF_EXPORT_MAX_CONCURRENT", "2")
+    monkeypatch.setenv("PDF_EXPORT_QUEUE_TIMEOUT_S", "30")
+
+    live = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def _slow_build(source_pdf, translated_pdf, out):
+        nonlocal live, peak
+        with guard:
+            live += 1
+            peak = max(peak, live)
+        time.sleep(0.15)                         # 동시 진입 창을 넓힌다
+        with guard:
+            live -= 1
+        out.write_bytes(b"%PDF-1.4 dual")
+        return out
+
+    monkeypatch.setattr(api_mod, "build_dual_pdf", _slow_build)
+    jobs = [_dual_job(tmp_path, f"capped-{index}") for index in range(6)]
+    threads = [
+        threading.Thread(
+            target=lambda j=job, t=translated: api_mod._ensure_dual_pdf(j, "ko", t)
+        )
+        for job, translated in jobs
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert peak == 2, peak                   # 상한 없이는 6 (잡마다 락이 다르다)
+        assert live == 0
+        for job, _translated in jobs:
+            assert (job.dir / "export.ko.dual.pdf").is_file()
+    finally:
+        for job, _translated in jobs:
+            api_mod._forget_job_caches(job.id)
+
+
+def test_pdf_export_cache_hit_does_not_take_a_build_slot(tmp_path, monkeypatch):
+    """정상 사용(캐시 적중)은 전역 상한의 영향을 받지 않아야 한다 — 슬롯을 잡으면
+    상한이 낮은 배포에서 이미 만들어 둔 PDF 다운로드까지 줄을 선다."""
+    import app.api as api_mod
+    from app.pipeline import derived
+
+    monkeypatch.setenv("PDF_EXPORT_MAX_CONCURRENT", "1")
+    monkeypatch.setenv("PDF_EXPORT_QUEUE_TIMEOUT_S", "0.2")
+    job, translated = _dual_job(tmp_path, "cached")
+    dual = job.dir / "export.ko.dual.pdf"
+    dual.write_bytes(b"%PDF-1.4 dual")           # 입력보다 나중 = 최신 캐시
+
+    def _never(*args, **kwargs):
+        raise AssertionError("캐시가 최신인데 다시 빌드했다")
+
+    monkeypatch.setattr(api_mod, "build_dual_pdf", _never)
+    try:
+        with derived.export_build_slot():        # 유일한 슬롯을 점유한 채로
+            assert api_mod._ensure_dual_pdf(job, "ko", translated) == dual
+    finally:
+        api_mod._forget_job_caches(job.id)
+
+
+def test_pdf_export_queue_timeout_is_503_with_retry_after(client, sample_pdf, monkeypatch):
+    """대기가 길어져도 요청이 무한정 매달리면 안 된다 — 재시도 가능한 과부하이므로
+    잡 상태 오류(4xx)나 서버 결함(500)이 아니라 503 + Retry-After다."""
+    from app.pipeline import derived
+
+    monkeypatch.setenv("PDF_EXPORT_MAX_CONCURRENT", "1")
+    monkeypatch.setenv("PDF_EXPORT_QUEUE_TIMEOUT_S", "0.2")
+    jid, _job_dir = _ko_layout_job(client, sample_pdf)
+
+    with derived.export_build_slot():            # 유일한 슬롯을 점유한 채로
+        busy = client.get(f"/api/jobs/{jid}/pdf?lang=ko")
+    assert busy.status_code == 503, busy.text
+    assert int(busy.headers["Retry-After"]) >= 1
+
+    # 슬롯이 풀리면 같은 요청이 그대로 성공한다 (일시적 거절이지 영구 실패가 아니다)
+    assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200
+
+
+def _ko_layout_job(client, sample_pdf) -> tuple[str, Path]:
+    """번역 산출물(result.ko.md·layout.ko.json)만 갖춘 잡 — 번역 엔진 없이
+    한국어 facsimile 경로(export.ko.pdf → rendered/ko/*.png)를 실제로 태운다."""
+    jid = _upload(client, sample_pdf).json()["job_id"]
+    wait_done(client, jid)
+    job_dir = client.app.state.store.get(jid).dir
+    (job_dir / "result.ko.md").write_text(
+        (job_dir / "result.md").read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    shutil.copyfile(job_dir / "layout.json", job_dir / "layout.ko.json")
+    return jid, job_dir
+
+
+def test_translated_page_recovers_from_lost_png(client, sample_pdf):
+    """marker는 그대로인데 PNG만 사라지면, 프로세스 내 메모가 '검증됨'으로 굳어
+    페이지 이미지가 프로세스 수명 내내 404로 남았다 — 재검증으로 자가 복구한다.
+    같은 경로에서 고아 staging 디렉터리도 청소된다."""
+    import app.api as api_mod
+
+    jid, job_dir = _ko_layout_job(client, sample_pdf)
+    assert client.get(f"/api/jobs/{jid}/page/1?lang=ko").status_code == 200
+    png = job_dir / "rendered" / "ko" / "page_0001.png"
+    assert png.is_file()
+    assert (job_dir / "rendered" / "ko" / ".source.json").is_file()
+
+    orphan = job_dir / "rendered" / ".ko.deadbeef.tmp"
+    orphan.mkdir()
+    old = time.time() - api_mod._STAGING_STALE_S - 60
+    os.utime(orphan, (old, old))
+
+    png.unlink()                                  # marker는 남겨 둔다 (부분 유실 재현)
+    r = client.get(f"/api/jobs/{jid}/page/1?lang=ko")
+    assert r.status_code == 200, r.text
+    assert png.is_file()
+    assert not orphan.exists()
+    assert list((job_dir / "rendered").glob(".ko.*.tmp")) == []
+
+
+def test_translated_layout_font_backfill_follows_enrich_version(client, sample_pdf):
+    """ENRICH_VERSION 상향은 파생 산출물 layout.{lang}.json으로도 전파되어야 한다 —
+    아니면 다음 상향 때 한국어 뷰만 구버전 폰트 메타로 고정된다."""
+    import app.api as api_mod
+    from app.pipeline.pdf_fonts import ENRICH_VERSION
+
+    jid, job_dir = _ko_layout_job(client, sample_pdf)
+    job = client.app.state.store.get(jid)
+    stale = json.loads((job_dir / "layout.ko.json").read_text(encoding="utf-8"))
+    for page in stale:
+        page["fonts_v"] = 1                       # 구버전 enrichment 결과 재현
+    (job_dir / "layout.ko.json").write_text(json.dumps(stale), encoding="utf-8")
+    original_before = (job_dir / "layout.json").read_bytes()
+
+    pages = api_mod._load_layout_pages(job, "ko")
+    assert [page.get("fonts_v") for page in pages] == [ENRICH_VERSION] * len(pages)
+    saved = json.loads((job_dir / "layout.ko.json").read_text(encoding="utf-8"))
+    assert [page.get("fonts_v") for page in saved] == [ENRICH_VERSION] * len(saved)
+    # 번역본 백필이 원본 layout.json을 덮어쓰지 않는다 (경로 혼동 회귀 방지)
+    assert (job_dir / "layout.json").read_bytes() == original_before
 
 
 def test_page_image_does_not_reparse_layout_each_request(client, sample_pdf, monkeypatch):

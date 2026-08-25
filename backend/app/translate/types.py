@@ -27,6 +27,16 @@ from dataclasses import dataclass, field
 # v5: 제목 유닛의 의미·정보량 보존 지시(짧은 UI 라벨식 축약 방지)
 # v6: 출력 측 검증(masking.looks_untranslated) 도입 + 인라인 수식 통화 오인 수정
 #     → 거부문·요약·영문 echo가 이미 캐시된 units.json을 강제로 무효화한다
+#
+# **운영자 안내 — PROMPT_V를 올리면 기존 units.json은 전부 무효가 된다.**
+# cache_key에 PROMPT_V·model·temperature·reasoning이 들어가므로, 값 하나만 바뀌어도
+# 기존 잡의 캐시는 단 한 건도 적중하지 않고 유닛 전량이 다시 API를 탄다(비용·시간).
+# 배포 전에 알아둘 것:
+#   * 잡당 1회만 발생한다 — 재번역 결과가 새 키로 다시 캐시된다.
+#   * 무효화가 실제로 일어나면 엔진이 report.json의 warnings에 남기고
+#     `번역 캐시 전량 무효` WARNING을 로그로 낸다. cached==0 · cache_prior>0이 지표다.
+#   * 새 버전이 이전보다 나쁘면 되돌릴 곳은 이 상수다 — 값을 내리면 옛 캐시가 그대로
+#     다시 적중하므로 롤백에 재번역 비용이 들지 않는다(옛 units.json을 지우지 말 것).
 PROMPT_V = "6"
 
 SUPPORTED_LANGS = ("ko",)

@@ -23,6 +23,7 @@ import {
   readerRailBandAt,
   railAnchorFrom,
   railAnchorTarget,
+  overlayInKeepWindow,
 } from '../app.js';
 
 /* ---------------- readerPageBands ---------------- */
@@ -264,4 +265,38 @@ test('alignmentFailureIsPermanent: 일시 실패는 재시도 대상으로 남�
   assert.equal(alignmentFailureIsPermanent(429), false, '스로틀');
   assert.equal(alignmentFailureIsPermanent(0), false, '네트워크 오류');
   assert.equal(alignmentFailureIsPermanent(undefined), false, '방어: 상태 미상');
+});
+
+/* ---------------- overlayInKeepWindow ---------------- */
+// 개별(sync off) 모드에서 레일만 굴리면 좌측 페이지는 멈춘 채 먼 페이지 정렬이
+// 계속 도착한다. 그 페이지들의 bbox 오버레이까지 그리면 hydrate의 걷어내기가
+// 돌지 않아 좌측 스테이지에 버튼이 무제한 쌓인다 — 그리는 기준은 걷어내는
+// 기준(keep 창)과 반드시 같아야 한다.
+
+test('overlayInKeepWindow: keep 창 안에서만 bbox를 그린다', () => {
+  assert.equal(overlayInKeepWindow(10, 10, 40), true, '현재 페이지');
+  assert.equal(overlayInKeepWindow(4, 10, 40), true, '창 하단 경계(-6)');
+  assert.equal(overlayInKeepWindow(16, 10, 40), true, '창 상단 경계(+6)');
+  assert.equal(overlayInKeepWindow(3, 10, 40), false, '창 밖 — 레일 스크롤로 도착해도 안 그린다');
+  assert.equal(overlayInKeepWindow(17, 10, 40), false, '창 밖');
+  assert.equal(overlayInKeepWindow(40, 10, 40), false, '문서 끝까지 굴려도 좌측에 쌓이지 않는다');
+});
+
+test('overlayInKeepWindow: hydrateReaderPages의 keep 창과 정확히 같은 집합', () => {
+  const total = 40;
+  for (const current of [1, 5, 20, 38, 40]) {
+    const keep = readerHydrationWindow(total, current, 6);
+    for (let page = 1; page <= total; page += 1) {
+      assert.equal(
+        overlayInKeepWindow(page, current, total),
+        page >= keep.start && page <= keep.end,
+        `page=${page} current=${current}`,
+      );
+    }
+  }
+});
+
+test('overlayInKeepWindow: 총 페이지 미상·비정상 입력은 그리지 않는다', () => {
+  assert.equal(overlayInKeepWindow(1, 1, 0), false);
+  assert.equal(overlayInKeepWindow(1, 1, undefined), false);
 });

@@ -21,6 +21,11 @@ sample/e2e-*/
 nohup.out
 # 일회성 변환 산출물(.dockerignore와 동일 정책). ⚠ 이미 추적 중인 output/ 파일은
 # .gitignore만으로 빠지지 않는다 — `git rm -r --cached output/`을 한 번 돌려야 한다.
+# ⚠⚠ 그 `git rm --cached`는 **커밋에서는 파일 삭제**로 기록된다. 명령을 실행한
+#    작업 트리에만 파일이 남고, 그 커밋을 pull 하는 다른 클론에서는 output/이
+#    통째로 사라진다(fd478ce에서 40MB 6개 파일). 되살리려면:
+#        git checkout fd478ce^ -- output/     # 파일만 복구(추적은 안 됨)
+#    output/은 재생성 가능한 변환 산출물이므로 백업이 필요하면 리포 밖에 둘 것.
 /output/
 
 # Node (e2e 브라우저 테스트 의존성)

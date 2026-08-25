@@ -135,6 +135,33 @@ def test_render_page_failure_replaced_with_blank(tmp_path, monkeypatch, caplog):
         assert abs(blank.size[1] - good.size[1]) <= 2
     assert any("흰색 페이지로 대체" in r.message for r in caplog.records)
 
+    # 로그만으로는 사용자가 알 수 없다 — 병합기가 승계할 수 있게 파일로도 남긴다
+    # (merge.IncrementalMerger → job.warnings → quality.state="degraded").
+    import json
+
+    from app.pipeline.merge import IncrementalMerger
+    from app.pipeline.pdf import RENDER_WARNINGS_NAME
+
+    recorded = json.loads(
+        (tmp_path / "pages" / RENDER_WARNINGS_NAME).read_text(encoding="utf-8")
+    )
+    assert len(recorded) == 1
+    assert "1/3페이지 렌더에 실패" in recorded[0] and "(2)" in recorded[0]
+    assert IncrementalMerger(tmp_path, "\n\n---\n\n").warnings == recorded
+
+
+def test_render_success_leaves_no_stale_render_warning(tmp_path, monkeypatch):
+    """이전 세대의 경고 파일이 남아 있으면 정상 재렌더가 조용히 'degraded'로 보인다."""
+    from app.pipeline.pdf import RENDER_WARNINGS_NAME
+
+    pdf = _write_pdf(tmp_path, pages=2)
+    pages_dir = tmp_path / "pages"
+    pages_dir.mkdir()
+    (pages_dir / RENDER_WARNINGS_NAME).write_text('["옛 경고"]', encoding="utf-8")
+
+    render_pdf_pages(pdf, pages_dir, dpi=100, max_pages=10)
+    assert not (pages_dir / RENDER_WARNINGS_NAME).exists()
+
 
 def test_render_all_pages_failed_raises(tmp_path, monkeypatch):
     """전 페이지 렌더 실패 시에만 잡 오류(ValueError)로 승격된다."""

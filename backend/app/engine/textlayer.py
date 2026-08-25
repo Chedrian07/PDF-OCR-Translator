@@ -7,8 +7,9 @@ Localight의 auto 추출(app/services/documents.py의 _native_text/_meaningful_l
 1) 원본 PDF의 텍스트 레이어를 PyMuPDF ``get_text("blocks", sort=True)``로 추출
 2) 영숫자 수가 ``settings.native_text_threshold`` 이상이면 그대로 사용
 3) 미만(스캔/이미지 페이지)이면 **이미 렌더된** 페이지 PNG를 로컬 Tesseract로
-   OCR (stdin/stdout 파이프 — 네트워크 없음). Tesseract 미설치면 희박한 텍스트
-   레이어로 폴백하고 잡당 1회 경고를 남긴다.
+   OCR (stdin/stdout 파이프 — 네트워크 없음). Tesseract 미설치·실행 실패면 희박한
+   텍스트 레이어로 폴백하고 잡당 1회 경고 + **페이지 본문에 실패 표식**을 남긴다
+   (표식이 없으면 전면 스캔 문서가 status=done인 채 빈 문서로 끝난다).
 
 출력 규약은 FakeEngine과 동일(base.py 모듈 docstring 참조):
 - run_multi는 ``<PAGE>`` 마커로 페이지를 구분해 스트림/반환 (진행률·병합 계약)
@@ -49,6 +50,11 @@ _NO_TESSERACT_WARNING = (
     "Tesseract 미설치 — 텍스트 레이어만 사용했습니다. "
     "brew install tesseract tesseract-lang"
 )
+# OCR 실패 페이지의 본문 표식. 표식이 없으면 전면 스캔 문서가 status=done인 채
+# **완전 공백**으로 끝나 사용자가 "원래 빈 문서"로 오인한다 (경고 배열은 잡 상세를
+# 열어야 보이고, 어느 페이지가 비었는지도 알 수 없다). blockquote 한 줄이라
+# `<PAGE>`·페이지 구분자(`---`) 문법과 충돌하지 않는다.
+_OCR_FAILED_NOTE = "> ⚠️ 이 페이지는 OCR에 실패해 본문이 비어 있거나 불완전합니다"
 
 
 # ── 모듈 레벨 재바인딩 심 (테스트가 monkeypatch로 대체한다) ────────────────
@@ -137,6 +143,12 @@ def sanitize_text(text: str) -> str:
         # 비정상적으로 깊은 중첩 — 정상 추출 텍스트에서는 도달하지 않는 경로
         out = out.replace("<", " ")
     return out.replace("<PAGE>", "⟨PAGE⟩")
+
+
+def mark_ocr_failure(page_text: str, reason: str) -> str:
+    """OCR 실패 페이지 본문 앞에 사유 표식을 붙인다 (본문이 없으면 표식만)."""
+    note = f"{_OCR_FAILED_NOTE} ({reason})."
+    return f"{note}\n\n{page_text}" if page_text else note
 
 
 def _meaningful_length(text: str) -> int:
@@ -338,7 +350,9 @@ class TextLayerEngine(OCREngine):
         executable = find_tesseract()
         if executable is None:
             self._warn_no_tesseract(job_dir)
-            return native_text, raw
+            # 스캔 페이지인데 OCR을 못 돌렸다 — 결과에 표식을 남긴다 (아래 실패
+            # 경로와 동일 이유). 표식이 없으면 전면 스캔 문서가 빈 문서로 끝난다.
+            return mark_ocr_failure(native_text, "Tesseract 미설치"), raw
         try:
             ocr_text = run_tesseract(
                 executable, self._settings.ocr_languages, image_path.read_bytes()
@@ -351,7 +365,7 @@ class TextLayerEngine(OCREngine):
                 f"({str(e)[:160]}) — 언어팩 확인: brew install tesseract-lang / "
                 "apt install tesseract-ocr-kor"
             )
-            return native_text, raw
+            return mark_ocr_failure(native_text, "Tesseract 실행 실패"), raw
         # OCR 텍스트를 쓰는 페이지의 레이아웃 raw는 버린다 — 그 det 문법은 본문으로
         # 채택되지 않은 희박 텍스트 레이어에서 합성된 것이라 result.md와 어긋난다
         # (Tesseract 출력에는 bbox가 없다 — 스캔 페이지의 레이아웃 뷰는 빈 페이지).

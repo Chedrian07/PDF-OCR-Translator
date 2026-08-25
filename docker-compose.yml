@@ -273,6 +273,14 @@ services:
       RENDER_DPI: ${RENDER_DPI:-200}
       MAX_PAGES: ${MAX_PAGES:-200}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      # 페이지 구분자는 **엔진과 무관**하다 — merge.py의 result.md 조립, render.py의
+      # doc-page 분할, qa.py의 페이지 컨텍스트 추출이 전부 이 값으로 split한다.
+      # 여기서 스레딩하지 않으면 .env의 PAGE_SEPARATOR가 sidecar 스택에서만 조용히
+      # 무시돼 Q&A 페이지 인덱스가 ocr-cpu/ocr-cuda와 어긋난다.
+      # 빈 값 = config.py 기본 "\n\n---\n\n" (config가 unicode_escape로 디코드한다)
+      # ⚠ MAX_LENGTH는 반대로 engine/unlimited.py 전용(로컬 생성 상한)이라 sidecar
+      #   스택(ocr-ovis/ocr-paddle)에는 넣지 않는다 — 넣어도 소비하는 코드가 없다.
+      PAGE_SEPARATOR: ${PAGE_SEPARATOR:-}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}   # 기본 * = 모든 Host 허용 (ocr-cpu 주석 참조)
       JOB_TTL_DAYS: ${JOB_TTL_DAYS:-0}
       # ── 한국어 번역 (OpenAI 호환 API) — 미설정 시 번역 기능만 비활성 ──
@@ -397,6 +405,7 @@ services:
       RENDER_DPI: ${RENDER_DPI:-200}
       MAX_PAGES: ${MAX_PAGES:-200}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      PAGE_SEPARATOR: ${PAGE_SEPARATOR:-}   # 엔진 무관 — 설명은 ocr-ovis의 동일 항목 참조
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-*}   # 기본 * = 모든 Host 허용 (ocr-cpu 주석 참조)
       JOB_TTL_DAYS: ${JOB_TTL_DAYS:-0}
       # ── 한국어 번역 (OpenAI 호환 API) — 미설정 시 번역 기능만 비활성 ──

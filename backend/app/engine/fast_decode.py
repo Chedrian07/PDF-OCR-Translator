@@ -41,6 +41,8 @@ block=8 기준 0.1~0.2초 수준.
     (변환이 절대 죽지 않게). EOS 오버런 ≤ block-1 계약은 기존 그대로.
   - 킬스위치: ``OCR_CUDA_GRAPHS=0/false/no/off`` → 전 구간 eager.
     통합자의 0/1 파리티 검증 기준.
+  - ``OCR_MOE_FUSED=0``(벤더 P17 킬스위치)도 전 구간 eager로 보낸다 — legacy
+    ``moe_infer``는 레이어마다 호스트 동기화를 하므로 캡처가 성립할 수 없다.
 """
 
 from __future__ import annotations
@@ -57,6 +59,12 @@ def _cuda_graphs_enabled() -> bool:
     return os.environ.get("OCR_CUDA_GRAPHS", "").strip().lower() not in ("0", "false", "no", "off")
 
 
+def _moe_fused_enabled() -> bool:
+    """OCR_MOE_FUSED(벤더 P17 킬스위치) — 0/false/no/off면 off, 그 외(미설정)는 on.
+    벤더 `DeepseekV2MoE._fused_env_enabled`와 같은 파싱."""
+    return os.environ.get("OCR_MOE_FUSED", "").strip().lower() not in ("0", "false", "no", "off")
+
+
 def _graph_skip_reason(input_ids, processors, model, block) -> str | None:
     """그래프 경로를 못 타는 **첫 사유** 문자열 — 탈 수 있으면 None.
 
@@ -69,6 +77,14 @@ def _graph_skip_reason(input_ids, processors, model, block) -> str | None:
         return "cpu/mps 입력"
     if not _cuda_graphs_enabled():
         return "OCR_CUDA_GRAPHS=off"
+    if not _moe_fused_enabled():
+        # 파리티 킬스위치가 꺼지면 디코드가 legacy `moe_infer`로 돌아가고, 그 안의
+        # `tokens_per_expert.cpu().numpy()`(+ P18 패스트패스의 `.tolist()`)는 캡처 중
+        # 금지된 호스트 동기화라 **캡처가 매 청크 확정 실패**한다. 그 실패는 청크마다
+        # 워밍업·사이드스트림 예열을 버리고 traceback 경고를 남길 뿐 아니라,
+        # OCR_MOE_FUSED=0/1 비교가 MoE 경로가 아니라 graph↔eager 차이를 재는 셈이 된다.
+        # 처음부터 eager로 가서 킬스위치를 "legacy 완전 복원"이라는 문서상 의미로 만든다.
+        return "OCR_MOE_FUSED=off (legacy MoE의 호스트 동기화는 캡처 불가)"
     if len(processors) != 1:
         return f"processors={len(processors)} (단일 ngram 아님)"
     proc = processors[0]

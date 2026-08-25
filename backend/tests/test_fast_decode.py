@@ -361,3 +361,42 @@ def test_p20_ring_multi_token_chunk_advances_tensor_slot():
         model(input_ids=chunk, use_cache=True, past_key_values=cache, position_ids=pos)
     assert int(cache._ring_pos_t[0]) == (1 + 2) % 2  # 두 슬롯 전진 + 랩
     assert cache.get_seq_length() == 4 + 2  # 여전히 고정 길이(링 덮어쓰기)
+
+
+def test_graph_precheck_skips_when_moe_kill_switch_off(monkeypatch):
+    """OCR_MOE_FUSED=0(벤더 P17 킬스위치)이면 그래프 경로를 아예 타지 않는다.
+
+    legacy `moe_infer`는 레이어마다 `tokens_per_expert.cpu().numpy()`로 호스트
+    동기화를 하므로 CUDA Graph 캡처가 **매 청크 확정 실패**한다 — 워밍업을 버리고
+    traceback을 남긴 뒤 eager로 폴백할 뿐 아니라, 0/1 파리티 비교가 MoE 경로가
+    아니라 graph↔eager 차이를 재게 된다."""
+    from app.engine.fast_decode import _graph_skip_reason, _should_try_cuda_graph
+
+    ids, procs, model = _graph_ready_stubs()
+    monkeypatch.delenv("OCR_CUDA_GRAPHS", raising=False)
+
+    for off in ("0", "false", "no", "off", "OFF"):
+        monkeypatch.setenv("OCR_MOE_FUSED", off)
+        assert _should_try_cuda_graph(ids, procs, model, 8) is False
+        assert "OCR_MOE_FUSED" in _graph_skip_reason(ids, procs, model, 8)
+    # 기본(미설정)·명시 on은 기존대로 그래프 허용
+    for on in ("1", "true", ""):
+        monkeypatch.setenv("OCR_MOE_FUSED", on)
+        assert _should_try_cuda_graph(ids, procs, model, 8) is True
+    monkeypatch.delenv("OCR_MOE_FUSED", raising=False)
+    assert _should_try_cuda_graph(ids, procs, model, 8) is True
+
+
+def test_moe_kill_switch_parse_matches_vendor(monkeypatch):
+    """킬스위치 해석이 벤더 `DeepseekV2MoE._fused_env_enabled`와 어긋나면
+    한쪽만 legacy로 도는 조합(=캡처 확정 실패)이 다시 생긴다."""
+    from app.engine.fast_decode import _moe_fused_enabled
+    from app.vendor.unlimited_ocr.modeling_deepseekv2 import DeepseekV2MoE
+
+    class _Probe:
+        _fused_env = None
+
+    for value in ("0", "false", "no", "off", "OFF", " 0 ", "1", "true", "yes", "", "bogus"):
+        monkeypatch.setenv("OCR_MOE_FUSED", value)
+        probe = _Probe()
+        assert _moe_fused_enabled() is DeepseekV2MoE._fused_env_enabled(probe), value

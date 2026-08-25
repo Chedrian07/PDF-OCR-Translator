@@ -217,6 +217,22 @@ _SCAFFOLD_RE = re.compile(
 def looks_untranslated(src: str, out: str, mapping: dict) -> bool:
     """출력 측 최소 검증 — 거부문·요약·원문 echo면 True(엔진이 래더로 보낸다).
 
+    판정 사유가 필요하면 untranslated_reason()을 쓴다 (이 함수는 그 얇은 래퍼다).
+    """
+    return bool(untranslated_reason(src, out, mapping))
+
+
+def untranslated_reason(src: str, out: str, mapping: dict) -> str:
+    """게이트 판정 사유 — 통과면 "", 거부면 어느 규칙이 걸었는지 나타내는 슬러그.
+
+    사유: scaffold / refusal / hangul-ratio / length-ratio.
+
+    **오탐 관측용이다.** 게이트는 오탐해도 조용하다 — 정상 번역이 거부되면 래더
+    왕복이 늘고, 래더가 소진되면 그 문단이 영어로 남는다(kept_reason=gate-rejected).
+    총합만으로는 어떤 규칙이 몇 건을 걸었는지 알 수 없어, 임계값을 조정해야 하는지
+    공급자가 고장 난 것인지 운영자가 구분할 수 없었다. 엔진이 사유별로 집계해
+    report.json의 gate_reasons에 남긴다.
+
     입력 측 should_skip()과 대칭인 게이트다. 플레이스홀더 정합만으로는 모델
     거부문("I cannot translate this text.")·한 줄 요약·영문 echo가 문단을 통째로
     대체해도 '성공'으로 통과해 units.json에 캐시된다(무손실 원칙 위반).
@@ -234,15 +250,15 @@ def looks_untranslated(src: str, out: str, mapping: dict) -> bool:
     # 프롬프트 스캐폴딩이 섞인 출력은 어떤 경우에도 번역이 아니다. 원문 길이·언어와
     # 무관하므로 모든 면제보다 앞에 둔다(원문에 같은 문구가 있으면 정상이므로 제외).
     if _SCAFFOLD_RE.search(out) and not _SCAFFOLD_RE.search(src):
-        return True
+        return "scaffold"
 
     if _REFUSAL_RE.search(out) and not _REFUSAL_RE.search(src):
-        return True
+        return "refusal"
 
     residual = _PLACEHOLDER_RE.sub(" ", mask(src)[0])
     src_words = [w.lower() for w in re.findall(r"[A-Za-z]{2,}", residual)]
     if len(src_words) < 2:
-        return False  # 고유명사·짧은 라벨은 원문 그대로 나와도 정상
+        return ""  # 고유명사·짧은 라벨은 원문 그대로 나와도 정상
     # 복원된 불변 토큰(수식·URL·코드)은 한글일 수 없으므로 비율 계산에서 뺀다 —
     # 넣고 세면 수식·표가 많은 정상 번역이 거부문으로 오탐된다.
     out_text = out
@@ -257,7 +273,7 @@ def looks_untranslated(src: str, out: str, mapping: dict) -> bool:
         out_words = {w.lower() for w in re.findall(r"[A-Za-z]{2,}", out)}
         retention = sum(1 for w in src_words if w in out_words) / len(src_words)
         if hangul_ratio < 0.05 or retention >= 0.9:
-            return True  # 한글이 사실상 없음 / 원문 영단어 그대로 → 거부문·echo
+            return "hangul-ratio"  # 한글이 사실상 없음 / 원문 영단어 그대로 → 거부문·echo
     # 한국어 거부문·한 줄 요약은 한글 비율을 통과하므로 길이비로 잡는다.
     # 하한은 **원문 길이로 나눈다** — 한국어는 짧은 명사구일수록 압축이 극단적이다
     # ('Writing the introduction'→'서론 쓰기' 0.208). 실측 165쌍 분포:
@@ -266,4 +282,6 @@ def looks_untranslated(src: str, out: str, mapping: dict) -> bool:
     # 하한을 각 구간 분포 밖(0.12 / 0.25)에 둬 오탐 0을 확보한다.
     lo = 0.12 if len(src) <= 80 else 0.25
     hi = 4.0 if mapping else 3.0  # 수식·표 유닛은 상한 완화
-    return not (lo * len(src) <= len(out) <= hi * len(src))
+    if lo * len(src) <= len(out) <= hi * len(src):
+        return ""
+    return "length-ratio"

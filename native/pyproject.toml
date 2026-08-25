@@ -1,5 +1,12 @@
 [build-system]
-requires = ["scikit-build-core>=0.10", "pybind11>=2.12", "ninja>=1.11"]
+# ⚠ 정확 고정(==)이다. backend/Dockerfile이 `uv pip install /src/native`로 이 패키지를
+# **이미지 빌드 시점에** PEP 517 격리 빌드하므로, 상한 없는 `>=`면 그날 PyPI 최신이
+# 무엇이냐에 따라 다른 툴체인으로 컴파일된 .so가 이미지에 들어간다 — 같은 커밋을
+# 다시 빌드해도 재현되지 않는다. 실측(2026-08): `>=0.10 / >=2.12`가
+# scikit-build-core 1.0.3 · pybind11 3.1.0으로 해석됐다(양쪽 다 메이저 2번 건너뜀).
+# 버전을 올릴 때는 이 줄을 고치고 `cd native && uv pip install -e . && pytest tests/`로
+# 패리티 테스트를 통과시킨 뒤 커밋한다.
+requires = ["scikit-build-core==1.0.3", "pybind11==3.1.0", "ninja==1.13.0"]
 build-backend = "scikit_build_core.build"
 
 [project]

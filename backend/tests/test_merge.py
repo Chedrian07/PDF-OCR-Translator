@@ -180,3 +180,66 @@ def test_special_tokens_stripped(tmp_path):
     out = m.finalize()
     assert "<|ref|>" not in out and "<|det|>" not in out
     assert "keep" in out and "this" in out
+
+
+def test_code_fence_hr_is_not_rewritten_but_still_breaks_separator(tmp_path):
+    """코드펜스 안의 `---`는 문자 치환(`***`) 대상이 아니다 — 펜스 안은 렌더 결과가
+    곧 원문이라 YAML 문서 구분자·구분선 예제가 조용히 깨진다(포터빌리티 계약).
+    동시에 페이지 경계 불변식(N페이지 = 구분자 N-1개)은 그대로 지켜야 한다."""
+    m = IncrementalMerger(tmp_path, SEP)
+    c = _mk_multi_chunk(tmp_path, "chunk_00", 2)
+    m.add_chunk(ChunkResult(
+        c, 1, 2,
+        "<PAGE>\n설명:\n\n```yaml\nname: x\n\n---\n\nname: y\n```\n\n본문 각주선\n\n---\n\n각주\n"
+        "<PAGE>\n2쪽 본문",
+    ))
+    out = m.finalize()
+
+    assert m.warnings == []
+    segments = out.split(SEP)
+    assert len(segments) == 2                      # (a) 페이지 경계 불변식 유지
+    assert "***" not in segments[0].split("```")[1]  # (b) 펜스 안은 문자 변조 없음
+    assert "\n--- \n" in segments[0]               # 펜스 안은 후행 공백으로만 무해화
+    assert "***" in segments[0].split("```")[2]    # (c) 펜스 밖 각주선은 기존대로 치환
+    assert "2쪽 본문" in segments[1]
+
+
+def test_code_fence_close_reenables_neutralization(tmp_path):
+    """펜스가 닫힌 뒤의 `---`는 다시 일반 구분선 무해화 경로를 탄다 (상태 누수 방지)."""
+    m = IncrementalMerger(tmp_path, SEP)
+    c = _mk_multi_chunk(tmp_path, "chunk_00", 1)
+    m.add_chunk(ChunkResult(c, 1, 1, "<PAGE>\n~~~\ncode\n~~~\n\n---\n\ntail"))
+    out = m.finalize()
+
+    assert m.warnings == []
+    assert len(out.split(SEP)) == 1
+    assert "***" in out
+
+
+def test_render_warnings_are_inherited_as_job_warnings(tmp_path):
+    """렌더 단계의 흰 페이지 대체 고지를 잡 경고로 승계한다 — 승계하지 않으면
+    빈 결과가 quality.state='ok'로 남아 정상 변환으로 오인된다."""
+    import json
+
+    pages = tmp_path / "pages"
+    pages.mkdir(parents=True)
+    (pages / "render_warnings.json").write_text(
+        json.dumps(["2/3페이지 렌더에 실패해 흰 페이지로 대체했습니다 (1, 3)"]),
+        encoding="utf-8",
+    )
+    m = IncrementalMerger(tmp_path, SEP)
+    assert m.warnings == ["2/3페이지 렌더에 실패해 흰 페이지로 대체했습니다 (1, 3)"]
+
+    c = _mk_multi_chunk(tmp_path, "chunk_00", 1)
+    m.add_chunk(ChunkResult(c, 1, 1, "<PAGE>\n본문"))
+    m.finalize()
+    assert m.warnings[0].startswith("2/3페이지 렌더에 실패")
+
+
+def test_render_warnings_absent_or_broken_is_silent(tmp_path):
+    """파일이 없거나 깨졌으면 경고 없이 진행한다 (부가 채널이 잡을 못 죽이게)."""
+    assert IncrementalMerger(tmp_path, SEP).warnings == []
+    pages = tmp_path / "pages"
+    pages.mkdir(parents=True, exist_ok=True)
+    (pages / "render_warnings.json").write_text("{not json", encoding="utf-8")
+    assert IncrementalMerger(tmp_path, SEP).warnings == []

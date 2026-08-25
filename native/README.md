@@ -21,6 +21,13 @@ during decoding (`no_repeat_ngram_size=35`, `ngram_window=1024` in production).
 ### `crop_regions(image, boxes) -> list[np.ndarray | None]`
 Crops figure regions out of a rendered page.
 
+> **Not wired into the app.** Nothing outside `tests/test_parity.py` calls this.
+> The service crops figures through two *Python* paths instead —
+> `backend/app/sidecar/materializer.py` (PIL, sidecar engines) and
+> `backend/app/vendor/unlimited_ocr/modeling_unlimitedocr.py` (PIL, Unlimited
+> engine). Treat the spec below as the module's contract, not as a description
+> of an active acceleration path.
+
 - `image`: `HxWx3` `uint8` C-contiguous ndarray (forcecast accepted).
 - `boxes`: `Nx4` `int64` ndarray, rows `(x1, y1, x2, y2)` in 0–999 normalized
   coordinates (forcecast accepted).
@@ -56,3 +63,19 @@ pip wheel . -w dist
 The build is standalone (PEP 517, isolated): `scikit-build-core` + `pybind11` +
 `ninja` are resolved automatically as build requirements. Only `numpy` is a
 runtime dependency.
+
+### Build toolchain is pinned exactly — bump it deliberately
+
+`[build-system] requires` uses `==`, not `>=`. `backend/Dockerfile` builds this
+package **at image build time** (`uv pip install /src/native`), so an unbounded
+range means the compiler toolchain is whatever PyPI shipped that day and the
+same commit does not rebuild identically. Measured 2026-08: the old
+`scikit-build-core>=0.10` / `pybind11>=2.12` resolved to **1.0.3 / 3.1.0** —
+two major versions past the declared floor, in both cases.
+
+To upgrade: edit the pins, then re-run the build+parity check above and commit
+only if it stays green.
+```bash
+cd native && rm -rf build && uv pip install -p .venv/bin/python -e . \
+  && .venv/bin/python -m pytest tests/ -q
+```

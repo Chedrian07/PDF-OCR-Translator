@@ -8,10 +8,8 @@ import json
 import logging
 import os
 import queue
-import shutil
 import threading
 import time
-import uuid
 import zipfile
 from pathlib import Path
 
@@ -28,9 +26,10 @@ from fastapi.responses import (
 )
 
 from . import native_ops
+from .pipeline import artifacts, derived
+from .pipeline.derived import PdfExportBusyError
 from .pipeline.pdf import probe_pdf, render_pdf_pages
 from .pipeline.pdf_export import (
-    PDF_EXPORT_FORMAT_VERSION,
     PdfExportError,
     build_dual_pdf,
     build_translated_pdf,
@@ -56,15 +55,22 @@ _ALLOWED_FILE_DIRS = ("pages", "images", "layout", "rendered")
 _UPLOAD_CHUNK = 1024 * 1024
 _PREVIEW_MAX_BYTES = 2_000_000
 
-# facsimile 래스터는 잡 단위로 직렬화한다. 전역 락이면 200페이지 잡 하나의 첫
-# 렌더가 **다른 잡의** /layout·/page까지 수 분간 막았다. 락 범위에는 export PDF
-# 빌드도 포함해, 같은 잡의 동시 첫 진입이 같은 PDF를 두 번 만들지 않게 한다.
-_FACSIMILE_LOCKS: dict[str, threading.RLock] = {}
-_FACSIMILE_LOCKS_GUARD = threading.Lock()
-# (job_id, lang) → 마지막으로 검증에 성공한 (signature, marker 지문). 페이지 이미지
-# 요청마다 전 페이지를 stat하지 않기 위한 프로세스 내 메모 — marker가 바뀌거나
-# 사라지면 곧바로 전체 검증으로 되돌아간다(디스크가 진실의 원천).
-_FACSIMILE_VERIFIED: dict[tuple[str, str], tuple] = {}
+# 파생 산출물 보장 로직(잡 단위 락·facsimile 검증 메모·내보내기 빌드)은
+# pipeline/derived.py가 소유한다. 아래는 라우트와 회귀 테스트가 예전 이름으로
+# 계속 참조하는 재노출이다 — dict/함수는 같은 객체라 상태가 갈라지지 않는다.
+_FACSIMILE_LOCKS = derived._FACSIMILE_LOCKS
+_JOB_LOCK_REFS = derived._JOB_LOCK_REFS
+_FACSIMILE_VERIFIED = derived._FACSIMILE_VERIFIED
+_STAGING_STALE_S = derived._STAGING_STALE_S
+_job_render_lock = derived._job_render_lock
+_job_render_guard = derived._job_render_guard
+_forget_job_caches = derived._forget_job_caches
+_forget_facsimile_memo = derived._forget_facsimile_memo
+_facsimile_memo_get = derived._facsimile_memo_get
+_facsimile_memo_set = derived._facsimile_memo_set
+_sweep_stale_staging = derived._sweep_stale_staging
+_page_numbers = derived._page_numbers
+
 # layout.json 페이지 번호 캐시 — /page/{n}은 유효성 검사만 필요한데 매 요청 전체
 # JSON을 재파싱했다. 키에 크기·mtime을 넣어 갱신 시 자동 무효화된다.
 _LAYOUT_PAGE_NUMBERS: dict[tuple[str, int, int], tuple[int, ...]] = {}
@@ -147,9 +153,42 @@ class _AbuseGuard:
             self._slots.release()
 
 
+# 리버스 프록시 뒤에서는 request.client.host가 **프록시 IP**라 모든 사용자가 한
+# 버킷으로 붕괴한다(문서가 권장하는 배포 형태). 반대로 X-Forwarded-For를 무조건
+# 믿으면 헤더 위조로 레이트리밋을 우회할 수 있다. 그래서 **옵트인**으로만 신뢰한다:
+# TRUSTED_PROXY_HOPS = 앱 앞단에 있는 신뢰 프록시 수(각 홉이 XFF에 한 항목을 덧붙인다).
+# 미설정(0)이면 헤더를 완전히 무시하는 현행 동작 그대로 — 기본값이 안전한 쪽이다.
+_TRUSTED_PROXY_HOPS_ENV = "TRUSTED_PROXY_HOPS"
+_XFF_KEY_MAX = 64
+_trusted_proxy_warned: set[str] = set()
+
+
+def _trusted_proxy_hops() -> int:
+    raw = (os.environ.get(_TRUSTED_PROXY_HOPS_ENV) or "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        if raw not in _trusted_proxy_warned:
+            _trusted_proxy_warned.add(raw)
+            logger.warning("%s 값이 정수가 아닙니다 (%r) — 프록시 헤더를 무시합니다",
+                           _TRUSTED_PROXY_HOPS_ENV, raw)
+        return 0
+
+
 def _client_key(request: Request) -> str:
     client = request.client
-    return client.host if client is not None else "unknown"
+    direct = client.host if client is not None else "unknown"
+    hops = _trusted_proxy_hops()
+    if hops <= 0:
+        return direct
+    chain = [p.strip() for p in (request.headers.get("x-forwarded-for") or "").split(",")]
+    chain = [p for p in chain if p]
+    # 홉 수보다 짧은 체인 = 신뢰 프록시가 붙이지 않은 헤더(또는 위조 시도) — 무시한다.
+    if len(chain) < hops:
+        return direct
+    return chain[-hops][:_XFF_KEY_MAX] or direct
 
 
 def _abuse_guard(st, name: str) -> _AbuseGuard:
@@ -183,6 +222,33 @@ def _get_job(request: Request, job_id: str):
     return job
 
 
+class _JobFileResponse(FileResponse):
+    """존재 확인과 전송 사이에 파일이 사라져도 500이 아니라 404를 준다.
+
+    라우트의 is_file() 검사 이후 실제 전송까지는 스레드풀 반납·이벤트 루프 복귀가
+    끼어든다. 그 사이 잡이 삭제(DELETE·TTL GC)되면 Starlette FileResponse가
+    RuntimeError를 던져 500 + 스택트레이스가 된다 — 이 경합의 올바른 답은 404다.
+    아직 아무 바이트도 보내기 전이라 상태 코드를 바꿀 수 있다."""
+
+    async def __call__(self, scope, receive, send) -> None:
+        import stat as stat_module
+
+        if self.stat_result is None:
+            try:
+                stat_result = await anyio.to_thread.run_sync(os.stat, self.path)
+                regular = stat_module.S_ISREG(stat_result.st_mode)
+            except OSError:
+                regular = False
+            if not regular:
+                await PlainTextResponse(
+                    "파일을 찾을 수 없습니다", status_code=404,
+                )(scope, receive, send)
+                return
+            self.stat_result = stat_result
+            self.set_stat_headers(stat_result)
+        await super().__call__(scope, receive, send)
+
+
 # ── 번역(한국어) 공용 헬퍼 ────────────────────────────────────────────────
 def _check_lang(lang: str) -> None:
     """구체 lang 값 검증 (쿼리에서는 None(원본)을 먼저 걸러낸 뒤 호출)."""
@@ -191,7 +257,7 @@ def _check_lang(lang: str) -> None:
 
 
 def _translate_dir(job, lang: str) -> Path:
-    return job.dir / "translations" / lang
+    return artifacts.translate_dir(job.dir, lang)
 
 
 def _translate_channel(job_id: str, lang: str) -> str:
@@ -200,7 +266,7 @@ def _translate_channel(job_id: str, lang: str) -> str:
 
 
 def _translated_markdown_or_404(job, lang: str) -> str:
-    p = job.dir / f"result.{lang}.md"
+    p = artifacts.markdown(job.dir, lang)
     if not p.is_file():
         raise HTTPException(404, "한국어 번역본이 없습니다 — 먼저 번역을 실행하세요")
     return p.read_text(encoding="utf-8")
@@ -208,7 +274,7 @@ def _translated_markdown_or_404(job, lang: str) -> str:
 
 def _read_translate_state(job, lang: str) -> dict | None:
     """translations/{lang}/state.json 로드 (없거나 손상되면 None)."""
-    p = _translate_dir(job, lang) / "state.json"
+    p = artifacts.translate_state(job.dir, lang)
     if not p.is_file():
         return None
     try:
@@ -220,7 +286,7 @@ def _read_translate_state(job, lang: str) -> dict | None:
 
 def _read_translate_report(job, lang: str) -> dict | None:
     """translations/{lang}/report.json 로드 (없거나 손상되면 None)."""
-    p = _translate_dir(job, lang) / "report.json"
+    p = artifacts.translate_report(job.dir, lang)
     if not p.is_file():
         return None
     try:
@@ -237,9 +303,9 @@ _TRANSLATE_REASON_KEYS = ("skip_reasons", "kept_reasons", "reference_rule")
 def _write_translate_state(job, lang: str, state: dict) -> None:
     d = _translate_dir(job, lang)
     d.mkdir(parents=True, exist_ok=True)
-    tmp = d / ".state.json.tmp"
+    tmp = artifacts.translate_state_tmp(job.dir, lang)
     tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, d / "state.json")
+    os.replace(tmp, artifacts.translate_state(job.dir, lang))
 
 
 def _stale_adjusted_state(request: Request, job, lang: str) -> dict | None:
@@ -308,13 +374,10 @@ def _run_translate_thread(
                 },
             })
             # ko 번역본을 포함해 다시 만들도록 archive.zip 캐시를 무효화한다.
-            (job.dir / "archive.zip").unlink(missing_ok=True)
-            # 번역이 갱신됐으므로 내보내기 PDF 캐시도 무효화한다.
-            (job.dir / f"export.{lang}.pdf").unlink(missing_ok=True)
-            (job.dir / f"export.{lang}.report.json").unlink(missing_ok=True)
-            (job.dir / f"export.{lang}.dual.pdf").unlink(missing_ok=True)
-            # 번역 PDF에서 만든 HTML 기준면 캐시도 다음 요청에서 다시 렌더한다.
-            (job.dir / "rendered" / lang / ".source.json").unlink(missing_ok=True)
+            artifacts.archive(job.dir).unlink(missing_ok=True)
+            # 번역이 갱신됐으므로 내보내기 PDF·대조 PDF·리포트와, 그 PDF에서 만든
+            # HTML 기준면 캐시까지 한 곳(artifacts)에서 무효화한다.
+            artifacts.invalidate_language_artifacts(job.dir, lang)
     except TranslateError as e:
         # SSE는 구독자가 없으면 이벤트를 버린다 — 서버 로그에도 반드시 남긴다
         logger.exception("번역 실패: %s (lang=%s)", job.id, lang)
@@ -351,6 +414,22 @@ def _qa_available(st) -> bool:
     return True
 
 
+def _note_worker_liveness(st, alive: bool) -> None:
+    """워커 스레드 생존 여부의 **변화**를 서버 로그에 남긴다.
+
+    health의 worker_alive 필드는 아무도 폴링하지 않으면 무성이다 — 방벽이 못 잡는
+    워커 사망(BaseException)은 잡이 영원히 queued로 남는 치명적 상태이므로 로그에도
+    반드시 남긴다. 폴링마다 찍지 않도록 상태 전이에서만 기록한다."""
+    last = getattr(st, "worker_alive_last", None)
+    if last == alive:
+        return
+    st.worker_alive_last = alive
+    if not alive:
+        logger.error("OCR 워커 스레드가 살아 있지 않습니다 — 새 잡이 queued로 남습니다")
+    elif last is False:
+        logger.info("OCR 워커 스레드가 다시 살아났습니다")
+
+
 @router.get("/health")
 def health(request: Request) -> dict:
     st = _state(request)
@@ -362,6 +441,8 @@ def health(request: Request) -> dict:
         provider = engine.provider_health()
     except Exception as e:  # noqa: BLE001 — health가 500으로 죽지 않게
         provider = {"status": "error", "error": str(e)[:300]}
+    worker_alive = st.worker.is_alive()
+    _note_worker_liveness(st, worker_alive)
     return {
         "status": "ok",
         "engine": engine.name,
@@ -374,7 +455,7 @@ def health(request: Request) -> dict:
         "gpu_name": engine.gpu_name(),
         "native_ops": native_ops.HAVE_NATIVE,
         # 워커 스레드 생존 여부 — 죽으면 잡이 영원히 queued로 남으므로 운영 가시성 필수
-        "worker_alive": st.worker.is_alive(),
+        "worker_alive": worker_alive,
         "max_upload_mb": st.settings.max_upload_mb,
         "translate_available": _translate_available(),
         # ── 신규 필드 (추가만 — 기존 필드 의미 불변) ──
@@ -422,7 +503,7 @@ async def create_job(
             "provider": caps.provider,
         },
     )
-    dest = job.dir / "source.pdf"
+    dest = artifacts.source_pdf(job.dir)
     size = 0
     try:
         # 디스크 쓰기·probe는 async 핸들러 안의 동기 blocking — 워커 스레드로 오프로드
@@ -549,14 +630,14 @@ async def job_events(request: Request, job_id: str) -> StreamingResponse:
 
 
 def _read_markdown(job) -> tuple[str, bool]:
-    md_path = job.dir / "result.md"
+    md_path = artifacts.markdown(job.dir)
     text = md_path.read_text(encoding="utf-8") if md_path.is_file() else ""
     return text, job.status != "done"
 
 
 def _load_figure_boxes(job) -> dict | None:
     """벤더 P13 → merge가 통합한 images/boxes.json (없으면 풀폭 폴백)."""
-    p = job.dir / "images" / "boxes.json"
+    p = artifacts.figure_boxes(job.dir)
     if not p.is_file():
         return None
     try:
@@ -598,11 +679,16 @@ def job_html(request: Request, job_id: str, lang: str | None = None) -> HTMLResp
     return HTMLResponse(html, headers=headers)
 
 
-def _backfill_layout_fonts(job, pages: list) -> None:
+def _backfill_layout_fonts(job, pages: list, lang: str | None = None) -> None:
     """기존 잡 지연 백필: layout.json에 실측 폰트 크기(fs)가 빠진 비이미지 블록이
     있고 source.pdf가 있으면, 텍스트 레이어에서 뽑아 in-place 주입 후 원자적 저장.
-    재변환 없이 이미 변환된 잡도 개선된다. enrichment 실패는 절대 500을 내지 않음."""
-    src = job.dir / "source.pdf"
+    재변환 없이 이미 변환된 잡도 개선된다. enrichment 실패는 절대 500을 내지 않음.
+
+    lang을 주면 파생 산출물 layout.{lang}.json에 같은 백필을 적용하고 그 경로에 쓴다 —
+    번역본 블록은 원본을 깊은 복사해 bbox가 동일하므로 주입 값도 동일하다. 이 경로가
+    없으면 ENRICH_VERSION 상향 시 원본 뷰만 갱신되고 번역 뷰는 구버전 폰트 메타로
+    고정된다(원문/번역 화면이 서로 다른 조판을 보게 된다)."""
+    src = artifacts.source_pdf(job.dir)
     if not src.exists():
         return
     try:
@@ -621,10 +707,11 @@ def _backfill_layout_fonts(job, pages: list) -> None:
         if enrich_layout_fonts(src, pages):
             # 요청별 고유 tmp — 동시 백필 요청이 같은 tmp에 겹쳐 쓰는 레이스 차단.
             # (병합 워커의 .layout.json.tmp와도 이름이 겹치지 않는다.)
-            tmp = job.dir / f".layout.{uuid.uuid4().hex}.tmp"
+            tmp = artifacts.layout_tmp(job.dir)
+            target = artifacts.layout(job.dir, lang)
             try:
                 tmp.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
-                os.replace(tmp, job.dir / "layout.json")
+                os.replace(tmp, target)
             finally:
                 tmp.unlink(missing_ok=True)
     except Exception:
@@ -634,10 +721,10 @@ def _backfill_layout_fonts(job, pages: list) -> None:
 def _load_layout_pages(job, lang: str | None = None) -> list:
     """lang=None이면 원본 layout.json, lang이면 번역본 layout.{lang}.json을 로드."""
     if lang is not None:
-        p = job.dir / f"layout.{lang}.json"
+        p = artifacts.layout(job.dir, lang)
         missing = "한국어 번역본이 없습니다 — 먼저 번역을 실행하세요"
     else:
-        p = job.dir / "layout.json"
+        p = artifacts.layout(job.dir)
         missing = "레이아웃 데이터가 없습니다"
     if not p.is_file():
         raise HTTPException(404, missing)
@@ -646,138 +733,42 @@ def _load_layout_pages(job, lang: str | None = None) -> list:
         assert isinstance(pages, list)
     except Exception as e:
         raise HTTPException(500, "레이아웃 데이터를 읽을 수 없습니다") from e
-    # 폰트 백필은 원본 layout.json만 대상: 번역본 페이지는 엔진이 fonts_v 스탬프를
-    # 복사해 두므로 no-op이고, _backfill_layout_fonts는 결과를 원본 경로에 쓰기 때문에
-    # 번역본에 실행하면 안 된다.
-    if lang is None:
-        _backfill_layout_fonts(job, pages)
+    # 번역본 페이지는 번역 시점의 fonts_v 스탬프를 복사해 온다 — 보통은 최신이라
+    # no-op이지만, 번역 뒤 ENRICH_VERSION이 오르면 번역본만 구버전으로 남는다.
+    # 각 산출물을 자기 경로에 백필해 원문/번역 뷰가 같은 폰트 메타를 쓰게 한다.
+    _backfill_layout_fonts(job, pages, lang)
     return pages
 
 
-def _read_text_or_none(path: Path) -> str | None:
-    try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, ValueError):
-        return None
-
-
-def _load_pdf_export_report(job, lang: str) -> dict:
-    try:
-        loaded = json.loads(
-            (job.dir / f"export.{lang}.report.json").read_text(encoding="utf-8")
-        )
-        return loaded if isinstance(loaded, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def _pdf_export_font_id(settings) -> str:
-    """PDF_EXPORT_FONT 설정의 정체성. 경로뿐 아니라 크기·mtime까지 넣어, 같은 경로에
-    다른 폰트를 덮어써도 export.{lang}.pdf 캐시가 무효화되게 한다."""
-    raw = (settings.pdf_export_font or "").strip()
-    if not raw:
-        return "auto"
-    try:
-        stat = Path(raw).stat()
-    except OSError:
-        return f"{raw}:missing"
-    return f"{raw}:{stat.st_size}:{stat.st_mtime_ns}"
-
-
-def _font_marker_path(job, lang: str) -> Path:
-    return job.dir / f"export.{lang}.font.txt"
-
-
-def _write_pdf_export_font_id(job, lang: str, font_id: str) -> None:
-    """어떤 폰트 설정으로 만든 PDF인지 원자적으로 남긴다(리포트는 파이프라인 소유라
-    여기서 건드리지 않는다). 기록 실패는 다음 요청의 재빌드로만 이어진다."""
-    marker = _font_marker_path(job, lang)
-    tmp = job.dir / f".export.{lang}.font.{uuid.uuid4().hex}.tmp"
-    try:
-        tmp.write_text(font_id, encoding="utf-8")
-        os.replace(tmp, marker)
-    except OSError:
-        logger.warning("PDF 폰트 표식 저장 실패: %s", marker.name)
-    finally:
-        tmp.unlink(missing_ok=True)
-
-
+# ── 파생 산출물 보장(derived) 어댑터 ──────────────────────────────────────
+# 빌더를 이 모듈 전역에서 읽어 넘긴다 — 라우트 계층이 어떤 구현으로 내보내는지의
+# 단일 진입점이자, 회귀 테스트가 느린 빌드를 가로채는 이음매(seam)다.
 def _ensure_translated_pdf(job, lang: str, settings) -> tuple[Path, dict]:
-    """번역 레이아웃과 같은 세대의 PDF를 만들거나 캐시에서 돌려준다.
-
-    잡 단위 락 안에서 수행한다 — /pdf·/layout·/page가 동시에 첫 진입하면 같은
-    export.{lang}.pdf를 여러 번 만들게 된다(수십 초짜리 작업).
-    """
-    source_pdf = job.dir / "source.pdf"
-    orig_layout = job.dir / "layout.json"
-    trans_layout = job.dir / f"layout.{lang}.json"
-    out = job.dir / f"export.{lang}.pdf"
-    font_id = _pdf_export_font_id(settings)
-    with _job_render_lock(job.id):
-        report = _load_pdf_export_report(job, lang)
-        try:
-            latest_input = max(
-                source_pdf.stat().st_mtime_ns,
-                orig_layout.stat().st_mtime_ns,
-                trans_layout.stat().st_mtime_ns,
-            )
-            cache_current = (
-                out.is_file()
-                and out.stat().st_mtime_ns >= latest_input
-                and report.get("format_version") == PDF_EXPORT_FORMAT_VERSION
-                # 폰트는 입력 파일이 아니라 설정이라 mtime 비교로는 잡히지 않는다 —
-                # PDF_EXPORT_FONT를 바꾸면 예전 폰트로 조판된 캐시가 계속 나갔다.
-                and _read_text_or_none(_font_marker_path(job, lang)) == font_id
-            )
-        except OSError:
-            # build_translated_pdf가 누락 입력을 사용자용 PdfExportError로 변환한다.
-            cache_current = False
-        if not cache_current:
-            built = build_translated_pdf(
-                job.dir, lang, fontfile=settings.pdf_export_font,
-            )
-            _write_pdf_export_font_id(job, lang, font_id)
-            return built.path, built.report()
-    return out, report
+    return derived._ensure_translated_pdf(job, lang, settings, build=build_translated_pdf)
 
 
 def _ensure_dual_pdf(job, lang: str, translated_pdf: Path) -> Path:
-    """원본·번역 대조 PDF 캐시를 번역 단일 PDF와 같은 세대로 유지한다."""
-    source_pdf = job.dir / "source.pdf"
-    out = job.dir / f"export.{lang}.dual.pdf"
-    try:
-        latest_input = max(
-            source_pdf.stat().st_mtime_ns,
-            translated_pdf.stat().st_mtime_ns,
-        )
-    except OSError:
-        # build_dual_pdf가 누락 파일을 사용자에게 읽을 수 있는 PdfExportError로 바꾼다.
-        return build_dual_pdf(source_pdf, translated_pdf, out)
-    if not out.is_file() or out.stat().st_mtime_ns < latest_input:
-        return build_dual_pdf(source_pdf, translated_pdf, out)
-    return out
+    return derived._ensure_dual_pdf(job, lang, translated_pdf, build=build_dual_pdf)
 
 
-def _forget_job_caches(job_id: str) -> None:
-    """잡 삭제 시 프로세스 내 파생 캐시(락·검증 메모)를 함께 버린다."""
-    with _FACSIMILE_LOCKS_GUARD:
-        _FACSIMILE_LOCKS.pop(job_id, None)
-    for key in [k for k in _FACSIMILE_VERIFIED if k[0] == job_id]:
-        _FACSIMILE_VERIFIED.pop(key, None)
+def _ensure_facsimile_pages(job, page_numbers: list[int], lang: str | None, settings) -> Path:
+    return derived._ensure_facsimile_pages(
+        job, page_numbers, lang, settings,
+        render=render_pdf_pages, build=build_translated_pdf,
+    )
 
 
-def _job_render_lock(job_id: str) -> threading.RLock:
-    """잡 단위 렌더 락 — 다른 잡의 레이아웃/페이지 요청을 막지 않는다."""
-    with _FACSIMILE_LOCKS_GUARD:
-        return _FACSIMILE_LOCKS.setdefault(job_id, threading.RLock())
+def _try_facsimile_pages(job, pages: list, lang: str | None, settings) -> Path | None:
+    return derived._try_facsimile_pages(
+        job, pages, lang, settings,
+        render=render_pdf_pages, build=build_translated_pdf,
+    )
 
 
-def _page_numbers(pages: list) -> list[int]:
-    """layout 페이지 목록 → 렌더 파일명에 쓰는 페이지 번호(누락 시 순서 폴백)."""
-    return [
-        int(page.get("page", index)) if isinstance(page, dict) else index
-        for index, page in enumerate(pages, start=1)
-    ]
+def _busy_as_503(e: PdfExportBusyError) -> HTTPException:
+    """내보내기 대기열 포화는 잡 상태 문제(4xx)도 서버 결함(500)도 아니다 —
+    재시도하면 성공할 수 있는 일시적 과부하이므로 503 + Retry-After로 알린다."""
+    return HTTPException(503, str(e), headers={"Retry-After": str(e.retry_after)})
 
 
 def _cached_page_numbers(job, lang: str | None) -> list[int]:
@@ -785,7 +776,7 @@ def _cached_page_numbers(job, lang: str | None) -> list[int]:
 
     예전에는 페이지 이미지 요청마다 layout.json 전체를 재파싱했다. 파일 크기·mtime을
     키에 넣어 산출물이 갱신되면 자동으로 다시 읽는다."""
-    path = job.dir / (f"layout.{lang}.json" if lang else "layout.json")
+    path = artifacts.layout(job.dir, lang)
     try:
         stat = path.stat()
     except OSError:
@@ -801,105 +792,6 @@ def _cached_page_numbers(job, lang: str | None) -> list[int]:
             _LAYOUT_PAGE_NUMBERS.clear()
         _LAYOUT_PAGE_NUMBERS[key] = numbers
     return list(numbers)
-
-
-def _ensure_facsimile_pages(job, page_numbers: list[int], lang: str | None, settings) -> Path:
-    """HTML의 시각 기준면이 될 페이지 PNG 디렉터리를 보장한다.
-
-    원문은 OCR 입력에 쓰인 pages/를 그대로 재사용한다. 번역본은 동일한
-    export.{lang}.pdf를 job.dpi로 렌더해, HTML과 다운로드 PDF가 픽셀 수준에서
-    같은 결과를 보게 한다. marker는 PDF 크기·mtime·DPI·페이지 수를 포함한다.
-    """
-    if lang is None:
-        pages_dir = job.dir / "pages"
-        if not pages_dir.is_dir():
-            raise PdfExportError("원본 페이지 이미지가 없습니다")
-        return pages_dir
-
-    target = job.dir / "rendered" / lang
-    marker = target / ".source.json"
-    # PDF 빌드까지 락 안에서 수행한다 — 락 밖이면 같은 잡의 동시 첫 진입이 같은
-    # export.{lang}.pdf를 중복으로 만든다.
-    with _job_render_lock(job.id):
-        pdf_path, _report = _ensure_translated_pdf(job, lang, settings)
-        pdf_stat = pdf_path.stat()
-        signature = {
-            "pdf_size": pdf_stat.st_size,
-            "pdf_mtime_ns": pdf_stat.st_mtime_ns,
-            "dpi": int(job.dpi),
-            "pages": len(page_numbers),
-        }
-
-        def _cache_valid() -> bool:
-            try:
-                saved = json.loads(marker.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                return False
-            if saved != signature:
-                return False
-            expected = [target / f"page_{number:04d}.png" for number in page_numbers]
-            return bool(expected) and all(path.is_file() for path in expected)
-
-        def _marker_id() -> tuple:
-            try:
-                stat = marker.stat()
-            except OSError:
-                return ()
-            return (stat.st_size, stat.st_mtime_ns)
-
-        memo_key = (job.id, lang)
-        # 같은 세대를 이 프로세스에서 이미 검증했으면 전 페이지 stat을 건너뛴다.
-        # marker 지문까지 함께 비교하므로, 캐시 무효화(marker 삭제/재기록)는 메모리
-        # 메모를 우회하지 못한다 — 디스크가 여전히 진실의 원천이다.
-        marker_id = _marker_id()
-        if marker_id and _FACSIMILE_VERIFIED.get(memo_key) == (signature, marker_id):
-            return target
-        if _cache_valid():
-            _FACSIMILE_VERIFIED[memo_key] = (signature, _marker_id())
-            return target
-        target.mkdir(parents=True, exist_ok=True)
-        # 재생성은 파일 단위로 원자적이어야 한다. 예전에는 기존 PNG를 먼저 지우고
-        # 같은 자리에 다시 렌더해, 그 사이 /files 요청이 404나 반쯤 쓰인 이미지를
-        # 받았다. 임시 디렉터리에 렌더한 뒤 os.replace로 갈아끼운다.
-        staging = job.dir / "rendered" / f".{lang}.{uuid.uuid4().hex}.tmp"
-        staging.mkdir(parents=True, exist_ok=True)
-        try:
-            render_pdf_pages(
-                pdf_path,
-                staging,
-                dpi=int(job.dpi),
-                max_pages=settings.max_pages,
-            )
-            fresh = sorted(staging.glob("page_*.png"))
-            for path in fresh:
-                os.replace(path, target / path.name)
-            keep = {path.name for path in fresh}
-            for old in target.glob("page_*.png"):
-                if old.name not in keep:
-                    old.unlink(missing_ok=True)
-            tmp = target / f".source.{uuid.uuid4().hex}.tmp"
-            try:
-                tmp.write_text(json.dumps(signature, sort_keys=True), encoding="utf-8")
-                os.replace(tmp, marker)
-            finally:
-                tmp.unlink(missing_ok=True)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
-        _FACSIMILE_VERIFIED[memo_key] = (signature, _marker_id())
-    return target
-
-
-def _try_facsimile_pages(job, pages: list, lang: str | None, settings) -> Path | None:
-    """레이아웃 HTML은 PDF export 결함 때문에 완전히 사라지지 않도록 폴백한다."""
-    try:
-        return _ensure_facsimile_pages(job, _page_numbers(pages), lang, settings)
-    except (PdfExportError, OSError, ValueError):
-        logger.exception(
-            "facsimile 페이지 준비 실패 — 좌표 텍스트 렌더로 폴백: %s (%s)",
-            job.id,
-            lang or "orig",
-        )
-        return None
 
 
 @router.get("/jobs/{job_id}/layout.html")
@@ -936,10 +828,13 @@ def job_document_download(request: Request, job_id: str, lang: str | None = None
         text = _translated_markdown_or_404(job, lang)
     else:
         text, _partial = _read_markdown(job)  # 미완료 잡도 부분 결과 내보내기 허용(/markdown과 동일)
-    layout_path = job.dir / (f"layout.{lang}.json" if lang else "layout.json")
+    layout_path = artifacts.layout(job.dir, lang)
     if job.status == "done" and layout_path.is_file():
         pages = _load_layout_pages(job, lang)
-        pages_dir = _try_facsimile_pages(job, pages, lang, st.settings)
+        try:
+            pages_dir = _try_facsimile_pages(job, pages, lang, st.settings)
+        except PdfExportBusyError as e:
+            raise _busy_as_503(e) from e
         if pages_dir is not None:
             stem = Path(job.filename).stem or "document"
             html = render_layout_standalone(
@@ -983,13 +878,17 @@ def job_layout(request: Request, job_id: str, lang: str | None = None) -> HTMLRe
         _check_lang(lang)
     pages = _load_layout_pages(job, lang)
     st = _state(request)
-    pages_dir = _try_facsimile_pages(job, pages, lang, st.settings)
+    try:
+        pages_dir = _try_facsimile_pages(job, pages, lang, st.settings)
+    except PdfExportBusyError as e:
+        raise _busy_as_503(e) from e
     page_src = None
     if pages_dir is not None:
         rel = pages_dir.relative_to(job.dir).as_posix()
 
         def page_src(page_number):
-            return f"/api/jobs/{job_id}/files/{rel}/page_{page_number:04d}.png"
+            name = artifacts.page_image(pages_dir, page_number).name
+            return f"/api/jobs/{job_id}/files/{rel}/{name}"
     return HTMLResponse(render_layout_html(
         pages,
         f"/api/jobs/{job_id}/files",
@@ -1015,29 +914,41 @@ def job_page_image(
     if lang is not None:
         _check_lang(lang)
         _translated_markdown_or_404(job, lang)
-    layout_path = job.dir / (f"layout.{lang}.json" if lang else "layout.json")
+    layout_path = artifacts.layout(job.dir, lang)
     if not layout_path.is_file():
         # figure_only 엔진은 번역 텍스트 좌표가 없어 최종 페이지 합성이 불가능하다.
         # 기존 원본 페이지를 유지하고 오른쪽 semantic 번역문을 계속 제공한다.
-        path = job.dir / "pages" / f"page_{page_number:04d}.png"
+        path = artifacts.page_image(artifacts.pages_dir(job.dir), page_number)
         if page_number < 1 or not path.is_file():
             raise HTTPException(404, "페이지 이미지를 찾을 수 없습니다")
-        return FileResponse(path, media_type="image/png")
+        return _JobFileResponse(path, media_type="image/png")
     page_numbers = _cached_page_numbers(job, lang)
     if page_number not in set(page_numbers):
         raise HTTPException(404, "페이지를 찾을 수 없습니다")
-    try:
-        pages_dir = _ensure_facsimile_pages(
-            job, page_numbers, lang, _state(request).settings,
-        )
-    except PdfExportError as e:
-        # 내보내기 불가는 서버 결함이 아니라 잡 상태(입력 누락·손상) 문제다 —
-        # 500 대신 사용자에게 그대로 보여줄 수 있는 409로 알린다.
-        raise HTTPException(409, str(e)) from e
-    path = pages_dir / f"page_{page_number:04d}.png"
+    settings = _state(request).settings
+
+    def _prepare() -> Path:
+        try:
+            return _ensure_facsimile_pages(job, page_numbers, lang, settings)
+        except PdfExportBusyError as e:
+            raise _busy_as_503(e) from e
+        except PdfExportError as e:
+            # 내보내기 불가는 서버 결함이 아니라 잡 상태(입력 누락·손상) 문제다 —
+            # 500 대신 사용자에게 그대로 보여줄 수 있는 409로 알린다.
+            raise HTTPException(409, str(e)) from e
+
+    pages_dir = _prepare()
+    path = artifacts.page_image(pages_dir, page_number)
+    if not path.is_file() and lang is not None:
+        # marker는 그대로인데 PNG만 사라진 상태(외부 정리·부분 유실)에서는 프로세스
+        # 내 메모가 "검증됨"으로 굳어 재렌더를 막는다 — 메모를 버리고 한 번만 다시
+        # 준비해 즉시 자가 복구한다.
+        _forget_facsimile_memo(job.id, lang)
+        pages_dir = _prepare()
+        path = artifacts.page_image(pages_dir, page_number)
     if not path.is_file():
         raise HTTPException(404, "페이지 이미지를 찾을 수 없습니다")
-    return FileResponse(path, media_type="image/png")
+    return _JobFileResponse(path, media_type="image/png")
 
 
 def _alignment_bbox(value) -> list[float] | None:
@@ -1157,16 +1068,22 @@ def job_alignment(
 def _viewer_artifact_revision(job, lang: str | None) -> str:
     """뷰어 계약 캐시 키. 내용 전체를 재해시하지 않고 원자적으로 교체되는 산출물의
     파일명·크기·mtime을 묶는다. 강제 재번역/재병합 시 URL 계약이 즉시 바뀐다."""
-    names = ["meta.json", "layout.json", "result.md"]
+    paths = [
+        artifacts.meta(job.dir),
+        artifacts.layout(job.dir),
+        artifacts.markdown(job.dir),
+    ]
     if lang is not None:
-        names.extend([
-            f"layout.{lang}.json",
-            f"result.{lang}.md",
-            f"translations/{lang}/state.json",
+        paths.extend([
+            artifacts.layout(job.dir, lang),
+            artifacts.markdown(job.dir, lang),
+            artifacts.translate_state(job.dir, lang),
         ])
     parts = []
-    for name in names:
-        path = job.dir / name
+    for path in paths:
+        # 해시 입력에는 경로가 아니라 잡 디렉터리 기준 상대 이름을 넣는다 —
+        # 잡 디렉터리를 옮겨도(데이터 볼륨 마이그레이션) ETag가 흔들리지 않는다.
+        name = path.relative_to(job.dir).as_posix()
         try:
             stat = path.stat()
         except OSError:
@@ -1204,9 +1121,9 @@ def job_viewer_manifest(
     if request.headers.get("if-none-match") == headers["ETag"]:
         return Response(status_code=304, headers=headers)
 
-    source_layout = job.dir / "layout.json"
-    target_layout = job.dir / f"layout.{lang}.json" if lang else source_layout
-    source_images = sorted((job.dir / "pages").glob("page_*.png"))
+    source_layout = artifacts.layout(job.dir)
+    target_layout = artifacts.layout(job.dir, lang) if lang else source_layout
+    source_images = sorted(artifacts.pages_dir(job.dir).glob("page_*.png"))
     page_count = 0
     try:
         page_count = int(job.progress.get("total_pages") or 0)
@@ -1242,7 +1159,7 @@ def job_viewer_manifest(
             "translated_page_image": bool(
                 lang
                 and target_layout.is_file()
-                and (job.dir / "rendered" / lang / ".source.json").is_file()
+                and artifacts.facsimile_marker(job.dir, lang).is_file()
             ),
             "alignment": source_layout.is_file() and target_layout.is_file(),
             "outline": target_layout.is_file(),
@@ -1372,7 +1289,8 @@ def job_file(request: Request, job_id: str, file_path: str) -> FileResponse:
     roots = [(job.dir / name).resolve() for name in _ALLOWED_FILE_DIRS]
     if not any(full.is_relative_to(root) for root in roots) or not full.is_file():
         raise HTTPException(404, "파일을 찾을 수 없습니다")
-    return FileResponse(full)
+    # is_file() → 실제 전송 사이에 잡이 삭제되면 500이 아니라 404여야 한다.
+    return _JobFileResponse(full)
 
 
 @router.get("/jobs/{job_id}/archive")
@@ -1380,25 +1298,25 @@ def job_archive(request: Request, job_id: str) -> FileResponse:
     job = _get_job(request, job_id)
     if job.status != "done":
         raise HTTPException(409, "아직 변환이 완료되지 않았습니다")
-    zip_path = job.dir / "archive.zip"
+    zip_path = artifacts.archive(job.dir)
     if not zip_path.is_file():
         # 요청별 고유 tmp — 동시 요청 둘이 같은 tmp에 겹쳐 써 손상 zip이 캐시되는
         # 레이스 차단(sync 핸들러는 스레드풀 병렬). 둘 다 완주하면 마지막 replace가 승자.
-        tmp = job.dir / f".archive.{uuid.uuid4().hex}.tmp"
+        tmp = artifacts.archive_tmp(job.dir)
         try:
             with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
-                md = job.dir / "result.md"
+                md = artifacts.markdown(job.dir)
                 if md.is_file():
                     zf.write(md, "result.md")
                 # 변환 메타(엔진/모델/경고)도 동봉 — 어떤 모델로 변환했는지 아카이브만으로 확인 가능
-                meta = job.dir / "meta.json"
+                meta = artifacts.meta(job.dir)
                 if meta.is_file():
                     zf.write(meta, "meta.json")
                 # 번역본(result.ko.md 등)도 포함 — 번역 완료 시 이 zip 캐시가 삭제돼
                 # 다음 요청에서 번역본까지 담아 재생성된다. (glob은 result.md 자신은 제외)
                 for extra in sorted(job.dir.glob("result.*.md")):
                     zf.write(extra, extra.name)
-                images = job.dir / "images"
+                images = artifacts.images_dir(job.dir)
                 if images.is_dir():
                     for f in sorted(images.iterdir()):
                         if f.is_file():
@@ -1432,8 +1350,8 @@ def job_pdf(
     if job.status != "done":
         raise HTTPException(409, "아직 변환이 완료되지 않았습니다")
     _translated_markdown_or_404(job, lang)
-    trans_layout = job.dir / f"layout.{lang}.json"
-    if not (job.dir / "layout.json").is_file() or not trans_layout.is_file():
+    trans_layout = artifacts.layout(job.dir, lang)
+    if not artifacts.layout(job.dir).is_file() or not trans_layout.is_file():
         raise HTTPException(
             409,
             "이 잡에는 좌표 레이아웃이 없어 PDF 내보내기를 지원하지 않습니다"
@@ -1444,6 +1362,8 @@ def job_pdf(
             job, lang, _state(request).settings,
         )
         out = _ensure_dual_pdf(job, lang, translated_pdf) if view == "dual" else translated_pdf
+    except PdfExportBusyError as e:
+        raise _busy_as_503(e) from e
     except PdfExportError as e:
         raise HTTPException(500, str(e))
     # 헤더는 숫자만 사용해 비ASCII 경고문·원문이 HTTP 메타데이터로 새지 않게 한다.

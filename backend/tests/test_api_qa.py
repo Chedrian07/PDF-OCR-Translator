@@ -292,6 +292,53 @@ def test_qa_model_allowlist_violation_maps_to_400(client, sample_pdf):
     assert client.post(f"/api/jobs/{jid}/qa", json={"question": "q"}).status_code == 503
 
 
+def test_llm_input_error_markers_match_real_provider_messages():
+    """위 매핑은 providers.py 문구의 **복사본**에 걸려 있다 — 리워딩 한 줄이면 조용히
+    503으로 되돌아간다. 실제 프로바이더가 던지는 LlmError로 매핑을 고정한다."""
+    import asyncio
+
+    import pytest
+
+    from app.api import _llm_error_status
+    from app.llm.providers import LlmRouter, OllamaClient, OpenAIClient
+
+    openai = OpenAIClient(
+        api_key="k", base_url="http://127.0.0.1:1",
+        responses_models=("gpt-allowed",), chat_models=("gpt-chat",),
+        default_responses_model="gpt-allowed", default_chat_model="gpt-chat",
+    )
+    ollama = OllamaClient(base_url="http://127.0.0.1:1", default_model="qwen3:8b")
+    router = LlmRouter(
+        openai=openai, ollama=ollama,
+        default_provider="openai-responses", default_reasoning_effort="low",
+    )
+    kwargs = dict(
+        system="s", prompt="p", reasoning_effort="low",
+        reasoning_summary="none", thinking=False,
+    )
+
+    async def _models():          # 네트워크 없이 온디바이스 목록을 비운다
+        return []
+
+    ollama.models = _models
+
+    real_messages = []
+    for coro in (
+        openai.generate(provider="openai-legacy", model=None, **kwargs),
+        openai.generate(provider="openai-responses", model="gpt-9", **kwargs),
+        ollama.generate(model="qwen3:cloud", **kwargs),
+        router._generate(provider="bogus", model=None, **kwargs),
+    ):
+        with pytest.raises(LlmError) as excinfo:
+            asyncio.run(coro)
+        real_messages.append(str(excinfo.value))
+
+    for message in real_messages:
+        assert _llm_error_status(message) == 400, message
+    # 업스트림 장애 문구는 여전히 503으로 남는다 (구분이 실제로 살아 있다)
+    assert _llm_error_status("OpenAI API request failed: timeout") == 503
+
+
 def test_qa_unknown_provider_rejected_before_llm_call(client, sample_pdf):
     """카탈로그에 없는 프로바이더는 LLM 호출 전에 400 — 라우터의 기본 모델 해석이
     엉뚱한 프로바이더로 흘러가지 않게 한다."""
@@ -328,6 +375,46 @@ def test_qa_rate_limit_returns_429(tmp_path, sample_pdf):
         r = client.post(f"/api/jobs/{jid}/qa", json={"question": "q"})
         assert r.status_code == 429
         assert int(r.headers["retry-after"]) >= 1
+
+
+def test_qa_rate_limit_buckets_split_by_client_behind_trusted_proxy(
+    tmp_path, sample_pdf, monkeypatch,
+):
+    """문서가 권장하는 리버스 프록시 배포에서는 client.host가 프록시 IP라 모든
+    사용자가 한 버킷으로 붕괴한다 — 신뢰 홉 수를 명시하면 사용자별로 나뉜다."""
+    from fastapi.testclient import TestClient
+
+    from app.config import Settings
+    from app.main import create_app
+
+    settings = Settings(
+        engine="fake", device="cpu", data_dir=tmp_path / "data",
+        preload_model=False, fake_delay=0.0, frontend_dir=tmp_path / "no-frontend",
+        qa_rate_limit_per_min=2,
+    )
+    with TestClient(create_app(settings)) as client:
+        client.app.state.llm_router = FakeRouter()
+        first = _done_job(client, sample_pdf)
+        second = _done_job(client, sample_pdf)   # 잡 버킷이 아니라 IP 버킷을 본다
+
+        def _ask(job_id: str, addr: str) -> int:
+            return client.post(
+                f"/api/jobs/{job_id}/qa", json={"question": "q"},
+                headers={"x-forwarded-for": addr},
+            ).status_code
+
+        # 옵트인 전: 서로 다른 사용자 셋이 각 1회씩 물어도 IP 버킷이 하나로 붕괴한다
+        monkeypatch.delenv("TRUSTED_PROXY_HOPS", raising=False)
+        assert _ask(first, "203.0.113.1") == 200
+        assert _ask(second, "203.0.113.2") == 200
+        assert _ask(first, "203.0.113.3") == 429
+
+        # 옵트인 후: 프록시가 붙인 마지막 항목이 사용자 주소 → 버킷이 나뉜다
+        client.app.state.abuse_guards = None     # 가드 재생성 (버킷 초기화)
+        monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+        assert _ask(first, "203.0.113.1") == 200
+        assert _ask(second, "203.0.113.2") == 200
+        assert _ask(first, "203.0.113.3") == 200
 
 
 def test_qa_concurrency_cap_returns_429(client, sample_pdf):

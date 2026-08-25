@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections import Counter
@@ -29,6 +30,12 @@ MAX_RENDER_PIXELS = 50_000_000
 MAX_EMBEDDED_TEXT_CHARS = 100_000
 _UNSAFE_TEXT_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _EMBEDDED_RECOVERY_NOTE = "> ℹ️ PDF 내장 텍스트 레이어에서 복구한 plain text입니다."
+
+# 렌더 단계 경고의 인계 파일. 렌더는 잡 경고 채널(merge.IncrementalMerger)이
+# 생기기 **전**에 끝나므로, 흰 페이지 대체 같은 품질 저하 사실을 여기에 남겨야
+# merge가 승계해 job.warnings(→ quality.state="degraded")에 반영할 수 있다.
+RENDER_WARNINGS_NAME = "render_warnings.json"
+_MAX_LISTED_FAILED_PAGES = 10
 
 
 def quiet_fitz():
@@ -168,6 +175,19 @@ def _write_blank_page(doc, index: int, path: Path, dpi: int) -> None:
     Image.new("RGB", size, "white").save(path)
 
 
+def _write_render_warnings(pages_dir: Path, messages: list[str]) -> None:
+    """렌더 경고를 pages_dir에 기록(없으면 삭제 — 재실행 시 이전 세대가 남지 않게).
+    기록 실패는 렌더 자체를 죽이지 않는다(품질 고지는 best-effort)."""
+    path = pages_dir / RENDER_WARNINGS_NAME
+    try:
+        if messages:
+            path.write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
+        else:
+            path.unlink(missing_ok=True)
+    except OSError as e:  # pragma: no cover - 디스크 이상
+        logger.warning("렌더 경고 파일 기록 실패 (%s): %s", path, e)
+
+
 def render_pdf_pages(
     pdf_path: Path,
     pages_dir: Path,
@@ -193,7 +213,7 @@ def render_pdf_pages(
         if n > max_pages:
             raise ValueError(f"페이지 수({n})가 상한({max_pages})을 초과합니다")
         out: list[Path] = []
-        failed = 0
+        failed_pages: list[int] = []
         last_err: Exception | None = None
         for i in range(n):
             p = pages_dir / f"page_{i + 1:04d}.png"
@@ -211,7 +231,7 @@ def render_pdf_pages(
                 pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
                 pix.save(str(p))
             except Exception as e:  # noqa: BLE001 — 페이지 단위 격리
-                failed += 1
+                failed_pages.append(i + 1)
                 last_err = e
                 logger.warning("페이지 %d/%d 렌더 실패 (%s: %s) — 흰색 페이지로 대체",
                                i + 1, n, e.__class__.__name__, str(e)[:200])
@@ -219,8 +239,23 @@ def render_pdf_pages(
             out.append(p)
             if progress_cb:
                 progress_cb(i + 1, n)
-        if failed == n:
+        if len(failed_pages) == n:
             raise ValueError(f"모든 페이지({n}) 렌더에 실패했습니다: {last_err}") from last_err
+        # 흰 페이지 대체는 조용한 품질 저하다 — 로그만으로는 사용자가 알 수 없어
+        # 병합기가 승계할 수 있게 파일로 남긴다 (없으면 파일 삭제 = 경고 없음).
+        messages: list[str] = []
+        if failed_pages:
+            listed = ", ".join(str(p) for p in failed_pages[:_MAX_LISTED_FAILED_PAGES])
+            more = (
+                f" 외 {len(failed_pages) - _MAX_LISTED_FAILED_PAGES}쪽"
+                if len(failed_pages) > _MAX_LISTED_FAILED_PAGES
+                else ""
+            )
+            messages.append(
+                f"{len(failed_pages)}/{n}페이지 렌더에 실패해 흰 페이지로 대체했습니다 "
+                f"({listed}{more}) — 해당 페이지의 인식 결과가 비어 있거나 부정확할 수 있습니다"
+            )
+        _write_render_warnings(pages_dir, messages)
         return out
     finally:
         doc.close()

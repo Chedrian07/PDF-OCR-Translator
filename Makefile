@@ -40,6 +40,9 @@ e2e:              ## 실서버 스모크 (기동된 백엔드 필요 — README 
 e2e-mock:         ## hermetic 브라우저 E2E — mock OpenAI + FakeEngine 백엔드를 직접 띄운다
 	cd frontend && npm i && npx playwright install chromium && npm run test:e2e-mock
 
+# 동시에 두 번 돌리려면 작업 디렉터리를 갈라야 한다 — 하네스가 --work에 배타 락을
+# 걸고, 겹치면 종료코드 2로 멈춘다(포트와 달리 작업 디렉터리는 자동으로 안 갈린다):
+#   make verify-e2e VERIFY_ARGS="--pages 6 --work tmp/verify-e2e-2"
 verify-e2e:       ## 실 PDF 전 구간 점검 — 업로드→OCR→번역→PDF→뷰어→보안 (외부 API 없음)
 	cd backend && uv run python ../scripts/verify_e2e.py $(VERIFY_ARGS)
 

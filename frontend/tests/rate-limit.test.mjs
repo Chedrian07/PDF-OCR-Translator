@@ -10,6 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  applyRetryLock,
   parseRetryAfter,
   rateLimitNotice,
   RETRY_AFTER_FALLBACK_S,
@@ -82,4 +83,41 @@ test('rateLimitNotice: 문구는 항상 초를 포함하고 잠금은 유한하�
     assert.ok(seconds >= 1 && seconds <= RETRY_AFTER_MAX_S, `범위 밖: ${header} → ${seconds}`);
     assert.ok(message.includes(`${seconds}초 후`));
   }
+});
+
+/* ---------------- applyRetryLock ---------------- */
+// 잠금은 잡이 아니라 클라이언트(IP) 단위다 — 잡을 바꿔도 서버는 계속 429를 준다.
+// 그런데 잡 전환·재렌더(showTranslateButton / setQaBusyUI(false))는 버튼을 되살린다.
+// 그 상태를 그대로 두면 "눌리지만 요청은 나가지 않는 버튼"이 된다.
+
+test('applyRetryLock: 남은 시간이 있으면 버튼을 다시 비활성으로 되돌린다', () => {
+  const btns = [{ disabled: false }, { disabled: false }];
+  assert.equal(applyRetryLock(12, btns), true);
+  assert.deepEqual(btns.map((b) => b.disabled), [true, true]);
+});
+
+test('applyRetryLock: 잠금이 끝났으면 아무것도 건드리지 않는다', () => {
+  const btns = [{ disabled: false }];
+  assert.equal(applyRetryLock(0, btns), false);
+  assert.equal(btns[0].disabled, false, '만료 뒤에는 다시 활성 상태 그대로');
+  assert.equal(applyRetryLock(-3, btns), false);
+  assert.equal(applyRetryLock(null, btns), false);
+  assert.equal(applyRetryLock(NaN, btns), false);
+  assert.equal(btns[0].disabled, false);
+});
+
+test('applyRetryLock: 다른 사유로 이미 비활성인 버튼을 활성화하지 않는다', () => {
+  // 프로바이더 미설정으로 비활성인 버튼을 잠금 해제가 되살리면 안 된다 —
+  // 이 함수는 오직 "더 잠그는" 방향으로만 움직인다.
+  const unavailable = { disabled: true };
+  applyRetryLock(0, [unavailable]);
+  assert.equal(unavailable.disabled, true);
+  applyRetryLock(5, [unavailable]);
+  assert.equal(unavailable.disabled, true);
+});
+
+test('applyRetryLock: 빈 목록·null 항목에도 던지지 않는다', () => {
+  assert.equal(applyRetryLock(5, []), true);
+  assert.equal(applyRetryLock(5, [null, undefined]), true);
+  assert.equal(applyRetryLock(5, null), true);
 });

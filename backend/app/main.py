@@ -20,7 +20,14 @@ from .engine import build_engine
 from .jobs import EventBroker, JobStore, Worker
 from .llm import build_router
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# 스레드 이름을 포맷에 포함한다 — 번역은 잡별 데몬 스레드로 **병렬** 실행되고
+# (api.py: name=f"translate-{job_id}-{lang}") OCR 워커·sidecar 요청 스레드도 함께
+# 돌아, 이름이 없으면 여러 잡의 로그가 한 줄씩 섞여 어느 잡·언어의 실패인지
+# 사후에 분리할 수 없다. 로거별 코드 변경 없이 상관관계를 얻는 최소 조치.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s [%(threadName)s]: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 _GC_INTERVAL_S = 6 * 60 * 60  # 잡 TTL GC 주기 — 시작 시 1회 + 6시간마다

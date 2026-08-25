@@ -137,7 +137,9 @@ def test_textlayer_blank_first_page_keeps_page_count(tmp_path, monkeypatch):
         md = client.get(f"/api/jobs/{jid}/markdown").text
         pages = [p.strip() for p in md.split("\n\n---\n\n")]
         assert len(pages) == 3, md  # 선두 빈 페이지도 자리(구분자)를 유지한다
-        assert pages[0] == ""
+        # OCR을 못 돌린 페이지는 완전 공백이 아니라 사유 표식을 갖는다 —
+        # 표식이 없으면 전면 스캔 문서가 status=done인 채 빈 문서로 끝난다.
+        assert "OCR에 실패" in pages[0] and "Tesseract 미설치" in pages[0]
         assert "Body text page 2" in pages[1]
         assert "Body text page 3" in pages[2]
 
@@ -335,3 +337,58 @@ def test_registry_builds_textlayer_engine():
 def test_registry_invalid_engine_lists_textlayer():
     with pytest.raises(ValueError, match="textlayer"):
         build_engine(Settings(engine="does-not-exist", device="cpu"))
+
+
+# ── (2c) 전면 스캔 문서: OCR 불가 시 result.md가 무표식 공백으로 끝나지 않는다 ──
+
+
+def test_scanned_document_without_ocr_is_marked_not_silently_empty(tmp_path, monkeypatch):
+    """모든 페이지가 스캔이고 Tesseract가 없으면 예전에는 result.md가 구분자만 남은
+    완전 공백이었다 — status=done인 채 빈 문서를 정상 결과로 오인하게 된다."""
+    monkeypatch.setattr(shutil, "which", lambda cmd, *a, **k: None)
+    with _client(tmp_path) as client:
+        r = _upload(client, make_blank_pdf_bytes(pages=3))
+        assert r.status_code == 202, r.text
+        jid = r.json()["job_id"]
+        body = wait_done(client, jid)
+        assert body["status"] == "done", body
+
+        md = client.get(f"/api/jobs/{jid}/markdown").text
+        pages = [p.strip() for p in md.split("\n\n---\n\n")]
+        assert len(pages) == 3, md                      # 페이지 수 계약 불변
+        assert all(page.startswith("> ⚠️") for page in pages), md
+        assert all("Tesseract 미설치" in page for page in pages), md
+        # 잡 경고 채널도 그대로 (표식은 경고를 대체하지 않고 보완한다)
+        assert [w for w in body["warnings"] if "Tesseract" in w], body["warnings"]
+
+
+def test_tesseract_run_failure_marks_the_page(tmp_path, monkeypatch):
+    """실행 실패(언어팩 누락 등) 페이지도 본문에 사유가 남는다 — 정상 페이지와
+    섞이면 경고 배열만으로는 어느 페이지가 비었는지 알 수 없다."""
+    from app.engine.base import EngineError
+
+    def _boom(executable: str, languages: str, png_bytes: bytes) -> str:
+        raise EngineError("Tesseract OCR 실패: Error opening data file kor.traineddata")
+
+    monkeypatch.setattr(textlayer_mod, "find_tesseract", lambda: "/fake/tesseract")
+    monkeypatch.setattr(textlayer_mod, "run_tesseract", _boom)
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 80), "Body text page 1", fontsize=18)
+    doc.new_page(width=595, height=842)  # 2쪽: 스캔류 → OCR 경로에서 실패
+    pdf = doc.tobytes()
+    doc.close()
+
+    with _client(tmp_path) as client:
+        r = _upload(client, pdf)
+        jid = r.json()["job_id"]
+        body = wait_done(client, jid)
+        assert body["status"] == "done", body
+        pages = [
+            p.strip()
+            for p in client.get(f"/api/jobs/{jid}/markdown").text.split("\n\n---\n\n")
+        ]
+        assert "Body text page 1" in pages[0]
+        assert "> ⚠️" not in pages[0]                   # 정상 페이지는 표식 없음
+        assert "Tesseract 실행 실패" in pages[1]

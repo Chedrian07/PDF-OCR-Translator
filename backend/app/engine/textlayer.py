@@ -339,10 +339,23 @@ class TextLayerEngine(OCREngine):
         if executable is None:
             self._warn_no_tesseract(job_dir)
             return native_text, raw
-        ocr_text = run_tesseract(
-            executable, self._settings.ocr_languages, image_path.read_bytes()
-        )
-        return sanitize_text(ocr_text).strip(), raw
+        try:
+            ocr_text = run_tesseract(
+                executable, self._settings.ocr_languages, image_path.read_bytes()
+            )
+        except (EngineError, OSError) as e:
+            # 페이지 단위 강등 — 예외를 청크로 흘리면 같은 청크의 정상 페이지까지
+            # 통째로 플레이스홀더가 된다(언어팩 누락·페이지 타임아웃·PNG 손상).
+            self._note(
+                f"{image_path.name} Tesseract 실패로 텍스트 레이어만 사용했습니다 "
+                f"({str(e)[:160]}) — 언어팩 확인: brew install tesseract-lang / "
+                "apt install tesseract-ocr-kor"
+            )
+            return native_text, raw
+        # OCR 텍스트를 쓰는 페이지의 레이아웃 raw는 버린다 — 그 det 문법은 본문으로
+        # 채택되지 않은 희박 텍스트 레이어에서 합성된 것이라 result.md와 어긋난다
+        # (Tesseract 출력에는 bbox가 없다 — 스캔 페이지의 레이아웃 뷰는 빈 페이지).
+        return sanitize_text(ocr_text).strip(), ""
 
     # ── OCREngine 구현 ─────────────────────────────────────────
 

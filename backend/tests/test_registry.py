@@ -71,9 +71,40 @@ def test_resolve_dtype():
     assert _resolve_dtype("metal", "auto") in (torch.bfloat16, torch.float32)
     assert _resolve_dtype("metal", "float16") is torch.float16
     assert _resolve_dtype("cpu", "auto") is torch.float32
-    assert _resolve_dtype("cuda", "auto") is torch.bfloat16
+    # cuda/auto도 MPS와 동일하게 bf16 지원을 프로브한다 — 실행 환경(GPU 유무·세대)에
+    # 따라 bf16 또는 float16이며, 무조건 bf16이던 과거 동작은 pre-Ampere에서 실패했다
+    assert _resolve_dtype("cuda", "auto") in (torch.bfloat16, torch.float16)
     with pytest.raises(ValueError, match="OCR_DTYPE"):
         _resolve_dtype("metal", "int8")
+
+
+def test_cuda_auto_dtype_falls_back_when_bf16_unsupported(monkeypatch):
+    """pre-Ampere(sm<80) GPU에서 bf16을 강행하면 커널 부재로 로드가 실패한다 —
+    auto는 float16으로 강등돼야 한다 (MPS 경로와 동일한 방어)."""
+    torch = pytest.importorskip("torch")
+    from app.engine import unlimited as unlimited_mod
+
+    monkeypatch.setattr(unlimited_mod, "_cuda_bf16_supported", lambda: False)
+    assert unlimited_mod._resolve_dtype("cuda", "auto") is torch.float16
+
+    monkeypatch.setattr(unlimited_mod, "_cuda_bf16_supported", lambda: True)
+    assert unlimited_mod._resolve_dtype("cuda", "auto") is torch.bfloat16
+    # 명시 지정은 프로브와 무관하게 그대로 존중한다
+    monkeypatch.setattr(unlimited_mod, "_cuda_bf16_supported", lambda: False)
+    assert unlimited_mod._resolve_dtype("cuda", "bfloat16") is torch.bfloat16
+
+
+def test_fake_engine_capabilities_do_not_claim_real_model():
+    """FakeEngine이 model_id를 비워 두면 health/잡 메타가 settings.model_id
+    (baidu/Unlimited-OCR)로 폴백해 데모 출력이 실모델 결과처럼 기록된다."""
+    eng = build_engine(_fake_settings(device="cpu"))
+    caps = eng.capabilities()
+    assert caps.model_id == "fake-engine"
+    assert caps.provider == "in-process"
+    # 청크·스트리밍 계약은 기존과 동일해야 한다 (하위 호환)
+    assert caps.supports_multi_page is True
+    assert caps.stream_granularity == "token"
+    assert caps.preferred_chunk_size is None
 
 
 def test_load_concurrent_calls_load_once(monkeypatch):

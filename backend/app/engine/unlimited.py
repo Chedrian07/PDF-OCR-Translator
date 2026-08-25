@@ -53,6 +53,21 @@ def _mps_bf16_supported() -> bool:
         return False
 
 
+def _cuda_bf16_supported() -> bool:
+    # bf16 텐서코어는 Ampere(sm_80) 이상 — pre-Ampere GPU에서 bf16을 쓰면 커널이
+    # 없어 실패하거나 에뮬레이션으로 극단적으로 느려진다. MPS와 동일하게 프로브한다.
+    import torch
+
+    try:
+        try:
+            # 에뮬레이션은 '지원'으로 세지 않는다 (구버전 torch엔 이 인자가 없다)
+            return bool(torch.cuda.is_bf16_supported(including_emulation=False))
+        except TypeError:
+            return bool(torch.cuda.is_bf16_supported())
+    except Exception:  # 드라이버 부재·조회 실패 — 보수적으로 미지원 취급
+        return False
+
+
 @functools.lru_cache(maxsize=1)
 def _apple_chip_name() -> str:
     try:
@@ -70,7 +85,11 @@ def _resolve_dtype(device: str, dtype_name: str):
 
     if dtype_name == "auto":
         if device == "cuda":
-            return torch.bfloat16
+            if _cuda_bf16_supported():
+                return torch.bfloat16
+            logger.warning("이 GPU는 bfloat16을 지원하지 않아 float16으로 동작합니다 "
+                           "(pre-Ampere — OCR_DTYPE으로 명시 지정 가능)")
+            return torch.float16
         if device == "metal":
             if _mps_bf16_supported():
                 return torch.bfloat16

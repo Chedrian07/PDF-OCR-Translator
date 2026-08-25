@@ -30,6 +30,8 @@ _EVENT_QUEUE_MAX = 2000
 # decoded 문자 상한(16,384) × 최대 200페이지보다 넉넉하고, 단일 OCR 워커라
 # 동시에 커지는 히스토리는 하나뿐이다. 터미널 이벤트에서 즉시 폐기한다.
 _TOKEN_HISTORY_MAX_CHARS = 8 * 1024 * 1024
+# 아직 워커 큐에 제출되지 않은(업로드 중) 잡의 정렬 키 — 제출된 잡보다 항상 뒤.
+_UNSUBMITTED_SEQ = float("inf")
 
 
 def _now_iso() -> str:
@@ -59,13 +61,22 @@ class Job:
     model_id: str | None = None
     model_revision: str | None = None
     provider: str | None = None
+    # 워커 큐 제출 순번(런타임 전용, meta.json 미기록). 업로드 본문 수신이 끝난 뒤에야
+    # submit()되므로 생성 순서와 어긋날 수 있다 — queue_position이 이 값을 쓴다.
+    # 아직 제출 전(업로드 중)이면 None.
+    submit_seq: int | None = None
 
-    def _result_block(self) -> dict | None:
+    def _result_block(self, *, include_files: bool = True) -> dict | None:
         if self.status != "done":
             return None
         base = f"/api/jobs/{self.id}"
 
         def _urls(subdir: str) -> list[str]:
+            # include_files=False면 디렉터리 스캔 자체를 건너뛴다 — 목록 폴링처럼
+            # 전 페이지 URL이 필요 없는 호출부의 전수 스캔 비용을 없앤다.
+            # 키는 항상 유지하므로 기존 클라이언트 계약은 불변.
+            if not include_files:
+                return []
             d = self.dir / subdir
             if not d.is_dir():
                 return []
@@ -90,7 +101,9 @@ class Job:
             "has_layout": (self.dir / "layout.json").is_file(),
         }
 
-    def to_dict(self, queue_position: int | None = None) -> dict:
+    def to_dict(
+        self, queue_position: int | None = None, *, include_files: bool = True
+    ) -> dict:
         d = {
             "job_id": self.id,
             "filename": self.filename,
@@ -100,7 +113,7 @@ class Job:
             "progress": dict(self.progress),
             "error": self.error,
             "warnings": list(self.warnings),
-            "result": self._result_block(),
+            "result": self._result_block(include_files=include_files),
             # 신규 필드(추가만 — 기존 필드 의미 불변). 구 잡은 null.
             "engine": self.engine,
             "model_id": self.model_id,
@@ -135,6 +148,7 @@ class JobStore:
         self.jobs_dir = jobs_dir
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self._jobs: dict[str, Job] = {}
+        self._submit_seq = 0
         self._lock = threading.RLock()
 
     def create(
@@ -164,29 +178,46 @@ class JobStore:
         return jobs[:limit]
 
     def queue_position(self, job: Job) -> int | None:
-        """queued 잡의 대기열 위치(1-base): 먼저 생성된 queued 잡 수 + 1.
+        """queued 잡의 대기열 위치(1-base): 워커 큐 제출 순서 기준.
 
-        단일 워커 큐는 FIFO 제출 순서이고 제출은 업로드 완료 직후이므로 생성 순서와
-        일치한다. created_at은 초 단위라 동률이 생기므로 _jobs 삽입 순서(=create()
-        호출 순서)로 센다. running/터미널 잡은 None(직렬화 시 필드 생략)."""
+        단일 워커 큐는 FIFO 제출 순서인데, 제출(submit)은 업로드 본문 수신이 끝난
+        뒤라 생성 순서와 어긋날 수 있다(큰 파일을 먼저 올리기 시작해도 작은 파일이
+        먼저 제출된다). 그래서 mark_submitted()가 매긴 submit_seq로 센다. 아직
+        제출 전(업로드 중)인 잡은 이미 제출된 잡들 뒤에 오도록 두고, 동률은 _jobs
+        삽입 순서(=create() 호출 순서)로 안정 정렬한다.
+        running/터미널 잡은 None(직렬화 시 필드 생략)."""
         if job.status != "queued":
             return None
         with self._lock:
-            pos = 1
-            for j in self._jobs.values():
-                if j.id == job.id:
-                    return pos
-                if j.status == "queued":
-                    pos += 1
-        return None  # 삭제 경합 — 목록에서 빠졌으면 위치 없음
+            if job.id not in self._jobs:
+                return None  # 삭제 경합 — 목록에서 빠졌으면 위치 없음
+            order = sorted(
+                (j.submit_seq if j.submit_seq is not None else _UNSUBMITTED_SEQ, idx, j.id)
+                for idx, j in enumerate(self._jobs.values())
+                if j.status == "queued"
+            )
+        for pos, (_seq, _idx, jid) in enumerate(order, start=1):
+            if jid == job.id:
+                return pos
+        return None
+
+    def mark_submitted(self, job: Job) -> None:
+        """워커 큐 제출 순번을 부여한다 — queue_position이 실제 처리 순서를 반영하게."""
+        with self._lock:
+            self._submit_seq += 1
+            job.submit_seq = self._submit_seq
 
     def save(self, job: Job) -> None:
         tmp = job.dir / f".{_META_NAME}.tmp"
         try:
             tmp.write_text(json.dumps(job.meta(), ensure_ascii=False, indent=1), encoding="utf-8")
             os.replace(tmp, job.dir / _META_NAME)
-        except FileNotFoundError:  # 삭제 경합 — 무시
-            pass
+        except OSError as e:
+            # 메타 기록은 best-effort — 디스크 만원(ENOSPC)·권한 오류가 잡 처리
+            # 흐름(특히 오류 마감 경로)이나 워커 스레드를 죽여서는 안 된다.
+            # FileNotFoundError는 삭제 경합이라 정상 경로 — 로그도 남기지 않는다.
+            if not isinstance(e, FileNotFoundError):
+                logger.warning("잡 메타 기록 실패: %s (%s)", job.id, e)
 
     def remove(self, job_id: str) -> None:
         with self._lock:
@@ -267,6 +298,10 @@ class JobStore:
                 # 상태가 바뀐 잡만 재기록 — 터미널 잡의 meta.json mtime은 TTL GC의
                 # "마지막 갱신" 시계라, 무조건 재저장하면 재시작마다 TTL이 리셋된다.
                 if changed:
+                    # 중단된 잡의 work/ 잔여물 정리 — runner의 finally(터미널 마감
+                    # 시 rmtree)가 돌지 못하고 죽었고, 이 잡은 다시 실행되지 않아
+                    # 어느 경로에서도 정리되지 않는다.
+                    shutil.rmtree(job.dir / "work", ignore_errors=True)
                     self.save(job)
             except Exception:
                 logger.exception("잡 메타 복원 실패: %s", d)
@@ -368,6 +403,7 @@ class Worker(threading.Thread):
 
     def submit(self, job: Job) -> None:
         self.cancel_events.setdefault(job.id, threading.Event())
+        self.store.mark_submitted(job)
         self._queue.put(job.id)
 
     def stop(self) -> None:
@@ -381,52 +417,65 @@ class Worker(threading.Thread):
             job_id = self._queue.get()
             if job_id is None:
                 return
-            job = self.store.get(job_id)
-            if job is None:
-                # queued 상태에서 삭제돼 dequeue 시 이미 사라진 잡 — cancel_events도
-                # 정리한다(다른 종료 경로는 모두 pop하는데 이 경로만 누락돼 Event가
-                # 영구 축적되던 누수 수정).
-                self.cancel_events.pop(job_id, None)
-                continue
-            cancel = self.cancel_events.setdefault(job_id, threading.Event())
-            if job.delete_requested or cancel.is_set():
-                job.status = "canceled"
-                job.error = "사용자에 의해 취소되었습니다"
-                self.store.save(job)
-                if job.delete_requested:
-                    self.store.delete_dir(job)
-                self.cancel_events.pop(job_id, None)
-                continue
+            # 잡 단위 예외 방벽 — execute_job이나 마감 경로(store.save의 OSError 등)에서
+            # 예외가 새어 나와도 워커 스레드가 죽으면 안 된다. 죽으면 이후 제출되는
+            # 모든 잡이 영구 queued로 남고 프로세스 재시작 외에 복구 수단이 없다.
+            # cancel_events 정리는 finally로 일원화한다(모든 종료 경로 공통).
             try:
-                if not self.engine.loaded:
-                    def _on_wait(note: str, _jid: str = job_id) -> None:
-                        # 모델 로딩 대기를 진행 상태로 알린다 — 프론트가 "모델 로딩
-                        # 대기 중…"을 표시하고, 잡이 조용히 멈춘 것처럼 보이지 않게 한다.
-                        self.broker.publish(_jid, "progress", {
-                            "phase": "loading", "status": "queued", "note": note,
-                            "current_page": 0, "total_pages": 0, "chunk": 0, "total_chunks": 0,
-                        })
+                job = self.store.get(job_id)
+                if job is None:
+                    # queued 상태에서 삭제돼 dequeue 시 이미 사라진 잡
+                    continue
+                cancel = self.cancel_events.setdefault(job_id, threading.Event())
+                if job.delete_requested or cancel.is_set():
+                    job.status = "canceled"
+                    job.error = "사용자에 의해 취소되었습니다"
+                    self.store.save(job)
+                    if job.delete_requested:
+                        self.store.delete_dir(job)
+                    continue
+                try:
+                    if not self.engine.loaded:
+                        def _on_wait(note: str, _jid: str = job_id) -> None:
+                            # 모델 로딩 대기를 진행 상태로 알린다 — 프론트가 "모델 로딩
+                            # 대기 중…"을 표시하고, 잡이 조용히 멈춘 것처럼 보이지 않게 한다.
+                            self.broker.publish(_jid, "progress", {
+                                "phase": "loading", "status": "queued", "note": note,
+                                "current_page": 0, "total_pages": 0,
+                                "chunk": 0, "total_chunks": 0,
+                            })
 
-                    _on_wait("모델 로딩 대기 중…")
-                    self.engine.wait_until_ready(cancel, on_wait=_on_wait)
-            except JobCanceled:
-                # 대기 중 사용자가 취소 — 오류가 아니라 취소로 마감
-                job.status = "canceled"
-                job.error = "사용자에 의해 취소되었습니다"
-                self.store.save(job)
-                if job.delete_requested:
-                    self.store.delete_dir(job)
-                else:
-                    self.broker.publish(job_id, "error", {"message": job.error, "canceled": True})
+                        _on_wait("모델 로딩 대기 중…")
+                        self.engine.wait_until_ready(cancel, on_wait=_on_wait)
+                except JobCanceled:
+                    # 대기 중 사용자가 취소 — 오류가 아니라 취소로 마감
+                    job.status = "canceled"
+                    job.error = "사용자에 의해 취소되었습니다"
+                    self.store.save(job)
+                    if job.delete_requested:
+                        self.store.delete_dir(job)
+                    else:
+                        self.broker.publish(
+                            job_id, "error", {"message": job.error, "canceled": True}
+                        )
+                    continue
+                except Exception as e:  # noqa: BLE001 — 로드 실패를 잡 오류로 변환
+                    logger.exception("엔진 로드 실패")
+                    job.status = "error"
+                    job.error = f"모델 로드 실패: {e}"[:2000]
+                    self.store.save(job)
+                    self.broker.publish(job_id, "error", {"message": job.error})
+                    continue
+                execute_job(job, self.store, self.broker, self.engine, self.settings, cancel)
+            except Exception:  # noqa: BLE001 — 워커 스레드 영구 정지 방지
+                logger.exception("잡 처리 중 예기치 못한 오류: %s", job_id)
+                # 메모리 상 running으로 남으면 DELETE도 거부돼(api의 running 가드)
+                # 사용자가 치울 수 없다 — 터미널(error)로 마감한다.
+                stuck = self.store.get(job_id)
+                if stuck is not None and stuck.status in ("queued", "running"):
+                    stuck.status = "error"
+                    stuck.error = "잡 처리 중 내부 오류가 발생했습니다"
+                    self.store.save(stuck)
+                    self.broker.publish(job_id, "error", {"message": stuck.error})
+            finally:
                 self.cancel_events.pop(job_id, None)
-                continue
-            except Exception as e:  # noqa: BLE001 — 로드 실패를 잡 오류로 변환
-                logger.exception("엔진 로드 실패")
-                job.status = "error"
-                job.error = f"모델 로드 실패: {e}"[:2000]
-                self.store.save(job)
-                self.broker.publish(job_id, "error", {"message": job.error})
-                self.cancel_events.pop(job_id, None)
-                continue
-            execute_job(job, self.store, self.broker, self.engine, self.settings, cancel)
-            self.cancel_events.pop(job_id, None)

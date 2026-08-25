@@ -264,6 +264,115 @@ def test_run_multi_cancel_before_start(tmp_path, stub):
     assert stub.requests_seen == []  # 취소 후에는 요청을 보내지 않는다
 
 
+# ── sidecar 재시작/모델 재로드 구간 (503) ──────────────────────────────────
+
+def _page_png(tmp_path, name: str = "p.png"):
+    from PIL import Image
+
+    p = tmp_path / name
+    Image.new("RGB", (400, 560), "white").save(p)
+    return p
+
+
+def test_파싱중_503은_복귀를_기다렸다_같은_페이지를_재시도한다(tmp_path, stub):
+    """재시작 직후 모델 재로드 창(HTTP 503)에서 페이지를 즉시 포기하면 남은 수백
+    페이지가 몇 초 만에 플레이스홀더로 확정된다 — 복귀를 기다렸다 재시도해야 한다."""
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:  # 재기동 직후: 모델 재로드 중
+            return (503, json.dumps({"detail": "모델 로딩 중"}).encode())
+        return (200, json.dumps(_parse_body()).encode())
+
+    stub.parse_behavior = flaky
+    eng = build_engine(_settings(tmp_path, stub))
+    eng.load()
+    md = eng.run_multi([_page_png(tmp_path)], tmp_path / "c", NullSink(), threading.Event())
+
+    assert calls["n"] == 2, "503 후 복귀 대기 + 1회 재시도"
+    assert "본문" in md  # 플레이스홀더가 아니라 정상 결과
+    assert any("재시작" in w for w in eng.drain_warnings())
+
+
+def test_읽기_타임아웃은_엔진이_같은_페이지를_재추론하지_않는다(tmp_path, stub):
+    """읽기 타임아웃은 provider가 그 페이지를 계속 추론 중일 수 있다 — 엔진이
+    여기서 재요청하면 GPU 중복 추론이다 (상위 runner의 청크 재시도만 담당)."""
+    import time as _t
+
+    from app.sidecar.client import SidecarTimeoutError
+
+    calls = {"n": 0}
+
+    def slow():
+        calls["n"] += 1
+        _t.sleep(2.0)
+        return (200, json.dumps(_parse_body()).encode())
+
+    stub.parse_behavior = slow
+    eng = build_engine(_settings(tmp_path, stub, sidecar_read_timeout_s=0.3,
+                                 sidecar_retries=0))
+    eng.load()
+    with pytest.raises(SidecarTimeoutError):
+        eng.run_multi([_page_png(tmp_path)], tmp_path / "c", NullSink(), threading.Event())
+    assert calls["n"] == 1
+
+
+def test_동시성2에서_503_복귀대기가_AttributeError없이_돈다(tmp_path, stub, monkeypatch):
+    """동시성>1 경로는 _AnyCancel(잡 취소 OR 형제 실패)을 넘긴다 — wait_until_ready가
+    cancel.wait()를 호출하므로 wait()가 없으면 AttributeError로 페이지가 죽는다."""
+    monkeypatch.setattr("app.engine.sidecar._MODEL_WAIT_POLL_S", 0.05)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # 첫 요청만 재시작 중 — 그 사이 health도 '로딩 중'으로 돌려 대기를 태운다
+            stub.health_response = _health_body(model_loaded=False)
+            threading.Timer(0.2, lambda: setattr(
+                stub, "health_response", _health_body(model_loaded=True))).start()
+            return (503, json.dumps({"detail": "모델 로딩 중"}).encode())
+        return (200, json.dumps(_parse_body()).encode())
+
+    stub.parse_behavior = flaky
+    eng = build_engine(_settings(tmp_path, stub, remote_page_concurrency=2))
+    eng.load()
+    pages = [_page_png(tmp_path, "a.png"), _page_png(tmp_path, "b.png")]
+    md = eng.run_multi(pages, tmp_path / "c", NullSink(), threading.Event())
+
+    assert md.count("<PAGE>") == 2
+    assert "본문" in md
+    notes = eng.drain_warnings()
+    assert any("모델 로딩 대기" in w for w in notes), notes
+
+
+def test_any_cancel_wait는_취소를_즉시_관측한다(tmp_path):
+    import time as _t
+
+    from app.engine.sidecar import _AnyCancel
+
+    a, b = threading.Event(), threading.Event()
+    signal = _AnyCancel(a, b)
+    t0 = _t.monotonic()
+    assert signal.wait(0.2) is False          # 아무 신호도 없으면 timeout까지 대기
+    assert 0.15 <= _t.monotonic() - t0 < 1.0
+    threading.Timer(0.1, b.set).start()
+    assert signal.wait(5.0) is True           # 어느 한 쪽이 서면 즉시 반환
+    assert _t.monotonic() - t0 < 2.0
+
+
+def test_sidecar_엔진사망_신고는_loaded로_전달된다(tmp_path, stub):
+    """sidecar는 vLLM 엔진 사망(wedge)을 status=error로 신고하면서 model_loaded는
+    True로 남긴다 — status를 무시하면 그 신고가 잡에 전달되지 않는다."""
+    stub.health_response = _health_body(status="error", model_loaded=True,
+                                        load_error="엔진 사망 시그니처")
+    eng = build_engine(_settings(tmp_path, stub))
+    eng.provider_health()          # health 캐시 채움
+    assert eng.loaded is False
+    with pytest.raises(EngineError, match="엔진 사망"):
+        eng.load()
+
+
 # ── API E2E (업로드 → 변환 → 결과/메타/아카이브) ───────────────────────────
 
 @pytest.fixture

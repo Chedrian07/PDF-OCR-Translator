@@ -155,6 +155,21 @@ def test_sanitize_figure_cap_and_duplicate_index():
     assert any("중복" in w for w in warnings)
 
 
+def test_본문의_리터럴_FIGURE_placeholder는_crop을_납치하지_못한다():
+    """문서 본문에 '[[FIGURE:0]]' 문자열이 있으면 모델이 그대로 옮겨 적고,
+    materializer가 실제 crop을 그 위치에도 붙인다(중복·위치 납치) — <PAGE>와
+    같은 이유로 경계에서 index당 첫 1개만 남긴다."""
+    page = _page(
+        [_block(type="image", figure_index=0, order=0, content="")],
+        markdown="원문 속 리터럴 [[FIGURE:0]] 입니다\n\n[[FIGURE:0]]\n\n[[FIGURE:9]]",
+    )
+    clean, warnings = sanitize_page(page)
+    assert clean.markdown.count("[[FIGURE:0]]") == 1     # 첫 참조만 유지
+    assert "[[FIGURE:9]]" not in clean.markdown          # 대응 crop 없는 참조는 제거
+    assert "원문 속 리터럴" in clean.markdown            # 본문 텍스트는 보존
+    assert any("placeholder" in w for w in warnings)
+
+
 def test_sanitize_strips_literal_page_marker():
     """모델이 본문에 <PAGE>를 뱉으면 청크의 페이지 수 계약이 깨진다 — 경계에서 제거."""
     page = _page(

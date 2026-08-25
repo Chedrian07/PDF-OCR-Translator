@@ -12,7 +12,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from .base import JobCanceled, OCREngine, StreamSink
+from .base import EngineCapabilities, JobCanceled, OCREngine, StreamSink
 
 _PAGE_MD = """## 페이지 {page} — {stem}
 
@@ -47,6 +47,22 @@ class FakeEngine(OCREngine):
 
     def load(self) -> None:
         self._loaded = True
+
+    def capabilities(self) -> EngineCapabilities:
+        """청크·스트리밍 의미는 기존 Unlimited와 동일하게 두되 **모델 정체만** 밝힌다.
+
+        model_id를 비워 두면 health/잡 메타가 settings.model_id(baidu/Unlimited-OCR)로
+        폴백해, 데모 출력이 실제 모델의 결과인 것처럼 기록된다."""
+        return EngineCapabilities(
+            model_id="fake-engine",
+            model_revision="",
+            provider="in-process",
+            supports_multi_page=True,
+            preferred_chunk_size=None,
+            stream_granularity="token",
+            layout_capability="full",
+            figure_capability=True,
+        )
 
     # ── 내부 유틸 ──────────────────────────────────────────────
 

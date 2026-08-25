@@ -104,9 +104,17 @@ def test_raw_pages_layout_roundtrip(tmp_path, page_image):
 def test_placeholder_without_figure_removed(tmp_path, page_image):
     out = tmp_path / "c"
     mat = ChunkMaterializer(out, single=True)
+    # 대응 crop이 없는 placeholder는 이제 protocol.sanitize_page가 경계에서 먼저
+    # 제거한다 (figure 위치 납치 방지) — 여기까지 오지 않는다
     md = mat.add_page(_page("본문 [[FIGURE:7]] 끝", []), page_image, 0)
     assert "FIGURE" not in md
     assert "본문" in md and "끝" in md
+    # materializer 자체 방어도 그대로 유지된다 (정화를 거치지 않은 입력 기준)
+    unsanitized = PageResult.model_validate(
+        {"page_index": 0, "markdown": "본문 [[FIGURE:7]] 끝", "blocks": []}
+    )
+    md2 = mat.add_page(unsanitized, page_image, 0)
+    assert "FIGURE" not in md2
     assert any("대응하는 figure 없음" in w for w in mat.warnings)
 
 

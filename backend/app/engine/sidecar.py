@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 from ..sidecar.client import (
     SidecarClient,
     SidecarError,
+    SidecarTimeoutError,
     SidecarUnavailableError,
 )
 from ..sidecar.materializer import ChunkMaterializer
@@ -38,6 +39,7 @@ if TYPE_CHECKING:  # pragma: no cover
 _HEALTH_CACHE_TTL_S = 5.0
 _MAX_JOB_WARNINGS = 40
 _MODEL_WAIT_POLL_S = 3.0   # wait_until_ready 폴링 간격
+_CANCEL_POLL_S = 0.1       # _AnyCancel.wait의 폴링 슬라이스
 
 
 class SidecarNotReadyError(EngineError):
@@ -54,6 +56,19 @@ class _AnyCancel:
 
     def is_set(self) -> bool:
         return any(s.is_set() for s in self._signals)
+
+    def wait(self, timeout: float) -> bool:
+        """threading.Event.wait 호환 — 어느 신호든 관측되면 즉시 True.
+
+        wait_until_ready(복귀 대기)가 취소 가능한 슬립으로 쓴다. 여러 신호를
+        동시에 기다릴 방법이 없으므로 짧은 슬라이스로 폴링한다."""
+        deadline = time.monotonic() + timeout
+        while not self.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(_CANCEL_POLL_S, remaining))
+        return True
 
 
 def _live_stream_text(page: PageResult) -> str:
@@ -133,8 +148,11 @@ class SidecarEngine(OCREngine):
 
     @property
     def loaded(self) -> bool:
+        # status도 함께 본다 — sidecar는 엔진 사망(wedge)을 status="error"로 신고하면서
+        # model_loaded는 True로 남긴다(_llm 유지). status를 무시하면 그 신고가 잡에
+        # 전달되지 않고 _check_ready가 조기 반환해 페이지가 조용히 실패한다.
         h = self._last_health
-        return h is not None and h.model_loaded
+        return h is not None and h.status == "ok" and h.model_loaded
 
     def _probe_health(self):
         """health 프로브 (성공·실패 모두 TTL 캐시) — /api/health 폴링용.
@@ -168,6 +186,16 @@ class SidecarEngine(OCREngine):
             self._last_probe_ts = time.monotonic()
         self.dtype_name = h.dtype or self.dtype_name
         self.device = h.device or self.device
+
+    def _invalidate_health(self, reason: str) -> None:
+        """health 캐시 무효화 — 실패를 관측했으면 stale 캐시를 신뢰하면 안 된다.
+
+        이걸 빼면 loaded가 stale True로 남아 wait_until_ready가 즉시 반환하고
+        복귀 대기 자체가 무효화된다."""
+        with self._health_lock:
+            self._last_health = None
+            self._last_health_error = reason[:300]
+            self._last_probe_ts = 0.0
 
     def _check_ready(self, force: bool = False) -> None:
         """준비 상태를 확인하고 미준비 시 **유형별** 예외를 던진다.
@@ -298,13 +326,32 @@ class SidecarEngine(OCREngine):
         self, image_path: Path, local_page: int, cancel
     ) -> PageResult:
         request_id = f"{uuid.uuid4().hex[:12]}-p{local_page}"
-        resp = self._client.parse_page(
-            image_path,
-            page_index=local_page,
-            request_id=request_id,
-            options={},
-            cancel=cancel,
-        )
+        try:
+            resp = self._client.parse_page(
+                image_path,
+                page_index=local_page,
+                request_id=request_id,
+                options={},
+                cancel=cancel,
+            )
+        except SidecarTimeoutError:
+            # provider는 살아서 그 페이지를 계속 추론 중일 수 있다 — 여기서 재요청하면
+            # 같은 페이지를 GPU에서 두 번 돌린다. 상위 runner의 청크 재시도에 맡긴다.
+            raise
+        except SidecarUnavailableError as e:
+            # sidecar 재시작/모델 재로드(HTTP 503·연결 끊김) — 컨테이너가 돌아오길
+            # 기다렸다가 이 페이지만 1회 재시도한다. 기다리지 않으면 재기동+모델 로드
+            # 시간 동안의 페이지가 전부 플레이스홀더로 확정된다.
+            self._invalidate_health(str(e))
+            self._note("sidecar 재시작/모델 재로드 대기 중… (해당 페이지는 복귀 후 재시도)")
+            self.wait_until_ready(cancel, on_wait=self._note)
+            resp = self._client.parse_page(
+                image_path,
+                page_index=local_page,
+                request_id=f"{request_id}r",
+                options={},
+                cancel=cancel,
+            )
         page, warnings = sanitize_page(resp.page)
         # 정화로 버려진 블록·절단은 사용자에게 알린다 (조용한 내용 손실 방지).
         # sidecar가 스스로 보고한 경고(해상도 강등 등)도 함께 승격한다.

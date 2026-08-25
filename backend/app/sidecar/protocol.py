@@ -201,6 +201,28 @@ def _clamp_bbox(
     return (x1, y1, x2, y2)
 
 
+def _keep_first_figure_placeholders(markdown: str, valid: set[int]) -> tuple[str, int]:
+    """살아남은 image 블록 index당 첫 `[[FIGURE:n]]`만 남기고 나머지를 제거.
+
+    `[[FIGURE:n]]`은 앱이 소유한 참조 문법이다(`<PAGE>`와 동일). 문서 본문에 이
+    문자열이 리터럴로 실려 있으면 모델이 그대로 옮겨 적고, materializer가 실제
+    crop을 그 위치에 붙여 figure가 납치·중복 삽입된다. 반환: (정화된 markdown, 제거 수).
+    """
+    used: set[int] = set()
+    dropped = 0
+
+    def _repl(m) -> str:
+        nonlocal dropped
+        idx = int(m.group(1))
+        if idx in valid and idx not in used:
+            used.add(idx)
+            return m.group(0)
+        dropped += 1
+        return ""
+
+    return FIGURE_PLACEHOLDER_RE.sub(_repl, markdown), dropped
+
+
 def sanitize_page(page: PageResult) -> tuple[PageResult, list[str]]:
     """스키마를 통과한 페이지를 파이프라인에 넣기 전 최종 정화.
 
@@ -262,6 +284,13 @@ def sanitize_page(page: PageResult) -> tuple[PageResult, list[str]]:
             type=btype, bbox=bbox, content=content,
             order=b.order, figure_index=figure_index, confidence=b.confidence,
         ))
+
+    markdown, dropped_placeholders = _keep_first_figure_placeholders(markdown, seen_figures)
+    if dropped_placeholders:
+        warnings.append(
+            f"본문의 잉여 figure placeholder {dropped_placeholders}개 제거 "
+            "(대응 crop이 없거나 중복 — figure 위치 납치 방지)"
+        )
 
     page_warnings = [str(w)[:500] for w in page.warnings[:MAX_WARNINGS]]
     if len(page.warnings) > MAX_WARNINGS:

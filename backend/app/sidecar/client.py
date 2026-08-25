@@ -78,7 +78,16 @@ class SidecarError(EngineError):
 
 
 class SidecarUnavailableError(SidecarError):
-    """연결 실패/타임아웃 — provider가 죽었거나 재시작 중."""
+    """연결 실패/재시작 중(HTTP 503) — 대기하면 풀릴 수 있는 일시적 상태."""
+
+    transient = True
+
+
+class SidecarTimeoutError(SidecarUnavailableError):
+    """읽기 응답 시간 초과 — provider는 살아서 그 페이지를 계속 추론 중일 수 있다.
+
+    다른 unavailable 오류와 달리 **같은 페이지의 즉시 재요청은 GPU 중복 추론**이라
+    엔진의 복귀-대기 재시도 경로에서 제외한다 (상위 runner의 청크 재시도만 담당)."""
 
 
 class SidecarProtocolError(SidecarError):
@@ -195,6 +204,12 @@ class SidecarClient:
 
         if status != 200:
             detail = self._error_detail(body)
+            if status == 503:
+                # 재시작 직후 모델 재로드 중 — 대기하면 풀린다(비-transient로 던지면
+                # 남은 페이지가 몇 초 만에 전부 플레이스홀더로 확정된다)
+                raise SidecarUnavailableError(
+                    f"sidecar가 아직 준비되지 않았습니다 (HTTP 503): {detail}"
+                )
             if status >= 500:
                 raise SidecarError(f"sidecar 추론 실패 (HTTP {status}): {detail}")
             raise SidecarProtocolError(f"sidecar 요청 거부 (HTTP {status}): {detail}")
@@ -277,7 +292,7 @@ class SidecarClient:
                 "컨테이너 기동/프로필을 확인하세요"
             )
         if isinstance(error, requests.exceptions.ReadTimeout):
-            return SidecarUnavailableError(
+            return SidecarTimeoutError(
                 f"sidecar 응답 시간 초과({self.read_timeout_s:.0f}s) — "
                 "페이지가 지나치게 크거나 provider가 멈췄을 수 있습니다"
             )

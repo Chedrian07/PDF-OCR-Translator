@@ -171,6 +171,77 @@ def test_textlayer_ocr_path_uses_tesseract_output(tmp_path, monkeypatch):
         assert calls[0][2][:8] == b"\x89PNG\r\n\x1a\n"
 
 
+# ── (3a) OCR 페이지의 레이아웃 raw는 버려진 텍스트 레이어에서 합성되지 않는다 ─
+
+
+def test_OCR_페이지는_희박한_텍스트레이어_레이아웃을_남기지_않는다(tmp_path, monkeypatch):
+    """본문으로 채택되지 않은(임계 미만) 텍스트 레이어로 det 문법을 합성하면
+    레이아웃 뷰가 result.md에 없는 문장을 박스로 보여준다."""
+    monkeypatch.setattr(textlayer_mod, "find_tesseract", lambda: "/fake/tesseract")
+    monkeypatch.setattr(textlayer_mod, "run_tesseract",
+                        lambda *a, **k: "OCR로 복원된 본문")
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 80), "sparse", fontsize=12)  # 임계 미만 → OCR 경로
+    source = tmp_path / "source.pdf"
+    doc.save(str(source))
+    doc.close()
+
+    pages_dir = tmp_path / "pages"
+    pages_dir.mkdir()
+    image_path = pages_dir / "page_0001.png"
+    src = fitz.open(str(source))
+    try:
+        src[0].get_pixmap(dpi=72).save(str(image_path))
+        engine = TextLayerEngine(_settings(tmp_path, native_text_threshold=1000))
+        text, raw = engine._extract_page(src, image_path, tmp_path)
+    finally:
+        src.close()
+    assert text == "OCR로 복원된 본문"
+    assert raw == ""  # 버려진 텍스트 레이어의 det 문법을 재사용하지 않는다
+
+
+# ── (3b) Tesseract 실행 실패는 페이지 단위로 격리된다 ─────────────────────
+
+
+def test_tesseract_실패는_같은_청크의_정상페이지를_죽이지_않는다(tmp_path, monkeypatch):
+    """언어팩 누락(kor.traineddata 없음)·페이지 타임아웃처럼 실행 중 나는 예외가
+    청크를 관통하면 8페이지가 통째로 플레이스홀더가 된다 — 페이지 단위 강등."""
+    from app.engine.base import EngineError
+
+    def _boom(executable: str, languages: str, png_bytes: bytes) -> str:
+        raise EngineError("Tesseract OCR 실패: Error opening data file kor.traineddata")
+
+    monkeypatch.setattr(textlayer_mod, "find_tesseract", lambda: "/fake/tesseract")
+    monkeypatch.setattr(textlayer_mod, "run_tesseract", _boom)
+
+    doc = fitz.open()
+    for i in (1, 2):
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((72, 80), f"Body text page {i}", fontsize=18)
+    doc.new_page(width=595, height=842)  # 3쪽: 스캔류 빈 페이지 → OCR 경로에서 실패
+    for i in (4, 5):
+        page = doc.new_page(width=595, height=842)
+        page.insert_text((72, 80), f"Body text page {i}", fontsize=18)
+    pdf = doc.tobytes()
+    doc.close()
+
+    with _client(tmp_path) as client:  # 기본 pages_per_chunk=8 → 5쪽이 한 청크
+        r = _upload(client, pdf)
+        assert r.status_code == 202, r.text
+        jid = r.json()["job_id"]
+        body = wait_done(client, jid)
+        assert body["status"] == "done", body
+
+        md = client.get(f"/api/jobs/{jid}/markdown").text
+        assert "변환에 실패했습니다" not in md  # 청크 전체 플레이스홀더 회귀 방지
+        for i in (1, 2, 4, 5):
+            assert f"Body text page {i}" in md
+        tesseract_warnings = [w for w in body["warnings"] if "Tesseract 실패" in w]
+        assert len(tesseract_warnings) == 1, body["warnings"]
+
+
 # ── (4) 원문 속 리터럴 '<PAGE>'가 페이지 수를 흔들지 않는다 ───────────────
 
 

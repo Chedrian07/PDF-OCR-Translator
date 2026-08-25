@@ -247,7 +247,11 @@ def test_single_fallback_failure_recovers_only_that_page_from_pdf_text(tmp_path)
     assert not (job.dir / "images" / "p0002_99.jpg").exists()
     assert not (job.dir / "layout" / "page_0002.jpg").exists()
     layout = json.loads((job.dir / "layout.json").read_text(encoding="utf-8"))
-    assert 2 not in {page["page"] for page in layout}
+    # 복구된 페이지도 layout.json에 자리를 유지한다(좌표는 없으므로 blocks는 비운다).
+    # 통째로 빠지면 facsimile 내보내기에서 페이지가 사라지고 /page/2가 404가 되며
+    # pdf_export의 원문↔번역 페이지 정렬 불변식이 깨진다.
+    assert {page["page"] for page in layout} == {1, 2, 3, 4}
+    assert layout[1]["blocks"] == []
 
 
 def test_single_fallback_repetition_goes_directly_to_pdf_text_without_retry(tmp_path):

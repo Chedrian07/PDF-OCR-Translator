@@ -482,11 +482,45 @@ services:
 
 volumes:
   # 잡 데이터·HF 캐시는 네 백엔드 서비스가 공유한다(엔진 전환 시 잡 이력 보존).
+  #
+  # ⚠ compose 볼륨의 **실제 이름에는 프로젝트 접두사가 붙는다**: `<PROJECT>_ocr-data`
+  #   (PROJECT 기본값 = compose 파일이 있는 디렉터리 이름, `-p`/`COMPOSE_PROJECT_NAME`으로 변경).
+  #   아래 명령들을 접두사 없이 그대로 복사하면 **없는 볼륨을 새로 만들고 exit 0**이 나서
+  #   아무것도 안 옮겨졌는데 성공으로 보인다. 반드시 이름 확인 → 존재 가드 순으로 진행할 것.
+  #
   # ⚠ 과거 버전의 ocr-ovis-data / ocr-paddle-data 볼륨은 더 이상 참조되지 않는다 —
-  #   그 안의 잡을 살리려면 한 번만 옮기고 지울 것:
-  #     docker run --rm -v ocr-ovis-data:/from -v ocr-data:/to alpine \
-  #       sh -c 'cp -an /from/. /to/'
-  #     docker volume rm ocr-ovis-data ocr-paddle-data
+  #   그 안의 잡을 살리려면 한 번만 옮기고 지운다 (compose 파일이 있는 디렉터리에서 실행):
+  #
+  #   1) 실제 이름 확인 (접두사 포함). 프로필 볼륨(ovis-/paddle-)은 해당 프로필을
+  #      켜야 목록에 나온다:
+  #        docker compose --profile ovis --profile paddle config --format json \
+  #          | python3 -c 'import json,sys; [print(k,"->",v.get("name",k)) for k,v in json.load(sys.stdin).get("volumes",{}).items()]'
+  #        # 예: ocr-data -> pdf-ocr-translator_ocr-data  → 접두사는 pdf-ocr-translator
+  #        docker volume ls | grep -E 'ocr-(ovis-|paddle-)?data'   # 남아 있는 옛 볼륨
+  #   2) 확인한 이름을 넣는다 (<PROJECT>는 자리표시자 — 그대로 쓰지 말 것):
+  #        SRC=<PROJECT>_ocr-ovis-data      # paddle은 <PROJECT>_ocr-paddle-data로 반복
+  #        DST=<PROJECT>_ocr-data
+  #   3) 존재 가드 — **이 단계가 유일한 안전장치다**. `-v`도 `--mount type=volume`도
+  #      미존재 이름이면 빈 볼륨을 새로 만들고 exit 0을 낸다(실측 확인). 오타·접두사
+  #      누락을 조용한 no-op 대신 즉시 실패로 바꾸려면 반드시 먼저 돌린다:
+  #        docker volume inspect "$SRC" >/dev/null || { echo "없는 볼륨: $SRC"; exit 1; }
+  #        docker volume inspect "$DST" >/dev/null || { echo "없는 볼륨: $DST"; exit 1; }
+  #   4) 복사 — `--mount`를 쓴다(원본에 readonly를 걸 수 있어 `-v`보다 안전).
+  #      ⚠ 이미지는 **GNU coreutils가 있는 것**(debian:stable-slim)을 쓴다. alpine의
+  #        busybox `cp -n`은 대상 디렉터리가 이미 있으면 트리 전체를 조용히 건너뛰고
+  #        exit 0을 낸다(실측: 0바이트 복사). 먼저 백엔드를 멈춰 쓰기 중인 잡이 없게 한다:
+  #        docker compose stop ocr-cpu ocr-cuda ocr-ovis ocr-paddle
+  #        docker run --rm \
+  #          --mount type=volume,src="$SRC",dst=/from,readonly \
+  #          --mount type=volume,src="$DST",dst=/to \
+  #          debian:stable-slim cp -an /from/. /to/     # -n: 기존 잡을 덮어쓰지 않는다
+  #   5) 옮겨졌는지 눈으로 확인한 **뒤에만** 삭제 (jobs/ 밑 잡 개수를 원본과 비교):
+  #        for V in "$SRC" "$DST"; do \
+  #          echo -n "$V: "; \
+  #          docker run --rm --mount type=volume,src="$V",dst=/v debian:stable-slim \
+  #            sh -c 'ls /v/jobs 2>/dev/null | wc -l'; \
+  #        done
+  #        docker volume rm "$SRC"
   ocr-data:
   hf-cache:
   # sidecar 모델 캐시는 런타임(vLLM/PaddleX)이 서로 달라 분리 유지한다.

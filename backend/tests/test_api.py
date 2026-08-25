@@ -608,7 +608,7 @@ def test_upload_body_limit_middleware_cuts_streaming_body():
 
 
 def test_upload_limit_does_not_affect_other_routes(tmp_path, sample_pdf):
-    """미들웨어는 업로드 라우트 전용 — /render-preview는 자체 2MB 상한만 적용받는다."""
+    """경로별 상한이라 /render-preview는 업로드 상한이 아니라 자기 2MB 상한을 받는다."""
     client, settings = _limited_app(tmp_path)
     with client:
         jid = _upload(client, sample_pdf).json()["job_id"]
@@ -617,6 +617,63 @@ def test_upload_limit_does_not_affect_other_routes(tmp_path, sample_pdf):
         assert client.post(f"/api/jobs/{jid}/render-preview", content=big).status_code == 200
         # SSE·다운로드 등 GET 경로도 그대로
         assert client.get("/api/health").status_code == 200
+
+
+def test_qa_body_limit_cuts_before_route(tmp_path):
+    """POST /jobs/{id}/qa는 잡 존재 확인조차 하기 전에 무제한 본문을 메모리에 적재했다.
+    (실측 uvicorn: 80MB 본문 1건에 RSS +414MB, 동시 4건 1.46GB.)
+    이제 기본 상한(64KiB)이 **라우트 진입 전에** 413으로 끊는다 — 잡이 없는 ID인데도
+    404가 아니라 413이 나오는 것이 '라우트가 돌지 않았다'는 증거다."""
+    client, _ = _limited_app(tmp_path)
+    with client:
+        big = json.dumps({"question": "q" * 200_000}).encode()
+        r = client.post(
+            "/api/jobs/j_nope/qa", content=big,
+            headers={"content-type": "application/json"},
+        )
+        assert r.status_code == 413, r.text
+        assert "64KiB" in r.json()["detail"]
+        assert len(r.content) < 1024          # 422처럼 원문을 되돌려주지 않는다
+        # 상한 안의 본문은 그대로 라우트에 도달한다 (없는 잡 → 404)
+        small = json.dumps({"question": "안녕"}).encode()
+        r = client.post("/api/jobs/j_nope/qa", content=small,
+                        headers={"content-type": "application/json"})
+        assert r.status_code == 404, r.text
+
+
+def test_body_limit_default_covers_unlisted_post_routes(tmp_path):
+    """표에 없는 POST 경로도 기본 상한(64KiB)으로 자동 보호된다 — 새 라우트가
+    추가돼도 무제한 적재가 생기지 않게."""
+    client, _ = _limited_app(tmp_path)
+    with client:
+        for path in ("/api/jobs/j_nope/cancel", "/api/jobs/j_nope/translate",
+                     "/api/some-future-route"):
+            r = client.post(path, content=b"x" * (64 * 1024 + 1))
+            assert r.status_code == 413, (path, r.status_code)
+
+
+def test_render_preview_limit_enforced_in_middleware(tmp_path, sample_pdf):
+    """프리뷰 상한은 미들웨어에서도 같은 값(2MB)으로 걸린다 — 경계값은 여전히 통과."""
+    client, _ = _limited_app(tmp_path)
+    with client:
+        jid = _upload(client, sample_pdf).json()["job_id"]
+        r = client.post(f"/api/jobs/{jid}/render-preview", content=b"x" * 2_000_001)
+        assert r.status_code == 413
+        assert "미리보기" in r.json()["detail"]
+        at_limit = (b"x" * 99 + b"\n") * 20_000  # 정확히 2,000,000바이트
+        assert client.post(
+            f"/api/jobs/{jid}/render-preview", content=at_limit
+        ).status_code == 200
+
+
+def test_body_limit_ignores_get_routes(tmp_path, sample_pdf):
+    """본문 없는 메서드(GET/SSE/다운로드)는 검사 대상이 아니다."""
+    client, _ = _limited_app(tmp_path)
+    with client:
+        jid = _upload(client, sample_pdf).json()["job_id"]
+        wait_done(client, jid)
+        assert client.get(f"/api/jobs/{jid}/markdown").status_code == 200
+        assert client.get("/api/jobs").status_code == 200
 
 
 def test_archive_before_done_conflicts(client, sample_pdf, settings):

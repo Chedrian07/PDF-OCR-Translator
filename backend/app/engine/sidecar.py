@@ -143,16 +143,19 @@ class SidecarEngine(OCREngine):
         self._last_probe_ts = 0.0
         self._warn_lock = threading.Lock()
         self._warnings: list[str] = []
+        self._degraded_noted = False   # status 이상 신고를 이미 경고로 올렸는지
 
     # ── 상태/메타 ──────────────────────────────────────────────
 
     @property
     def loaded(self) -> bool:
-        # status도 함께 본다 — sidecar는 엔진 사망(wedge)을 status="error"로 신고하면서
-        # model_loaded는 True로 남긴다(_llm 유지). status를 무시하면 그 신고가 잡에
-        # 전달되지 않고 _check_ready가 조기 반환해 페이지가 조용히 실패한다.
+        # `model_loaded` 축만 본다. `status` 축은 별개다 — sidecar는 임계 기반
+        # 자가 복구형 웨지 신고를 status="error" + model_loaded=True로 낸다.
+        # 그걸 미로드로 취급하면 오탐 1건이 모든 잡을 "모델 로드 실패"로 즉시
+        # 마감시키고, sidecar는 요청을 못 받아 스스로 복구할 수도 없다.
+        # status 이상은 _check_ready가 하드 실패/잡 경고로 나눠 처리한다.
         h = self._last_health
-        return h is not None and h.status == "ok" and h.model_loaded
+        return h is not None and h.model_loaded
 
     def _probe_health(self):
         """health 프로브 (성공·실패 모두 TTL 캐시) — /api/health 폴링용.
@@ -176,6 +179,7 @@ class SidecarEngine(OCREngine):
         if health is not None:
             self.dtype_name = health.dtype or self.dtype_name
             self.device = health.device or self.device
+            self._note_if_degraded(health)
         return health, error
 
     def _commit_health(self, h) -> None:
@@ -186,6 +190,27 @@ class SidecarEngine(OCREngine):
             self._last_probe_ts = time.monotonic()
         self.dtype_name = h.dtype or self.dtype_name
         self.device = h.device or self.device
+        self._note_if_degraded(h)
+
+    def _note_if_degraded(self, h) -> None:
+        """모델은 로드돼 있는데 status만 이상한 신고를 잡 경고로 올린다 (하드 실패 금지).
+
+        드레인 주기(= 잡/청크 경계)당 1회만 올린다 — /api/health 폴링(프런트 10초 주기)
+        마다 같은 문장이 경고 버퍼(_MAX_JOB_WARNINGS)를 채워 실제 페이지 경고를 밀어내지
+        않게. status가 ok로 돌아오면 플래그를 풀어 다음 신고를 다시 알린다."""
+        degraded = h.model_loaded and h.status != "ok"
+        with self._health_lock:
+            if not degraded:
+                self._degraded_noted = False
+                return
+            if self._degraded_noted:
+                return
+            self._degraded_noted = True
+        detail = h.load_error or f"sidecar 상태 이상({h.status})"
+        self._note(
+            f"sidecar가 이상 상태를 보고했습니다({detail}) — 모델은 로드돼 있어 그대로 "
+            "진행합니다. 페이지가 계속 실패하면 sidecar를 재시작하세요."
+        )
 
     def _invalidate_health(self, reason: str) -> None:
         """health 캐시 무효화 — 실패를 관측했으면 stale 캐시를 신뢰하면 안 된다.
@@ -196,6 +221,7 @@ class SidecarEngine(OCREngine):
             self._last_health = None
             self._last_health_error = reason[:300]
             self._last_probe_ts = 0.0
+            self._degraded_noted = False  # 복귀 후 다시 이상하면 새 경고를 남긴다
 
     def _check_ready(self, force: bool = False) -> None:
         """준비 상태를 확인하고 미준비 시 **유형별** 예외를 던진다.
@@ -204,10 +230,18 @@ class SidecarEngine(OCREngine):
         - 연결 실패(SidecarUnavailableError)·모델 미로드: 일시적(transient) — 대기하면 풀림
         - **프로토콜/엔진 불일치(SidecarProtocolError)**: 영구 오설정(URL 오배선·버전 불일치)
           — 대기해도 안 풀리므로 하드 실패(EngineError)로 즉시 전파해야 한다.
-        - sidecar 자체 로드 실패(status=error, CUDA 가드 트립 등): 하드 실패
+        - sidecar 자체 로드 실패(status=error 이면서 **model_loaded=False**): 하드 실패
+        - status=error인데 **model_loaded=True**: 자가 복구형 웨지 신고(오탐 가능) —
+          하드 실패시키지 않고 잡 경고로 올린 뒤 통과시킨다. 진짜 이상이면 parse가
+          502로 답해 기존 청크 격리가 받고, 오탐이면 성공 1회로 자동 복구된다.
         준비됐으면 조용히 반환(loaded=True).
         """
         if self.loaded and not force:
+            # 캐시가 이미 이상 신고를 담고 있으면(웨지 의심) 이 잡에도 알린다 —
+            # 캐시 히트로 조용히 빠져나가면 잡은 신고를 영영 못 본다.
+            h = self._last_health
+            if h is not None:
+                self._note_if_degraded(h)
             return
         try:
             h = self._client.health()
@@ -218,15 +252,17 @@ class SidecarEngine(OCREngine):
             # 프로토콜/엔진 불일치 등 — 대기 무의미, 하드 실패
             raise EngineError(f"sidecar 통신 오류(대기해도 해소되지 않음): {e}") from e
         self._commit_health(h)
-        if h.status != "ok":
-            # sidecar가 자기 로드 실패를 보고 — 대기해도 안 풀린다 (하드 실패)
-            detail = h.load_error or f"sidecar 상태 이상({h.status})"
-            raise EngineError(f"sidecar 모델 로드 실패: {detail}")
         if not h.model_loaded:
+            if h.status != "ok":
+                # 모델이 없는데 status까지 error — 진짜 로드 실패다 (하드 실패)
+                detail = h.load_error or f"sidecar 상태 이상({h.status})"
+                raise EngineError(f"sidecar 모델 로드 실패: {detail}")
             raise SidecarNotReadyError(
                 "sidecar가 아직 모델을 로드하지 못했습니다 — 최초 기동은 모델 다운로드·"
                 "컴파일로 수 분 걸릴 수 있습니다 (진행: docker compose logs -f)"
             )
+        # 모델이 살아 있는데 status만 이상한 경우는 _commit_health → _note_if_degraded가
+        # 잡 경고로 올렸다. 여기서는 통과시킨다 (하드 실패 금지).
 
     def load(self) -> None:
         """준비 상태 1회 확인 (대기 없음). 미준비면 유형별 예외.
@@ -296,6 +332,13 @@ class SidecarEngine(OCREngine):
     def drain_warnings(self) -> list[str]:
         with self._warn_lock:
             drained, self._warnings = self._warnings, []
+        # 이상 신고 1회 제한을 드레인 주기마다 푼다 — runner는 잡 시작 시 한 번
+        # 버리고(이전 잡 잔여 폐기) 청크마다 드레인하므로, 풀지 않으면 신고가
+        # 그 첫 드레인에 삼켜져 잡에 전달되지 않는다.
+        # (_warn_lock 밖에서 잡는다 — _note_if_degraded는 _health_lock → _warn_lock
+        #  순서라 여기서 뒤집으면 교착이 난다)
+        with self._health_lock:
+            self._degraded_noted = False
         # 페이지마다 반복되는 동일 경고는 1건으로 접는다 (순서 보존)
         seen: set[str] = set()
         unique: list[str] = []

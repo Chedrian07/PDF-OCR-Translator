@@ -361,15 +361,34 @@ def test_any_cancel_wait는_취소를_즉시_관측한다(tmp_path):
     assert _t.monotonic() - t0 < 2.0
 
 
-def test_sidecar_엔진사망_신고는_loaded로_전달된다(tmp_path, stub):
-    """sidecar는 vLLM 엔진 사망(wedge)을 status=error로 신고하면서 model_loaded는
-    True로 남긴다 — status를 무시하면 그 신고가 잡에 전달되지 않는다."""
+def test_sidecar_웨지신고는_하드실패가_아니라_잡경고다(tmp_path, stub):
+    """sidecar는 vLLM 엔진 사망(wedge) **의심**을 임계 기반으로 status=error로 신고하면서
+    model_loaded는 True로 남긴다(자가 복구형 신고 — 오탐 가능).
+
+    이걸 하드 실패로 만들면 오탐 1건이 모든 잡을 "모델 로드 실패"로 즉시 마감하고,
+    sidecar는 요청을 못 받아 스스로 복구할 수도 없다(HEALTHCHECK는 200이라 재시작도
+    안 걸린다). 따라서 잡 경고로 올린 뒤 통과시켜야 한다 — 진짜 이상이면 parse가
+    502로 답해 기존 청크 격리가 받고, 오탐이면 성공 1회로 자동 복구된다."""
     stub.health_response = _health_body(status="error", model_loaded=True,
                                         load_error="엔진 사망 시그니처")
     eng = build_engine(_settings(tmp_path, stub))
     eng.provider_health()          # health 캐시 채움
+    assert eng.loaded is True      # model_loaded 축만 본다 (status 축과 분리)
+    eng.load()                     # 하드 실패하지 않는다
+    warnings = eng.drain_warnings()
+    assert any("엔진 사망 시그니처" in w for w in warnings), warnings
+    # provider_health는 status 축을 그대로 노출해 운영 가시성을 남긴다
+    assert eng.provider_health()["status"] == "error"
+
+
+def test_sidecar_모델미로드_status에러는_여전히_하드실패(tmp_path, stub):
+    """model_loaded=False + status=error는 진짜 로드 실패 — 조용한 손실 방지를 위해
+    대기하지 않고 즉시 하드 실패해야 한다(웨지 완화의 부작용으로 풀리면 안 된다)."""
+    stub.health_response = _health_body(status="error", model_loaded=False,
+                                        load_error="가중치 다운로드 실패")
+    eng = build_engine(_settings(tmp_path, stub))
     assert eng.loaded is False
-    with pytest.raises(EngineError, match="엔진 사망"):
+    with pytest.raises(EngineError, match="가중치 다운로드 실패"):
         eng.load()
 
 
@@ -479,6 +498,20 @@ def test_e2e_sidecar_error_isolated_per_page(sidecar_client_app, stub):
     assert body["status"] == "done", body
     # 실패 페이지에 대한 복구/placeholder 경고가 남는다
     assert any("1페이지" in w or "1–" in w for w in body["warnings"] if "페이지" in w)
+
+
+def test_e2e_웨지신고에도_잡은_완주하고_경고만_남는다(sidecar_client_app, stub):
+    """status=error + model_loaded=True(자가 복구형 웨지 신고)에서도 parse가 정상이면
+    잡은 done으로 완주해야 한다 — 신고 하나로 모든 잡이 "모델 로드 실패"로 즉시
+    마감되던 과교정 회귀 방지."""
+    stub.health_response = _health_body(status="error", model_loaded=True,
+                                        load_error="엔진 사망 시그니처")
+    c = sidecar_client_app
+    r = c.post("/api/jobs", files={"file": ("doc.pdf", BytesIO(make_pdf_bytes(pages=1)), "application/pdf")},
+               data={"mode": "per_page"})
+    body = wait_done(c, r.json()["job_id"])
+    assert body["status"] == "done", body
+    assert any("엔진 사망 시그니처" in w for w in body["warnings"]), body["warnings"]
 
 
 # ── legacy 메타 복원 ───────────────────────────────────────────────────────

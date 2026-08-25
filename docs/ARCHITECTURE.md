@@ -183,8 +183,13 @@
   모델 로드 시간 동안의 페이지가 전부 플레이스홀더로 확정된다. 반면
   `SidecarTimeoutError`는 provider가 아직 그 페이지를 추론 중일 수 있어 여기서
   재요청하지 않고(같은 페이지를 GPU에서 두 번 돌리게 된다) 상위 runner의 청크 재시도에 맡긴다.
-  `loaded` 판정도 `status=="ok" and model_loaded`로 좁혀, sidecar가 엔진 사망(wedge)을
-  `status="error"`로 신고하면서 `model_loaded=True`를 유지하는 경우를 놓치지 않는다.
+  `loaded`는 **`model_loaded` 축만** 본다. sidecar의 `status` 축은 별개 신호라
+  `_check_ready`가 나눠 처리한다: `model_loaded=False`+`status!=ok`는 진짜 로드 실패라
+  하드 실패(`EngineError`), `model_loaded=True`+`status!=ok`는 임계 기반 **자가 복구형
+  웨지 신고**(오탐 가능)이므로 잡 경고로만 올리고 통과시킨다. 후자를 하드 실패로 만들면
+  오탐 1건이 모든 잡을 "모델 로드 실패"로 즉시 마감하고, sidecar는 요청을 못 받아 스스로
+  복구할 수도 없다(HEALTHCHECK는 200이라 재시작도 안 걸린다). 진짜 이상이면 parse가
+  502로 답해 기존 청크 격리가 받고, 오탐이면 성공 1회로 자동 복구된다.
 - **실패 격리**: 렌더에서 한 페이지가 깨지면 흰색 페이지로 대체하고 계속한다. multi 생성의
   rolling 반복/페이지 상한 초과는 같은 multi를 재시도하지 않고 즉시 페이지별 single로 격리한다.
   single에서도 같은 문제가 나거나 일반 오류 재시도까지 실패하면 원본 PDF의 내장 텍스트 레이어를
@@ -268,6 +273,14 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   `dpi`(72–400, 기본 200). 페이지 상한은 서버의 `MAX_PAGES`로 일괄 적용한다.
 - 202 → `{"job_id": "j_1a2b3c4d5e6f", "status": "queued"}`
 - 400(비PDF/손상), 413(MAX_UPLOAD_MB 초과)
+- **본문 상한은 라우트 진입 전(ASGI)에서 끊는다** — `UploadBodyLimitMiddleware`가
+  본문을 가질 수 있는 메서드(POST/PUT/PATCH)를 (경로 패턴 → 상한) 표로 판정한다:
+  `/api/jobs` = `MAX_UPLOAD_MB` + 64KiB(멀티파트 봉투 여유),
+  `/api/jobs/{id}/render-preview` = 2MB(라우트 내부 상한과 동일 값),
+  **그 외 = 64KiB 기본**. 표에 없는 새 POST 라우트도 기본 상한으로 자동 보호된다 —
+  예전처럼 `/api/jobs`만 검사하면 `POST /jobs/{id}/qa`가 잡 존재 확인 이전에 무제한
+  본문을 메모리에 적재한다(실측 uvicorn: 80MB 본문 1건에 RSS +422MB·동시 4건 +1.4GB,
+  422 응답이 80MB 원문 반향 → 상한 적용 후 RSS +0MB·62바이트 413).
 
 ### GET /api/jobs — 잡 목록 (최신순, 최대 50)
 ```json
@@ -615,7 +628,17 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
 - **공유 볼륨**: `hf-cache`(모델 가중치 ~6.7GB, 최초 1회 다운로드)와
   `ocr-data`(잡 결과)를 **네 backend 서비스가 모두 공유**한다 — 엔진(스택)을 바꿔도
   잡 이력이 남는다. 과거의 `ocr-ovis-data`/`ocr-paddle-data`는 더 이상 참조되지 않으며,
-  그 안의 잡을 살리려면 한 번만 `ocr-data`로 복사한 뒤 볼륨을 지운다(compose 주석에 명령 있음).
+  그 안의 잡을 살리려면 한 번만 `ocr-data`로 복사한 뒤 볼륨을 지운다(compose 주석에 절차 있음).
+- ⚠ **볼륨 명령에는 프로젝트 접두사가 필요하다**: compose 볼륨의 실제 이름은
+  `<PROJECT>_ocr-data`처럼 접두사가 붙는다(PROJECT 기본값 = 이 디렉터리 이름,
+  `docker compose config --format json`의 `volumes[].name`으로 확인). 접두사를 빠뜨린
+  `docker run -v <없는이름>:...`은 **빈 볼륨을 새로 만들고 exit 0**을 내므로 마이그레이션이
+  조용한 no-op이 된다(`--mount type=volume`도 동일하게 자동 생성한다 — 실측 확인).
+  그래서 위 절차와 Dockerfile의 `chown` 절차는 모두 (1) 이름 확인 →
+  (2) `docker volume inspect ... || exit 1` 존재 가드 → (3) 실행(원본은 `--mount ...,readonly`)
+  순으로 돌려야 한다. 존재 가드가 유일한 안전장치다. 복사 단계는 **GNU coreutils 이미지**
+  (`debian:stable-slim`)로 돌린다 — alpine의 busybox `cp -n`은 대상 디렉터리가 이미 있으면
+  트리 전체를 조용히 건너뛰고 exit 0을 낸다(실측: 0바이트 복사).
 - `ocr-cpu`는 프로필이 없어 `docker compose up` = CPU 서비스만 기동 (.env 불필요)
 - GPU: `docker compose up -d ocr-cuda` — 서비스명을 명시하면 cuda 프로필이 자동 활성화
 - **하드닝**: 전 서비스 `security_opt: no-new-privileges:true`. 4개 backend 서비스

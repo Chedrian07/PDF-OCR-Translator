@@ -1133,38 +1133,165 @@ def test_모든_유닛에_같은_출력을_주는_공급자는_축퇴로_원문_
         assert "요약입니다." not in json.loads(units.read_text()).values(), "캐시 오염 금지"
 
 
-def test_캐시_적중만으로는_결정적_4xx_강등을_허용하지_않는다(tmp_path, cfg):
+# 2차(deferred) 패스 축퇴 방어에서 공용으로 쓰는 캔드 응답.
+_CANNED = "이 문단의 요약입니다."
+
+
+class _CannedClient:
+    """모든 요청(용어집 포함)에 같은 문자열을 돌려주는 고장 난 공급자."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def complete(self, *a, **k):
+        self.calls += 1
+        return _CANNED
+
+
+def _deferred_degenerate_job(job):
+    """reconcile 폴백 → 2차 패스가 반드시 도는 잡을 만든다.
+
+    covered 6줄만 layout 블록으로 두고 md는 그 6줄(2줄짜리 문단 3개)과 layout이
+    모르는 6줄을 함께 담는다. 매칭률 6/12 = 0.5 < min_coverage(0.7)이라 reconcile은
+    인자로 받은 assembled를 그대로 돌려주고(폴백), 1차에서 미뤄둔 md 유닛 3개가
+    2차 패스로 내려간다. 반환값은 (deferred 유닛 id, 1차 유닛 수).
+    """
+    covered = [
+        "The model reached higher accuracy.",
+        "We repeated every run three times.",
+        "Each dataset used the same split.",
+        "The baseline stayed clearly behind.",
+        "Our tuning changed only one factor.",
+        "The final table lists every score.",
+    ]
+    uncovered = [
+        "Training used a very small rate.",
+        "The ablation removed one module.",
+        "We logged every metric per epoch.",
+        "The appendix holds extra figures.",
+        "Reviewers asked for more details.",
+        "Future work explores larger data.",
+    ]
+    paragraphs = ["\n".join(covered[i:i + 2]) for i in range(0, len(covered), 2)]
+    md = "\n\n".join([*paragraphs, *uncovered]) + "\n"
+    job.mkdir(exist_ok=True)
+    (job / "result.md").write_text(md, encoding="utf-8")
+    (job / "layout.json").write_text(
+        json.dumps(_layout_of(covered), ensure_ascii=False), encoding="utf-8")
+    # 2줄짜리 md 문단 3개가 deferred, 1차는 layout 6 + 미커버 md 6 = 12유닛.
+    return ["md:0:0", "md:0:1", "md:0:2"], len(covered) + len(uncovered)
+
+
+def test_2차패스_deferred_유닛도_축퇴_방어를_받는다(tmp_path, cfg):
+    """축퇴 스윕은 1차 dispatch와 2차(deferred) 패스 **양쪽** 뒤에 필요하다.
+
+    1차 스윕은 deferred dispatch 이전에 끝나므로, 2차 호출이 없으면 지연된 md
+    유닛의 캔드 응답만 방어를 통과해 result.{lang}.md에 그대로 실린다(1차 유닛은
+    전부 원문 유지된 채 지연 유닛만 '요약'으로 대체되는 최악의 혼합 산출물).
+    엔진의 2차 `_sweep_degenerate()` 호출을 지우면 이 테스트는 실패한다.
+    """
+    job = tmp_path / "job"
+    deferred_ids, first_pass_units = _deferred_degenerate_job(job)
+
+    client = _CannedClient()
+    res = run_translation(job, "ko", cfg, client=client)
+
+    # 2차 패스가 실제로 돌았다 — total이 deferred 수만큼 늘어난다.
+    assert res.total == first_pass_units + len(deferred_ids)
+    out = (job / "result.ko.md").read_text(encoding="utf-8")
+    assert _CANNED not in out, "2차 패스 축퇴 출력이 산출물에 실리면 안 된다"
+    for uid in deferred_ids:
+        assert uid in res.kept_original, f"지연 유닛 {uid}이 축퇴로 원문 유지돼야 한다"
+    report = _report(job)
+    # 1차 12 + 2차 3 = 15유닛 전부 축퇴 사유로 집계된다.
+    assert report["kept_reasons"]["degenerate-output"] == first_pass_units + len(deferred_ids)
+    cache = json.loads(
+        (job / "translations" / "ko" / "units.json").read_text(encoding="utf-8"))
+    assert _CANNED not in cache.values(), "2차 축퇴 출력이 캐시에 남으면 안 된다"
+
+
+class AlwaysRejectClient(EchoClient):
+    """유닛 번역 요청마다 재시도 불가 4xx — 죽은 엔드포인트·모델명 오타 재현."""
+
+    def complete(self, system, user, *, max_tokens):
+        from app.translate.types import TranslateUnitRejected
+
+        self.calls += 1
+        if _marker(user) is None:
+            return ""  # 용어집 프롬프트
+        raise TranslateUnitRejected("번역 API 오류 (HTTP 400): unknown model")
+
+
+_WARM_MD = (
+    "The first paragraph explains the training procedure in detail.\n\n"
+    "The last paragraph summarizes the evaluation protocol briefly.\n"
+)
+_NEW_PARA = "A newly appended paragraph describes the ablation study setup."
+
+
+def test_적중하지_않는_캐시만_있으면_결정적_4xx는_잡_전체_실패(tmp_path, cfg):
     """progressed의 의미는 "이 run에서 엔드포인트가 실제로 동작했다"이다.
 
     캐시 적중은 API를 한 번도 타지 않으므로 엔드포인트 건강의 증거가 될 수 없다.
-    캐시로 progressed가 서면, 모델명 오타·잘못된 payload로 전 요청이 400을 받는
-    죽은 엔드포인트에서도 신규 유닛이 전부 kept_original로 강등돼 잡이 조용히
-    done 된다(사용자는 새 문단만 영어인 산출물을 받는다). 전역 실패는 error여야 한다.
+    캐시 파일이 있다는 사실만으로 강등을 허용하면, 모델명 오타로 전 요청이 400을
+    받는 죽은 엔드포인트에서도 전 유닛이 kept_original로 강등돼 잡이 조용히 done
+    된다(사용자는 영문 그대로인 산출물을 받는다). 모델명이 바뀌면 캐시 키가 전부
+    달라져 **한 건도 적중하지 않으므로**, 이전 run의 성공 이력도 없는 것과 같다.
     """
     from dataclasses import replace
 
-    from app.translate.types import TranslateError, TranslateUnitRejected
+    from app.translate.types import TranslateError
 
-    class AlwaysRejectClient(EchoClient):
-        def complete(self, system, user, *, max_tokens):
-            self.calls += 1
-            if _marker(user) is None:
-                return ""
-            raise TranslateUnitRejected("번역 API 오류 (HTTP 400): unknown model")
-
-    warm = (
-        "The first paragraph explains the training procedure in detail.\n\n"
-        "The last paragraph summarizes the evaluation protocol briefly.\n"
-    )
     seq = replace(cfg, concurrency=1)
-    _run_md(tmp_path, seq, warm, EchoClient())  # units.json 적재
+    _run_md(tmp_path, seq, _WARM_MD, EchoClient())  # units.json 적재 (model=test-model)
 
-    # 같은 잡에 문단 하나가 추가된 상태로 재번역 — 앞 두 유닛은 캐시 적중.
-    grown = warm + "\nA newly appended paragraph describes the ablation study setup.\n"
+    # 모델명 오타 — units.json은 그대로지만 캐시 키가 전부 달라져 적중이 0이다.
+    typo = replace(seq, model="test-modle")
+    with pytest.raises(TranslateError):
+        run_translation(tmp_path, "ko", typo, client=AlwaysRejectClient())
+    assert _state(tmp_path)["status"] == "error"
+
+
+def test_워밍된_재개에서_신규_유닛_4xx는_그_유닛만_원문유지(tmp_path, cfg):
+    """취소·오류 후 재개(캐시 워밍)에서는 대부분이 캐시 적중이라 progressed가 서지
+    않는다. 그 상태에서 신규 유닛 하나가 결정적 4xx를 받았다고 잡 전체를 하드
+    실패시키면, 복구 수단이 전량 재번역뿐이라 부분 캐시 보존의 목적이 무너진다.
+
+    이전 run의 캐시가 **이번 설정으로 실제 적중**했다면 설정 자체는 유효하므로
+    그 유닛만 강등하고 done으로 끝낸다 — 단 API 성공 0건은 경고로 남는다.
+    """
+    from dataclasses import replace
+
+    seq = replace(cfg, concurrency=1)
+    _run_md(tmp_path, seq, _WARM_MD, EchoClient())  # 정상 run — 유닛 2개 캐시
+
+    # 같은 설정으로 재개하되 문단 하나가 추가됐고, 그 신규 유닛만 API를 탄다.
+    grown = _WARM_MD + "\n" + _NEW_PARA + "\n"
     (tmp_path / "result.md").write_text(grown, encoding="utf-8")
     dead = AlwaysRejectClient()
+    res = run_translation(tmp_path, "ko", seq, client=dead)
+
+    assert res.status == "done" and _state(tmp_path)["status"] == "done"
+    assert len(res.kept_original) == 1 and res.cached == 2
+    report = _report(tmp_path)
+    assert report["kept_reasons"] == {"api-rejected": 1}
+    assert report["cache_reused"] == 2
+    assert any("성공한 API 호출이 없습니다" in w for w in report["warnings"])
+    # 무손실 — 강등된 신규 문단은 원문 그대로 남고 캐시 적중분은 번역돼 있다.
+    out = (tmp_path / "result.ko.md").read_text(encoding="utf-8")
+    assert _NEW_PARA in out
+    assert "The first paragraph" not in out
+
+
+def test_콜드_캐시에서_전_요청_4xx는_즉시_잡_전체_실패(tmp_path, cfg):
+    """이전 캐시가 아예 없으면 성공 이력이 전혀 없다 — 종전대로 빠르게 전파한다."""
+    from dataclasses import replace
+
+    from app.translate.types import TranslateError
+
+    (tmp_path / "result.md").write_text(_WARM_MD + "\n" + _NEW_PARA + "\n", encoding="utf-8")
     with pytest.raises(TranslateError):
-        run_translation(tmp_path, "ko", seq, client=dead)
+        run_translation(tmp_path, "ko", replace(cfg, concurrency=1), client=AlwaysRejectClient())
     assert _state(tmp_path)["status"] == "error"
 
 

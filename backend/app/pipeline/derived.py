@@ -109,6 +109,56 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+# ── 요청 단위 대기 예산 ───────────────────────────────────────────────────
+# 전역 슬롯에만 타임아웃이 있고 **잡 락에는 없어서**, 같은 잡에 동시 K건이 들어오면
+# 각 요청이 앞 요청의 타임아웃을 차례로 기다렸다(실측: 상한 0.5s에 6건 →
+# 0.51/1.02/…/3.06s로 정확히 N배 누적, 전부 503). 그 동안 sync 라우트용 스레드풀
+# 토큰을 물고 있어 다른 라우트까지 굶는다. 잡 락과 슬롯을 **하나의 예산**으로 묶어
+# 총 대기가 요청당 상한을 넘지 않게 한다. 예산은 실제 '대기'에서만 깎이고 빌드·렌더
+# 시간은 깎지 않는다 — 느린 빌드가 뒤따르는 획득을 굶기지 않게.
+_EXPORT_WAIT = threading.local()
+
+
+def _export_queue_timeout() -> float:
+    return _env_float(PDF_EXPORT_QUEUE_TIMEOUT_ENV, _PDF_EXPORT_QUEUE_TIMEOUT_DEFAULT)
+
+
+def _busy_error() -> PdfExportBusyError:
+    return PdfExportBusyError(retry_after=max(1, int(_export_queue_timeout())))
+
+
+@contextlib.contextmanager
+def export_wait_budget():
+    """이 스레드의 대기 예산을 연다 — 이미 열려 있으면 그대로 공유한다(중첩 안전).
+
+    라우트 하나가 여러 ensure를 연달아 호출할 때(예: /pdf?view=dual은 단일 PDF +
+    대조 PDF) 바깥에서 한 번 열어 두면 그 요청 전체의 대기 상한이 하나로 묶인다.
+    """
+    owner = getattr(_EXPORT_WAIT, "remaining", None) is None
+    if owner:
+        _EXPORT_WAIT.remaining = max(0.0, _export_queue_timeout())
+    try:
+        yield
+    finally:
+        if owner:
+            _EXPORT_WAIT.remaining = None
+
+
+def _acquire_within_budget(acquire) -> bool:
+    """남은 예산만큼만 기다리고, 실제로 기다린 시간을 예산에서 뺀다.
+
+    예산 밖에서 호출되면(다른 모듈이 직접 쓰는 경우) 예전처럼 무한 대기한다.
+    """
+    remaining = getattr(_EXPORT_WAIT, "remaining", None)
+    if remaining is None:
+        return bool(acquire())
+    started = time.monotonic()
+    try:
+        return bool(acquire(timeout=remaining))
+    finally:
+        _EXPORT_WAIT.remaining = max(0.0, remaining - (time.monotonic() - started))
+
+
 def _pdf_export_slots() -> threading.BoundedSemaphore | None:
     """전역 빌드 슬롯. 상한 설정이 바뀌면 새 세마포어로 갈아끼운다(운영 중 조정·테스트).
 
@@ -138,15 +188,16 @@ def export_build_slot():
     if slots is None:
         yield
         return
-    timeout = _env_float(PDF_EXPORT_QUEUE_TIMEOUT_ENV, _PDF_EXPORT_QUEUE_TIMEOUT_DEFAULT)
-    if not slots.acquire(timeout=timeout):
-        raise PdfExportBusyError(retry_after=max(1, int(timeout)))
-    try:
-        yield
-    finally:
-        with contextlib.suppress(ValueError):
-            # 상한 설정이 도중에 바뀌어 세마포어가 교체되면 release가 초과일 수 있다.
-            slots.release()
+    # 예산을 body 전체에 걸쳐 열어 둔다 — 중첩된 획득(래스터 슬롯 등)이 같은 상한을 쓴다.
+    with export_wait_budget():
+        if not _acquire_within_budget(slots.acquire):
+            raise _busy_error()
+        try:
+            yield
+        finally:
+            with contextlib.suppress(ValueError):
+                # 상한 설정이 도중에 바뀌어 세마포어가 교체되면 release가 초과일 수 있다.
+                slots.release()
 
 
 # ── 잡 단위 렌더 락 ───────────────────────────────────────────────────────
@@ -162,13 +213,21 @@ def _job_render_guard(job_id: str):
 
     락 dict은 잡이 늘어날수록 무한히 커진다(TTL GC로 사라진 잡은 DELETE 훅도
     타지 않는다). 상한을 넘으면 **아무도 쓰고 있지 않은** 항목만 버린다 —
-    사용 중 항목을 버리면 같은 잡에 락이 둘 생겨 중복 빌드가 되살아난다."""
+    사용 중 항목을 버리면 같은 잡에 락이 둘 생겨 중복 빌드가 되살아난다.
+
+    획득 순서는 잡 락 → 전역 슬롯을 유지하고(순환 대기 없음), 잡 락 대기도 슬롯과
+    같은 예산 아래 둔다 — 예전에는 무한 대기라 동시 K건의 대기가 K배로 누적됐다."""
     with _FACSIMILE_LOCKS_GUARD:
         lock = _FACSIMILE_LOCKS.setdefault(job_id, threading.RLock())
         _JOB_LOCK_REFS[job_id] = _JOB_LOCK_REFS.get(job_id, 0) + 1
     try:
-        with lock:
-            yield
+        with export_wait_budget():
+            if not _acquire_within_budget(lock.acquire):
+                raise _busy_error()
+            try:
+                yield
+            finally:
+                lock.release()
     finally:
         with _FACSIMILE_LOCKS_GUARD:
             remaining = _JOB_LOCK_REFS.get(job_id, 1) - 1
@@ -445,12 +504,16 @@ def _ensure_facsimile_pages(
         staging = artifacts.facsimile_staging(job.dir, lang)
         staging.mkdir(parents=True, exist_ok=True)
         try:
-            render(
-                pdf_path,
-                staging,
-                dpi=int(job.dpi),
-                max_pages=settings.max_pages,
-            )
+            # 래스터도 빌드와 같은 전역 상한 아래에 둔다 — 리더 기본 경로는
+            # 빌드 1회 + 전 페이지 래스터 1회인데 예전에는 앞의 절반만 상한을
+            # 받아, 상한 1인데도 서로 다른 잡 4개의 래스터가 함께 돌았다(실측).
+            with export_build_slot():
+                render(
+                    pdf_path,
+                    staging,
+                    dpi=int(job.dpi),
+                    max_pages=settings.max_pages,
+                )
             fresh = sorted(staging.glob("page_*.png"))
             for path in fresh:
                 os.replace(path, target / path.name)

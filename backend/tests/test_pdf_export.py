@@ -16,9 +16,11 @@ from conftest import make_pdf_bytes, wait_done
 from app.pipeline.pdf_export import (
     PDF_EXPORT_FORMAT_VERSION,
     PdfExportError,
+    _PORTABLE_SYMBOL_FALLBACKS,
     _free_growth_rect,
     _metrics_font,
     _plain_text,
+    _portable_text_for_font,
     _resolve_font,
     build_dual_pdf,
     build_translated_pdf,
@@ -765,6 +767,81 @@ def test_build_warns_when_only_builtin_cjk_font_available(tmp_path, monkeypatch)
     assert any("폰트" in w for w in report["warnings"])
 
 
+# ── 글리프 폴백 3단계 (_portable_text_for_font) ────────────────────────────
+class _GlyphlessFont:
+    """지정한 문자만 글리프가 없는 측정용 가짜 폰트 (fitz.Font의 has_glyph 대역)."""
+
+    def __init__(self, missing: str):
+        self._missing = {ord(ch) for ch in missing}
+
+    def has_glyph(self, code: int) -> bool:
+        return code not in self._missing
+
+
+def _portable(monkeypatch, text: str, missing: str) -> str:
+    """missing 문자만 빠진 폰트로 조판할 때의 이식성 보정 결과."""
+    monkeypatch.setattr(
+        "app.pipeline.pdf_export._metrics_font",
+        lambda fontfile, fontname: _GlyphlessFont(missing),
+    )
+    return _portable_text_for_font(text, "/fake/font.ttf")
+
+
+@pytest.mark.parametrize(("char", "expected"), [
+    ("−", "-"),   # MINUS SIGN — 실측: AppleMyungjo에 없어 `1 −PL`이 tofu가 됐다
+    ("‐", "-"),   # HYPHEN
+    ("‑", "-"),   # NON-BREAKING HYPHEN
+    ("×", "x"),   # MULTIPLICATION SIGN
+    ("⁄", "/"),   # FRACTION SLASH
+])
+def test_폰트에_없는_수학기호는_대체문자로_낮춘다(monkeypatch, char, expected):
+    """2단계(_PORTABLE_SYMBOL_FALLBACKS) 없이는 구제되지 않는 문자들이다.
+
+    다섯 글자 모두 NFKD 분해가 자기 자신(또는 비ASCII)이라 3단계 분해 경로로는
+    ASCII가 나오지 않는다 — 딕셔너리를 비우거나 매핑을 바꾸면 tofu가 되며 이
+    테스트가 실패한다(복구 사고에서 수작업 복원된 바로 그 표).
+    """
+    assert _portable(monkeypatch, f"1 {char} 2", missing=char) == f"1 {expected} 2"
+    # 대조군 — 같은 폰트에 글리프가 있으면 원 문자를 그대로 보존한다.
+    assert _portable(monkeypatch, f"1 {char} 2", missing="") == f"1 {char} 2"
+
+
+def test_기호_폴백표는_수학기호_5종을_모두_덮는다():
+    """표 자체를 고정한다 — 항목이 사라지면 조판이 조용히 tofu로 회귀한다."""
+    assert _PORTABLE_SYMBOL_FALLBACKS == {
+        "−": "-", "‐": "-", "‑": "-", "×": "x", "⁄": "/",
+    }
+
+
+def test_대체문자마저_없는_폰트에서는_원문자를_유지한다(monkeypatch):
+    """폴백은 '있는 글리프로만' 낮춘다 — 없는 ASCII로 바꾸면 tofu만 옮겨간다."""
+    assert _portable(monkeypatch, "1 − 2", missing="−-") == "1 − 2"
+
+
+def test_NFKD_분해_경로는_기호표와_독립이다(monkeypatch):
+    """3단계 — 표에 없는 precomposed 라틴은 분해해 ASCII 기반 문자만 남긴다."""
+    assert "ö" not in _PORTABLE_SYMBOL_FALLBACKS
+    assert _portable(monkeypatch, "Schrödinger", missing="ö") == "Schrodinger"
+    # 폰트가 ö를 지원하면(컨테이너 Noto) 원 철자를 보존한다.
+    assert _portable(monkeypatch, "Schrödinger", missing="") == "Schrödinger"
+
+
+def test_위첨자_경로가_기호표보다_먼저_적용된다(monkeypatch):
+    """1단계 — _UNICODE_SUPERSCRIPT_ASCII 치환. ⁻는 표(U+2212)와 다른 코드포인트다."""
+    assert _portable(monkeypatch, "x²", missing="²") == "x2"
+    assert _portable(monkeypatch, "10⁻³", missing="⁻³") == "10-3"
+
+
+def test_내장폰트_경로는_문자를_변형하지_않는다(monkeypatch):
+    """fontfile이 없으면(내장 CJK) 측정할 폰트가 없어 원문 그대로 통과한다."""
+    monkeypatch.setattr(
+        "app.pipeline.pdf_export._metrics_font",
+        lambda fontfile, fontname: pytest.fail("fontfile 없이 폰트를 로드하면 안 된다"),
+    )
+    assert _portable_text_for_font("1 − 2", None) == "1 − 2"
+    assert _portable_text_for_font("", "/fake/font.ttf") == ""
+
+
 def _png_stamp(size: int = 8, value: int = 120) -> bytes:
     import fitz
 
@@ -927,3 +1004,59 @@ def test_build_replaces_text_over_full_page_scan_background(tmp_path):
     with fitz.open(result.path) as exported:
         # 전면 배경 이미지는 이모지 패스(완전 포함 + 소면적 한정)에 걸리지 않는다.
         assert exported[0].get_image_info(), "전면 스캔 배경은 보존되어야 한다"
+
+
+# ── 패키지 글루 불변식 (pdf_export/__init__.py) ─────────────────────────────
+def test_서브모듈_등록표가_실제_모듈_목록과_일치한다():
+    """`_SUBMODULES` 누락은 조용하다 — 그 모듈만 monkeypatch가 안 먹는다.
+
+    패키지는 monkeypatch 의미(단일 모듈 시절 = 전역 하나)를 `__setattr__` 전파로
+    흉내내는데, 전파 대상이 이 표다. 새 서브모듈을 추가하고 등록을 잊으면 그
+    모듈을 지나는 테스트만 실제 구현을 계속 호출한다.
+    """
+    import pkgutil
+
+    import app.pipeline.pdf_export as pkg
+
+    registered = {mod.__name__.rsplit(".", 1)[-1] for mod in pkg._SUBMODULES}
+    discovered = {info.name for info in pkgutil.iter_modules(pkg.__path__)}
+    assert registered == discovered, "서브모듈 추가 시 _SUBMODULES 등록도 함께 해야 한다"
+
+
+def test_여러_서브모듈에_있는_동명_심볼은_모두_같은_객체다():
+    """이름이 같은데 객체가 다르면 `__setattr__` 전파가 의미를 잃는다.
+
+    전파는 이름 기준(`hasattr(sub, name)`)이라, 두 모듈이 같은 이름으로 서로 다른
+    객체를 들고 있으면 monkeypatch가 한쪽의 진짜 정의를 다른 쪽 값으로 덮어써
+    테스트가 관측하는 대상과 실행되는 대상이 갈라진다.
+    """
+    import app.pipeline.pdf_export as pkg
+
+    seen: dict[str, tuple[str, object]] = {}
+    conflicts: list[str] = []
+    for mod in pkg._SUBMODULES:
+        for name, value in vars(mod).items():
+            if name.startswith("__"):
+                continue
+            owner = seen.setdefault(name, (mod.__name__, value))
+            if owner[1] is not value:
+                conflicts.append(f"{name}: {owner[0]} vs {mod.__name__}")
+    assert conflicts == []
+
+
+def test_패키지_속성_대입은_모든_서브모듈_전역에_전파된다(monkeypatch):
+    """단일 모듈 시절의 monkeypatch 의미 — undo(원상 복구)까지 함께 전파된다."""
+    import app.pipeline.pdf_export as pkg
+
+    owners = [mod for mod in pkg._SUBMODULES if hasattr(mod, "_resolve_font")]
+    assert len(owners) >= 2, "정의 모듈 + 사용 모듈 양쪽에서 관측돼야 의미가 있다"
+    original = pkg._resolve_font
+
+    def _stub(*args, **kwargs):
+        return (None, "korea")
+
+    monkeypatch.setattr("app.pipeline.pdf_export._resolve_font", _stub)
+    assert all(mod._resolve_font is _stub for mod in owners)
+    monkeypatch.undo()
+    assert pkg._resolve_font is original
+    assert all(mod._resolve_font is original for mod in owners)

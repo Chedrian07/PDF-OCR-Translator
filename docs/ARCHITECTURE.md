@@ -91,7 +91,13 @@
 │   │   │   ├── layout.py       # raw_pages.json → layout.json 블록 파싱
 │   │   │   ├── pdf_fonts.py    # 원본 텍스트 레이어의 실측 폰트 크기·굵기 주입
 │   │   │   ├── render.py       # markdown → HTML (markdown-it-py) + document.html
-│   │   │   └── pdf_export.py   # 레이아웃 보존 번역 PDF (단일/대조) — §5 /pdf
+│   │   │   ├── derived.py      # 파생 산출물(페이지 raster·export) 락 + 전역 빌드 상한 (§5)
+│   │   │   └── pdf_export/     # 레이아웃 보존 번역 PDF (단일/대조) — §5 /pdf. **패키지**
+│   │   │       ├── __init__.py # 공개 API(build_translated_pdf 등) — 외부는 여기만 임포트
+│   │   │       ├── build.py    # 페이지 순회·리댁션·삽입 오케스트레이션
+│   │   │       ├── fitting.py  # 조판 dry-run(행간→축소 사다리) · 확장 공간 탐색
+│   │   │       ├── spans.py · text.py · tables.py · geometry.py · fonts.py
+│   │   │       └── models.py · constants.py · report.py  # report.py = PDF_EXPORT_FORMAT_VERSION
 │   │   ├── translate/          # 번역 코어 (OCR 엔진·torch 무관) — §13
 │   │   │   ├── engine.py       # run_translation (2단 패스·래더·캐시·state.json)
 │   │   │   ├── client.py       # OpenAICompatClient (chat/responses 협상·재시도)
@@ -113,7 +119,12 @@
 │   ├── src/uocr_native.cpp
 │   └── tests/test_parity.py
 ├── frontend/                   # 정적 SPA (빌드스텝/외부 의존성 0)
-│   ├── index.html · styles.css · app.js · layout-fit.js
+│   ├── index.html · styles.css · layout-fit.js
+│   ├── app.js                  # **진입점만**(361줄) — 부트스트랩 + 모듈 배선. 로직 없음
+│   ├── js/                     # ES module 16개(약 6,060줄) — 실제 로직은 전부 여기 (§10)
+│   │   ├── core.js · state.js · api.js · sse.js · ui.js · constants.js
+│   │   ├── upload.js · jobs.js · live.js · results.js · tabs.js · health.js
+│   │   └── translate.js · qa.js · viewer.js · reader.js
 │   ├── vendor/katex/           # 로컬 번들 (외부 CDN 금지 — §10)
 │   └── tests/                  # node --test 단위 + tests/e2e/(ui, mock-full-flow)
 └── scripts/
@@ -374,13 +385,16 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   사용하되, 화면은 원본/번역 PDF 페이지 이미지를 기준면으로 표시한다. OCR
   블록은 같은 좌표의 투명 텍스트 레이어로 남아 검색·선택·복사가 가능하다.
   페이지 이미지를 만들 수 없을 때만 좌표 텍스트 재조판으로 폴백한다.
-  layout.json 없으면 404 (프론트는 탭에서 안내 문구 표시)
+  layout.json 없으면 404 (프론트는 탭에서 안내 문구 표시).
+  `?lang=` 뷰는 번역 PDF raster를 유발하므로 `/document.html`과 함께
+  **503 + `Retry-After`**(전역 빌드 대기열 초과, §5 `/pdf`)를 낼 수 있다.
 
 ### GET /api/jobs/{id}/page/{page}?lang=ko
 - 리더용 최종 페이지 PNG. 원문은 `pages/`, 번역은 `export.{lang}.pdf`를 잡 DPI로
   렌더한 `rendered/{lang}/` 캐시를 반환한다(캐시 마커는 PDF 크기·mtime·DPI·페이지 수).
 - 상태코드: **400** 미지원 lang · **404** 번역본 없음/페이지 번호가 layout에 없음/
-  이미지 파일 없음 · **409** 내보내기 불가(`PdfExportError` — 입력 누락·손상).
+  이미지 파일 없음 · **409** 내보내기 불가(`PdfExportError` — 입력 누락·손상) ·
+  **503** 전역 빌드 대기열 초과(`Retry-After` 동반 — §5 `/pdf`의 전역 빌드 상한).
   `layout.json`(또는 `layout.{lang}.json`)이 없는 잡은 원본 `pages/` PNG로 폴백한다.
 
 ### GET /api/jobs/{id}/outline?lang=ko
@@ -423,7 +437,8 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   `layout.json`(원문)과 `layout.{lang}.json`(번역)을 블록 단위로 비교해
   **내용이 실제로 바뀐 텍스트 블록만** 원본 PDF에서 리댁션(텍스트만 제거,
   이미지·그래픽 보존) 후 같은 자리에 번역 텍스트를 삽입한다
-  (`pipeline/pdf_export.py`). 행·열 구조가 같은 HTML 표는 PDF 텍스트 검색으로
+  (`pipeline/pdf_export/` 패키지 — 진입점 `build_translated_pdf`, §3).
+  행·열 구조가 같은 HTML 표는 PDF 텍스트 검색으로
   셀 격자를 추정해 **셀별 번역**하고 벡터 격자선을 보존한다(최대 500셀).
   독립 수식·그림·참고문헌과 세로쓰기 블록은 원본 글리프를 유지하며, 일반
   텍스트 안의 단순 LaTeX 위첨자는 읽을 수 있는 평문(`mc^{2}`→`mc²`)으로 낮춘다.
@@ -472,16 +487,29 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   dry-run이 블록마다 폰트 파일을 다시 파싱하던 비용 제거(결과 불변).
 - 상태코드: 400 미지원 lang **또는 미지원 `view`**(single|dual 외) · 404 번역본 없음 ·
   409 미완료 잡 또는 좌표 레이아웃 없음(figure_only 엔진 — document.html 사용 안내) ·
-  500 내보내기 실패(`PdfExportError`).
+  500 내보내기 실패(`PdfExportError`) ·
+  **503 빌드 대기열 초과**(`PdfExportBusyError`, `Retry-After` 동반 — 아래 전역 상한).
+- **전역 빌드 상한 (503 + `Retry-After`)**: 잡 단위 락은 *같은 잡*의 중복 빌드만 막는다.
+  서로 다른 잡 N개가 동시에 요청되면 빌드 N개가 함께 돌아 CPU를 포화시킨다(실측 9.4s/16p).
+  그래서 `pipeline/derived.py::export_build_slot`이 프로세스 전역 세마포어
+  (`PDF_EXPORT_MAX_CONCURRENT`, 기본 **2**)로 빌드 수를 묶고, 슬롯을
+  `PDF_EXPORT_QUEUE_TIMEOUT_S`(기본 **30초**) 안에 못 얻으면 매달리는 대신
+  **503 + `Retry-After`**로 거절한다(재시도하면 성공할 수 있는 일시적 과부하 —
+  입력 누락·손상인 `PdfExportError`와 구분된다). 슬롯은 **실제 빌드에서만** 잡고
+  캐시 적중 경로에서는 잡지 않는다. `0` 이하로 두면 상한 비활성(예전 동작).
+  같은 슬롯을 쓰는 라우트는 이 `/pdf` 외에 `/document.html`·`/layout`·`/page/{n}`
+  (번역 페이지 raster가 export를 유발한다)까지 넷이며, 모두 같은 503을 낼 수 있다.
+  ⚠ 업그레이드 직후 `PDF_EXPORT_FORMAT_VERSION`이 오르면 전 캐시가 한꺼번에
+  무효화돼 이 폭주가 **실제로** 일어난다(§15.1).
 - 응답 헤더: `X-UOCR-PDF-Replaced`, `-Preserved`, `-Relocated`, `-Table-Cells`,
   `-Specialist-Preserved`, `-Warnings`. 모두 숫자만 담아 원문·경고 본문이 프록시
   메타데이터로 새지 않으며, 프런트 다운로드 토스트가 이를 요약한다.
 - 캐시: 단일판 `job.dir/export.{lang}.pdf` + `export.{lang}.report.json`, 대조판
   `export.{lang}.dual.pdf` — 단일판은 `layout.{lang}.json`보다 오래되면 재생성하고,
   대조판은 원본·단일판보다 오래되면 재생성한다. 번역 완료 시 함께 무효화한다.
-  리포트의 `format_version`이 현행 `PDF_EXPORT_FORMAT_VERSION`(현재 **4**)과 다르면
-  캐시를 무시하고 재생성한다 — 내보내기 동작이 바뀐 사이클에서는 기존 export 캐시가
-  전부 한 번 재생성된다.
+  리포트의 `format_version`이 현행 `PDF_EXPORT_FORMAT_VERSION`
+  (`pipeline/pdf_export/report.py`, 현재 **6**)과 다르면 캐시를 무시하고 재생성한다 —
+  내보내기 동작이 바뀐 사이클에서는 기존 export 캐시가 전부 한 번 재생성된다(§15.1).
 
 ### POST /api/jobs/{id}/cancel
 - 실행/대기 중 잡을 **삭제 없이** 중단. 202 `{"job_id","status":"canceling"}`
@@ -587,6 +615,9 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
 | `QA_MAX_CONCURRENT` | `4` | 동시 처리 중인 Q&A 요청 수 상한 — 초과 시 429 `Retry-After: 5` |
 | `TRANSLATE_RATE_LIMIT_PER_MIN` | `12` | `POST /translate`의 잡·IP별 60초 윈도우 상한 (0 이하=비활성) |
 | `TRANSLATE_MAX_ACTIVE` | `4` | 동시에 실행 중인 번역 태스크 수 상한 — 초과 시 429 `Retry-After: 30` |
+| `TRUSTED_PROXY_HOPS` | `0` | 앱 앞단의 **신뢰 프록시 홉 수**. `0`=`X-Forwarded-For` 완전 무시(기본, 위조 방어). 리버스 프록시 뒤에 둘 때만 홉 수를 넣는다 — 그렇지 않으면 위 레이트리밋 키가 프록시 IP 하나로 붕괴한다. 정수가 아니면 경고 후 `0` (§5·§14) |
+| `PDF_EXPORT_MAX_CONCURRENT` | `2` | 서로 다른 잡의 PDF 내보내기 빌드 **프로세스 전역** 동시 실행 상한 (`0` 이하=비활성). 캐시 적중 경로는 슬롯을 잡지 않는다 (§5 `/pdf`) |
+| `PDF_EXPORT_QUEUE_TIMEOUT_S` | `30` | 위 슬롯 대기 상한(초) — 초과 시 매달리는 대신 503 + `Retry-After` |
 | `GPU_DEVICE` | `0` | (compose) CUDA_VISIBLE_DEVICES로 전달 — 두 번째 GPU는 `1` |
 | `HOST`/`PORT` | `0.0.0.0`/`8000` | 컨테이너 내부 uvicorn 바인드 (Dockerfile CMD 고정값) |
 | `BIND_HOST` | `0.0.0.0` | (compose) 호스트 쪽 포트 바인딩 주소 — **기본은 외부 노출**. 루프백 전용으로 되돌리려면 `127.0.0.1` (§8·§14) |
@@ -657,6 +688,14 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
   compose `environment`에 명시하지 않은 키는 컨테이너에서 조용히 무시된다.
   `LLM_OPENAI_API_KEY`·`PAGE_SEPARATOR`는 backend 4개 서비스
   (`ocr-cpu`/`ocr-cuda`/`ocr-ovis`/`ocr-paddle`) **전부**에 있다.
+  남용 방어 4종(`QA_RATE_LIMIT_PER_MIN`·`QA_MAX_CONCURRENT`·
+  `TRANSLATE_RATE_LIMIT_PER_MIN`·`TRANSLATE_MAX_ACTIVE`)과 `TRUSTED_PROXY_HOPS`,
+  내보내기 전역 상한(`PDF_EXPORT_MAX_CONCURRENT`·`PDF_EXPORT_QUEUE_TIMEOUT_S`)도
+  마찬가지로 4개 전부에 있다 — 소비처(`api.py`·`pipeline/derived.py`)가 엔진과
+  무관하게 모든 backend에서 돈다. ⚠ 이 중 하나라도 빠지면 운영자는 `.env`로
+  **조였다고 믿는데 컨테이너는 코드 기본값을 쓴다**(유료 LLM 키 소진 방어에서
+  가장 위험한 실패 형태). `tests/test_ci_ops_contracts.py`가 "코드가 읽는 env 키는
+  `.env.example`에 있고, 엔진 무관 키는 4개 서비스 전부에 있다"를 고정한다.
   `MAX_LENGTH`는 일부러 `ocr-cpu`·`ocr-cuda`에만 둔다 — 소비처가
   `engine/unlimited.py`(로컬 생성 상한) 하나뿐이라 sidecar 스택에서는 아무 효과가
   없다. 반대로 `PAGE_SEPARATOR`는 **엔진과 무관**하다(`merge.py`의 result.md 조립,
@@ -727,6 +766,18 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
 ## 10. 프론트엔드 (frontend/, 정적 SPA)
 
 - **외부 네트워크 리소스 0** (CDN/폰트/트래커 금지), 빌드 스텝 없음, 바닐라 JS(ES modules)
+- ⚠ **`app.js`에는 로직이 없다**: 진입점(361줄 — 부트스트랩 `init()` + 테스트가 쓰는
+  공개 심볼 재노출)일 뿐이고, 실제 구현은 `frontend/js/` **16개 모듈(약 6,060줄)**에
+  있다. 브라우저 네이티브 ES 모듈이라 번들러가 없으므로 임포트 그래프가 곧 구조다.
+  | 모듈 | 역할 |
+  |---|---|
+  | `constants.js` · `state.js` · `ui.js` | UI 상수 · 전역 DOM/상태 핸들 · DOM 헬퍼·토스트·테마 |
+  | `api.js` · `sse.js` | `/api` fetch 래퍼 · SSE 구독/재연결·폴백 폴링 |
+  | `core.js` | **순수 함수 코어**(스트림 파싱·진행률·라벨·URL 조립) — 노드 단위 테스트 대상 |
+  | `upload.js` · `jobs.js` · `health.js` | 드롭존/검증 · 잡 히스토리·라우팅 · health 배지 |
+  | `live.js` · `results.js` · `tabs.js` | 3-패널 라이브 뷰 · 완료 화면 · 결과 탭 |
+  | `translate.js` · `qa.js` | 번역 실행/상태/경고 요약(429 재시도 잠금 포함) · 페이지 Q&A |
+  | `viewer.js` · `reader.js` | 전체화면 뷰어 부트스트랩 · 연속 스크롤 리더(원문↔번역 동기화) |
 - 한국어 UI, 다크/라이트 자동(`prefers-color-scheme`) + 수동 토글(localStorage)
 - 구성:
   - 헤더: 앱명 "Unlimited-OCR — PDF → Markdown", `/api/health` 기반 디바이스/엔진 배지
@@ -896,7 +947,7 @@ LLM 왕복의 절반이 낭비였다. 그래서 **비어 있지 않은 모든 �
 translations/{lang}/state.json     진행 상태 (아래 스키마)
 translations/{lang}/glossary.json  문서 용어집 [{"src","ko","policy","first_unit"}]
 translations/{lang}/units.json     유닛 캐시 {cache_key: 번역문}
-translations/{lang}/report.json    품질 리포트 {"kept_original":[...],"retried":n,...}
+translations/{lang}/report.json    품질 리포트 (아래 키 — GET /translate/report가 그대로 노출)
 result.{lang}.md                   번역 마크다운 — page_separator 구조·페이지 수 보존
 layout.{lang}.json                 blocks[].content만 교체된 layout.json (그 외 필드 동일)
 ```
@@ -912,6 +963,32 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
 }
 ```
 
+`report.json` 스키마(엔진이 `_finish`에서 1회 기록):
+```json
+{
+  "kept_original": ["u12", "…"],      // 원문 유지 유닛 id (§13.4)
+  "retried": 0, "repaired": 0, "split": 0, "sanitized": 0, "skipped": 4,
+  "skip_reasons":  {"references": 3, "non-linguistic": 1},  // 왜 번역 대상에서 빠졌나
+  "kept_reasons":  {"gate-rejected": 1},                    // 왜 원문이 그대로 남았나
+  "gate_reasons":  {"refusal": 1, "hangul-ratio": 2},       // 출력 게이트 규칙별 거부 횟수
+  "cache_prior": 120, "cache_reused": 0,                  // 전량 재번역 감지 (§15.1)
+  "reference_rule": "…", "cached": 0, "translated": 8,
+  "api_mode": "chat", "warnings": ["…"]
+}
+```
+- `skip_reasons`(입력 측 `should_skip`·segment의 references 표시 —
+  `references`\|`non-linguistic`\|`already-korean`\|`identifier`)·
+  `kept_reasons`(래더 소진 후 원문 유지 —
+  `gate-rejected`\|`placeholder-mismatch`\|`empty-output`\|`api-rejected`\|`degenerate-output`)·
+  `gate_reasons`(출력 측 검증 게이트가 거부한 규칙, §13.4 —
+  `refusal`\|`scaffold`\|`hangul-ratio`\|`length-ratio`)는
+  **"왜 이 문단이 영어 그대로인가"**의 사유별 집계다.
+  총합(`skipped`/`kept_original`)만으로는 원인을 구분할 수 없어서 추가됐다.
+  `gate_reasons` 합이 `kept_reasons["gate-rejected"]`보다 **훨씬 크면** 게이트 오탐이
+  래더 왕복 비용만 태우고 있다는 신호다(임계값 회귀 감시 지표).
+- `cache_prior > 0`인데 `cache_reused == 0`이면 `PROMPT_V`·모델·샘플링 변경으로 캐시가
+  전량 무효화돼 유료 API 전량 재호출이 일어난 것이다 — 같은 내용이 `warnings`에도 남는다(§15.1).
+
 ### 13.3 REST / SSE 계약 (번역)
 
 - **POST /api/jobs/{id}/translate** — body `{"lang":"ko","force":false}` (기본 `lang="ko"`).
@@ -925,6 +1002,13 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   - 성공 시 `archive.zip` 캐시를 삭제해 다음 `/archive`가 `result.{lang}.md`까지 담아 재생성
 - **GET /api/jobs/{id}/translate/state?lang=ko** — `state.json` 없으면 `200 {"status":"none","lang"}`.
   있으면 내용 반환하되 **stale 조정** 적용(§13.5).
+  - `report.json`이 있으면 사유별 집계 **`skip_reasons`·`kept_reasons`·`reference_rule`**를
+    응답에 덧붙인다(§13.2) — 상태 폴링 한 번으로 "왜 원문이 그대로인가"를 알 수 있게.
+    `gate_reasons`는 진단용이라 state에 붙이지 않고 아래 `/translate/report`로만 노출한다.
+- **GET /api/jobs/{id}/translate/report?lang=ko** — `translations/{lang}/report.json`을
+  `{"job_id","lang", …report}`로 그대로 반환한다(§13.2의 전 키 — `kept_original` 유닛 id,
+  `skip_reasons`/`kept_reasons`/`gate_reasons`, `cache_prior`/`cache_reused`, `warnings`).
+  `400` 미지원 lang / `404` 리포트 없음("먼저 번역을 실행하세요").
 - **POST /api/jobs/{id}/translate/cancel?lang=ko** — 실행 중이면 `202 {"status":"canceling"}`,
   아니면 현재 상태 반환.
 - **GET /api/jobs/{id}/translate/events?lang=ko** — `/events`와 동일 SSE 패턴
@@ -1042,6 +1126,39 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
   파일만 되살린다(추적은 되지 않는다). `output/`은 재생성 가능한 산출물이므로
   보관이 필요하면 리포 밖에 둔다. 앞으로 추적 중인 디렉터리를 무시 목록에 넣을
   때는 커밋 메시지에 "다른 클론에서는 삭제된다"를 반드시 적을 것.
+
+### 15.1 업그레이드 노트 — 버전 상수 상향 = 캐시 전량 무효화
+
+이 리포에는 산출물 캐시를 무효화하는 **버전 상수가 셋** 있고, 최근 사이클에 **셋이 동시에**
+올랐다. 기존 배포를 이 커밋으로 올리면 잡마다 1회씩 아래가 실제로 일어난다.
+**코드 변경 없이 조용히 일어나므로**, 모르면 "왜 갑자기 느리고 청구서가 늘었나"가 된다.
+
+| 상수 | 위치 | 현재 값 | 상향 시 무효화되는 것 | 비용 |
+|---|---|---|---|---|
+| `PROMPT_V` | `translate/types.py` | `"6"` | `translations/{lang}/units.json` **전체**(캐시 키 첫 재료) | **유료 API 전량 재호출** |
+| `PDF_EXPORT_FORMAT_VERSION` | `pipeline/pdf_export/report.py` | `6` | `export.{lang}.pdf`·`.dual.pdf`·`.report.json` | CPU (실측 9.4s/16p) |
+| `ENRICH_VERSION` | `pipeline/pdf_fonts.py` | `5` | `layout.json`의 폰트 메타(`fonts_v`) → 뒤이어 export 캐시 | CPU (재조판) |
+
+- **가장 비싼 것은 번역이다**: 모델·샘플링(`TRANSLATE_TEMPERATURE`·`TRANSLATE_REASONING`)을
+  바꿔도 같은 일이 일어난다(§13.4). 재번역은 **번역을 다시 실행할 때만** 일어나므로,
+  이미 있는 `result.ko.md`를 그대로 두면 비용은 0이다 — 예산을 확인하기 전에는 기존
+  잡의 번역을 재실행하지 말 것.
+- **확인 방법**: 재번역이 일어났다면 `report.json`에 `cache_prior > 0 && cache_reused == 0`이
+  남고 `warnings`에 "기존 캐시 N건이 하나도 적중하지 않아 유닛 M개를 전량 재번역했습니다"가
+  들어간다. 서버 로그에도 같은 줄이 `WARNING`으로 남는다. `state.json`/`report.json`의
+  `prompt_v`로 어떤 프롬프트 버전으로 만든 결과인지 구분한다.
+- **PDF/레이아웃 쪽은 CPU만 든다**: 다만 업그레이드 직후 사용자가 여러 잡을 동시에 열면
+  export 빌드가 한꺼번에 몰린다. 그래서 전역 상한(`PDF_EXPORT_MAX_CONCURRENT`, 기본 2)이
+  있고, 대기가 `PDF_EXPORT_QUEUE_TIMEOUT_S`(기본 30초)를 넘으면 503 + `Retry-After`가 나간다
+  (§5 `/pdf`). 업그레이드 직후 잠깐 503이 보이는 것은 **설계된 동작**이며, 코어가 넉넉하면
+  상한을 올려 흡수한다.
+- **권장 절차**: ① 이미지 갱신 전 `data/jobs`(=`ocr-data` 볼륨) 백업 → ② 올린 뒤 잡 하나로
+  번역을 재실행해 `report.json`의 `cache_reused`로 비용 규모를 실측 → ③ 여럿이 쓰는 서버라면
+  `TRANSLATE_RATE_LIMIT_PER_MIN`·`TRANSLATE_MAX_ACTIVE`를 임시로 낮춰 동시 재번역을 묶는다.
+- **롤백의 비대칭**: `units.json`은 키→번역문 **사전**이라 옛 항목이 지워지지 않는다 —
+  구버전으로 되돌리면 옛 키가 다시 맞아 재번역이 일어나지 않는다(신·구 항목이 함께 쌓인다).
+  반면 `export.{lang}.pdf`·`layout.json`은 **덮어쓰는 단일 산출물**이라 버전을 오갈 때마다
+  매번 재생성된다(CPU만).
 
 ## 16. textlayer 엔진 (Localight 통합)
 

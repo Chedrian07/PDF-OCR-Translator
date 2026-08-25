@@ -107,6 +107,22 @@ services:
       # 번역 PDF 내보내기용 사용자 지정 폰트(컨테이너 내 경로, 볼륨 마운트 필요).
       # .env는 dockerignore로 컨테이너에 없어 여기서 스레딩해야 동작한다.
       PDF_EXPORT_FONT: ${PDF_EXPORT_FONT:-}
+      # 내보내기 전역 빌드 상한 (§5) — 잡 락은 같은 잡의 중복 빌드만 막는다.
+      # FORMAT_VERSION 상향 직후엔 전 캐시가 무효화돼 서로 다른 잡의 빌드가 몰린다.
+      # 0 이하 = 상한 비활성. 대기가 타임아웃을 넘으면 503 + Retry-After로 거절한다.
+      PDF_EXPORT_MAX_CONCURRENT: ${PDF_EXPORT_MAX_CONCURRENT:-2}
+      PDF_EXPORT_QUEUE_TIMEOUT_S: ${PDF_EXPORT_QUEUE_TIMEOUT_S:-30}
+      # ── 남용 방어 상한 (무인증 서비스의 비용 상한, §5) ──────────────
+      # ⚠ 여기서 스레딩하지 않으면 .env에서 아무리 조여도 컨테이너는 코드 기본값을
+      #   쓴다 — "조였다고 믿는" 상태가 유료 LLM 키 소진 방어에서 가장 위험하다.
+      QA_RATE_LIMIT_PER_MIN: ${QA_RATE_LIMIT_PER_MIN:-30}
+      QA_MAX_CONCURRENT: ${QA_MAX_CONCURRENT:-4}
+      TRANSLATE_RATE_LIMIT_PER_MIN: ${TRANSLATE_RATE_LIMIT_PER_MIN:-12}
+      TRANSLATE_MAX_ACTIVE: ${TRANSLATE_MAX_ACTIVE:-4}
+      # 앞단 신뢰 프록시 홉 수 — 기본 0은 X-Forwarded-For를 완전히 무시한다(안전한 쪽).
+      # 리버스 프록시 뒤에 둘 때만 홉 수를 넣는다: 0이면 레이트리밋 키가 프록시 IP
+      # 하나로 붕괴해 사용자 한 명이 전체 상한을 소진한다(api.py::_client_key).
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
       # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) ──
       OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
       NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}
@@ -212,6 +228,16 @@ services:
       TRANSLATE_REASONING: ${TRANSLATE_REASONING:-}
       TRANSLATE_CONTEXT: ${TRANSLATE_CONTEXT:-1}
       PDF_EXPORT_FONT: ${PDF_EXPORT_FONT:-}   # 내보내기 폰트 스레딩 — 설명은 ocr-cpu 참조
+      # 내보내기 전역 빌드 상한 · 남용 방어 상한 · 프록시 홉 — 설명은 ocr-cpu 참조.
+      # 이 노브들은 엔진과 무관하다(api.py·pipeline/derived.py가 읽는다) — 네 backend
+      # 서비스 전부에 있어야 .env 값이 어느 스택에서든 동일하게 먹는다.
+      PDF_EXPORT_MAX_CONCURRENT: ${PDF_EXPORT_MAX_CONCURRENT:-2}
+      PDF_EXPORT_QUEUE_TIMEOUT_S: ${PDF_EXPORT_QUEUE_TIMEOUT_S:-30}
+      QA_RATE_LIMIT_PER_MIN: ${QA_RATE_LIMIT_PER_MIN:-30}
+      QA_MAX_CONCURRENT: ${QA_MAX_CONCURRENT:-4}
+      TRANSLATE_RATE_LIMIT_PER_MIN: ${TRANSLATE_RATE_LIMIT_PER_MIN:-12}
+      TRANSLATE_MAX_ACTIVE: ${TRANSLATE_MAX_ACTIVE:-4}
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
       # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) — 설명은 ocr-cpu 참조 ──
       OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
       NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}
@@ -298,6 +324,16 @@ services:
       TRANSLATE_REASONING: ${TRANSLATE_REASONING:-}
       TRANSLATE_CONTEXT: ${TRANSLATE_CONTEXT:-1}
       PDF_EXPORT_FONT: ${PDF_EXPORT_FONT:-}   # 내보내기 폰트 스레딩 — 설명은 ocr-cpu 참조
+      # 내보내기 전역 빌드 상한 · 남용 방어 상한 · 프록시 홉 — 설명은 ocr-cpu 참조.
+      # 이 노브들은 엔진과 무관하다(api.py·pipeline/derived.py가 읽는다) — 네 backend
+      # 서비스 전부에 있어야 .env 값이 어느 스택에서든 동일하게 먹는다.
+      PDF_EXPORT_MAX_CONCURRENT: ${PDF_EXPORT_MAX_CONCURRENT:-2}
+      PDF_EXPORT_QUEUE_TIMEOUT_S: ${PDF_EXPORT_QUEUE_TIMEOUT_S:-30}
+      QA_RATE_LIMIT_PER_MIN: ${QA_RATE_LIMIT_PER_MIN:-30}
+      QA_MAX_CONCURRENT: ${QA_MAX_CONCURRENT:-4}
+      TRANSLATE_RATE_LIMIT_PER_MIN: ${TRANSLATE_RATE_LIMIT_PER_MIN:-12}
+      TRANSLATE_MAX_ACTIVE: ${TRANSLATE_MAX_ACTIVE:-4}
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
       # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) — 설명은 ocr-cpu 참조 ──
       OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
       NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}
@@ -423,6 +459,16 @@ services:
       TRANSLATE_REASONING: ${TRANSLATE_REASONING:-}
       TRANSLATE_CONTEXT: ${TRANSLATE_CONTEXT:-1}
       PDF_EXPORT_FONT: ${PDF_EXPORT_FONT:-}   # 내보내기 폰트 스레딩 — 설명은 ocr-cpu 참조
+      # 내보내기 전역 빌드 상한 · 남용 방어 상한 · 프록시 홉 — 설명은 ocr-cpu 참조.
+      # 이 노브들은 엔진과 무관하다(api.py·pipeline/derived.py가 읽는다) — 네 backend
+      # 서비스 전부에 있어야 .env 값이 어느 스택에서든 동일하게 먹는다.
+      PDF_EXPORT_MAX_CONCURRENT: ${PDF_EXPORT_MAX_CONCURRENT:-2}
+      PDF_EXPORT_QUEUE_TIMEOUT_S: ${PDF_EXPORT_QUEUE_TIMEOUT_S:-30}
+      QA_RATE_LIMIT_PER_MIN: ${QA_RATE_LIMIT_PER_MIN:-30}
+      QA_MAX_CONCURRENT: ${QA_MAX_CONCURRENT:-4}
+      TRANSLATE_RATE_LIMIT_PER_MIN: ${TRANSLATE_RATE_LIMIT_PER_MIN:-12}
+      TRANSLATE_MAX_ACTIVE: ${TRANSLATE_MAX_ACTIVE:-4}
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
       # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) — 설명은 ocr-cpu 참조 ──
       OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
       NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}

@@ -1078,6 +1078,10 @@ def _viewer_artifact_revision(job, lang: str | None) -> str:
             artifacts.layout(job.dir, lang),
             artifacts.markdown(job.dir, lang),
             artifacts.translate_state(job.dir, lang),
+            # facsimile marker는 capabilities.translated_page_image의 유일한 근거다.
+            # 빠뜨리면 false→true로 바뀌어도 ETag가 그대로라 조건부 요청이 영구히
+            # 304(옛 false 본문)를 받아 뷰어가 "번역 이미지 준비 안 됨"에 고착됐다.
+            artifacts.facsimile_marker(job.dir, lang),
         ])
     parts = []
     for path in paths:
@@ -1358,10 +1362,16 @@ def job_pdf(
             " — HTML 내보내기(document.html)를 사용하세요",
         )
     try:
-        translated_pdf, report = _ensure_translated_pdf(
-            job, lang, _state(request).settings,
-        )
-        out = _ensure_dual_pdf(job, lang, translated_pdf) if view == "dual" else translated_pdf
+        # 두 단계(단일 PDF → 대조 PDF)의 대기를 하나의 예산으로 묶는다 — 따로 두면
+        # 이 요청 하나가 상한의 2배까지 스레드풀 토큰을 물고 매달릴 수 있다.
+        with derived.export_wait_budget():
+            translated_pdf, report = _ensure_translated_pdf(
+                job, lang, _state(request).settings,
+            )
+            out = (
+                _ensure_dual_pdf(job, lang, translated_pdf)
+                if view == "dual" else translated_pdf
+            )
     except PdfExportBusyError as e:
         raise _busy_as_503(e) from e
     except PdfExportError as e:

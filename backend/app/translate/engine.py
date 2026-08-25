@@ -45,6 +45,7 @@ from .segment import (
 )
 from .types import (
     PROMPT_V,
+    TranslateAPIError,
     TranslateConfig,
     TranslateError,
     TranslateResult,
@@ -188,8 +189,13 @@ class _TranslationRun:
     # step-0의 결정적 4xx를 유닛 강등으로 흡수해도 되는지 판단하는 데 쓴다.
     # **캐시 적중은 세우지 않는다** — API를 타지 않아 엔드포인트 건강의 증거가 아니다.
     # (세우면 모델명 오타로 전 요청이 400인 상태에서도 신규 유닛이 전부 kept로 강등돼
-    #  잡이 조용히 done 된다.)
+    #  잡이 조용히 done 된다.) 재개 run(이전 캐시 존재)에서 이게 0인 경우의 처리는
+    #  _may_degrade·_verify_endpoint_health 참조.
     progressed: threading.Event = field(default_factory=threading.Event)
+    # progressed가 아직 없는 상태에서 "판정을 run 끝으로 미룬 채" 강등한 4xx 건수와
+    # 대표 메시지. 이전 run의 캐시가 있는 재개 run에서만 미룬다(_may_degrade 참조).
+    unverified_rejects: int = 0     # gate_lock으로 보호 (worker 스레드에서 증가)
+    unverified_msg: str = ""
     flights: SingleFlight = field(default_factory=SingleFlight)
 
     # ── 문서 상태 (execute 단계에서 채워진다) ────────────────────────────────
@@ -353,6 +359,36 @@ class _TranslationRun:
         )
         return masked, mapping, pairs, first, keep, key
 
+    def _may_degrade(self, exc: TranslateUnitRejected) -> bool:
+        """step-0의 결정적 4xx를 유닛 강등(래더 → 원문 유지)으로 흡수해도 되는가.
+
+        증거는 두 축이고 성격이 다르다.
+        - progressed: **이번 run**의 API 왕복 성공 = 엔드포인트·인증·설정이 지금 정상.
+          이게 있으면 4xx는 그 유닛의 결함이므로 즉시 강등한다.
+        - 이전 run이 남긴 유닛 캐시(flights.prior_keys): 캐시 적중은 API를 타지 않아
+          엔드포인트 건강의 증거가 **아니지만**, 이 잡이 같은 설정으로 이미 번역됐다는
+          이력이다. 취소·오류 후 재개(캐시 워밍)에서는 대부분이 캐시 적중이라
+          progressed가 끝까지 안 설 수 있고, 그때 신규 유닛 하나의 4xx로 잡 전체를
+          하드 실패시키면 부분 캐시 보존(재개 비용 절감)이 무의미해진다.
+          그래서 여기서는 전파하지 않고 **판정만 run 끝으로 미룬다**
+          (_verify_endpoint_health: 이전 캐시가 실제로 적중했는지로 확정).
+
+        캐시가 아예 없는 콜드 run은 이전 성공 이력이 전혀 없으므로 종전대로 즉시
+        전파한다 — 죽은 엔드포인트에서 남은 큐가 드레인되는 것도 함께 막는다.
+        (재개 run에서 판정을 미루면 최악의 경우 남은 큐가 드레인되지만, 결정적 4xx는
+         _RETRYABLE이 아니라 백오프 없이 즉시 실패하므로 비용은 유닛 수 × 왕복 1회
+         수준이다. 반대로 즉시 전파하면 캐시 적중 순서에 따라 판정이 흔들린다.)
+        """
+        if self.progressed.is_set():
+            return True
+        if not self.flights.prior_keys:
+            return False
+        with self.gate_lock:
+            self.unverified_rejects += 1
+            if not self.unverified_msg:
+                self.unverified_msg = str(exc)
+        return True
+
     def translate_unit(self, u, precomputed=None):
         stats = _zero_stats()
         # 취소·abort 응답성: 이미 디스패치된 유닛도 API 호출·래더 단계 사이에서
@@ -366,6 +402,8 @@ class _TranslationRun:
             if hit:
                 # 캐시 적중은 API를 타지 않으므로 progressed를 세우지 않는다 —
                 # 죽은 엔드포인트에서도 신규 유닛이 조용히 강등되는 것을 막는다.
+                # (이전 run 캐시의 적중은 flights.prior_hits로 따로 계측돼
+                #  _verify_endpoint_health의 재개 판정에 쓰인다.)
                 return u, cached_text, "cached", key, stats
         ctx = self.context_map.get(u.id) if self.cfg.context else None
         max_toks = self._max_toks(masked)
@@ -382,13 +420,13 @@ class _TranslationRun:
         #    통과하면 즉시 성공.
         #    유닛 하나만 결정적으로 거부되는 재시도 불가 4xx(초대형 표·초장문이
         #    서버 n_ctx를 넘겨 400 등)는 잡 전체를 죽이는 대신 래더로 넘겨 강등한다.
-        #    단 이 run에서 성공한 유닛이 아직 없으면 엔드포인트·설정 자체 문제이므로
-        #    종전대로 전파한다 — 전 유닛이 kept로 조용히 done 되는 회귀 방지.
+        #    단 이 run에서 성공한 유닛이 아직 없으면 엔드포인트·설정 자체 문제일 수
+        #    있으므로 강등 허용 여부는 _may_degrade가 판정한다.
         api_rejected = False
         try:
             restored, missing, dup, sc, clean = self._run_pass(prompt, max_toks, mapping)
-        except TranslateUnitRejected:
-            if not self.progressed.is_set():
+        except TranslateUnitRejected as e:
+            if not self._may_degrade(e):
                 raise
             logger.warning("번역 유닛 최초 패스 API 거부 — 래더로 강등: %s", u.id)
             api_rejected = True
@@ -599,6 +637,35 @@ class _TranslationRun:
                         self.write_state("running", self.done, self.total)
         return not stopped
 
+    def _verify_endpoint_health(self) -> None:
+        """미뤄둔 4xx 강등을 확정하거나, 엔드포인트 고장으로 보고 잡을 실패시킨다.
+
+        _may_degrade가 미룬 건은 "이번 run의 API 성공이 0"인 상태에서 강등된 것들이다.
+        dispatch가 끝난 지금은 이전 캐시가 실제로 적중했는지(prior_hits)를 순서에
+        무관하게 알 수 있다.
+        - 적중 있음: 같은 모델·프롬프트·샘플링(캐시 키 재료)으로 만든 번역을 이번 run이
+          재사용했다 = 설정 자체는 유효하다. 강등을 확정하되, API 성공이 0건이라는
+          사실은 경고로 남긴다(엔드포인트가 이제 막 죽었을 수도 있다).
+        - 적중 없음: 모델명 오타처럼 키가 전부 달라졌거나 처음부터 죽은 엔드포인트다.
+          전 유닛이 kept로 조용히 done 되지 않도록 잡 전체를 실패시킨다.
+        """
+        if not self.unverified_rejects or self.progressed.is_set():
+            return
+        n, msg = self.unverified_rejects, self.unverified_msg
+        self.unverified_rejects = 0  # 2차 패스에서 다시 판정 (경고 중복 방지)
+        if not self.flights.prior_hits:
+            raise TranslateAPIError(
+                f"{msg} — 이번 실행에서 성공한 API 호출이 하나도 없습니다"
+                f" (유닛 {n}개 연속 거부). 모델명·엔드포인트 설정을 확인하세요."
+            )
+        warn = (
+            f"이번 실행에서 성공한 API 호출이 없습니다 — 신규 유닛 {n}개가 API 거부로"
+            " 원문 유지되었고 나머지는 기존 캐시를 재사용했습니다."
+            " 엔드포인트·모델 설정이 여전히 유효한지 확인하세요."
+        )
+        self.warnings.append(warn)
+        logger.warning("번역 API 성공 0건: %s (lang=%s) — %s", self.job_dir.name, self.lang, warn)
+
     def _sweep_degenerate(self) -> None:
         # ── 문서 단위 축퇴(degenerate) 출력 방어 ──────────────────────────────
         # 유닛별 검증(looks_untranslated)은 "이 출력이 이 원문의 번역인가"만 본다.
@@ -801,6 +868,7 @@ class _TranslationRun:
                     self.flush_cache()
                 if canceled:
                     return self._canceled_result()
+                self._verify_endpoint_health()  # 2차 패스의 미뤄둔 4xx도 같은 기준으로 확정
                 assembled = self._assemble_md()
             else:
                 assembled = reconciled
@@ -885,6 +953,10 @@ class _TranslationRun:
 
         if canceled:
             return self._canceled_result()
+
+        # 산출물을 쓰기 전에 판정한다 — 실패로 결론나면 부분 번역이 result.{lang}.md로
+        # 나가지 않고 state는 error가 된다(캐시는 위 finally에서 이미 보존됐다).
+        self._verify_endpoint_health()
 
         self._sweep_degenerate()
 

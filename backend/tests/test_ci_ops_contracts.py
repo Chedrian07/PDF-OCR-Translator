@@ -58,6 +58,101 @@ def test_engine_independent_knobs_reach_every_backend_service(compose, svc):
         assert key in env, f"{svc}에 {key} 스레딩 누락"
 
 
+# ── 코드가 읽는 env 키 ↔ compose·.env.example 전수 대조 ──
+# 위 두 테스트는 "이미 터진 누락"만 고정한다. 새 노브가 생길 때마다 사람이 여기에
+# 줄을 추가해야 한다면 다음 사이클에 또 빠진다 — 실제로 TRUSTED_PROXY_HOPS·
+# PDF_EXPORT_MAX_CONCURRENT·PDF_EXPORT_QUEUE_TIMEOUT_S와 남용 방어 4종이 그렇게
+# 누락됐다(문서에는 있는데 컨테이너에는 전달되지 않아 "조였다고 믿는" 상태).
+# 그래서 키 목록을 **코드에서 뽑아** 대조한다: 새 키는 기본적으로 "전 서비스 + 문서"
+# 를 요구하고, 예외는 아래 표에 이유와 함께 명시해야만 통과한다.
+
+# env 키를 읽는 모듈 — 여기 없는 파일에 새 키가 생기면 스캔에 잡히지 않는다.
+ENV_SOURCE_FILES = (
+    "backend/app/config.py",            # Settings.from_env (대부분의 노브)
+    "backend/app/api.py",               # TRUSTED_PROXY_HOPS
+    "backend/app/pipeline/derived.py",  # PDF_EXPORT_MAX_CONCURRENT/_QUEUE_TIMEOUT_S
+    "backend/app/translate/types.py",   # TranslateConfig.from_env
+)
+_ENV_KEY_RE = re.compile(r'"([A-Z][A-Z0-9_]{3,})"')
+
+# .env.example에 적지 않는 키 — 운영자가 조정할 대상이 아니다.
+NOT_OPERATOR_KNOBS = {
+    "DATA_DIR",     # Dockerfile ENV(/data) + compose 볼륨이 정한다
+    "FRONTEND_DIR", # 이미지 안 경로 — 리포 상대 탐색이 기본
+    "FAKE_DELAY",   # FakeEngine 전용(테스트/데모)
+}
+
+# 소비처가 일부 스택에만 있는 키 → 그 서비스에만 둔다 (§8: 전부에 복붙하면
+# 소비되지 않는 값이 문서와 함께 굳는다). 그 외 키는 backend 4개 전부에 있어야 한다.
+_UNLIMITED_ONLY = frozenset({"ocr-cpu", "ocr-cuda"})   # 로컬 모델 생성 경로만 읽는다
+_SIDECAR_ONLY = frozenset({"ocr-ovis", "ocr-paddle"})  # sidecar HTTP 클라이언트만 읽는다
+SERVICE_SCOPED: dict[str, frozenset[str]] = {
+    "MAX_LENGTH": _UNLIMITED_ONLY,
+    "MAX_PAGE_OUTPUT_CHARS": _UNLIMITED_ONLY,
+    "MAX_PAGE_OUTPUT_TOKENS": _UNLIMITED_ONLY,
+    "MODEL_ID": _UNLIMITED_ONLY,
+    "MODEL_REVISION": _UNLIMITED_ONLY,
+    "OCR_DTYPE": _UNLIMITED_ONLY,
+    "OCR_DECODE_BLOCK": _UNLIMITED_ONLY,
+    "OCR_FAST_DECODE": _UNLIMITED_ONLY,
+    "PAGES_PER_CHUNK": _UNLIMITED_ONLY,
+    "OCR_CPU_THREADS": frozenset({"ocr-cpu"}),  # CUDA 스택은 torch CPU 스레드가 무의미
+    "OCR_SIDECAR_URL": _SIDECAR_ONLY,
+    "OCR_SIDECAR_CONNECT_TIMEOUT_S": _SIDECAR_ONLY,
+    "OCR_SIDECAR_READ_TIMEOUT_S": _SIDECAR_ONLY,
+    "OCR_SIDECAR_HEALTH_TIMEOUT_S": _SIDECAR_ONLY,
+    "OCR_SIDECAR_MAX_RESPONSE_MB": _SIDECAR_ONLY,
+    "OCR_SIDECAR_RETRIES": _SIDECAR_ONLY,
+    "OCR_SIDECAR_MODEL_WAIT_S": _SIDECAR_ONLY,
+    "OCR_REMOTE_PAGE_CONCURRENCY": _SIDECAR_ONLY,
+    **dict.fromkeys(NOT_OPERATOR_KNOBS, frozenset()),
+}
+
+
+def _env_keys_read_by_code() -> set[str]:
+    keys: set[str] = set()
+    for rel in ENV_SOURCE_FILES:
+        keys |= set(_ENV_KEY_RE.findall((REPO / rel).read_text(encoding="utf-8")))
+    return keys
+
+
+def test_env_key_scanner_still_sees_the_known_knobs():
+    """스캐너가 조용히 0개를 반환하면 아래 두 계약이 통과하며 무력화된다."""
+    keys = _env_keys_read_by_code()
+    sentinel = {
+        "TRUSTED_PROXY_HOPS", "PDF_EXPORT_MAX_CONCURRENT", "PDF_EXPORT_QUEUE_TIMEOUT_S",
+        "QA_RATE_LIMIT_PER_MIN", "TRANSLATE_MAX_ACTIVE", "OPENAI_BASE_URL",
+    }
+    assert sentinel <= keys, f"env 키 스캐너가 놓친 키: {sorted(sentinel - keys)}"
+
+
+def test_every_env_key_the_code_reads_is_documented_in_env_example():
+    """코드가 읽는 키는 .env.example에 있어야 한다 — 없으면 존재 자체를 모른다."""
+    text = (REPO / ".env.example").read_text(encoding="utf-8")
+    missing = sorted(
+        k for k in _env_keys_read_by_code() - NOT_OPERATOR_KNOBS
+        if not re.search(rf"\b{k}\b", text)
+    )
+    assert not missing, f".env.example에 없는 노브: {missing}"
+
+
+@pytest.mark.parametrize("svc", BACKEND_SERVICES)
+def test_every_env_key_the_code_reads_is_threaded_into_compose(compose, svc):
+    """엔진 무관 노브는 backend 4개 전부에, 스택 전용 노브는 그 스택에만.
+
+    양방향 계약이다 — 누락(컨테이너에서 조용히 무시)과 과잉 복붙(소비처 없는 값이
+    문서와 함께 굳음)을 같은 자로 잡는다. 새 키는 예외 표에 없으면 '전부' 취급이라
+    기본값이 안전한 쪽이다.
+    """
+    env = compose["services"][svc]["environment"]
+    for key in sorted(_env_keys_read_by_code()):
+        expected = svc in SERVICE_SCOPED.get(key, frozenset(BACKEND_SERVICES))
+        assert (key in env) is expected, (
+            f"{svc}: {key} 스레딩 {'누락' if expected else '과잉'} "
+            "(SERVICE_SCOPED에 이유를 적거나 compose를 고칠 것)"
+        )
+
+
 def test_max_length_only_where_a_consumer_exists(compose):
     """반대 방향 — 소비처 없는 서비스에 노브를 복붙하지 않는다.
 

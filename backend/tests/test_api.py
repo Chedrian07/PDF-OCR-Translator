@@ -763,6 +763,150 @@ def test_pdf_export_queue_timeout_is_503_with_retry_after(client, sample_pdf, mo
     assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200
 
 
+def test_export_wait_does_not_accumulate_across_concurrent_requests(tmp_path, monkeypatch):
+    """전역 슬롯에는 타임아웃이 있는데 **잡 락에는 없어서**, 같은 잡의 동시 K건이
+    앞 요청의 타임아웃을 차례로 기다렸다 — 실측 0.51/1.02/…/3.06s로 정확히 N배
+    누적(전부 503). 기본값 30s에서는 마지막 요청이 K×30s 동안 스레드풀 토큰을
+    물고 있어 다른 라우트까지 굶는다. 대기 상한은 요청 단위로 지켜져야 한다."""
+    import app.api as api_mod
+    from app.pipeline import derived
+
+    monkeypatch.setenv("PDF_EXPORT_MAX_CONCURRENT", "1")
+    monkeypatch.setenv("PDF_EXPORT_QUEUE_TIMEOUT_S", "0.3")
+    job, translated = _dual_job(tmp_path, "queued")
+
+    waits: list[float] = []
+    busy = 0
+    guard = threading.Lock()
+
+    def _work():
+        nonlocal busy
+        started = time.monotonic()
+        try:
+            api_mod._ensure_dual_pdf(job, "ko", translated)
+        except derived.PdfExportBusyError:
+            with guard:
+                busy += 1
+        finally:
+            with guard:
+                waits.append(time.monotonic() - started)
+
+    threads = [threading.Thread(target=_work) for _ in range(8)]
+    try:
+        with derived.export_build_slot():        # 유일한 슬롯을 다른 스레드가 점유
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
+        assert busy == 8                          # 전원 일시적 과부하로 거절
+        # 누적되면 8번째가 ~2.4s(=8×0.3). 상한이 요청 단위로 지켜지면 전부 ~0.3s다.
+        assert max(waits) < 1.0, waits
+    finally:
+        for thread in threads:
+            thread.join(timeout=5)
+        api_mod._forget_job_caches(job.id)
+
+
+def _facsimile_job(tmp_path: Path, name: str, settings) -> SimpleNamespace:
+    """번역 PDF 캐시가 이미 최신이라 래스터만 남은 잡 — 리더 기본 경로의 후반부."""
+    from app.pipeline import artifacts, derived
+    from app.pipeline.pdf_export import PDF_EXPORT_FORMAT_VERSION
+
+    job_dir = tmp_path / name
+    job_dir.mkdir()
+    job = SimpleNamespace(id=name, dir=job_dir, dpi=72)
+    for path in (
+        artifacts.source_pdf(job_dir),
+        artifacts.layout(job_dir),
+        artifacts.layout(job_dir, "ko"),
+    ):
+        path.write_text("{}", encoding="utf-8")
+    artifacts.export_pdf(job_dir, "ko").write_bytes(b"%PDF-1.4 translated")
+    artifacts.export_report(job_dir, "ko").write_text(
+        json.dumps({"format_version": PDF_EXPORT_FORMAT_VERSION}), encoding="utf-8",
+    )
+    derived._write_pdf_export_font_id(job, "ko", derived._pdf_export_font_id(settings))
+    return job
+
+
+def test_facsimile_raster_is_globally_capped(tmp_path, monkeypatch):
+    """리더 기본 경로(/page?lang=ko·/layout·/document.html)는 빌드 1회 + 전 페이지
+    래스터 1회인데, 전역 상한이 앞의 절반만 막았다 — 16페이지 래스터는 빌드에
+    필적하는 CPU 작업이라 상한 1인데도 서로 다른 잡 4개의 래스터가 함께 돌았다."""
+    import app.api as api_mod
+
+    monkeypatch.setenv("PDF_EXPORT_MAX_CONCURRENT", "1")
+    monkeypatch.setenv("PDF_EXPORT_QUEUE_TIMEOUT_S", "30")
+    settings = SimpleNamespace(pdf_export_font="", max_pages=4)
+
+    live = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def _slow_render(pdf_path, out_dir, *, dpi, max_pages):
+        nonlocal live, peak
+        with guard:
+            live += 1
+            peak = max(peak, live)
+        time.sleep(0.15)                          # 동시 진입 창을 넓힌다
+        (out_dir / "page_0001.png").write_bytes(b"\x89PNG")
+        with guard:
+            live -= 1
+
+    def _never_build(*args, **kwargs):
+        raise AssertionError("PDF 캐시가 최신인데 다시 빌드했다")
+
+    monkeypatch.setattr(api_mod, "render_pdf_pages", _slow_render)
+    monkeypatch.setattr(api_mod, "build_translated_pdf", _never_build)
+    jobs = [_facsimile_job(tmp_path, f"raster-{index}", settings) for index in range(4)]
+    threads = [
+        threading.Thread(
+            target=lambda j=job: api_mod._ensure_facsimile_pages(j, [1], "ko", settings)
+        )
+        for job in jobs
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert peak == 1, peak                    # 상한 밖이면 4 (잡마다 락이 다르다)
+        assert live == 0
+        for job in jobs:
+            assert (job.dir / "rendered" / "ko" / "page_0001.png").is_file()
+    finally:
+        for job in jobs:
+            api_mod._forget_job_caches(job.id)
+
+
+def test_viewer_manifest_etag_tracks_translated_raster_marker(client, sample_pdf):
+    """translated_page_image가 false→true로 바뀌어도 ETag가 그대로면, 응답이
+    no-cache라 반드시 재검증하는 클라이언트가 영구히 304(옛 false 본문)를 받아
+    뷰어가 '번역 이미지 준비 안 됨'에 고착된다."""
+    from app.pipeline import artifacts
+
+    jid, job_dir = _ko_layout_job(client, sample_pdf)
+    before = client.get(f"/api/jobs/{jid}/viewer-manifest?lang=ko")
+    assert before.status_code == 200
+    assert before.json()["capabilities"]["translated_page_image"] is False
+    etag = before.headers["ETag"]
+    # 같은 상태에서는 그대로 304 (조건부 재검증 자체는 계속 동작해야 한다)
+    assert client.get(
+        f"/api/jobs/{jid}/viewer-manifest?lang=ko", headers={"If-None-Match": etag},
+    ).status_code == 304
+
+    marker = artifacts.facsimile_marker(job_dir, "ko")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"pages": 1}), encoding="utf-8")
+
+    after = client.get(
+        f"/api/jobs/{jid}/viewer-manifest?lang=ko", headers={"If-None-Match": etag},
+    )
+    assert after.status_code == 200, after.status_code
+    assert after.headers["ETag"] != etag
+    assert after.json()["capabilities"]["translated_page_image"] is True
+
+
 def _ko_layout_job(client, sample_pdf) -> tuple[str, Path]:
     """번역 산출물(result.ko.md·layout.ko.json)만 갖춘 잡 — 번역 엔진 없이
     한국어 facsimile 경로(export.ko.pdf → rendered/ko/*.png)를 실제로 태운다."""

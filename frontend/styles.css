@@ -210,6 +210,21 @@ a { color: var(--accent); }
   user-select: none;
 }
 .btn:disabled, .btn.disabled { opacity: 0.5; cursor: not-allowed; pointer-events: none; }
+/* 진행 중인 버튼. PDF 내보내기는 캐시가 비어 있으면 서버가 십수 초 동안 빌드하는데,
+   예전에는 aria-busy만 세우고 스타일 규칙이 없어 화면이 클릭 전과 **완전히 동일**했다
+   — 사용자는 버튼이 고장난 줄 알고 연타했다(연타는 state.pdfDownloadBusy가 삼킨다).
+   스피너 + 진행 문구로 "돌고 있다"를 눈에 보이게 한다. */
+.btn[aria-busy="true"] { cursor: progress; pointer-events: none; }
+.btn[aria-busy="true"]::before {
+  content: "";
+  width: 11px;
+  height: 11px;
+  border: 2px solid color-mix(in srgb, currentColor 30%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex: 0 0 auto;
+}
 .btn-block { width: 100%; }
 .btn-primary { background: var(--accent); color: var(--accent-fg); }
 .btn-primary:hover { background: var(--accent-hover); }

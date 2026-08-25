@@ -378,6 +378,11 @@ def _run_translate_thread(
             # 번역이 갱신됐으므로 내보내기 PDF·대조 PDF·리포트와, 그 PDF에서 만든
             # HTML 기준면 캐시까지 한 곳(artifacts)에서 무효화한다.
             artifacts.invalidate_language_artifacts(job.dir, lang)
+            # 방금 지운 그 캐시를 곧바로 다시 만들어 둔다. 사용자가 다운로드
+            # 버튼을 누르는 시점이 정확히 여기 직후라, 예열하지 않으면 첫 클릭이
+            # 빌드 전체를 요청 안에서 기다린다. 경합하면 조용히 포기하므로
+            # 진짜 클릭을 밀어내지 않는다(derived.warm_translated_pdf 참조).
+            _warm_export_pdf(st, job, lang)
     except TranslateError as e:
         # SSE는 구독자가 없으면 이벤트를 버린다 — 서버 로그에도 반드시 남긴다
         logger.exception("번역 실패: %s (lang=%s)", job.id, lang)
@@ -679,7 +684,7 @@ def job_html(request: Request, job_id: str, lang: str | None = None) -> HTMLResp
     return HTMLResponse(html, headers=headers)
 
 
-def _backfill_layout_fonts(job, pages: list, lang: str | None = None) -> None:
+def _backfill_layout_fonts(job, pages: list, lang: str | None = None, st=None) -> None:
     """기존 잡 지연 백필: layout.json에 실측 폰트 크기(fs)가 빠진 비이미지 블록이
     있고 source.pdf가 있으면, 텍스트 레이어에서 뽑아 in-place 주입 후 원자적 저장.
     재변환 없이 이미 변환된 잡도 개선된다. enrichment 실패는 절대 500을 내지 않음.
@@ -714,11 +719,16 @@ def _backfill_layout_fonts(job, pages: list, lang: str | None = None) -> None:
                 os.replace(tmp, target)
             finally:
                 tmp.unlink(missing_ok=True)
+            # 방금 layout.{lang}.json의 mtime이 올라가 export.{lang}.pdf 캐시가
+            # 무효해졌다. 그 무효화 자체는 옳다(내보내기의 입력이 실제로 바뀌었다)
+            # — 다만 다음 다운로드 클릭이 그 빌드를 통째로 기다리게 두지 않는다.
+            if st is not None and lang is not None:
+                _warm_export_pdf(st, job, lang)
     except Exception:
         pass  # 백필 실패는 렌더를 막지 않는다 (폴백 휴리스틱으로 표시)
 
 
-def _load_layout_pages(job, lang: str | None = None) -> list:
+def _load_layout_pages(job, lang: str | None = None, st=None) -> list:
     """lang=None이면 원본 layout.json, lang이면 번역본 layout.{lang}.json을 로드."""
     if lang is not None:
         p = artifacts.layout(job.dir, lang)
@@ -736,7 +746,7 @@ def _load_layout_pages(job, lang: str | None = None) -> list:
     # 번역본 페이지는 번역 시점의 fonts_v 스탬프를 복사해 온다 — 보통은 최신이라
     # no-op이지만, 번역 뒤 ENRICH_VERSION이 오르면 번역본만 구버전으로 남는다.
     # 각 산출물을 자기 경로에 백필해 원문/번역 뷰가 같은 폰트 메타를 쓰게 한다.
-    _backfill_layout_fonts(job, pages, lang)
+    _backfill_layout_fonts(job, pages, lang, st)
     return pages
 
 
@@ -763,6 +773,21 @@ def _try_facsimile_pages(job, pages: list, lang: str | None, settings) -> Path |
         job, pages, lang, settings,
         render=render_pdf_pages, build=build_translated_pdf,
     )
+
+
+def _warm_export_pdf(st, job, lang: str) -> bool:
+    """내보내기 PDF 캐시를 백그라운드에서 미리 만들어 둔다.
+
+    캐시가 비는 순간(번역 완료·폰트 백필로 레이아웃 mtime 상승)마다 부른다.
+    실패·경합은 조용히 넘어간다 — 사용자의 클릭이 같은 경로로 다시 시도한다.
+    """
+    try:
+        return derived.warm_translated_pdf_async(
+            job, lang, st.settings, build=build_translated_pdf,
+        )
+    except Exception:  # noqa: BLE001 — 예열은 어떤 경우에도 본 요청을 깨지 않는다
+        logger.warning("PDF 예열 시작 실패: %s/%s", job.id, lang, exc_info=True)
+        return False
 
 
 def _busy_as_503(e: PdfExportBusyError) -> HTTPException:
@@ -830,7 +855,7 @@ def job_document_download(request: Request, job_id: str, lang: str | None = None
         text, _partial = _read_markdown(job)  # 미완료 잡도 부분 결과 내보내기 허용(/markdown과 동일)
     layout_path = artifacts.layout(job.dir, lang)
     if job.status == "done" and layout_path.is_file():
-        pages = _load_layout_pages(job, lang)
+        pages = _load_layout_pages(job, lang, _state(request))
         try:
             pages_dir = _try_facsimile_pages(job, pages, lang, st.settings)
         except PdfExportBusyError as e:
@@ -876,7 +901,7 @@ def job_layout(request: Request, job_id: str, lang: str | None = None) -> HTMLRe
     job = _get_job(request, job_id)
     if lang is not None:
         _check_lang(lang)
-    pages = _load_layout_pages(job, lang)
+    pages = _load_layout_pages(job, lang, _state(request))
     st = _state(request)
     try:
         pages_dir = _try_facsimile_pages(job, pages, lang, st.settings)
@@ -1057,7 +1082,7 @@ def job_alignment(
 
     target_page = source_page
     if lang is not None:
-        target_pages = _load_layout_pages(job, lang)
+        target_pages = _load_layout_pages(job, lang, _state(request))
         target_page = _layout_page(target_pages, page)
         if target_page is None:
             raise HTTPException(409, "번역 레이아웃의 페이지 대응이 올바르지 않습니다")
@@ -1207,7 +1232,7 @@ def job_viewer_pages(
         _check_lang(lang)
 
     source_pages = _load_layout_pages(job)
-    target_pages = _load_layout_pages(job, lang) if lang else source_pages
+    target_pages = _load_layout_pages(job, lang, _state(request)) if lang else source_pages
     source_by_number = {
         page.get("page"): page
         for page in source_pages
@@ -1255,7 +1280,7 @@ def job_outline(request: Request, job_id: str, lang: str | None = None) -> dict:
     job = _get_job(request, job_id)
     if lang is not None:
         _check_lang(lang)
-    pages = _load_layout_pages(job, lang)
+    pages = _load_layout_pages(job, lang, _state(request))
     items = []
     for page in pages:
         if not isinstance(page, dict):

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import tempfile
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -23,6 +24,7 @@ from .constants import (
     _MIN_FONT_PT,
     _MIN_TABLE_FONT_PT,
     _PRESERVE_TYPES,
+    _REDACT_CHUNK,
     _REPLACEABLE_TYPES,
     _SPECIALIST_TYPES,
     _TITLE_LINEHEIGHTS,
@@ -57,6 +59,7 @@ from .spans import (
     _source_span_records,
     _source_text_rects,
 )
+from .subset import drawable_charset, subset_font_files
 from .tables import _table_cell_rects, _table_cell_source_style, _table_cells
 from .text import (
     _TITLE_PREFIX_RE,
@@ -144,6 +147,29 @@ def _resolve_export_fonts(fontfile: str) -> _ExportFonts:
     table_name = "uocr-table" if compact_ff and compact_ff != serif_ff else serif_name
     return _ExportFonts(
         serif_ff, serif_name, sans_ff, sans_name, table_ff, table_name,
+    )
+
+
+def _subset_export_fonts(
+    fonts: _ExportFonts, charset: str, out_dir: Path,
+) -> _ExportFonts:
+    """조판에 쓰는 글리프만 남긴 폰트로 갈아끼운다(실패하면 원본 그대로).
+
+    임베드되는 것은 여기서 정해진 파일이다. 서브셋은 `has_glyph` 동치가 검증된
+    경우에만 채택되므로 조판 결과는 바뀌지 않고 파일만 작아진다 — 실측 20.8MB →
+    0.95MB. 부수 효과로 조판 시행(`_plan_rich_prefix`)이 폰트를 여는 비용도 함께
+    줄어든다: 시행마다 26MB를 파싱하던 것이 180KB가 된다.
+    """
+    mapping = subset_font_files(
+        [fonts.serif_ff, fonts.sans_ff, fonts.table_ff], charset, out_dir,
+    )
+    if not mapping:
+        return fonts
+    return replace(
+        fonts,
+        serif_ff=mapping.get(fonts.serif_ff, fonts.serif_ff),
+        sans_ff=mapping.get(fonts.sans_ff, fonts.sans_ff),
+        table_ff=mapping.get(fonts.table_ff, fonts.table_ff),
     )
 
 
@@ -724,18 +750,42 @@ def _hide_visible_link_borders(page) -> None:
             logger.warning("PDF 링크 테두리를 숨기지 못했습니다: xref=%s", xref)
 
 
+def _redact_in_chunks(page, rects, chunk: int = _REDACT_CHUNK, **apply_kwargs) -> None:
+    """리댁션을 나눠 건다 — PyMuPDF의 annot 이름 부여가 페이지당 2차이기 때문.
+
+    `page.add_redact_annot`는 삽입할 때마다 `JM_add_annot_id`가 페이지의 **기존
+    annot을 전수 순회**해 `/NM`이 겹치지 않는지 본다. 그래서 한 페이지에 N개를
+    쌓으면 비용이 N²로 큰다(실측: annot당 0.245ms@N=100 → 2.773ms@N=1000).
+    실제 문서는 페이지당 최대 547개, 문서 전체 4,190개였다.
+
+    `apply_redactions`가 지운 annot을 페이지에서 걷어내므로, 끊어서 add→apply를
+    반복하면 순회 대상이 매번 chunk 크기로 리셋된다. 지우는 사각형 집합과 순서는
+    같으므로 결과 문서는 달라지지 않는다(실측: 6.14s → 1.83s, 리포트·추출 텍스트
+    동일). 빈 목록이면 apply_redactions를 아예 부르지 않는다 — 호출자는 지금
+    targets가 빈 페이지에서 먼저 빠져나가지만, 여기서도 지울 게 없으면 페이지를
+    건드리지 않는 편이 안전하다.
+    """
+    for start in range(0, len(rects), chunk):
+        batch = rects[start:start + chunk]
+        if not batch:
+            continue
+        for rect in batch:
+            page.add_redact_annot(rect)
+        page.apply_redactions(**apply_kwargs)
+
+
 def _apply_page_redactions(fitz, page, targets, raster_rects) -> None:
     """원문 텍스트(그리고 이모지의 이미지 절반)만 지운다 — 그래픽은 보존."""
     # 2) 원문 텍스트 리댁션 (이미지·그래픽 보존) — 삽입 전에 일괄 적용
     source_rects = []
+    text_rects = []
     for target in targets:
         # 삽입 bbox가 아래 빈 공간으로 커져도 실제 원문 bbox만 지운다.
         # 확장 사각형 전체를 리댁션하면 인접한 원문 글리프가 함께 사라질 수 있다.
         target_redactions = target.redact_rects or (
             target.redact_rect if target.redact_rect is not None else target.plan.rect,
         )
-        for rr in target_redactions:
-            page.add_redact_annot(rr)
+        text_rects.extend(target_redactions)
         source_rects.append((
             +(
                 target.source_rect
@@ -748,7 +798,8 @@ def _apply_page_redactions(fitz, page, targets, raster_rects) -> None:
         ))
     # 텍스트만 제거한다. graphics 기본값(REMOVE_IF_COVERED)을 그대로 두면
     # 블록 안의 밑줄·도형·차트 선까지 사라져 "레이아웃 보존"을 위반한다.
-    page.apply_redactions(
+    _redact_in_chunks(
+        page, text_rects,
         images=fitz.PDF_REDACT_IMAGE_NONE,
         graphics=fitz.PDF_REDACT_LINE_ART_NONE,
         text=fitz.PDF_REDACT_TEXT_REMOVE,
@@ -779,9 +830,8 @@ def _apply_page_redactions(fitz, page, targets, raster_rects) -> None:
                 emoji_boxes.append(bbox)
                 break
     if emoji_boxes:
-        for bbox in emoji_boxes:
-            page.add_redact_annot(bbox)
-        page.apply_redactions(
+        _redact_in_chunks(
+            page, emoji_boxes,
             images=fitz.PDF_REDACT_IMAGE_REMOVE,
             graphics=fitz.PDF_REDACT_LINE_ART_NONE,
             text=fitz.PDF_REDACT_TEXT_NONE,
@@ -960,23 +1010,36 @@ def build_translated_pdf(
     except Exception as e:  # noqa: BLE001 — mupdf 예외 타입이 다양함
         raise PdfExportError("원본 PDF를 열 수 없습니다") from e
 
-    _reserve_font_resource_names(doc, fonts)
+    # 서브셋 폰트 파일은 doc.save()가 글리프를 임베드할 때까지 살아 있어야 한다.
+    # 잡 디렉터리가 아니라 시스템 임시 경로에 둔다 — 강제 종료로 남더라도 잡
+    # 산출물 목록을 더럽히지 않고 OS가 청소한다.
+    with tempfile.TemporaryDirectory(prefix="uocr-font-") as fontdir:
+        fonts = _subset_export_fonts(
+            fonts,
+            drawable_charset(trans_pages, orig_page_list),
+            Path(fontdir),
+        )
+        _reserve_font_resource_names(doc, fonts)
 
-    try:
-        for tpage in trans_pages:
-            pno = tpage.get("page")
-            opage = orig_pages.get(pno)
-            if not isinstance(pno, int) or not (1 <= pno <= doc.page_count) or opage is None:
-                continue
-            _process_page(fitz, doc[pno - 1], pno, tpage, opage, fonts, result)
-        tmp = job_dir / f".export.{lang}.{uuid.uuid4().hex}.tmp"
         try:
-            doc.save(tmp, garbage=3, deflate=True)
-            tmp.replace(result.path)
+            for tpage in trans_pages:
+                pno = tpage.get("page")
+                opage = orig_pages.get(pno)
+                if (
+                    not isinstance(pno, int)
+                    or not (1 <= pno <= doc.page_count)
+                    or opage is None
+                ):
+                    continue
+                _process_page(fitz, doc[pno - 1], pno, tpage, opage, fonts, result)
+            tmp = job_dir / f".export.{lang}.{uuid.uuid4().hex}.tmp"
+            try:
+                doc.save(tmp, garbage=3, deflate=True)
+                tmp.replace(result.path)
+            finally:
+                tmp.unlink(missing_ok=True)
         finally:
-            tmp.unlink(missing_ok=True)
-    finally:
-        doc.close()
+            doc.close()
 
     if result.warnings:
         for w in result.warnings[:5]:

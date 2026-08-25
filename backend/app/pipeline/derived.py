@@ -57,15 +57,18 @@ _STAGING_STALE_S = 3600.0
 
 # ── 내보내기 빌드 전역 동시성 상한 ────────────────────────────────────────
 # 잡 단위 락은 **같은 잡**의 중복 빌드만 막는다. 서로 다른 잡 N개가 동시에 요청되면
-# N개 빌드가 함께 돈다(실측 9.4s/16p, CPU 포화). PDF_EXPORT_FORMAT_VERSION이 오르면
-# 기존 배포의 전 캐시가 한꺼번에 무효화되므로 업그레이드 직후 이 폭주가 실제로
-# 일어난다 — 전역 상한을 두고 대기가 길어지면 매달리는 대신 거절한다.
+# N개 빌드가 함께 돈다(실측 ~11s/17p, CPU 포화 — 폰트 서브셋·리댁션 청킹 전에는
+# 같은 문서가 ~43s였다). PDF_EXPORT_FORMAT_VERSION이 오르면 기존 배포의 전 캐시가
+# 한꺼번에 무효화되므로 업그레이드 직후 이 폭주가 실제로 일어난다 — 전역 상한을
+# 두고 대기가 길어지면 매달리는 대신 거절한다.
 PDF_EXPORT_MAX_CONCURRENT_ENV = "PDF_EXPORT_MAX_CONCURRENT"
 PDF_EXPORT_QUEUE_TIMEOUT_ENV = "PDF_EXPORT_QUEUE_TIMEOUT_S"
 # 기본값: 빌드는 단일 스레드 CPU 작업이라 2면 코어를 놀리지 않으면서도 폭주는 막는다.
 # 0 이하로 두면 상한 비활성(예전 동작).
 _PDF_EXPORT_MAX_CONCURRENT_DEFAULT = 2
-# 한 건이 ~10s이므로 30s면 앞선 몇 건은 기다려 주고, 그보다 길면 재시도가 낫다.
+# 한 건이 ~11s(17페이지 실측)이므로 30s면 앞선 두어 건은 기다려 주고, 그보다
+# 길면 재시도가 낫다. 캐시 적중은 이제 락을 기다리지 않으므로(_ensure_translated_pdf)
+# 이 예산에 걸리는 것은 진짜로 빌드를 기다리는 요청뿐이다.
 _PDF_EXPORT_QUEUE_TIMEOUT_DEFAULT = 30.0
 
 _PDF_EXPORT_SLOTS: threading.BoundedSemaphore | None = None
@@ -344,65 +347,92 @@ def _write_pdf_export_font_id(job, lang: str, font_id: str) -> None:
 
 
 # ── 파생 산출물 보장 ──────────────────────────────────────────────────────
+def _translated_pdf_cache(job, lang: str, font_id: str) -> tuple[bool, Path, dict]:
+    """(캐시가 최신인가, 산출물 경로, 리포트).
+
+    모든 입력은 원자적 교체(os.replace)로만 갱신되므로 락 없이 읽어도 반쪽짜리
+    파일을 보지 않는다. 최악의 경우 빌드 직후 리포트·폰트 표식이 아직 안 써진
+    찰나를 봐서 '낡음'으로 판정하는데, 그러면 락을 잡고 다시 확인하게 되므로
+    안전한 방향의 오판이다.
+    """
+    out = artifacts.export_pdf(job.dir, lang)
+    report = _load_pdf_export_report(job, lang)
+    try:
+        latest_input = max(
+            artifacts.source_pdf(job.dir).stat().st_mtime_ns,
+            artifacts.layout(job.dir).stat().st_mtime_ns,
+            artifacts.layout(job.dir, lang).stat().st_mtime_ns,
+        )
+        current = (
+            out.is_file()
+            and out.stat().st_mtime_ns >= latest_input
+            and report.get("format_version") == PDF_EXPORT_FORMAT_VERSION
+            # 폰트는 입력 파일이 아니라 설정이라 mtime 비교로는 잡히지 않는다 —
+            # PDF_EXPORT_FONT를 바꾸면 예전 폰트로 조판된 캐시가 계속 나갔다.
+            and _read_text_or_none(_font_marker_path(job, lang)) == font_id
+        )
+    except OSError:
+        # build_translated_pdf가 누락 입력을 사용자용 PdfExportError로 변환한다.
+        current = False
+    return current, out, report
+
+
 def _ensure_translated_pdf(job, lang: str, settings, *, build=build_translated_pdf):
     """번역 레이아웃과 같은 세대의 PDF를 만들거나 캐시에서 돌려준다.
 
-    잡 단위 락 안에서 수행한다 — /pdf·/layout·/page가 동시에 첫 진입하면 같은
+    빌드는 잡 단위 락 안에서 한다 — /pdf·/layout·/page가 동시에 첫 진입하면 같은
     export.{lang}.pdf를 여러 번 만들게 된다(수십 초짜리 작업).
+
+    **캐시 적중 판정은 락 밖에서 먼저** 한다. 예전에는 락을 잡은 뒤에 판정해서,
+    이미 만들어져 있는 PDF를 받으러 온 요청이 진행 중인 빌드 뒤에 줄을 섰다 —
+    대기 예산(기본 30s)을 다 쓰면 **웜 캐시인데도 503**이 나갔다(재현: 리더가
+    연 빌드가 락을 40초 쥔 사이 들어온 다운로드 클릭이 30.1초 뒤 503). 락을
+    잡은 뒤 한 번 더 확인해 중복 빌드는 그대로 막는다(double-checked).
     """
-    source_pdf = artifacts.source_pdf(job.dir)
-    orig_layout = artifacts.layout(job.dir)
-    trans_layout = artifacts.layout(job.dir, lang)
-    out = artifacts.export_pdf(job.dir, lang)
     font_id = _pdf_export_font_id(settings)
+    current, out, report = _translated_pdf_cache(job, lang, font_id)
+    if current:
+        return out, report
     with _job_render_guard(job.id):
-        report = _load_pdf_export_report(job, lang)
-        try:
-            latest_input = max(
-                source_pdf.stat().st_mtime_ns,
-                orig_layout.stat().st_mtime_ns,
-                trans_layout.stat().st_mtime_ns,
-            )
-            cache_current = (
-                out.is_file()
-                and out.stat().st_mtime_ns >= latest_input
-                and report.get("format_version") == PDF_EXPORT_FORMAT_VERSION
-                # 폰트는 입력 파일이 아니라 설정이라 mtime 비교로는 잡히지 않는다 —
-                # PDF_EXPORT_FONT를 바꾸면 예전 폰트로 조판된 캐시가 계속 나갔다.
-                and _read_text_or_none(_font_marker_path(job, lang)) == font_id
-            )
-        except OSError:
-            # build_translated_pdf가 누락 입력을 사용자용 PdfExportError로 변환한다.
-            cache_current = False
-        if not cache_current:
-            with export_build_slot():
-                built = build(job.dir, lang, fontfile=settings.pdf_export_font)
-            _write_pdf_export_font_id(job, lang, font_id)
-            return built.path, built.report()
-    return out, report
+        # 락을 기다리는 사이 다른 스레드가 같은 PDF를 완성했을 수 있다.
+        current, out, report = _translated_pdf_cache(job, lang, font_id)
+        if current:
+            return out, report
+        with export_build_slot():
+            built = build(job.dir, lang, fontfile=settings.pdf_export_font)
+        _write_pdf_export_font_id(job, lang, font_id)
+        return built.path, built.report()
+
+
+def _dual_pdf_cache_current(source_pdf: Path, translated_pdf: Path, out: Path) -> bool:
+    """대조 PDF가 두 입력보다 새것인가. 판정 불가(입력 누락)면 '낡음'."""
+    try:
+        latest_input = max(
+            source_pdf.stat().st_mtime_ns,
+            translated_pdf.stat().st_mtime_ns,
+        )
+    except OSError:
+        # build_dual_pdf가 누락 파일을 사용자에게 읽을 수 있는 PdfExportError로 바꾼다.
+        return False
+    return out.is_file() and out.stat().st_mtime_ns >= latest_input
 
 
 def _ensure_dual_pdf(job, lang: str, translated_pdf: Path, *, build=build_dual_pdf) -> Path:
     """원본·번역 대조 PDF 캐시를 번역 단일 PDF와 같은 세대로 유지한다.
 
-    단일 PDF와 같은 잡 단위 락 안에서 수행한다 — 락 밖이면 프런트 기본 다운로드
-    경로(view=dual)의 동시 첫 요청이 같은 대조 PDF를 중복으로 만든다."""
+    빌드는 단일 PDF와 같은 잡 단위 락 안에서 한다 — 락 밖이면 프런트 기본
+    다운로드 경로(view=dual)의 동시 첫 요청이 같은 대조 PDF를 중복으로 만든다.
+    캐시 적중 판정은 `_ensure_translated_pdf`와 같은 이유로 락 밖에서 먼저 한다.
+    """
     source_pdf = artifacts.source_pdf(job.dir)
     out = artifacts.export_dual_pdf(job.dir, lang)
+    if _dual_pdf_cache_current(source_pdf, translated_pdf, out):
+        return out
     with _job_render_guard(job.id):
-        try:
-            latest_input = max(
-                source_pdf.stat().st_mtime_ns,
-                translated_pdf.stat().st_mtime_ns,
-            )
-        except OSError:
-            # build_dual_pdf가 누락 파일을 사용자에게 읽을 수 있는 PdfExportError로 바꾼다.
-            with export_build_slot():
-                return build(source_pdf, translated_pdf, out)
-        if not out.is_file() or out.stat().st_mtime_ns < latest_input:
-            with export_build_slot():
-                return build(source_pdf, translated_pdf, out)
-    return out
+        if _dual_pdf_cache_current(source_pdf, translated_pdf, out):
+            return out
+        with export_build_slot():
+            return build(source_pdf, translated_pdf, out)
 
 
 def _page_numbers(pages: list) -> list[int]:
@@ -553,3 +583,65 @@ def _try_facsimile_pages(
             lang or "orig",
         )
         return None
+
+
+# ── 백그라운드 캐시 예열 ──────────────────────────────────────────────────
+# 번역이 끝나면 export.{lang}.pdf 캐시가 무효화된다(api._run_translate_thread).
+# 그런데 사용자가 다운로드 버튼을 누르는 것은 바로 그 직후다 — 버튼이 보이는
+# 순간이 캐시가 가장 확실히 비어 있는 순간이라, 첫 클릭이 빌드 전체를 요청
+# 안에서 기다린다(실측 ~11–16s, 패치 전 ~43s). 번역 완료 시점에 미리 만들어
+# 두면 그 대기가 클릭에서 사라진다.
+#
+# 예열은 **사용자 요청을 밀어내면 안 된다**. 그래서
+#  - 슬롯·락을 즉시 얻지 못하면 조용히 포기한다(대기 예산 0). 클릭이 직접
+#    만들면 되고, 예열이 큐를 잡고 있다가 진짜 클릭을 503으로 만들지 않는다.
+#  - (job, lang)마다 하나만 돈다. 번역 완료와 폰트 백필이 연달아 예열을
+#    부탁해도 빌드는 한 번이다.
+_WARM_INFLIGHT: set[tuple[str, str]] = set()
+_WARM_GUARD = threading.Lock()
+
+
+def warm_translated_pdf(job, lang: str, settings, *, build=build_translated_pdf) -> bool:
+    """export.{lang}.pdf를 지금 만들어 둔다 — 이미 최신이면 아무 일도 하지 않는다.
+
+    호출 스레드에서 동기로 돈다. 백그라운드 실행은 `warm_translated_pdf_async`.
+    실제로 빌드를 돌렸는지 여부와 무관하게, 끝났을 때 캐시가 최신이면 True.
+    """
+    with export_wait_budget():
+        # 예산을 0으로 만들어 어떤 대기도 하지 않게 한다 — 경합하면 포기한다.
+        _EXPORT_WAIT.remaining = 0.0
+        try:
+            _ensure_translated_pdf(job, lang, settings, build=build)
+        except PdfExportBusyError:
+            logger.debug("PDF 예열 건너뜀(경합): %s/%s", job.id, lang)
+            return False
+        except (PdfExportError, OSError, ValueError):
+            # 예열 실패는 사용자에게 알리지 않는다 — 클릭 시 같은 경로가 다시
+            # 시도하고, 그때는 진짜 오류로 보고된다.
+            logger.warning("PDF 예열 실패: %s/%s", job.id, lang, exc_info=True)
+            return False
+    return True
+
+
+def warm_translated_pdf_async(job, lang: str, settings, *, build=build_translated_pdf) -> bool:
+    """`warm_translated_pdf`를 데몬 스레드에서 돌린다. 시작했으면 True.
+
+    같은 (job, lang) 예열이 이미 돌고 있으면 새로 띄우지 않는다.
+    """
+    key = (job.id, lang)
+    with _WARM_GUARD:
+        if key in _WARM_INFLIGHT:
+            return False
+        _WARM_INFLIGHT.add(key)
+
+    def _run() -> None:
+        try:
+            warm_translated_pdf(job, lang, settings, build=build)
+        finally:
+            with _WARM_GUARD:
+                _WARM_INFLIGHT.discard(key)
+
+    threading.Thread(
+        target=_run, name=f"pdf-warm-{job.id}-{lang}", daemon=True,
+    ).start()
+    return True

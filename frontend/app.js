@@ -51,15 +51,17 @@ import { handleUpload, setupDropzone } from './js/upload.js';
  * (순수 코어는 js/core.js, 나머지는 각 기능 모듈에 있다.)
  * ========================================================================== */
 export {
-  PAGE_MARKER, RETRY_AFTER_FALLBACK_S, RETRY_AFTER_MAX_S, TRANSLATE_KEPT_LABELS,
-  TRANSLATE_SKIP_LABELS, alignmentBatchPlan, alignmentFailureIsPermanent, alignmentRect,
+  PAGE_MARKER, PDF_RETRY_MAX, RETRY_AFTER_FALLBACK_S, RETRY_AFTER_MAX_S,
+  TRANSLATE_KEPT_LABELS, TRANSLATE_SKIP_LABELS, alignmentBatchPlan,
+  alignmentFailureIsPermanent, alignmentRect,
   armTransition, blockAtFraction, buildQaBody, buildViewerSearch, clampQaPage, clampReaderPage,
   classifyFiles, createGroundState, docLayoutIsFigureOnly, extractDocPages, fileSizeError,
   groundAnnounce, groundDrain, groundPush, healthCapabilities, incompleteTailIndex,
   jobIdFromHash, jobModelChip, livePageImageUrl, normalizeAlignmentPayload, normalizeLabel,
-  overlayInKeepWindow, parseRetryAfter, parseViewerSearch, pdfExportState, pdfReportMessage,
-  pickQaModels, planPreviewRender, progressPhaseText, providerIssue, qaProviderHint,
-  railAnchorFrom, railAnchorTarget, rateLimitNotice, readerFocusAt, readerHydrationWindow,
+  overlayInKeepWindow, parseRetryAfter, parseViewerSearch, pdfExportState,
+  pdfProgressLabel, pdfReportMessage, pdfRetryDelay, pickQaModels, planPreviewRender,
+  progressPhaseText, providerIssue, qaProviderHint, railAnchorFrom, railAnchorTarget,
+  rateLimitNotice, readerFocusAt, readerHydrationWindow,
   readerImageUrl, readerPageBands, readerRailBandAt, replayExtendsRaw, scanQuads,
   selectionSummary, splitInlineMath, splitPreviewPages, ssePromoteDelay, statusLabel,
   streamPaneTrimCount, structurePreview, summarizeIssues, syncedStreamPageNo,

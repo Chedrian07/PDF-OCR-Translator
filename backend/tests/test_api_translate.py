@@ -568,6 +568,9 @@ def test_concurrent_first_requests_build_translated_pdf_once(
     import app.api as api_mod
 
     monkeypatch.setattr("app.api.run_translation", _make_fake())
+    # 번역 완료 훅의 백그라운드 예열을 끈다 — 켜 두면 여기서 이미 만들어져
+    # 아래의 '동시 첫 진입'이 성립하지 않는다. 예열 자체는 별도 테스트가 지킨다.
+    monkeypatch.setattr(api_mod, "_warm_export_pdf", lambda *a, **kw: False)
     jid = _done_job(client, sample_pdf)
     assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 202
     _wait_no_task(client, jid)
@@ -715,3 +718,43 @@ def test_translate_state에_사유별_집계가_병합된다(client, sample_pdf,
 def test_translate_report_지원하지_않는_언어는_400(client, sample_pdf, settings):
     jid = _done_job(client, sample_pdf)
     assert client.get(f"/api/jobs/{jid}/translate/report?lang=zz").status_code == 400
+
+
+def test_번역이_끝나면_내보내기_PDF를_미리_만들어_둔다(
+    client, sample_pdf, provider_env, monkeypatch,
+):
+    """첫 다운로드 클릭이 빌드 전체를 기다리지 않게 캐시를 예열한다.
+
+    번역 완료 훅이 export.{lang}.pdf 캐시를 지운 직후가 사용자가 다운로드
+    버튼을 누르는 시점이다. 예열이 없으면 그 클릭이 십수 초짜리 빌드를 요청
+    안에서 통째로 기다린다(패치 전 실측 ~43s, 지금도 ~11s).
+    """
+    from app.pipeline import derived
+
+    monkeypatch.setattr("app.api.run_translation", _make_fake())
+    jid = _done_job(client, sample_pdf)
+    job_dir = client.app.state.store.get(jid).dir
+    assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 202
+    _wait_no_task(client, jid)
+
+    # 예열은 데몬 스레드다 — 레지스트리가 빌 때까지 기다린다.
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        with derived._WARM_GUARD:
+            running = (jid, "ko") in derived._WARM_INFLIGHT
+        if not running:
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError("예열 스레드가 시간 내에 끝나지 않음")
+
+    assert (job_dir / "export.ko.pdf").is_file(), "번역 직후에 PDF가 준비돼 있어야 한다"
+
+    # 그리고 그 클릭은 빌드 없이 나가야 한다.
+    def _never(*args, **kwargs):
+        raise AssertionError("예열해 뒀는데 클릭이 다시 빌드했다")
+
+    monkeypatch.setattr("app.api.build_translated_pdf", _never)
+    r = client.get(f"/api/jobs/{jid}/pdf?lang=ko")
+    assert r.status_code == 200, r.text
+    assert r.content[:4] == b"%PDF"

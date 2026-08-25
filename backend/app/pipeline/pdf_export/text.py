@@ -47,6 +47,10 @@ _PORTABLE_SYMBOL_FALLBACKS = {
     "\u2011": "-",  # NON-BREAKING HYPHEN
     "\u00d7": "x",  # MULTIPLICATION SIGN
     "\u2044": "/",  # FRACTION SLASH
+    # `\sim`\uc774 \ub9cc\ub4e4\uc5b4\ub0b4\ub294 \uae00\uc790. \ucee8\ud14c\uc774\ub108 \uae30\ubcf8 \ud3f0\ud2b8(Noto Serif/Sans CJK) \ub458 \ub2e4
+    # \uc774 \uae00\ub9ac\ud504\uac00 \uc5c6\uc5b4 `\( \sim \) 8M\uac1c\uc758 \ud1a0\ud070`\uc774 \uc2e4\uc81c \uc0b0\ucd9c\ubb3c\uc5d0\uc11c tofu\ub85c \ub098\uc654\ub2e4
+    # (\uc2e4\uce21: j_afea33c8b77a p4). ASCII \ubb3c\uacb0\ud45c\uac00 \ub73b\ub3c4 \ud1b5\ud558\uace0 \uac80\uc0c9\ub3c4 \ub41c\ub2e4.
+    "\u223c": "~",  # TILDE OPERATOR
 }
 _LITERAL_LBRACE = "\uf000"
 _LITERAL_RBRACE = "\uf001"

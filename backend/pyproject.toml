@@ -19,6 +19,9 @@ dependencies = [
     "addict==2.4.0",
     "easydict==1.13",
     "pymupdf==1.27.2.2",
+    # 내보내기 PDF에 임베드하는 CJK 폰트 서브셋 — 없으면 전체 폰트를
+    # 임베드하는 예전 동작으로 조용히 폴백한다(pdf_export/subset.py).
+    "fonttools>=4.53",
     "tqdm>=4.66",
     "requests>=2.32",
     "numpy>=1.26",

@@ -6,7 +6,10 @@ from pathlib import Path
 
 # 캐시된 export PDF가 이전 조판 규칙으로 생성됐는지 판별하는 공개 포맷 버전.
 # 조판 결과가 달라지는 변경에서는 반드시 올려 기존 잡도 다음 요청 때 재생성한다.
-PDF_EXPORT_FORMAT_VERSION = 6
+# 7: 폰트 서브셋(20.8MB → 0.94MB) + `\sim` tofu를 ASCII 물결표로 낮춤. 크기가
+#    바뀌는 것만으로도 올릴 값어치가 있다 — 올리지 않으면 이미 캐시된 잡은
+#    입력이 그대로라 계속 20MB짜리를 내려보낸다.
+PDF_EXPORT_FORMAT_VERSION = 7
 
 
 class PdfExportError(RuntimeError):

@@ -28,6 +28,7 @@ from . import (
     spans,
     tables,
     fitting,
+    subset,
     build,
 )
 from .constants import (
@@ -44,6 +45,7 @@ from .constants import (
     _MIN_FONT_PT,
     _MIN_TABLE_FONT_PT,
     _PRESERVE_TYPES,
+    _REDACT_CHUNK,
     _REPLACEABLE_TYPES,
     _SHRINK_STEPS,
     _SINGLE_LINE_SCALES,
@@ -208,6 +210,7 @@ __all__ = [
     "_CAPTION_LINEHEIGHTS",
     "_TITLE_LINEHEIGHTS",
     "_BLOCK_GAP_PT",
+    "_REDACT_CHUNK",
     "_FLOW_JOIN_GAP_PT",
     "_LISTING_COLUMN_GAP_PT",
     "_FLOW_UPWARD_SLACK_PT",
@@ -286,7 +289,10 @@ __all__ = [
     "build_dual_pdf",
 ]
 
-_SUBMODULES = (constants, report, models, text, fonts, geometry, spans, tables, fitting, build)
+_SUBMODULES = (
+    constants, report, models, text, fonts, geometry, spans, tables, fitting,
+    subset, build,
+)
 
 
 class _PdfExportPackage(_ModuleType):

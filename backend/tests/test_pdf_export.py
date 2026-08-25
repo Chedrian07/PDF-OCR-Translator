@@ -793,6 +793,11 @@ def _portable(monkeypatch, text: str, missing: str) -> str:
     ("‑", "-"),   # NON-BREAKING HYPHEN
     ("×", "x"),   # MULTIPLICATION SIGN
     ("⁄", "/"),   # FRACTION SLASH
+    # TILDE OPERATOR — `\sim`의 치환 결과. 컨테이너 기본 폰트(Noto Serif/Sans CJK)
+    # 둘 다 이 글리프가 없어 실제 산출물에 tofu가 나왔다(실측 j_afea33c8b77a p4:
+    # `샘플( ⊠ 8M개의 토큰)`). 폰트 서브셋 뒤에는 tofu 대신 빈칸이 돼 더 조용히
+    # 사라지므로, 여기서 ASCII 물결표로 낮추는 것이 유일한 방어선이다.
+    ("∼", "~"),
 ])
 def test_폰트에_없는_수학기호는_대체문자로_낮춘다(monkeypatch, char, expected):
     """2단계(_PORTABLE_SYMBOL_FALLBACKS) 없이는 구제되지 않는 문자들이다.
@@ -806,10 +811,10 @@ def test_폰트에_없는_수학기호는_대체문자로_낮춘다(monkeypatch,
     assert _portable(monkeypatch, f"1 {char} 2", missing="") == f"1 {char} 2"
 
 
-def test_기호_폴백표는_수학기호_5종을_모두_덮는다():
+def test_기호_폴백표는_수학기호_6종을_모두_덮는다():
     """표 자체를 고정한다 — 항목이 사라지면 조판이 조용히 tofu로 회귀한다."""
     assert _PORTABLE_SYMBOL_FALLBACKS == {
-        "−": "-", "‐": "-", "‑": "-", "×": "x", "⁄": "/",
+        "−": "-", "‐": "-", "‑": "-", "×": "x", "⁄": "/", "∼": "~",
     }
 
 
@@ -1060,3 +1065,51 @@ def test_패키지_속성_대입은_모든_서브모듈_전역에_전파된다(m
     monkeypatch.undo()
     assert pkg._resolve_font is original
     assert all(mod._resolve_font is original for mod in owners)
+
+
+# ── 리댁션 청킹 ───────────────────────────────────────────────────────────
+def test_리댁션을_끊어_걸어도_같은_문서가_나온다(tmp_path, monkeypatch):
+    """`_redact_in_chunks`는 성능 최적화다 — 결과가 달라지면 최적화가 아니다.
+
+    PyMuPDF의 annot 이름 부여가 페이지당 2차라 add→apply를 끊어서 반복한다
+    (constants._REDACT_CHUNK). 지우는 사각형 집합·순서는 그대로이므로 추출
+    텍스트와 리포트가 완전히 같아야 한다.
+    """
+    from app.pipeline.pdf_export import build as build_mod
+
+    def _build(chunk: int) -> tuple[str, dict]:
+        root = tmp_path / f"c{chunk}"
+        root.mkdir()
+        job_dir = _unit_job(root)
+        real = build_mod._redact_in_chunks
+        with monkeypatch.context() as m:
+            m.setattr(
+                build_mod, "_redact_in_chunks",
+                lambda page, rects, _c=chunk, **kw: real(page, rects, _c, **kw),
+            )
+            result = build_translated_pdf(job_dir, "ko")
+        return _pdf_text(result.path.read_bytes()), result.report()
+
+    # 1이면 사각형마다 apply, 10000이면 예전처럼 페이지당 한 번.
+    one_at_a_time, report_one = _build(1)
+    all_at_once, report_all = _build(10_000)
+    assert one_at_a_time == all_at_once
+    assert report_one == report_all
+    assert KO_TEXT in all_at_once
+
+
+def test_리댁션_청킹은_지울_것이_없으면_페이지를_건드리지_않는다():
+    """빈 목록에 apply_redactions를 부르면 안 된다 — 콘텐츠 스트림 재기록 위험."""
+    from app.pipeline.pdf_export.build import _redact_in_chunks
+
+    calls = []
+
+    class _Page:
+        def add_redact_annot(self, rect):
+            calls.append(("add", rect))
+
+        def apply_redactions(self, **kwargs):
+            calls.append(("apply", kwargs))
+
+    _redact_in_chunks(_Page(), [])
+    assert calls == []

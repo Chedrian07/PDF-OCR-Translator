@@ -6,7 +6,8 @@ import {
 import {
   alignmentBatchPlan, alignmentFailureIsPermanent, blockAtFraction, clampReaderPage,
   extractDocPages, livePageImageUrl, normalizeAlignmentPayload, overlayInKeepWindow,
-  pdfExportState, pdfReportMessage, railAnchorFrom, railAnchorTarget, readerFocusAt,
+  pdfExportState, pdfProgressLabel, pdfReportMessage, pdfRetryDelay,
+  railAnchorFrom, railAnchorTarget, readerFocusAt,
   readerHydrationWindow, readerImageUrl, readerRailBandAt, splitInlineMath,
   translatedHtmlExportState, withLangUrl,
 } from './core.js';
@@ -1594,28 +1595,79 @@ export function applyPdfExport() {
   }
 }
 
+// 결과 화면과 뷰어에 같은 다운로드 버튼이 하나씩 있다. 둘 다 잠그되(같은 잡의
+// 같은 빌드다) 진행 문구는 실제로 눌린 쪽에만 쓴다. 스타일은 styles.css의
+// `.btn[aria-busy="true"]` — 스피너와 pointer-events 차단이 거기 붙어 있다.
+function setPdfBusy(anchor, busy, label) {
+  for (const a of [el.dlPdf, el.viewerDlPdf]) {
+    if (!a) continue;
+    if (busy) a.setAttribute('aria-busy', 'true');
+    else a.removeAttribute('aria-busy');
+  }
+  const target = anchor || el.dlPdf;
+  if (!target) return;
+  if (busy) {
+    if (target.dataset.idleLabel === undefined) target.dataset.idleLabel = target.textContent;
+    target.textContent = label || 'PDF 준비 중…';
+  } else if (target.dataset.idleLabel !== undefined) {
+    target.textContent = target.dataset.idleLabel;
+    delete target.dataset.idleLabel;
+  }
+}
+
+// Content-Length가 있으면 퍼센트를, 없으면 받은 MB를 보여 준다. 진행 표시가
+// 없으면 사용자는 "버튼이 고장났다"고 느낀다 — 빌드가 도는 동안에는 첫 바이트
+// 자체가 늦으므로, 바이트가 오기 전에도 '준비 중' 문구가 떠 있어야 한다.
+async function readWithProgress(res, onProgress) {
+  const total = Number(res.headers.get('Content-Length')) || 0;
+  if (!res.body || !res.body.getReader) return res.blob();
+  const reader = res.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    onProgress(received, total);
+  }
+  return new Blob(chunks, { type: res.headers.get('Content-Type') || 'application/pdf' });
+}
+
 export async function downloadPdfWithReport(ev) {
   ev.preventDefault();
-  if (state.pdfDownloadBusy || el.dlPdf.classList.contains('disabled')) return;
-  const url = el.dlPdf.getAttribute('href');
+  // 뷰어의 버튼도 같은 핸들러를 쓴다 — 눌린 쪽에 진행 표시를 달아야 한다.
+  const anchor = (ev.currentTarget && ev.currentTarget.getAttribute) ? ev.currentTarget : el.dlPdf;
+  if (state.pdfDownloadBusy || anchor.classList.contains('disabled')) return;
+  const url = anchor.getAttribute('href') || el.dlPdf.getAttribute('href');
   if (!url) return;
   state.pdfDownloadBusy = true;
-  el.dlPdf.setAttribute('aria-busy', 'true');
+  setPdfBusy(anchor, true);
   try {
-    const res = await fetch(url, { headers: { Accept: 'application/pdf' } });
+    let res;
+    for (let attempt = 0; ; attempt += 1) {
+      res = await fetch(url, { headers: { Accept: 'application/pdf' } });
+      const wait = pdfRetryDelay(res.status, res.headers.get('Retry-After'), attempt);
+      if (!wait) break;
+      setPdfBusy(anchor, true, `대기 중… ${wait}초 후 재시도`);
+      await new Promise((done) => setTimeout(done, wait * 1000));
+      setPdfBusy(anchor, true);
+    }
     if (!res.ok) {
       let detail = '';
       try { detail = (await res.json()).detail || ''; } catch (_) { /* body may be plain */ }
       throw new Error(detail || `PDF 생성 실패 (${res.status})`);
     }
-    const blob = await res.blob();
+    const blob = await readWithProgress(res, (received, total) => {
+      setPdfBusy(anchor, true, pdfProgressLabel(received, total));
+    });
     if (!blob.size || !String(blob.type || '').includes('pdf')) {
       throw new Error('서버가 올바른 PDF를 반환하지 않았습니다.');
     }
     const objectUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = objectUrl;
-    a.download = el.dlPdf.getAttribute('download') || 'document.ko.pdf';
+    a.download = anchor.getAttribute('download') || el.dlPdf.getAttribute('download') || 'document.ko.pdf';
     a.hidden = true;
     document.body.appendChild(a);
     a.click();
@@ -1634,6 +1686,6 @@ export async function downloadPdfWithReport(ev) {
     showToast(e && e.message ? e.message : 'PDF 다운로드에 실패했습니다.', 'error');
   } finally {
     state.pdfDownloadBusy = false;
-    el.dlPdf.removeAttribute('aria-busy');
+    setPdfBusy(anchor, false);
   }
 }

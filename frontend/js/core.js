@@ -716,6 +716,30 @@ export function translatedHtmlExportState(jobStatus, koStatus) {
   return { visible: true, reason: '' };
 }
 
+// 내보내기 대기열이 가득 차면 서버가 503 + Retry-After를 준다(빌드는 캐시 미스일
+// 때만 돌고, 그때 다른 잡 빌드와 겹치면 이 응답이 난다). 사용자가 할 수 있는 일은
+// "잠시 뒤 다시 누르기"뿐이라 한 번은 대신 눌러 준다. 0을 돌려주면 재시도하지 않는다.
+export const PDF_RETRY_MAX = 1;
+const PDF_RETRY_FALLBACK_S = 5;
+const PDF_RETRY_CAP_S = 60;
+
+export function pdfRetryDelay(status, retryAfter, attempt = 0) {
+  if (status !== 503 || attempt >= PDF_RETRY_MAX) return 0;
+  const raw = Number(retryAfter);
+  const seconds = Number.isFinite(raw) && raw > 0 ? raw : PDF_RETRY_FALLBACK_S;
+  return Math.min(PDF_RETRY_CAP_S, Math.max(1, Math.ceil(seconds)));
+}
+
+// 다운로드 진행 문구. Content-Length가 없으면(청크 전송) 퍼센트를 만들 수 없으므로
+// 받은 양을 MB로 보여 준다 — 어느 쪽이든 "멈춰 있지 않다"가 보여야 한다.
+export function pdfProgressLabel(received, total) {
+  if (total > 0) {
+    const pct = Math.max(0, Math.min(100, Math.round((received / total) * 100)));
+    return `내려받는 중… ${pct}%`;
+  }
+  return `내려받는 중… ${(Math.max(0, received) / 1048576).toFixed(1)}MB`;
+}
+
 // PDF 응답의 숫자형 생성 리포트 → 사용자에게 보여 줄 짧은 무손실 요약.
 // 서버는 비ASCII 경고 본문을 헤더에 싣지 않고 개수만 보내므로 문서 내용이
 // 프록시 로그에 새지 않는다.

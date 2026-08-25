@@ -1287,3 +1287,53 @@ def test_queue_position_absent_on_terminal_job(client, sample_pdf):
     assert "queue_position" not in body
     listed = {j["job_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
     assert "queue_position" not in listed[jid]
+
+
+def test_웜캐시_다운로드는_진행중인_빌드_뒤에_줄서지_않는다(tmp_path, monkeypatch):
+    """이미 만들어 둔 PDF를 받으러 온 요청이 같은 잡의 진행 중 빌드에 막히면 안 된다.
+
+    예전에는 `_ensure_translated_pdf`가 **잡 락을 먼저 잡고** 캐시를 판정해서,
+    리더가 연 빌드가 락을 쥔 동안 들어온 다운로드 클릭이 대기 예산(30s)을 다 쓰고
+    503으로 떨어졌다(실측 재현: 빌드 40.3s 점유, 클릭 30.1s 대기 후 503).
+    캐시 판정을 락 밖으로 옮겨 적중이면 즉시 돌려준다.
+    """
+    import app.api as api_mod
+    from app.pipeline import derived
+    from app.pipeline.pdf_export import PDF_EXPORT_FORMAT_VERSION
+
+    monkeypatch.setenv("PDF_EXPORT_QUEUE_TIMEOUT_S", "0.2")
+    job, _translated = _dual_job(tmp_path, "warmlock")
+    # 최신 캐시 한 벌: export.ko.pdf + 리포트 + 폰트 표식.
+    (job.dir / "layout.json").write_bytes(b"[]")
+    (job.dir / "layout.ko.json").write_bytes(b"[]")
+    (job.dir / "export.ko.pdf").write_bytes(b"%PDF-1.4 translated")
+    (job.dir / "export.ko.report.json").write_text(
+        json.dumps({"format_version": PDF_EXPORT_FORMAT_VERSION}), encoding="utf-8")
+    settings = SimpleNamespace(pdf_export_font="", max_pages=100)
+    (job.dir / "export.ko.font.txt").write_text(
+        derived._pdf_export_font_id(settings), encoding="utf-8")
+
+    def _never(*args, **kwargs):
+        raise AssertionError("캐시가 최신인데 다시 빌드했다")
+
+    holder_in = threading.Event()
+    release = threading.Event()
+
+    def _hold_job_lock():
+        with derived._job_render_guard(job.id):
+            holder_in.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=_hold_job_lock, daemon=True)
+    holder.start()
+    try:
+        assert holder_in.wait(5), "락 보유 스레드가 뜨지 않았다"
+        monkeypatch.setattr(api_mod, "build_translated_pdf", _never)
+        # 락이 잡혀 있는 동안에도 웜 캐시는 즉시 나와야 한다.
+        path, report = api_mod._ensure_translated_pdf(job, "ko", settings)
+        assert path == job.dir / "export.ko.pdf"
+        assert report["format_version"] == PDF_EXPORT_FORMAT_VERSION
+    finally:
+        release.set()
+        holder.join(5)
+        api_mod._forget_job_caches(job.id)

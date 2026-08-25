@@ -218,6 +218,22 @@ def _read_translate_state(job, lang: str) -> dict | None:
         return None
 
 
+def _read_translate_report(job, lang: str) -> dict | None:
+    """translations/{lang}/report.json 로드 (없거나 손상되면 None)."""
+    p = _translate_dir(job, lang) / "report.json"
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+# state 응답에 덧붙이는 관측 필드 — "왜 이 문단이 원문 그대로인가"의 사유별 집계.
+_TRANSLATE_REASON_KEYS = ("skip_reasons", "kept_reasons", "reference_rule")
+
+
 def _write_translate_state(job, lang: str, state: dict) -> None:
     d = _translate_dir(job, lang)
     d.mkdir(parents=True, exist_ok=True)
@@ -1523,13 +1539,36 @@ async def translate_start(request: Request, job_id: str) -> JSONResponse:
 
 @router.get("/jobs/{job_id}/translate/state")
 def translate_state(request: Request, job_id: str, lang: str = "ko") -> dict:
-    """번역 상태. 없으면 {"status":"none","lang"}. stale-running은 error로 조정해 반환."""
+    """번역 상태. 없으면 {"status":"none","lang"}. stale-running은 error로 조정해 반환.
+
+    report.json이 있으면 사유별 집계(skip_reasons·kept_reasons·reference_rule)를
+    덧붙인다 — 원문이 그대로 남은 이유를 상태 폴링 한 번으로 알 수 있게 한다.
+    """
     job = _get_job(request, job_id)
     _check_lang(lang)
     state = _stale_adjusted_state(request, job, lang)
     if state is None:
         return {"status": "none", "lang": lang}
+    report = _read_translate_report(job, lang)
+    if report is not None:
+        for key in _TRANSLATE_REASON_KEYS:
+            if key in report:
+                state[key] = report[key]
     return state
+
+
+@router.get("/jobs/{job_id}/translate/report")
+def translate_report(request: Request, job_id: str, lang: str = "ko") -> dict:
+    """번역 품질 리포트(translations/{lang}/report.json). 없으면 404.
+
+    kept_original(원문 유지 유닛 id)·사유별 집계·경고를 그대로 노출한다.
+    """
+    job = _get_job(request, job_id)
+    _check_lang(lang)
+    report = _read_translate_report(job, lang)
+    if report is None:
+        raise HTTPException(404, "번역 리포트가 없습니다 — 먼저 번역을 실행하세요")
+    return {"job_id": job_id, "lang": lang, **report}
 
 
 @router.post("/jobs/{job_id}/translate/cancel")

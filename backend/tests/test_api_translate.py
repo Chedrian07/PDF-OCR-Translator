@@ -658,3 +658,60 @@ def test_archive_includes_translation(client, sample_pdf, provider_env, monkeypa
     names1 = set(zipfile.ZipFile(io.BytesIO(ar1.content)).namelist())
     assert "result.md" in names1
     assert "result.ko.md" in names1
+
+
+# ── 8. 사유별 집계 노출 (report 조회 경로 + state 병합) ─────────────────────
+_REPORT = {
+    "kept_original": ["md:0:1"],
+    "retried": 1, "repaired": 0, "split": 0, "sanitized": 0,
+    "skipped": 3,
+    "skip_reasons": {"references": 2, "already-korean": 1},
+    "kept_reasons": {"gate-rejected": 1},
+    "reference_rule": {"md_only": 0, "layout_only": 4, "sample_units": ["lay:9:2"]},
+    "cached": 0, "translated": 5, "api_mode": "chat", "warnings": ["참고문헌 규칙 불일치"],
+}
+
+
+def _write_report(settings, jid, lang="ko") -> Path:
+    tdir = settings.jobs_dir / jid / "translations" / lang
+    tdir.mkdir(parents=True, exist_ok=True)
+    (tdir / "state.json").write_text(json.dumps({
+        "lang": lang, "status": "done", "current": 5, "total": 5, "error": None,
+    }), encoding="utf-8")
+    (tdir / "report.json").write_text(json.dumps(_REPORT, ensure_ascii=False), encoding="utf-8")
+    return tdir
+
+
+def test_translate_report_없으면_404(client, sample_pdf, settings):
+    jid = _done_job(client, sample_pdf)
+    r = client.get(f"/api/jobs/{jid}/translate/report?lang=ko")
+    assert r.status_code == 404
+
+
+def test_translate_report는_사유별_집계를_노출한다(client, sample_pdf, settings):
+    jid = _done_job(client, sample_pdf)
+    _write_report(settings, jid)
+    r = client.get(f"/api/jobs/{jid}/translate/report?lang=ko")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["job_id"] == jid and body["lang"] == "ko"
+    assert body["skip_reasons"] == {"references": 2, "already-korean": 1}
+    assert body["kept_reasons"] == {"gate-rejected": 1}
+    assert body["reference_rule"]["layout_only"] == 4
+    assert body["kept_original"] == ["md:0:1"]
+
+
+def test_translate_state에_사유별_집계가_병합된다(client, sample_pdf, settings):
+    """프런트가 상태 폴링 한 번으로 '왜 원문이 남았는지'를 알 수 있어야 한다."""
+    jid = _done_job(client, sample_pdf)
+    _write_report(settings, jid)
+    body = _tstate(client, jid)
+    assert body["status"] == "done"
+    assert body["skip_reasons"] == {"references": 2, "already-korean": 1}
+    assert body["kept_reasons"] == {"gate-rejected": 1}
+    assert body["reference_rule"]["md_only"] == 0
+
+
+def test_translate_report_지원하지_않는_언어는_400(client, sample_pdf, settings):
+    jid = _done_job(client, sample_pdf)
+    assert client.get(f"/api/jobs/{jid}/translate/report?lang=zz").status_code == 400

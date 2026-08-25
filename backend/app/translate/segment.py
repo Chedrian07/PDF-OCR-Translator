@@ -174,6 +174,51 @@ def layout_units(pages: list) -> list[Unit]:
     return units
 
 
+def _nonempty_lines(text: str) -> list[str]:
+    return [ln.strip() for ln in text.split("\n") if ln.strip()]
+
+
+def reference_rule_mismatch(md_units: list[Unit], lay_units: list[Unit]) -> dict:
+    """md·layout 두 참고문헌 규칙의 불일치를 센다 (정책 변경 없이 관측만).
+
+    md 경로는 heading 스윕(`_REF_HEADING_RE` 제목 이후 구간)을, layout 경로는 블록
+    `type=="ref_text"`를 쓴다. 두 규칙은 **입력이 달라 하나로 합칠 수 없다** —
+    layout 블록만 레이아웃 엔진이 준 타입을 갖고, Markdown에는 그 타입이 없다.
+    반대로 heading 스윕은 타입을 주지 않는 엔진에서도 참고문헌을 보호한다. 그래서
+    규칙을 통일하는 대신, 같은 원문 줄이 **한쪽에서만** 원문 유지되는 경우를 세어
+    리포트 경고로 남긴다(같은 영역이 result.ko.md에선 번역, PDF에선 영어로 남는 사례).
+
+    반환: {"md_only": n, "layout_only": n, "sample_units": [유닛 id ...]}
+      md_only     — md는 references로 건너뛰는데 layout은 번역 대상인 블록 수
+      layout_only — layout은 ref_text로 건너뛰는데 md는 번역 대상인 블록 수
+    """
+    md_ref: set[str] = set()
+    md_plain: set[str] = set()
+    for unit in md_units:
+        target = md_ref if unit.skip_reason == "references" else md_plain
+        for line in _nonempty_lines(unit.src):
+            target.add(line)
+
+    md_only = 0
+    layout_only = 0
+    sample_units: list[str] = []
+    for unit in lay_units:
+        is_ref = unit.skip_reason == "references"
+        for line in _nonempty_lines(unit.src):
+            if is_ref and line in md_plain and line not in md_ref:
+                layout_only += 1
+            elif not is_ref and line in md_ref and line not in md_plain:
+                md_only += 1
+            else:
+                continue
+            # 블록당 1건만 센다 — 줄 수가 많은 블록이 집계를 왜곡하지 않게.
+            # 표본은 유닛 id만 남긴다(문서 원문은 리포트에 싣지 않는다).
+            if len(sample_units) < 5:
+                sample_units.append(unit.id)
+            break
+    return {"md_only": md_only, "layout_only": layout_only, "sample_units": sample_units}
+
+
 def apply_layout(pages: list, translations: dict[str, str]) -> list:
     """deep copy 후 content만 교체 — bbox/fs/bold/vertical/fonts_v 등은 그대로."""
     out = copy.deepcopy(pages)

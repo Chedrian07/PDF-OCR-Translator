@@ -28,7 +28,21 @@ def koreanize(text: str) -> str:
     길이비 1.0·한글 비율 높음으로 검증을 통과하면서 마스킹 왕복·조립 불변식은
     종전 EchoClient와 똑같이 검증된다.
     """
-    return _KO_ECHO_RE.sub(lambda m: m.group(1) or "가" * len(m.group(2)), text)
+    return _KO_ECHO_RE.sub(lambda m: m.group(1) or _ko_word(m.group(2)), text)
+
+
+def _ko_word(word: str) -> str:
+    """영단어 → 길이가 같은 **결정적이고 단어마다 다른** 한글.
+
+    종전에는 `"가" * len(word)`였는데, 길이만 같으면 서로 다른 원문이 완전히 같은
+    출력으로 수렴한다(실측: 길이가 같은 토큰만 다른 30개 문장 → 출력 30개 전부 동일).
+    엔진의 문서 단위 축퇴 방어가 이를 정당하게 잡아내므로, 스텁이 실제 번역기처럼
+    "다른 입력 → 다른 출력"을 지키게 한다. 길이는 그대로라 길이비 단언은 불변이다.
+    """
+    h = 0
+    for ch in word.lower():
+        h = (h * 31 + ord(ch)) & 0xFFFFFFFF
+    return "".join(chr(0xAC00 + ((h >> (i * 3)) + i) % 11172) for i in range(len(word)))
 
 
 def ko_expected(md_text: str) -> str:
@@ -977,3 +991,143 @@ def test_reasoning_설정이_바뀌면_캐시를_재사용하지_않는다(job, 
     hot = EchoClient()
     res2 = run_translation(job, "ko", replace(cfg, temperature="0.7"), client=hot)
     assert hot.calls > 0 and res2.cached == 0
+
+
+# ── 관측: 사유별 skip/kept 집계 + 참고문헌 규칙 불일치 ──────────────────────
+
+def test_report에_skip_사유별_집계가_남는다(tmp_path, cfg):
+    """총합 하나로 뭉개진 skipped로는 '왜 영어로 남았나'를 알 수 없다 —
+    references / already-korean / non-linguistic을 구분해 남긴다."""
+    md = (
+        "The accuracy improved on the benchmark dataset that we evaluated.\n\n"
+        "이 문단은 이미 한국어라 번역 대상이 아니다.\n\n"
+        "1234 5678 90\n\n"
+        "## References\n\n"
+        "[1] Author A. A paper title. Venue, 2020.\n"
+    )
+    res, report, _md_out = _run_md(tmp_path, cfg, md, EchoClient())
+
+    assert res.status == "done"
+    reasons = report["skip_reasons"]
+    assert reasons["references"] == 2          # heading + 서지 항목
+    assert reasons["already-korean"] == 1
+    assert reasons["non-linguistic"] == 1
+    assert sum(reasons.values()) == report["skipped"] == res.skipped
+
+
+def test_report에_kept_사유가_구분된다(tmp_path, cfg):
+    """게이트 거부(gate-rejected)와 플레이스홀더 정합 실패를 구분한다."""
+
+    class RefusingClient(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            if _marker(user) is None and _repair_src(user) is None:
+                return ""
+            return "I cannot translate this text."
+
+    md = "The accuracy improved on every benchmark dataset that we evaluated.\n"
+    _res, report, _out = _run_md(tmp_path, cfg, md, RefusingClient())
+    assert report["kept_original"] == ["md:0:0"]
+    assert report["kept_reasons"] == {"gate-rejected": 1}
+
+
+def test_플레이스홀더_소실은_gate_rejected와_다르게_집계된다(tmp_path, cfg):
+    md = "We train a model with loss $L = \\sum_i x_i$ over the dataset.\n"
+    _res, report, _out = _run_md(tmp_path, cfg, md, FaultyClient())
+    assert report["kept_original"] == ["md:0:0"]
+    assert report["kept_reasons"] == {"placeholder-mismatch": 1}
+
+
+def test_빈_출력은_empty_output으로_집계된다(tmp_path, cfg):
+    class SilentClient(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            return ""
+
+    md = "The accuracy improved on every benchmark dataset that we evaluated.\n"
+    _res, report, _out = _run_md(tmp_path, cfg, md, SilentClient())
+    assert report["kept_reasons"] == {"empty-output": 1}
+
+
+def test_결정적_4xx_강등은_api_rejected로_집계된다(tmp_path, cfg):
+    from dataclasses import replace
+
+    from app.translate.types import TranslateUnitRejected
+
+    class RejectOneClient(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            src = _marker(user)
+            if src is None:
+                return ""
+            if "oversized" in src:
+                raise TranslateUnitRejected("번역 API 오류 (HTTP 400): context length")
+            return koreanize(src)
+
+    md = (
+        "The first paragraph explains the training procedure in detail.\n\n"
+        "This oversized merged table exceeds the server context window.\n"
+    )
+    _res, report, _out = _run_md(
+        tmp_path, replace(cfg, concurrency=1), md, RejectOneClient(),
+    )
+    assert report["kept_reasons"] == {"api-rejected": 1}
+
+
+def test_참고문헌_규칙_불일치가_경고와_집계로_남는다(tmp_path, cfg):
+    """layout은 ref_text로 원문 유지, md는 heading 스윕 밖이라 번역 — 같은 원문이
+    PDF와 result.ko.md에서 갈라진다. 정책은 그대로 두고 관측만 한다."""
+    md = (
+        "The accuracy improved on the benchmark dataset that we evaluated.\n\n"
+        "[1] Author A. A paper title. Venue, 2020.\n"
+    )
+    layout = [{"page": 1, "width": 1000, "height": 1400, "blocks": [
+        {"type": "text", "bbox": [0, 0, 999, 80],
+         "content": "The accuracy improved on the benchmark dataset that we evaluated."},
+        {"type": "ref_text", "bbox": [0, 100, 999, 160],
+         "content": "[1] Author A. A paper title. Venue, 2020."},
+    ]}]
+    (tmp_path / "layout.json").write_text(json.dumps(layout, ensure_ascii=False), encoding="utf-8")
+    _res, report, _out = _run_md(tmp_path, cfg, md, EchoClient())
+
+    assert report["reference_rule"]["layout_only"] == 1
+    assert report["reference_rule"]["md_only"] == 0
+    assert report["reference_rule"]["sample_units"] == ["lay:1:1"]
+    assert any("참고문헌 규칙 불일치" in w for w in report["warnings"])
+
+
+def test_모든_유닛에_같은_출력을_주는_공급자는_축퇴로_원문_유지(tmp_path, cfg):
+    """문서 단위 축퇴 방어 — 유닛별 검증이 구조적으로 볼 수 없는 실패 모드.
+
+    공급자가 고장 나 모든 요청에 같은 캔드 응답을 돌려주면, 짧은 유닛은 길이비·
+    한글 비율 검사를 통과해 정상 번역으로 채택된다(실측: fault=summary 실행에서
+    '요약입니다'가 result.ko.md에 잔존). 서로 다른 원문 여럿이 한 출력으로
+    수렴하는 것 자체를 신호로 삼아 원문을 지킨다.
+    """
+    class CannedClient:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, *a, **k):
+            self.calls += 1
+            return "요약입니다."
+
+    md = "\n\n---\n\n".join(
+        "\n\n".join([
+            "Abstract", "Introduction", "Related Work", "Conclusion",
+        ]) for _ in range(1)
+    )
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / "result.md").write_text(md, encoding="utf-8")
+
+    client = CannedClient()
+    res = run_translation(job, "ko", cfg, client=client, page_separator="\n\n---\n\n")
+
+    out = (job / "result.ko.md").read_text(encoding="utf-8")
+    assert "요약입니다" not in out, "축퇴 출력이 산출물에 반영되면 안 된다"
+    assert res.kept_original, "축퇴 유닛은 kept_original로 관측돼야 한다"
+    units = job / "translations/ko/units.json"
+    if units.is_file():
+        import json
+        assert "요약입니다." not in json.loads(units.read_text()).values(), "캐시 오염 금지"

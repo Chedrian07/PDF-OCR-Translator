@@ -38,6 +38,7 @@ from .segment import (
     layout_line_sources,
     layout_units,
     reconcile_markdown_with_layout,
+    reference_rule_mismatch,
     split_markdown,
 )
 from .types import (
@@ -158,6 +159,10 @@ def run_translation(
     translated_n = 0
     cached_n = 0
     kept_original: list[str] = []
+    # 관측용 사유별 집계 — "왜 이 문단이 영어로 남았나"를 report.json에서 구분한다.
+    skip_reasons: dict[str, int] = {}   # references / already-korean / non-linguistic / identifier
+    kept_reasons: dict[str, int] = {}   # gate-rejected / placeholder-mismatch / empty-output / api-rejected
+    ref_rule: dict = {}                 # md·layout 참고문헌 규칙 불일치
 
     def write_state(status: str, current: int, total_: int, error: str | None = None) -> None:
         mode = getattr(client, "api_mode_used", "") or (cfg.api_mode if cfg.api_mode != "auto" else "")
@@ -222,11 +227,18 @@ def run_translation(
         targets = []
         skipped = 0
         for u in all_units:
-            if u.skip_reason or should_skip(u.src):
+            # 유닛 자체 사유(references)가 우선, 없으면 게이트 판정 사유를 그대로 쓴다.
+            reason = u.skip_reason or should_skip(u.src)
+            if reason:
                 skipped += 1
+                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
             else:
                 targets.append(u)
         total = len(targets)
+
+        # md(heading 스윕)와 layout(ref_text) 참고문헌 규칙의 불일치 관측 — 같은 영역이
+        # result.{lang}.md와 PDF에서 서로 다르게 처리되는 사례를 리포트로 드러낸다.
+        ref_rule = reference_rule_mismatch(md_units, lay_units)
 
         # 2단 패스 — reconcile이 성공하면 md 유닛 번역은 전량 폐기되고 layout 번역이
         # 단일 기준이 된다(LLM 왕복의 절반이 낭비). 그래서 **모든 줄이 layout 블록에
@@ -329,6 +341,16 @@ def run_translation(
                 pass  # 잡 삭제 경합 — 캐시는 잡과 함께 사라진다
 
         warnings = list(glossary.warnings)
+        if ref_rule.get("md_only") or ref_rule.get("layout_only"):
+            warnings.append(
+                "참고문헌 규칙 불일치 — 같은 원문이 한쪽 경로에서만 원문 유지됩니다"
+                f" (md만 유지 {ref_rule.get('md_only', 0)}건,"
+                f" layout(PDF)만 유지 {ref_rule.get('layout_only', 0)}건)"
+            )
+            logger.info(
+                "참고문헌 규칙 불일치: %s (lang=%s, md_only=%d, layout_only=%d)",
+                job_dir.name, lang, ref_rule.get("md_only", 0), ref_rule.get("layout_only", 0),
+            )
         results: dict[str, str] = {}
         kept_original: list[str] = []
         translated_n = 0
@@ -407,7 +429,8 @@ def run_translation(
             return None
 
         def _zero_stats() -> dict:
-            return {"retried": 0, "repaired": 0, "split": 0, "sanitized": 0}
+            # kept_reason: 래더가 소진돼 원문 유지로 떨어질 때의 최초 패스 실패 사유
+            return {"retried": 0, "repaired": 0, "split": 0, "sanitized": 0, "kept_reason": ""}
 
         def _unit_key(u):
             """유닛의 마스킹·용어집 파생값과 캐시 키 (유닛당 ~1.5ms — API 왕복의 0.04%)."""
@@ -473,6 +496,15 @@ def run_translation(
 
             # 여기부터 신뢰도 래더 — 태그 누락·중복, 빈 출력, 출력 검증 실패, API 거부
             stats["retried"] = 1
+            # 래더가 끝내 실패해 원문 유지로 떨어질 때 보고할 사유(최초 패스 기준).
+            if api_rejected:
+                stats["kept_reason"] = "api-rejected"
+            elif missing or dup:
+                stats["kept_reason"] = "placeholder-mismatch"
+            elif not restored.strip():
+                stats["kept_reason"] = "empty-output"
+            else:
+                stats["kept_reason"] = "gate-rejected"
             if _halted():
                 return u, u.src, "canceled", key, stats
 
@@ -582,7 +614,10 @@ def run_translation(
                 if flight.result is not None:
                     _owner_u, text, status, result_key, _stats = flight.result
                     if status == "kept":
-                        return u, u.src, "kept", result_key, _zero_stats()
+                        # 재시도 통계는 0(추가 왕복 없음)이지만 사유는 선점 결과를 공유한다.
+                        shared = _zero_stats()
+                        shared["kept_reason"] = (_stats or {}).get("kept_reason", "")
+                        return u, u.src, "kept", result_key, shared
                     if status == "canceled":
                         return u, u.src, "canceled", result_key, _zero_stats()
                     return u, text, "cached", result_key, _zero_stats()
@@ -662,6 +697,8 @@ def run_translation(
                                 publish_cache(key, text)
                         elif status == "kept":
                             kept_original.append(u.id)
+                            kr = stats.get("kept_reason") or "unknown"
+                            kept_reasons[kr] = kept_reasons.get(kr, 0) + 1
                             # 식별자만 기록 — 문서 원문·번역문 내용은 로그에 남기지 않는다
                             logger.warning("번역 유닛 원문 유지: %s (lang=%s, unit=%s)", job_dir.name, lang, u.id)
                         done += 1
@@ -689,6 +726,47 @@ def run_translation(
         if canceled:
             return _canceled_result()
 
+        def _sweep_degenerate() -> None:
+            nonlocal translated_n
+            # ── 문서 단위 축퇴(degenerate) 출력 방어 ──────────────────────────────
+            # 유닛별 검증(looks_untranslated)은 "이 출력이 이 원문의 번역인가"만 본다.
+            # 공급자가 고장 나 **모든 유닛에 같은 문자열**을 돌려주는 실패 모드(캔드 응답·
+            # 루프·잘못 설정된 게이트웨이)는 유닛 하나만 보면 정상처럼 보여 통과한다.
+            # 서로 다른 원문 여럿이 한 출력으로 수렴하면 그건 번역이 아니므로 원문을 지킨다.
+            # 원문은 **전체 유닛**에서 찾는다. targets는 deferred 선별로 줄어들어 있어
+            # 여기서 만들면 조회 실패분이 서로 다른 원문처럼 세어져 오탐이 난다.
+            src_by_id = {u.id: u.src for u in (*md_units, *lay_units)}
+            by_output: dict[str, set[str]] = {}
+            for uid, text in results.items():
+                norm = " ".join(text.split())
+                src = src_by_id.get(uid)
+                if norm and src is not None:
+                    by_output.setdefault(norm, set()).add(src)
+            for norm, srcs in by_output.items():
+                # 서로 다른 원문 3개 이상이 같은 출력 → 축퇴. 원문이 실제로 같은 유닛
+                # (반복되는 표 헤더 등)이 같은 번역을 받는 것은 정상이므로 원문 기준으로 센다.
+                if len(srcs) < 3:
+                    continue
+                degenerate = [uid for uid, text in results.items() if " ".join(text.split()) == norm]
+                for uid in degenerate:
+                    results.pop(uid, None)
+                    if uid not in kept_original:
+                        kept_original.append(uid)
+                        kept_reasons["degenerate-output"] = kept_reasons.get("degenerate-output", 0) + 1
+                        translated_n = max(0, translated_n - 1)
+                # 캐시도 함께 비운다 — 축퇴 출력이 units.json에 남으면 공급자를 고친 뒤
+                # force 없이 재실행해도 같은 손실이 그대로 재사용된다.
+                with cache_lock:
+                    for ckey in [k for k, v in cache.items() if " ".join(v.split()) == norm]:
+                        cache.pop(ckey, None)
+                logger.warning(
+                    "번역 축퇴 출력 감지: %s (lang=%s, 원문 %d종이 동일 출력 → 원문 유지)",
+                    job_dir.name, lang, len(srcs),
+                )
+            flush_cache()
+
+        _sweep_degenerate()
+
         # 조립 — 번역된 유닛만 교체(나머지 원문 보존)
         def _assemble_md() -> str:
             md_trans = {u.id: results[u.id] for u in md_units if u.id in results}
@@ -715,6 +793,10 @@ def run_translation(
                 logger.info("reconcile 폴백 — 지연 md 유닛 %d개 2차 번역", len(deferred))
                 try:
                     canceled = not _dispatch(deferred)
+                    if not canceled:
+                        # 2차 패스 유닛도 같은 축퇴 방어를 받아야 한다 —
+                        # 1차 스윕은 이 dispatch 이전에 끝났다.
+                        _sweep_degenerate()
                 finally:
                     flush_cache()
                 if canceled:
@@ -733,6 +815,11 @@ def run_translation(
             "split": split_n,
             "sanitized": sanitized_n,
             "skipped": skipped,
+            # 사유별 내역 — 총합(skipped/kept_original)만으로는 "왜 영어로 남았나"를
+            # 구분할 수 없어 사용자·프런트가 원인을 알 방법이 없었다.
+            "skip_reasons": skip_reasons,
+            "kept_reasons": kept_reasons,
+            "reference_rule": ref_rule,
             "cached": cached_n,
             "translated": translated_n,
             "api_mode": api_mode,

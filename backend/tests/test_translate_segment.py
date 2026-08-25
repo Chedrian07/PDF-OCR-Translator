@@ -213,3 +213,69 @@ def test_reconcile_폴백은_받은_assembled를_그대로_돌려준다():
     assembled = "번역 하나.\n번역 둘.\n번역 셋."
     out = reconcile_markdown_with_layout(md, assembled, [], [], "\n\n---\n\n")
     assert out is assembled
+
+
+# ── 참고문헌 규칙 불일치 관측 (md heading 스윕 vs layout ref_text) ──────────
+
+def test_layout만_ref_text면_불일치로_집계된다():
+    """같은 원문이 PDF(layout)에선 원문 유지, result.ko.md에선 번역되는 사례."""
+    from app.translate.segment import reference_rule_mismatch
+
+    md_units = split_markdown(
+        "# Introduction\n\nBody sentence here.\n\n[1] Author A. A paper title. Venue, 2020.\n",
+        SEP,
+    )
+    lay_units = layout_units([
+        {"page": 1, "blocks": [
+            {"type": "text", "content": "Body sentence here."},
+            {"type": "ref_text", "content": "[1] Author A. A paper title. Venue, 2020."},
+        ]},
+    ])
+    got = reference_rule_mismatch(md_units, lay_units)
+    assert got["layout_only"] == 1 and got["md_only"] == 0
+    assert got["sample_units"] == ["lay:1:1"]
+
+
+def test_md만_references_heading이면_불일치로_집계된다():
+    """반대 방향 — md는 heading 스윕으로 건너뛰는데 layout은 text라 번역된다."""
+    from app.translate.segment import reference_rule_mismatch
+
+    md_units = split_markdown(
+        "## References\n\n[1] Author A. A paper title. Venue, 2020.\n", SEP,
+    )
+    lay_units = layout_units([
+        {"page": 1, "blocks": [
+            {"type": "text", "content": "[1] Author A. A paper title. Venue, 2020."},
+        ]},
+    ])
+    got = reference_rule_mismatch(md_units, lay_units)
+    assert got["md_only"] == 1 and got["layout_only"] == 0
+
+
+def test_두_규칙이_일치하면_불일치가_0이다():
+    from app.translate.segment import reference_rule_mismatch
+
+    md_units = split_markdown(
+        "## References\n\n[1] Author A. A paper title. Venue, 2020.\n", SEP,
+    )
+    lay_units = layout_units([
+        {"page": 1, "blocks": [
+            {"type": "ref_text", "content": "[1] Author A. A paper title. Venue, 2020."},
+        ]},
+    ])
+    got = reference_rule_mismatch(md_units, lay_units)
+    assert got == {"md_only": 0, "layout_only": 0, "sample_units": []}
+
+
+def test_불일치_표본은_블록당_한_건만_센다():
+    """줄이 많은 블록 하나가 집계를 부풀리지 않는다."""
+    from app.translate.segment import reference_rule_mismatch
+
+    md_units = split_markdown("Line one here.\n\nLine two here.\n", SEP)
+    lay_units = layout_units([
+        {"page": 1, "blocks": [
+            {"type": "ref_text", "content": "Line one here.\nLine two here."},
+        ]},
+    ])
+    got = reference_rule_mismatch(md_units, lay_units)
+    assert got["layout_only"] == 1

@@ -17,6 +17,7 @@ from app.pipeline.pdf_export import (
     PDF_EXPORT_FORMAT_VERSION,
     PdfExportError,
     _free_growth_rect,
+    _metrics_font,
     _plain_text,
     _resolve_font,
     build_dual_pdf,
@@ -305,11 +306,31 @@ def test_growth_stops_when_next_column_block_touches_current_bbox():
     """연속 문단(y1 == next.y0)은 확장 공간이 아니다 — 겹침 회귀 방지."""
     import fitz
 
-    page = type("PageStub", (), {"mediabox": fitz.Rect(0, 0, 600, 800)})()
+    page = type("PageStub", (), {
+        "rect": fitz.Rect(0, 0, 600, 800),
+        "derotation_matrix": fitz.Identity,
+    })()
     current = fitz.Rect(50, 100, 280, 200)
     touching = fitz.Rect(50, 200, 280, 310)
     grown = _free_growth_rect(page, current, [touching])
     assert grown == current
+
+
+def test_측정용_폰트를_재사용해도_조판_결과가_같다(tmp_path):
+    """계획 함수의 fitz.Font는 블록마다 재파싱하지 않고 캐시를 공유한다."""
+    _metrics_font.cache_clear()
+    fontfile, fontname = _resolve_font("")
+    first = _metrics_font(fontfile, fontname)
+    assert _metrics_font(fontfile, fontname) is first
+    assert _metrics_font(None, "korea") is not first
+    assert _metrics_font.cache_info().hits >= 1
+
+    job_dir = _unit_job(tmp_path)
+    _metrics_font.cache_clear()
+    cold = _pdf_text(build_translated_pdf(job_dir, "ko").path.read_bytes())
+    warm = _pdf_text(build_translated_pdf(job_dir, "ko").path.read_bytes())
+    assert KO_TEXT in cold
+    assert warm == cold
 
 
 def test_build_skips_unfittable_block_without_redacting_original(tmp_path):
@@ -370,7 +391,10 @@ def test_build_rotated_page(tmp_path):
     job_dir = _unit_job(tmp_path, rotate=90)
     result = build_translated_pdf(job_dir, "ko")
     assert result.replaced == 1
-    assert KO_TEXT in _pdf_text(result.path.read_bytes())
+    exported_text = _pdf_text(result.path.read_bytes())
+    assert KO_TEXT in exported_text
+    # 회전 페이지에서도 원문 글리프가 남으면 번역문과 겹쳐 찍힌다.
+    assert "Original English sentence" not in exported_text
     dual = build_dual_pdf(job_dir / "source.pdf", result.path, job_dir / "dual.pdf")
     with fitz.open(job_dir / "source.pdf") as source, fitz.open(dual) as exported:
         page = exported[0]
@@ -412,6 +436,59 @@ def test_build_preserves_reference_entry_and_url(tmp_path):
     assert "https://example.test/paper." in text
     assert "Original Paper Title" in text
     assert "번역된 논문 제목" not in text
+
+
+def test_참고문헌_중복scheme_url은_미세교정으로_한번만_남는다(tmp_path):
+    """보존 대상 ref_text에서도 allowlist된 조판 오류(`https://https://`)만 고친다.
+
+    `_microfix_plan` 경로는 원문 한 행 안의 더 짧은 치환만 허용하므로 서지
+    항목의 다른 글리프는 그대로 남아야 한다. 겹친 링크 annotation의 URI도 같은
+    정상 주소로 맞춘다.
+    """
+    import fitz
+
+    job_dir = tmp_path / "microfix-job"
+    job_dir.mkdir()
+    doubled = "https://https://"
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((60, 100), "[1] Author, Paper Title,", fontsize=9)
+    # 중복 scheme만 별도 span이 되도록 다른 위치·폰트로 기록한다.
+    page.insert_text((60, 114), doubled, fontsize=9, fontname="cour")
+    for link_rect in (fitz.Rect(58, 104, 160, 118), fitz.Rect(58, 150, 160, 164)):
+        # 첫 annotation은 리댁션에서 사라지지만, 다음 행으로 이어진 같은 URI의
+        # 링크는 남는다 — 그 링크도 같은 정상 주소로 맞춰야 한다.
+        page.insert_link({
+            "kind": fitz.LINK_URI,
+            "from": link_rect,
+            "uri": f"{doubled}example.test/paper",
+        })
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+
+    content = f"[1] Author, Paper Title, {doubled}example.test/paper"
+    original = [{"page": 1, "width": 595, "height": 842, "blocks": [{
+        "type": "ref_text",
+        "bbox": [round(58 / 595 * 999), round(88 / 842 * 999),
+                 round(300 / 595 * 999), round(120 / 842 * 999)],
+        "content": content,
+        "fs": 9 / 595 * 100,
+    }]}]
+    translated = json.loads(json.dumps(original))
+    (job_dir / "layout.json").write_text(json.dumps(original), encoding="utf-8")
+    (job_dir / "layout.ko.json").write_text(
+        json.dumps(translated, ensure_ascii=False), encoding="utf-8")
+
+    result = build_translated_pdf(job_dir, "ko")
+    text = _pdf_text(result.path.read_bytes())
+    with fitz.open(result.path) as exported:
+        uris = [link.get("uri") for link in exported[0].get_links()]
+
+    assert result.specialist_kept["reference"] == 1
+    assert result.replaced == 1, result.report()
+    assert doubled not in text, text
+    assert "https://" in text and "Paper Title" in text, text
+    assert uris == ["https://example.test/paper"], uris
 
 
 def test_build_redaction_includes_source_glyphs_past_ocr_bbox(tmp_path):
@@ -703,6 +780,48 @@ def test_build_removes_inline_emoji_image_inside_replaced_block(tmp_path):
         boxes = [fitz.Rect(info["bbox"]) for info in exported[0].get_image_info()]
     assert any(abs(box.y0 - 700) < 2.0 for box in boxes), boxes  # 블록 밖 보존
     assert not any(box.y0 < 200 for box in boxes), boxes         # 블록 안 제거
+
+
+def test_build_keeps_letter_sized_limit_and_preserves_inline_figure(tmp_path):
+    """이모지 2차 패스는 '글자 한 칸 크기'만 지운다 — 인라인 그림·아이콘은 보존.
+
+    면적비(25%)만 보면 넓은 텍스트 블록 안의 100x100pt 로고·차트도 걸려 경고
+    없이 사라진다. docs/ARCHITECTURE.md의 "리댁션은 블록 안의 그림을 제거하지
+    않는다" 계약을 지키려면 절대 크기 상한이 함께 필요하다.
+    """
+    import fitz
+
+    job_dir = tmp_path / "inline-figure-job"
+    job_dir.mkdir()
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_textbox(
+        fitz.Rect(60, 85, 535, 250), "Original English sentence", fontsize=12)
+    # 블록(59.5,84.2)–(535.5,252.6) 안에 완전히 든 100x100pt 인라인 그림.
+    # 면적비는 약 12%라 기존 25% 조건만으로는 제거 대상이 된다.
+    page.insert_image(
+        fitz.Rect(400, 130, 500, 230), stream=_png_stamp(32, 90),
+        keep_proportion=False)
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+
+    original = [{"page": 1, "width": 1000, "height": 1414, "blocks": [
+        {"type": "text", "bbox": [100, 100, 900, 300],
+         "content": "Original English sentence", "fs": 2.0},
+    ]}]
+    translated = json.loads(json.dumps(original))
+    translated[0]["blocks"][0]["content"] = KO_TEXT
+    (job_dir / "layout.json").write_text(json.dumps(original), encoding="utf-8")
+    (job_dir / "layout.ko.json").write_text(
+        json.dumps(translated, ensure_ascii=False), encoding="utf-8")
+
+    result = build_translated_pdf(job_dir, "ko")
+    assert result.replaced == 1, result.report()
+    with fitz.open(result.path) as exported:
+        boxes = [fitz.Rect(info["bbox"]) for info in exported[0].get_image_info()]
+    assert any(
+        abs(box.width - 100) < 2.0 and abs(box.height - 100) < 2.0 for box in boxes
+    ), boxes
 
 
 def test_build_keeps_text_block_overlapping_figure_image(tmp_path):

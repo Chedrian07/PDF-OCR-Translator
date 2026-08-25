@@ -335,3 +335,98 @@ def test_merge_without_raw_pages_is_fine(tmp_path):
     c.mkdir(parents=True)
     m.add_chunk(ChunkResult(c, 1, 1, "<PAGE>\n텍스트만"))
     assert not (tmp_path / "layout.json").exists()
+
+
+def test_merge_recovery_page_kept_in_layout(tmp_path):
+    """raw_pages.json이 없는 복구 페이지(텍스트 레이어 폴백)도 layout.json에 남는다.
+
+    빠지면 facsimile document.html 내보내기에서 그 페이지가 통째로 사라지고
+    layout 페이지 번호와 result.md 페이지 인덱스가 어긋난다."""
+    (tmp_path / "pages").mkdir()
+    m = IncrementalMerger(tmp_path, "\n\n---\n\n")
+    c0 = tmp_path / "work" / "chunk_00"
+    (c0 / "images").mkdir(parents=True)
+    (c0 / "raw_pages.json").write_text(json.dumps({"pages": [RAW]}), encoding="utf-8")
+    m.add_chunk(ChunkResult(c0, 1, 1, "<PAGE>\n1쪽"))
+    # 2쪽: single OCR 실패 후 PDF 내장 텍스트로 복구 — 산출물이 없는 빈 디렉터리
+    c1 = tmp_path / "work" / "recover_02"
+    c1.mkdir(parents=True)
+    m.add_chunk(ChunkResult(c1, 2, 1, "2쪽 복구 텍스트", single=True))
+    c2 = tmp_path / "work" / "chunk_02"
+    (c2 / "images").mkdir(parents=True)
+    (c2 / "raw_pages.json").write_text(json.dumps({"pages": [RAW]}), encoding="utf-8")
+    m.add_chunk(ChunkResult(c2, 3, 1, "<PAGE>\n3쪽"))
+    out = m.finalize()
+
+    saved = json.loads((tmp_path / "layout.json").read_text(encoding="utf-8"))
+    assert [p["page"] for p in saved] == [1, 2, 3]
+    assert saved[1]["blocks"] == []                          # 좌표는 없지만 페이지는 존재
+    # (b) layout 페이지 N ↔ result.md split 인덱스 N 이 1:1
+    assert len(saved) == len(out.split("\n\n---\n\n")) == len(m.pages_md)
+
+
+def test_ref_block_matches_vendor_without_length_caps():
+    """벤더 re_match(`(.*?)`)가 잡는 긴 det 페이로드/라벨을 우리도 잡아야 한다.
+
+    놓치면 블록이 통째로 사라지고 좌표 문자열이 본문으로 새며, image 블록이면
+    벤더가 저장한 크롭과 crop_index가 어긋난다."""
+    boxes = ", ".join(f"[{i}, {i}, {i + 5}, {i + 5}]" for i in range(30))  # 400자 초과
+    raw = (
+        f"<|ref|>image<|/ref|><|det|>[{boxes}]<|/det|>\n"
+        "<|det|>text [100, 120, 900, 300]<|/det|>본문"
+    )
+    blocks = parse_page_blocks(raw)
+    image_blocks = [b for b in blocks if b["type"] == "image"]
+    assert len(image_blocks) == 30
+    assert [b["crop_index"] for b in image_blocks] == list(range(30))
+    text_block = [b for b in blocks if b["type"] == "text"][0]
+    assert text_block["content"] == "본문"          # 좌표 문자열이 본문으로 새지 않음
+
+    long_label = "figure_caption_" + "x" * 60      # 40자 상한 초과 라벨
+    blocks2 = parse_page_blocks(f"<|ref|>{long_label}<|/ref|><|det|>[[1, 2, 3, 4]]<|/det|>내용")
+    assert len(blocks2) == 1 and blocks2[0]["bbox"] == [1, 2, 3, 4]
+
+
+def test_ref_block_does_not_swallow_next_block_on_missing_close():
+    """닫는 태그가 빠져도 다음 ref 블록까지 삼키지 않는다(tempered-dot 경계)."""
+    raw = (
+        "<|ref|>image<|/ref|><|det|>[[1, 2, 3, 4]]\n"     # <|/det|> 결손
+        "<|ref|>text<|/ref|><|det|>[[10, 20, 30, 40]]<|/det|>본문"
+    )
+    blocks = parse_page_blocks(raw)
+    assert [b["type"] for b in blocks] == ["text"]
+    assert blocks[0]["bbox"] == [10, 20, 30, 40]
+
+
+def test_facsimile_falls_back_when_page_images_too_large(tmp_path, monkeypatch):
+    """페이지 PNG 총량이 상한을 넘으면 base64 인라인을 포기하고 좌표 렌더로 폴백한다
+    (전 페이지를 메모리에 쌓다 워커가 OOM 나는 것을 막는다)."""
+    from app.pipeline import layout as layout_mod
+
+    (tmp_path / "images").mkdir()
+    pages_dir = tmp_path / "pages"
+    pages_dir.mkdir()
+    for n in (1, 2):
+        (pages_dir / f"page_{n:04d}.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 4096)
+    pages = [
+        {"page": n, "width": 612, "height": 792, "blocks": [
+            {"type": "text", "bbox": [100, 50, 900, 90], "content": f"{n}쪽 제목"},
+        ]}
+        for n in (1, 2)
+    ]
+    monkeypatch.setattr(layout_mod, "_FACSIMILE_MAX_TOTAL_BYTES", 4096)
+
+    html = layout_mod.render_layout_standalone(
+        pages, tmp_path, "큰문서", None, pages_dir=pages_dir, facsimile=True,
+    )
+    assert "data:image/png;base64," not in html          # 페이지 PNG 인라인 없음
+    assert 'class="layout-canvas facsimile-canvas"' not in html  # 백지 페이지 방지
+    assert "1쪽 제목" in html and "2쪽 제목" in html      # 내용은 보존
+
+    # 상한 안이면 그대로 facsimile
+    monkeypatch.setattr(layout_mod, "_FACSIMILE_MAX_TOTAL_BYTES", 64 * 1024 * 1024)
+    ok = layout_mod.render_layout_standalone(
+        pages, tmp_path, "큰문서", None, pages_dir=pages_dir, facsimile=True,
+    )
+    assert "data:image/png;base64," in ok
+    assert 'class="layout-canvas facsimile-canvas"' in ok

@@ -24,15 +24,30 @@ import re
 from . import prompts
 from .client import OpenAICompatClient
 from .glossary import Glossary, build_glossary
-from .masking import _TOKEN_RE, mask, sanitize_translation, should_skip, unmask
+from .masking import (
+    _TOKEN_RE,
+    looks_untranslated,
+    mask,
+    sanitize_translation,
+    should_skip,
+    unmask,
+)
 from .segment import (
     apply_layout,
     assemble_markdown,
+    layout_line_sources,
     layout_units,
     reconcile_markdown_with_layout,
     split_markdown,
 )
-from .types import PROMPT_V, TranslateConfig, TranslateError, TranslateResult, cache_key
+from .types import (
+    PROMPT_V,
+    TranslateConfig,
+    TranslateError,
+    TranslateResult,
+    TranslateUnitRejected,
+    cache_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +111,12 @@ def _split_table(src: str) -> tuple[str, str] | None:
     return left, right
 
 
+def _fully_covered(src: str, covered: set[str]) -> bool:
+    """유닛의 비어있지 않은 모든 줄이 layout 매핑 대상인가 (reconcile과 같은 strip 규칙)."""
+    lines = [ln.strip() for ln in src.split("\n") if ln.strip()]
+    return bool(lines) and all(ln in covered for ln in lines)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -151,6 +172,9 @@ def run_translation(
                 "api_mode": mode,
                 "prompt_v": PROMPT_V,
                 "context": cfg.context,
+                # 캐시 키 재료 — translate_eval이 units.json 키를 재현할 때 쓴다
+                "temperature": cfg.temperature,
+                "reasoning": cfg.reasoning,
                 "started_at": started,
                 "finished_at": _now() if status in ("done", "error", "canceled") else None,
             })
@@ -164,6 +188,10 @@ def run_translation(
     # 이미 실행을 시작한 유닛이 다음 API 호출 전에 빠져나오게 해, 죽은 엔드포인트로
     # 남은 큐가 드레인되는 것(유닛 수 × 백오프)을 막는다. 사용자 취소(cancel)와 별개.
     abort = threading.Event()
+
+    # 이 run에서 유닛 하나라도 성공했는가 = 엔드포인트·인증·설정은 정상이라는 신호.
+    # step-0의 결정적 4xx를 유닛 강등으로 흡수해도 되는지 판단하는 데 쓴다.
+    progressed = threading.Event()
 
     def _halted() -> bool:
         return abort.is_set() or _cancel_set()
@@ -199,6 +227,25 @@ def run_translation(
             else:
                 targets.append(u)
         total = len(targets)
+
+        # 2단 패스 — reconcile이 성공하면 md 유닛 번역은 전량 폐기되고 layout 번역이
+        # 단일 기준이 된다(LLM 왕복의 절반이 낭비). 그래서 **모든 줄이 layout 블록에
+        # 커버되는** md 유닛만 1차에서 빼두고(deferred), reconcile이 폴백을 돌려준
+        # 경우에만 2차로 번역해 무손실 계약을 지킨다. 부분만 걸치는 md 유닛(다중 줄
+        # 블록·표·수식 줄)은 매핑에 안 걸려 원문이 남으므로 지금처럼 1차에서 번역한다.
+        deferred: list = []
+        if layout_pages is not None and lay_units:
+            lay_target_srcs = {u.src.strip() for u in targets if u.id.startswith("lay:")}
+            covered = layout_line_sources(layout_pages) & lay_target_srcs
+            if covered:
+                remaining = []
+                for u in targets:
+                    if u.id.startswith("md:") and _fully_covered(u.src, covered):
+                        deferred.append(u)
+                    else:
+                        remaining.append(u)
+                targets = remaining
+                total = len(targets)
 
         # 직전 유닛 꼬리 컨텍스트 (같은 소스 내에서만). 실제 프롬프트 입력이므로
         # 캐시 키에도 넣어 같은 문장이 다른 문맥의 번역을 잘못 공유하지 않게 한다.
@@ -300,9 +347,24 @@ def run_translation(
         def _run_pass(prompt: str, max_toks: int, mapping: dict) -> tuple[str, list, list, int, str]:
             """complete → sanitize → unmask 한 번. (복원문, missing, dup, 치환건수, 정리된_원출력)."""
             raw = client.complete(prompts.SYSTEM_TRANSLATE, prompt, max_tokens=max_toks)
+            # API 왕복 하나가 성공했다 = 엔드포인트·인증·설정은 정상. step-0의 결정적
+            # 4xx를 유닛 단위로 강등해도 되는지 판단하는 신호(워커 안에서 즉시 세운다).
+            progressed.set()
             clean, sc = sanitize_translation(raw)
             restored, missing, dup = unmask(clean, mapping)
             return restored, missing, dup, sc, clean
+
+        def _accepted(src: str, restored: str, missing: list, dup: list, mapping: dict) -> bool:
+            """유닛 출력 채택 판정 — 플레이스홀더 정합 + 비어있지 않음 + 출력 측 검증.
+
+            거부문·요약·영문 echo는 플레이스홀더가 온전해도 통과시키지 않는다.
+            거절된 출력은 기존 래더(repair→분할)가 흡수하고, 다 소진되면 "kept"로
+            떨어져 report.json에 남는다. publish_cache는 status=="translated"일
+            때만 호출되므로 units.json 오염도 함께 차단된다.
+            """
+            if missing or dup or not restored.strip():
+                return False
+            return not looks_untranslated(src, restored, mapping)
 
         def _translate_fragment(
             src, pairs, first, ctx, stats, keep=None, unit_kind: str = "",
@@ -330,7 +392,7 @@ def run_translation(
             except TranslateError:
                 return None
             stats["sanitized"] += sc
-            if not missing and not dup and restored.strip():
+            if _accepted(src, restored, missing, dup, mapping):
                 return restored
             if _halted():
                 return None
@@ -338,7 +400,7 @@ def run_translation(
                 rprompt = prompts.build_repair_prompt(masked, clean, missing + dup)
                 r_restored, r_missing, r_dup, r_sc, _ = _run_pass(rprompt, max_toks, mapping)
                 stats["sanitized"] += r_sc
-                if not r_missing and not r_dup and r_restored.strip():
+                if _accepted(src, r_restored, r_missing, r_dup, mapping):
                     return r_restored
             except TranslateError:
                 pass
@@ -361,6 +423,8 @@ def run_translation(
                 original_src=u.src,
                 unit_kind=u.kind,
                 context_tail=ctx,
+                temperature=cfg.temperature,
+                reasoning=cfg.reasoning,
             )
             return masked, mapping, pairs, first, keep, key
 
@@ -375,6 +439,7 @@ def run_translation(
             if not force:
                 hit, cached_text = read_cache(key)
                 if hit:
+                    progressed.set()  # 캐시 적중도 "이 유닛은 이미 해결됨" 신호
                     return u, cached_text, "cached", key, stats
             ctx = context_map.get(u.id) if cfg.context else None
             max_toks = _max_toks(masked)
@@ -387,28 +452,42 @@ def run_translation(
                 unit_kind=u.kind,
             )
 
-            # 0) 최초 패스 — complete→sanitize→unmask. 태그 완전하면 즉시 성공.
-            #    (step 0의 API 오류는 잡 전체 실패로 전파 — 기존 계약 유지)
-            restored, missing, dup, sc, clean = _run_pass(prompt, max_toks, mapping)
+            # 0) 최초 패스 — complete→sanitize→unmask. 태그 완전하고 출력 검증을
+            #    통과하면 즉시 성공.
+            #    유닛 하나만 결정적으로 거부되는 재시도 불가 4xx(초대형 표·초장문이
+            #    서버 n_ctx를 넘겨 400 등)는 잡 전체를 죽이는 대신 래더로 넘겨 강등한다.
+            #    단 이 run에서 성공한 유닛이 아직 없으면 엔드포인트·설정 자체 문제이므로
+            #    종전대로 전파한다 — 전 유닛이 kept로 조용히 done 되는 회귀 방지.
+            api_rejected = False
+            try:
+                restored, missing, dup, sc, clean = _run_pass(prompt, max_toks, mapping)
+            except TranslateUnitRejected:
+                if not progressed.is_set():
+                    raise
+                logger.warning("번역 유닛 최초 패스 API 거부 — 래더로 강등: %s", u.id)
+                api_rejected = True
+                restored, missing, dup, sc, clean = "", [], [], 0, ""
             stats["sanitized"] += sc
-            if not missing and not dup and restored.strip():
+            if not api_rejected and _accepted(u.src, restored, missing, dup, mapping):
                 return u, restored, "translated", key, stats
 
-            # 여기부터 신뢰도 래더 — 태그 누락·중복 또는 빈 출력
+            # 여기부터 신뢰도 래더 — 태그 누락·중복, 빈 출력, 출력 검증 실패, API 거부
             stats["retried"] = 1
             if _halted():
                 return u, u.src, "canceled", key, stats
 
             # 1) repair 패스 — 원문(태그 포함)+깨진 번역문을 주고 태그만 바로잡게 한다.
-            try:
-                rprompt = prompts.build_repair_prompt(masked, clean, missing + dup)
-                r_restored, r_missing, r_dup, r_sc, _ = _run_pass(rprompt, max_toks, mapping)
-                stats["sanitized"] += r_sc
-                if not r_missing and not r_dup and r_restored.strip():
-                    stats["repaired"] = 1
-                    return u, r_restored, "translated", key, stats
-            except TranslateError:
-                pass
+            #    API 거부는 고칠 깨진 출력 자체가 없으므로 건너뛰고 바로 분할로 간다.
+            if not api_rejected:
+                try:
+                    rprompt = prompts.build_repair_prompt(masked, clean, missing + dup)
+                    r_restored, r_missing, r_dup, r_sc, _ = _run_pass(rprompt, max_toks, mapping)
+                    stats["sanitized"] += r_sc
+                    if _accepted(u.src, r_restored, r_missing, r_dup, mapping):
+                        stats["repaired"] = 1
+                        return u, r_restored, "translated", key, stats
+                except TranslateError:
+                    pass
             if _halted():
                 return u, u.src, "canceled", key, stats
 
@@ -475,6 +554,7 @@ def run_translation(
             owner = False
             hit, cached_text = read_cache(key)
             if hit:
+                progressed.set()
                 return u, cached_text, "cached", key, _zero_stats()
             with inflight_lock:
                 flight = inflight.get(key)
@@ -520,30 +600,33 @@ def run_translation(
             finally:
                 flight.event.set()
 
-        # 취소: 디스패치 전 선체크
-        if _cancel_set():
-            flush_cache()
+        def _canceled_result() -> TranslateResult:
             write_state("canceled", done, total)
             return TranslateResult(
-                status="canceled", total=total, translated=0, cached=0,
-                kept_original=[], skipped=skipped,
+                status="canceled", total=total, translated=translated_n, cached=cached_n,
+                kept_original=kept_original, skipped=skipped,
                 api_mode=getattr(client, "api_mode_used", "") or cfg.api_mode,
             )
 
-        canceled = False
-        try:
+        def _dispatch(units: list) -> bool:
+            """유닛 목록을 병렬 번역해 results·통계에 반영. 취소를 만나면 False.
+
+            2단 패스(1차 targets → reconcile 폴백 시 deferred)가 같은 코드를 쓴다.
+            """
+            nonlocal done, translated_n, cached_n, retried_n, repaired_n, split_n, sanitized_n
+            stopped = False
             with cf.ThreadPoolExecutor(max_workers=max(1, cfg.concurrency)) as ex:
                 futures = {}
-                for u in targets:
+                for u in units:
                     if _cancel_set():
-                        canceled = True
+                        stopped = True
                         break
                     futures[ex.submit(translate_unit_shared, u)] = u
 
-                if not canceled:
+                if not stopped:
                     for fut in cf.as_completed(futures):
                         if _cancel_set():
-                            canceled = True
+                            stopped = True
                             for f in futures:
                                 f.cancel()
                             break
@@ -560,7 +643,7 @@ def run_translation(
                             raise
                         if status == "canceled":
                             # 유닛이 래더 도중 취소를 감지하고 조기 반환 — 결과 미반영
-                            canceled = True
+                            stopped = True
                             for f in futures:
                                 f.cancel()
                             break
@@ -588,33 +671,57 @@ def run_translation(
                             flush_cache()
                             # SSE 없이 state 폴링으로 보는 클라이언트(프런트 폴백)용 진행률
                             write_state("running", done, total)
+            return not stopped
+
+        # 취소: 디스패치 전 선체크
+        if _cancel_set():
+            flush_cache()
+            return _canceled_result()
+
+        canceled = False
+        try:
+            canceled = not _dispatch(targets)
         finally:
             # 정상·오류·취소 모든 경로에서 부분 캐시 보존 — 오류 전파 시에도 마지막
             # 주기 flush(10유닛) 이후 완료된 유닛의 번역이 유실되지 않게 한다.
             flush_cache()
 
         if canceled:
-            write_state("canceled", done, total)
-            return TranslateResult(
-                status="canceled", total=total, translated=translated_n, cached=cached_n,
-                kept_original=kept_original, skipped=skipped,
-                api_mode=getattr(client, "api_mode_used", "") or cfg.api_mode,
-            )
+            return _canceled_result()
 
         # 조립 — 번역된 유닛만 교체(나머지 원문 보존)
-        md_trans = {u.id: results[u.id] for u in md_units if u.id in results}
-        assembled = assemble_markdown(md_text, page_separator, md_trans)
+        def _assemble_md() -> str:
+            md_trans = {u.id: results[u.id] for u in md_units if u.id in results}
+            return assemble_markdown(md_text, page_separator, md_trans)
+
+        assembled = _assemble_md()
         new_pages = None
         if layout_pages is not None:
             lay_trans = {u.id: results[u.id] for u in lay_units if u.id in results}
             new_pages = apply_layout(layout_pages, lay_trans)
-            assembled = reconcile_markdown_with_layout(
+            reconciled = reconcile_markdown_with_layout(
                 md_text,
                 assembled,
                 layout_pages,
                 new_pages,
                 page_separator,
             )
+            # 폴백이면 reconcile은 인자로 받은 assembled를 그대로 돌려준다.
+            if reconciled is assembled and deferred:
+                # layout 번역이 md를 덮지 못했다 — 1차에서 미룬 md 유닛을 지금 번역해
+                # 무손실 계약을 지킨다(2단 패스). SSE는 total 증가를 허용한다.
+                total += len(deferred)
+                write_state("running", done, total)
+                logger.info("reconcile 폴백 — 지연 md 유닛 %d개 2차 번역", len(deferred))
+                try:
+                    canceled = not _dispatch(deferred)
+                finally:
+                    flush_cache()
+                if canceled:
+                    return _canceled_result()
+                assembled = _assemble_md()
+            else:
+                assembled = reconciled
             _atomic_write(job_dir / f"layout.{lang}.json", json.dumps(new_pages, ensure_ascii=False))
         _atomic_write(job_dir / f"result.{lang}.md", assembled)
 

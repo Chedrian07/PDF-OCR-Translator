@@ -186,6 +186,42 @@ def apply_layout(pages: list, translations: dict[str, str]) -> list:
     return out
 
 
+def _layout_line_candidates(source_pages: list) -> list[tuple[int, int, str]]:
+    """reconcile이 줄 매핑 후보로 삼는 layout 블록들 → [(페이지 idx, 블록 idx, 원문)].
+
+    필터는 reconcile_markdown_with_layout과 **같은 규칙**이다: ref_text 제외,
+    단일 줄·비어있지 않은 content만. 번역문 쪽 조건은 여기서 알 수 없으므로 뺀다.
+    """
+    out: list[tuple[int, int, str]] = []
+    if not isinstance(source_pages, list):
+        return out
+    for page_idx, source_page in enumerate(source_pages):
+        blocks = source_page.get("blocks", []) if isinstance(source_page, dict) else []
+        for block_idx, source_block in enumerate(blocks):
+            if not isinstance(source_block, dict):
+                continue
+            if str(source_block.get("type") or "") == "ref_text":
+                continue
+            source = str(source_block.get("content") or "").strip()
+            if not source or "\n" in source:
+                continue
+            out.append((page_idx, block_idx, source))
+    return out
+
+
+def layout_line_sources(source_pages: list) -> set[str]:
+    """reconcile이 성공하면 layout 번역으로 덮어쓸 수 있는 md 원문 줄 집합.
+
+    엔진이 md 유닛 1차 번역을 미루는(deferred) 판단에만 쓴다. 같은 원문이 여러
+    블록에 등장하면 번역이 상충할 수 있어(reconcile도 그때 매핑에서 뺀다)
+    보수적으로 제외한다.
+    """
+    seen: dict[str, int] = {}
+    for _page_idx, _block_idx, source in _layout_line_candidates(source_pages):
+        seen[source] = seen.get(source, 0) + 1
+    return {source for source, n in seen.items() if n == 1}
+
+
 def reconcile_markdown_with_layout(
     md_text: str,
     assembled: str,
@@ -210,21 +246,22 @@ def reconcile_markdown_with_layout(
         return assembled
 
     candidates: dict[str, set[str]] = {}
-    for source_page, translated_page in zip(source_pages, translated_pages):
-        source_blocks = source_page.get("blocks", []) if isinstance(source_page, dict) else []
+    for page_idx, block_idx, source in _layout_line_candidates(source_pages):
+        if page_idx >= len(translated_pages):
+            continue
+        translated_page = translated_pages[page_idx]
         translated_blocks = (
             translated_page.get("blocks", []) if isinstance(translated_page, dict) else []
         )
-        for source_block, translated_block in zip(source_blocks, translated_blocks):
-            if not isinstance(source_block, dict) or not isinstance(translated_block, dict):
-                continue
-            if str(source_block.get("type") or "") == "ref_text":
-                continue
-            source = str(source_block.get("content") or "").strip()
-            translated = str(translated_block.get("content") or "").strip()
-            if not source or not translated or "\n" in source or "\n" in translated:
-                continue
-            candidates.setdefault(source, set()).add(translated)
+        if block_idx >= len(translated_blocks):
+            continue
+        translated_block = translated_blocks[block_idx]
+        if not isinstance(translated_block, dict):
+            continue
+        translated = str(translated_block.get("content") or "").strip()
+        if not translated or "\n" in translated:
+            continue
+        candidates.setdefault(source, set()).add(translated)
 
     mapping = {
         source: next(iter(values))

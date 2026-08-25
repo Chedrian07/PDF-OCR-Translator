@@ -14,6 +14,8 @@ from app.translate.glossary import Glossary
 from app.translate.segment import split_markdown
 from app.translate.types import TranslateConfig
 
+from tests.test_translate_engine import koreanize
+
 from tools.translate_eval import (
     build_judge_sample,
     check_glossary,
@@ -67,7 +69,10 @@ def _marker(user: str):
 
 
 class EchoClient:
-    """[번역할 원문] 섹션을 그대로 반환 → 마스킹 왕복 후 원문과 동일(구조 보존)."""
+    """[번역할 원문] 섹션의 구조를 그대로 되돌리되 영문만 한글로 바꿔 반환한다.
+
+    엔진의 출력 측 검증(masking.looks_untranslated)이 영문 echo를 거부하므로
+    test_translate_engine.py의 koreanize 스텁을 그대로 재사용한다."""
 
     def __init__(self):
         self.calls = 0
@@ -76,7 +81,8 @@ class EchoClient:
     def complete(self, system, user, *, max_tokens):
         self.calls += 1
         src = _marker(user)
-        return src if src is not None else ""  # 용어집 프롬프트 → 빈 응답(시드 폴백)
+        # 용어집 프롬프트 → 빈 응답(시드 폴백)
+        return koreanize(src) if src is not None else ""
 
 
 class JudgeStub:
@@ -128,8 +134,14 @@ def _inject(job_dir, unit, translation, lang="ko"):
     """엔진과 동일한 cache_key로 units.json에 특정 번역을 주입한다."""
     tdir = job_dir / "translations" / lang
     glossary = Glossary.load(tdir / "glossary.json")
-    model = json.loads((tdir / "state.json").read_text(encoding="utf-8"))["model"]
-    key = unit_cache_key(unit, glossary, model)
+    state = json.loads((tdir / "state.json").read_text(encoding="utf-8"))
+    key = unit_cache_key(
+        unit,
+        glossary,
+        state["model"],
+        temperature=state.get("temperature", ""),
+        reasoning=state.get("reasoning", ""),
+    )
     cache = json.loads((tdir / "units.json").read_text(encoding="utf-8"))
     cache[key] = translation
     (tdir / "units.json").write_text(
@@ -268,3 +280,36 @@ def test_check_함수_직접호출(job):
 
     rec = reconstruct(j)
     assert check_glossary(rec, j.glossary) == []
+
+
+# ── --judge의 .env 로딩 ──────────────────────────────────────────────────
+
+def test_judge는_dotenv를_읽어_프로바이더를_찾는다(job, tmp_path, monkeypatch, capsys):
+    """문서화된 사용법(uv run python tools/translate_eval.py … --judge)에는 .env를
+    읽는 주체가 없어, 프로바이더 미설정으로 채점이 조용히 건너뛰어졌다."""
+    import tools.translate_eval as te
+
+    env_dir = tmp_path / "cwd"
+    env_dir.mkdir()
+    (env_dir / ".env").write_text(
+        "OPENAI_BASE_URL=https://host/v1\nTRANSLATE_MODEL=env-model\n", encoding="utf-8")
+    for key in ("OPENAI_BASE_URL", "TRANSLATE_MODEL", "OPENAI_MODEL"):
+        monkeypatch.setenv(key, "")   # teardown에서 원상 복구되도록 등록한 뒤
+        monkeypatch.delenv(key)       # 실행 시점엔 미설정 상태로 만든다
+    monkeypatch.chdir(env_dir)
+
+    seen = {}
+
+    def fake_run_judge(rec, cfg, **kw):
+        seen["model"] = cfg.model
+        return {
+            "sample_size": 1, "judged": 1, "failed": 0,
+            "avg_fidelity": 4, "avg_fluency": 4, "avg_terminology": 4,
+            "omission_count": 0, "name_errors": [],
+        }
+
+    monkeypatch.setattr(te, "run_judge", fake_run_judge)
+    assert te.main([str(job), "--judge"]) == 0
+
+    assert seen.get("model") == "env-model"        # .env가 실제로 반영됐다
+    assert "채점 실패" not in capsys.readouterr().err

@@ -19,14 +19,26 @@ import re
 
 import base64
 import functools
+import logging
 from pathlib import Path
 
 from markdown_it.common.utils import escapeHtml
 
 from .render import _restore_table_tags, text_with_math_html
 
-# 벤더 re_match와 동일한 두 그라운딩 문법
-_REF_BLOCK = re.compile(r"<\|ref\|>(.{1,40}?)<\|/ref\|><\|det\|>(.{0,400}?)<\|/det\|>", re.DOTALL)
+logger = logging.getLogger(__name__)
+
+# 벤더 re_match와 동일한 두 그라운딩 문법.
+# 길이 상한(구 `.{1,40}?`/`.{0,400}?`)은 벤더의 무제한 `(.*?)`와 어긋나 있었다 —
+# 라벨이 길거나 박스가 20개를 넘는 ref 블록(det 페이로드 400자 초과)을 벤더는
+# 매치하는데 여기서만 놓쳐 블록 유실·좌표 문자열 본문 노출·crop_index 밀림
+# (벤더는 크롭을 저장했는데 우리 인덱스만 앞당겨짐)이 났다. 대신 여는 태그를
+# 넘지 않는 tempered-dot으로 폭주만 막는다(닫는 태그 결손 시 다음 블록까지
+# 삼키지 않음) — 정상 입력에서는 벤더와 동일한 매치.
+_REF_BLOCK = re.compile(
+    r"<\|ref\|>((?:(?!<\|ref\|>).)*?)<\|/ref\|><\|det\|>((?:(?!<\|det\|>).)*?)<\|/det\|>",
+    re.DOTALL,
+)
 _DET_INLINE = re.compile(r"<\|det\|>\s*([A-Za-z_][\w-]*)\s*\[([^\]]+)\]\s*<\|/det\|>")
 _SPECIAL = re.compile(r"<\|[^|>]{0,64}\|>")
 _SAFE_TYPE = re.compile(r"^[a-z][a-z0-9_-]{0,24}$")
@@ -362,6 +374,27 @@ def _page_image_data_uri(pages_dir: Path, page_number: int) -> str:
         return "data:,"
 
 
+# facsimile standalone은 모든 페이지 PNG를 base64로 메모리에 쌓는다(원본의 4/3 +
+# HTML 문자열 사본 + 응답 인코딩). 대형 스캔 문서에서 워커를 OOM시키므로 원본
+# 바이트 총량에 상한을 둔다. 넘으면 facsimile을 포기하고 좌표 텍스트 렌더로
+# 폴백한다 — 개별 페이지를 빈 이미지로 떨구면 텍스트가 투명한 facsimile에서
+# 백지 페이지가 되기 때문(내용 소실보다 낫다).
+_FACSIMILE_MAX_TOTAL_BYTES = 64 * 1024 * 1024
+
+
+def _facsimile_pages_fit(pages_dir: Path, pages: list[dict]) -> bool:
+    total = 0
+    for p in pages:
+        src = pages_dir / f"page_{int(p.get('page', 0)):04d}.png"
+        try:
+            total += src.stat().st_size
+        except OSError:
+            continue
+        if total > _FACSIMILE_MAX_TOTAL_BYTES:
+            return False
+    return True
+
+
 def render_layout_standalone(
     pages: list[dict], job_dir: Path, title: str, frontend_dir: Path | None,
     lang: str | None = None,
@@ -375,8 +408,15 @@ def render_layout_standalone(
     # body에는 lang을 전달하지 않는다 — 컨테이너(<main>)에서 한 번만 부여.
     page_source = None
     if facsimile and pages_dir is not None:
-        def page_source(page_number):
-            return _page_image_data_uri(pages_dir, page_number)
+        if _facsimile_pages_fit(pages_dir, pages):
+            def page_source(page_number):
+                return _page_image_data_uri(pages_dir, page_number)
+        else:
+            logger.warning(
+                "facsimile 인라인 상한(%dMB) 초과 — 좌표 텍스트 렌더로 폴백 (페이지 %d개)",
+                _FACSIMILE_MAX_TOTAL_BYTES // (1024 * 1024), len(pages),
+            )
+            facsimile = False
     body = render_layout_html(
         pages,
         files_base_url="",

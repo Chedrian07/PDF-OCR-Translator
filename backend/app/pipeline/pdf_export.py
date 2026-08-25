@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 # 캐시된 export PDF가 이전 조판 규칙으로 생성됐는지 판별하는 공개 포맷 버전.
 # 조판 결과가 달라지는 변경에서는 반드시 올려 기존 잡도 다음 요청 때 재생성한다.
-PDF_EXPORT_FORMAT_VERSION = 3
+PDF_EXPORT_FORMAT_VERSION = 4
 
 # 번역 텍스트로 교체할 수 있는 블록 타입. 이 밖의 타입(image·equation·table·
 # algorithm 등)은 내용이 달라도 원본을 유지한다 — 표 HTML·수식 LaTeX를 평문으로
@@ -374,6 +375,20 @@ def _resolve_font(
     return None, "korea"  # PyMuPDF 내장 CJK (Droid Sans Fallback) — 항상 존재
 
 
+@functools.lru_cache(maxsize=8)
+def _metrics_font(fontfile: str | None, fontname: str):
+    """측정 전용 fitz.Font 재사용 캐시.
+
+    Font 생성은 폰트 파일 전체를 파싱한다(실측: AppleMyungjo 18MB 3.1ms,
+    AppleSDGothicNeo 55MB 8.6ms). 계획 함수들은 text_length/has_glyph/ascender
+    같은 읽기 전용 측정에만 쓰므로 내보내기 한 번에 serif/sans/table 폰트를
+    공유해도 조판 결과가 같다. `_resolve_font`는 손상 폰트 검증이 목적이고
+    빌드당 몇 회뿐이라 캐시하지 않는다.
+    """
+    fitz = quiet_fitz()
+    return fitz.Font(fontfile=fontfile) if fontfile else fitz.Font(fontname=fontname)
+
+
 def _document_font_resource_names(doc) -> set[str]:
     """원본 문서에 이미 존재하는 페이지 font resource 이름을 모은다."""
     names: set[str] = set()
@@ -521,9 +536,8 @@ def _portable_text_for_font(text: str, fontfile: str | None) -> str:
     """선택 폰트가 빠뜨린 글리프만 검색 가능한 ASCII로 안전하게 낮춘다."""
     if not fontfile or not text:
         return text
-    fitz = quiet_fitz()
     try:
-        font = fitz.Font(fontfile=fontfile)
+        font = _metrics_font(fontfile, "")
     except Exception:  # noqa: BLE001 — 실제 삽입기의 기존 폴백을 유지한다
         return text
     output: list[str] = []
@@ -567,7 +581,7 @@ def _balance_title_text(
         return text
     fitz = quiet_fitz()
     try:
-        font = fitz.Font(fontfile=fontfile) if fontfile else fitz.Font(fontname=fontname)
+        font = _metrics_font(fontfile, fontname)
     except Exception:  # noqa: BLE001 — 기존 textbox wrapping으로 폴백
         return text
 
@@ -671,6 +685,19 @@ def _table_matrix(content: str) -> list[list[str]] | None:
     return matrix
 
 
+def _page_bounds(page):
+    """블록 좌표와 같은 비회전 내부 좌표계의 페이지 표시 영역(CropBox) Rect.
+
+    `page.mediabox`는 CropBox를 무시한 PDF 원좌표라 CropBox<MediaBox인 문서에서
+    실제 페이지 하단보다 아래를 가드 기준으로 삼는다. `_block_rect`가 만드는
+    좌표와 같은 공간으로 맞추려면 `page.rect`를 derotation까지 거쳐야 한다
+    (회전 페이지에서 `page.rect.y1`을 그대로 쓰면 가로/세로가 뒤바뀐다).
+    """
+    bounds = page.rect * page.derotation_matrix
+    bounds.normalize()
+    return bounds
+
+
 def _rect_horizontal_overlap(a, b) -> float:
     return max(0.0, min(a.x1, b.x1) - max(a.x0, b.x0))
 
@@ -688,7 +715,7 @@ def _free_growth_rect(page, rect, obstacles: list[object]) -> object:
     """
     # 페이지 끝 자체도 장애물이다. 푸터 검출이 빠져도 마지막 행과 재단선 사이에
     # 최소 여백을 남긴다.
-    limit = page.mediabox.y1 - _BLOCK_GAP_PT
+    limit = _page_bounds(page).y1 - _BLOCK_GAP_PT
     for other in obstacles:
         if other is rect or other.is_empty:
             continue
@@ -829,8 +856,12 @@ def _table_cell_rects(
     original: list[_TableCell],
     rows: int,
     cols: int,
-) -> list[object]:
-    """원문 셀 검색 중심으로 표 격자를 추정하고 span 셀 사각형을 반환한다."""
+) -> tuple[list[object], bool]:
+    """원문 셀 검색 중심으로 표 격자를 추정해 `(셀 사각형, 격자 신뢰 여부)`를 낸다.
+
+    `grid_trusted=False`는 원문 셀을 거의 찾지 못해 균등 분할로 강행했다는 뜻이다
+    — 호출부는 그런 표를 교체하지 말고 원문 그대로 보존해야 한다.
+    """
     x_centers: list[list[float]] = [[] for _ in range(cols)]
     y_centers: list[list[float]] = [[] for _ in range(rows)]
     fitz = quiet_fitz()
@@ -861,6 +892,17 @@ def _table_cell_rects(
     grid_x1 = max([table_rect.x1] + [hit.x1 + 2.0 for hit in observed])
     grid_y0 = min([table_rect.y0] + [hit.y0 - 1.0 for hit in observed])
     grid_y1 = max([table_rect.y1] + [hit.y1 + 1.0 for hit in observed])
+    # 텍스트 레이어가 있는 표에서 원문 셀 검색이 절반도 맞지 않으면 아래 균등
+    # 격자는 실제 열 폭과 무관하다 — 번역문이 엉뚱한 셀에 찍히고 인접 셀 원문이
+    # 리댁션된다. 스캔 표(텍스트 레이어 없음)는 지울 원문이 없어 균등 격자가
+    # 무해하므로 그대로 신뢰한다.
+    try:
+        has_source_text = bool(page.get_text("text", clip=search_clip).strip())
+    except Exception:  # noqa: BLE001 — 추출 실패는 스캔 표와 같게 취급
+        has_source_text = False
+    grid_trusted = not has_source_text or (
+        len(observed) * 2 >= sum(1 for cell in original if cell.text)
+    )
     xs = _grid_boundaries(x_centers, grid_x0, grid_x1)
     ys = _grid_boundaries(y_centers, grid_y0, grid_y1)
     horizontal_rules = _horizontal_table_rules(page, table_rect)
@@ -920,43 +962,42 @@ def _table_cell_rects(
                 lower_y, lower_width = lower
                 rect.y1 = max(rect.y1, lower_y - lower_width / 2 - 0.1)
         rects.append(rect)
-    return rects
+    return rects, grid_trusted
 
 
-def _table_cell_source_style(page, cell_rect) -> tuple[float, int, bool, object]:
-    """원본 셀의 실제 span 크기·정렬·굵기와 텍스트 redaction 영역을 추정한다."""
-    fitz = quiet_fitz()
-    spans = []
+def _table_cell_source_style(
+    page, cell_rect, records: list[_SourceSpan] | None = None,
+) -> tuple[float, int, bool, object]:
+    """원본 셀의 실제 span 크기·정렬·굵기와 텍스트 redaction 영역을 추정한다.
+
+    `records`는 페이지에서 이미 한 번 읽어둔 span 목록이다. 넘기지 않으면 이
+    함수가 직접 추출하지만, 셀마다 페이지 전체를 재추출하면 큰 표에서 비용이
+    셀 수만큼 곱해진다.
+    """
+    if records is None:
+        records = _source_span_records(quiet_fitz(), page)
     # `get_text(..., clip=...)`는 경계에 걸친 이웃 span을 잘라서 반환한다.
     # 그 잘린 조각까지 현재 셀의 redaction으로 합치면, 왼쪽 셀 번역이 오른쪽
     # 값의 첫 글자들을 지우는 일이 생긴다. 전체 span의 중심이 실제 셀 안에
     # 있는 경우만 소유하게 해 인접 셀 경계를 침범하지 않는다.
-    for block in page.get_text("dict").get("blocks", []):
-        for line in block.get("lines", []):
-            for span in line.get("spans", []):
-                text = str(span.get("text") or "").strip()
-                bbox = span.get("bbox")
-                if not text or not bbox:
-                    continue
-                rect = fitz.Rect(bbox)
-                center = (rect.tl + rect.br) / 2
-                if cell_rect.contains(center):
-                    spans.append((span, rect))
+    spans = [
+        span for span in records
+        if cell_rect.contains((span.rect.tl + span.rect.br) / 2)
+    ]
 
     if not spans:
         size = min(12.0, max(_MIN_FONT_PT, cell_rect.height * 0.65))
         return size, 0, False, +cell_rect
 
-    sizes = [float(span.get("size") or 0.0) for span, _ in spans]
-    sizes = [size for size in sizes if size > 0]
+    sizes = [span.size for span in spans if span.size > 0]
     source_size = median(sizes) if sizes else cell_rect.height * 0.65
-    ink = +spans[0][1]
+    ink = +spans[0].rect
     bold_chars = total_chars = 0
-    for span, rect in spans:
-        ink.include_rect(rect)
-        count = max(1, len(str(span.get("text") or "").strip()))
+    for span in spans:
+        ink.include_rect(span.rect)
+        count = max(1, len(span.text.strip()))
         total_chars += count
-        if int(span.get("flags") or 0) & 16:
+        if span.flags & 16:
             bold_chars += count
 
     center = (ink.x0 + ink.x1) / 2
@@ -1239,7 +1280,7 @@ def _microfix_plan(
 ) -> _Replacement | None:
     """원문 한 행 안에서 더 짧은 안전 치환만 허용하는 보존 텍스트 계획."""
     try:
-        font = fitz.Font(fontfile=fontfile) if fontfile else fitz.Font(fontname=fontname)
+        font = _metrics_font(fontfile, fontname)
         width = (
             font.text_length(text, fontsize=fontsize)
             if fontfile
@@ -1444,13 +1485,14 @@ def _plan_shrink_to_fit(
     rot = page.rotation
     fitz = quiet_fitz()
     try:
-        font = fitz.Font(fontfile=fontfile) if fontfile else fitz.Font(fontname=fontname)
+        font = _metrics_font(fontfile, fontname)
     except Exception:  # noqa: BLE001 — 삽입기와 동일한 내장 CJK로 메트릭 폴백
-        font = fitz.Font(fontname="korea")
+        font = _metrics_font(None, "korea")
 
+    page_limit = _page_bounds(page).y1 - _BLOCK_GAP_PT
     grown = +(max_rect if max_rect is not None else rect)
     if max_rect is None:
-        grown.y1 = page.mediabox.y1 - _BLOCK_GAP_PT
+        grown.y1 = page_limit
     base = +rect
     base.y1 = min(base.y1, grown.y1)
     if base.y1 <= base.y0 + 0.5:
@@ -1497,7 +1539,7 @@ def _plan_shrink_to_fit(
                     ink = _textbox_ink_rect(
                         page, candidate, shape, size, font, spare, bold,
                     )
-                    if ink.y1 > page.mediabox.y1 - _BLOCK_GAP_PT:
+                    if ink.y1 > page_limit:
                         continue
                     if _ink_collides(ink, avoid):
                         continue
@@ -1612,7 +1654,7 @@ def _plan_single_line(
         return None
     fitz = quiet_fitz()
     try:
-        font = fitz.Font(fontfile=fontfile) if fontfile else fitz.Font(fontname=fontname)
+        font = _metrics_font(fontfile, fontname)
     except Exception:  # noqa: BLE001 — textbox 폴백이 있으므로 품질 경로만 포기
         return None
     vertical = +(max_rect if max_rect is not None else rect)
@@ -1831,9 +1873,10 @@ def _plan_rich_prefix(
     if not markup:
         return None
     fitz = quiet_fitz()
+    page_limit = _page_bounds(page).y1 - _BLOCK_GAP_PT
     grown = +(max_rect if max_rect is not None else rect)
     if max_rect is None:
-        grown.y1 = page.mediabox.y1 - _BLOCK_GAP_PT
+        grown.y1 = page_limit
     base = +rect
     base.y1 = min(base.y1, grown.y1)
     if base.y1 <= base.y0 + 0.5:
@@ -1894,7 +1937,7 @@ def _plan_rich_prefix(
                     for line_rect in line_rects[1:]:
                         ink.include_rect(line_rect)
                     ink += (-0.5, -0.5, 0.5, 0.5)
-                    if ink.y1 > page.mediabox.y1 - _BLOCK_GAP_PT:
+                    if ink.y1 > page_limit:
                         continue
                     if _ink_collides(ink, avoid):
                         continue
@@ -1987,7 +2030,8 @@ def _plan_flow_group(
             quiet_fitz().Rect(column_x0, rect.y0, column_x1, rect.y1), rect,
         ) >= min(column_width, rect.width) * 0.15
     ]
-    lower_bound = page.mediabox.y0 + _BLOCK_GAP_PT
+    page_area_bounds = _page_bounds(page)
+    lower_bound = page_area_bounds.y0 + _BLOCK_GAP_PT
     for obstacle in relevant_fixed:
         if obstacle.y1 <= original_start + 0.5:
             lower_bound = max(lower_bound, obstacle.y1 + _FLOW_OBSTACLE_GAP_PT)
@@ -2000,7 +2044,7 @@ def _plan_flow_group(
     if shifted_start < preferred_start - 0.5:
         starts.append(shifted_start)
 
-    end = page.mediabox.y1 - _BLOCK_GAP_PT
+    end = page_area_bounds.y1 - _BLOCK_GAP_PT
     for obstacle in relevant_fixed:
         if obstacle.y0 > original_bottom + 0.5:
             end = min(end, obstacle.y0 - _FLOW_OBSTACLE_GAP_PT)
@@ -2366,9 +2410,16 @@ def build_translated_pdf(
                         continue
                     old_cells, row_count, col_count = old_parsed
                     new_cells = new_parsed[0]
-                    cell_rects = _table_cell_rects(
+                    cell_rects, grid_trusted = _table_cell_rects(
                         page, table_rect, old_cells, row_count, col_count,
                     )
+                    if not grid_trusted:
+                        result.kept += 1
+                        result.specialist_kept["table"] = result.specialist_kept.get("table", 0) + 1
+                        result.warnings.append(
+                            f"p{pno}: 표 셀 격자 추정 실패(원문 검색 불일치) — 원문 표 보존"
+                        )
+                        continue
                     table_targets: list[_Replacement] = []
                     changed_cell_specs = [
                         (old_cell, new_cell, cell_rect)
@@ -2389,7 +2440,7 @@ def build_translated_pdf(
                             _plain_text(new_cell.text), table_ff,
                         )
                         base_pt, cell_align, cell_bold, source_redact = (
-                            _table_cell_source_style(page, cell_rect)
+                            _table_cell_source_style(page, cell_rect, source_records)
                         )
                         plan = _plan_single_line(
                             page,
@@ -2616,7 +2667,6 @@ def build_translated_pdf(
                 _normalize_repeated_scheme_links(page, repeated_scheme_link_rects)
 
             # 2) 원문 텍스트 리댁션 (이미지·그래픽 보존) — 삽입 전에 일괄 적용
-            redact_rects = []
             source_rects = []
             for target in targets:
                 # 삽입 bbox가 아래 빈 공간으로 커져도 실제 원문 bbox만 지운다.
@@ -2625,12 +2675,16 @@ def build_translated_pdf(
                     target.redact_rect if target.redact_rect is not None else target.plan.rect,
                 )
                 for rr in target_redactions:
-                    redact_rects.append(+rr)
                     page.add_redact_annot(rr)
-                source_rects.append(+(
-                    target.source_rect
-                    if target.source_rect is not None
-                    else target_redactions[0]
+                source_rects.append((
+                    +(
+                        target.source_rect
+                        if target.source_rect is not None
+                        else target_redactions[0]
+                    ),
+                    # 이모지는 글자 한 칸 크기다. 블록 폰트의 2배를 넘는 인스턴스는
+                    # 인라인 그림·로고·아이콘이므로 제거 대상에서 뺀다.
+                    max(2.0 * target.plan.fontsize, 20.0),
                 ))
             # 텍스트만 제거한다. graphics 기본값(REMOVE_IF_COVERED)을 그대로 두면
             # 블록 안의 밑줄·도형·차트 선까지 사라져 "레이아웃 보존"을 위반한다.
@@ -2644,11 +2698,13 @@ def build_translated_pdf(
             # 기록해 텍스트 리댁션만으로는 이미지가 번역문 위에 남는다. 교체
             # 사각형에 완전히 포함된 소형(25% 이하) 인스턴스만 별도 pass로
             # 지운다 — 부분 겹침 rect에 IMAGE_REMOVE를 쓰면 걸친 그림에 흰
-            # 구멍이 나므로 절대 블록 rect 전체로 걸지 않는다.
+            # 구멍이 나므로 절대 블록 rect 전체로 걸지 않는다. 면적비만으로는
+            # 넓은 블록 안의 100pt 인라인 그림도 걸리므로 '글자 한 칸 크기의
+            # 정사각형'이라는 이모지 고유 성질을 절대 크기·종횡비로 함께 건다.
             emoji_boxes = []
             for bbox in raster_rects:
                 area = bbox.width * bbox.height
-                for rr in source_rects:
+                for rr, size_limit in source_rects:
                     # Quartz 반올림으로 이미지가 글리프 상자를 1pt 미만 벗어나는
                     # 경우가 있어 1pt 허용 오차로 '완전 포함'을 판정한다.
                     if (
@@ -2657,6 +2713,8 @@ def build_translated_pdf(
                         and bbox.x1 <= rr.x1 + 1.0
                         and bbox.y1 <= rr.y1 + 1.0
                         and 0 < area <= rr.width * rr.height * 0.25
+                        and max(bbox.width, bbox.height) <= size_limit
+                        and 0.5 <= bbox.width / max(bbox.height, 0.01) <= 2.0
                     ):
                         emoji_boxes.append(bbox)
                         break

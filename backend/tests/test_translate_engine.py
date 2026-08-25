@@ -4,15 +4,39 @@ torch/OCR 없이 requests+표준 라이브러리만으로 도는지도 함께 �
 """
 
 import json
+import re
 import threading
 
 import pytest
 
 from app.translate.engine import run_translation
+from app.translate.masking import mask, unmask
 from app.translate.prompts import build_unit_prompt
 from app.translate.types import TranslateConfig, TranslateResult
 
 SEP = "\n\n---\n\n"
+
+# 영문 단어만 같은 길이의 한글로 바꾸는 치환 — 플레이스홀더는 첫 그룹으로 먼저 잡아 보존.
+_KO_ECHO_RE = re.compile(r"(<[mkgucft]\d+\b[^>]*>)|([A-Za-z]+)")
+
+
+def koreanize(text: str) -> str:
+    """구조는 그대로 두고 영문 단어만 한글로 바꾼다 (가짜 client 공용 스텁).
+
+    엔진의 출력 측 검증(masking.looks_untranslated)이 영문 echo를 거부하므로
+    "원문 구조를 그대로 되돌리되 한국어로 번역된 것처럼 보이는" 스텁이 필요하다.
+    길이비 1.0·한글 비율 높음으로 검증을 통과하면서 마스킹 왕복·조립 불변식은
+    종전 EchoClient와 똑같이 검증된다.
+    """
+    return _KO_ECHO_RE.sub(lambda m: m.group(1) or "가" * len(m.group(2)), text)
+
+
+def ko_expected(md_text: str) -> str:
+    """EchoClient로 번역했을 때의 result.ko.md 기대값 — 원문에 같은 규칙을 적용."""
+    masked, mapping = mask(md_text)
+    restored, _missing, _dup = unmask(koreanize(masked), mapping)
+    return restored
+
 
 RESULT_MD = (
     "# Deep Learning\n\n"
@@ -41,16 +65,30 @@ def _marker(user: str) -> str | None:
 
 
 class EchoClient:
-    """[번역할 원문] 섹션을 그대로 반환 → 마스킹 왕복 후 원문과 동일."""
+    """[번역할 원문] 섹션의 구조를 그대로 되돌리되 영문만 한글로 바꿔 반환한다.
+
+    마스킹 왕복은 원문과 동일하게 검증되고, 출력 측 검증(looks_untranslated)도
+    통과한다 — 종전의 순수 echo는 '영문 그대로'라 이제 번역 실패로 취급된다."""
 
     def __init__(self):
         self.calls = 0
+        self.unit_calls = 0  # 유닛 번역 호출만 (용어집 프롬프트 제외)
         self.api_mode_used = "chat"
+        self._count_lock = threading.Lock()
+
+    def _count(self, is_unit: bool) -> None:
+        """동시 worker에서도 안전하게 센다 (하위 스텁이 super()로 재사용)."""
+        with self._count_lock:
+            self.calls += 1
+            if is_unit:
+                self.unit_calls += 1
 
     def complete(self, system, user, *, max_tokens):
-        self.calls += 1
         src = _marker(user)
-        return src if src is not None else ""  # 용어집 프롬프트 → 빈 응답(시드 폴백)
+        self._count(src is not None)
+        if src is None:
+            return ""  # 용어집 프롬프트 → 빈 응답(시드 폴백)
+        return koreanize(src)
 
 
 class MarkerClient(EchoClient):
@@ -61,7 +99,7 @@ class MarkerClient(EchoClient):
         src = _marker(user)
         if src is None:
             return ""
-        return "\n".join("§" + ln for ln in src.split("\n"))
+        return "\n".join("§" + koreanize(ln) for ln in src.split("\n"))
 
 
 class FaultyClient(EchoClient):
@@ -74,8 +112,7 @@ class FaultyClient(EchoClient):
         src = _marker(user)
         if src is None:
             return ""
-        import re
-        return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", src)
+        return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", koreanize(src))
 
 
 def _repair_src(user: str) -> str | None:
@@ -94,12 +131,12 @@ class RepairClient(EchoClient):
         self.calls += 1
         rsrc = _repair_src(user)
         if rsrc is not None:
-            return rsrc                                   # repair: 태그 그대로 살려 반환
+            return koreanize(rsrc)                        # repair: 태그 그대로 살려 반환
         src = _marker(user)
         if src is None:
             return ""
-        import re
-        return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", src)  # 최초: 태그 전부 소실
+        # 최초: 태그 전부 소실
+        return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", koreanize(src))
 
 
 class SplitClient(EchoClient):
@@ -112,11 +149,10 @@ class SplitClient(EchoClient):
         src = _marker(user)
         if src is None:
             return ""
-        import re
         tags = re.findall(r"<[mkgucft]\d+\b[^>]*>", src)
         if len(tags) >= 2:
-            return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", src)  # 여러 태그 → 소실
-        return src                                        # 0~1개 → 보존(성공)
+            return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", koreanize(src))  # 여러 태그 → 소실
+        return koreanize(src)                             # 0~1개 → 보존(성공)
 
 
 class DelimiterClient(EchoClient):
@@ -127,7 +163,7 @@ class DelimiterClient(EchoClient):
         src = _marker(user)
         if src is None:
             return ""
-        return src + " \\(추가\\) $$없음$$ <PAGE>"
+        return koreanize(src) + " \\(추가\\) $$없음$$ <PAGE>"
 
 
 class TableSplitClient(EchoClient):
@@ -141,11 +177,10 @@ class TableSplitClient(EchoClient):
         src = _marker(user)
         if src is None:
             return ""
-        import re
         tags = re.findall(r"<[mkgucft]\d+\b[^>]*>", src)
         if len(tags) >= 20:
-            return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", src)
-        return src
+            return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", koreanize(src))
+        return koreanize(src)
 
 
 @pytest.fixture
@@ -191,16 +226,21 @@ def test_title_prompt_prevents_ui_label_style_abbreviation():
     assert prompt.endswith("[번역할 원문]\nHow to Read a Paper")
 
 
-def test_echo_결과_바이트동일_및_레이아웃_content동일(job, cfg):
+def test_echo_결과_구조동일_및_레이아웃_필드보존(job, cfg):
     res = run_translation(job, "ko", cfg, client=EchoClient())
     assert isinstance(res, TranslateResult) and res.status == "done"
 
-    # result.ko.md == result.md (바이트 동일)
-    assert (job / "result.ko.md").read_text(encoding="utf-8") == RESULT_MD
+    # result.ko.md == 원문에 같은 치환을 적용한 결과 (구조·수식·페이지 구분자 바이트 동일)
+    assert (job / "result.ko.md").read_text(encoding="utf-8") == ko_expected(RESULT_MD)
 
-    # layout.ko.json: content는 원본과 동일, 그 외 필드도 완전 동일
+    # layout.ko.json: content만 번역되고 그 외 필드는 원본과 완전 동일
     out = json.loads((job / "layout.ko.json").read_text(encoding="utf-8"))
-    assert out == LAYOUT  # Echo가 content를 원문 그대로 되돌리므로 전체 동일
+    expected_layout = json.loads(json.dumps(LAYOUT))
+    for page in expected_layout:
+        for block in page["blocks"]:
+            if "image" not in block:
+                block["content"] = koreanize(block["content"])
+    assert out == expected_layout
 
     st = _state(job)
     assert st["status"] == "done" and st["current"] == st["total"] == res.total
@@ -220,7 +260,7 @@ def test_marker_md와_layout에_반영_필드보존(job, cfg):
 
     out = json.loads((job / "layout.ko.json").read_text(encoding="utf-8"))
     title = out[0]["blocks"][0]
-    assert title["content"].startswith("§") and title["content"].endswith("Deep Learning")
+    assert title["content"] == "§" + koreanize("Deep Learning")
     assert title["bbox"] == [0, 0, 999, 80] and title["fs"] == 2.5 and title["bold"] is True
     assert out[0]["fonts_v"] == "2"
     # 이미지 블록은 손대지 않음
@@ -233,7 +273,7 @@ def test_캐시_2회차_호출없음(job, cfg):
     res2 = run_translation(job, "ko", cfg, client=echo2)
     assert echo2.calls == 0                    # 용어집 로드 + 전 유닛 캐시 적중
     assert res2.cached == res2.total and res2.translated == 0
-    assert (job / "result.ko.md").read_text(encoding="utf-8") == RESULT_MD
+    assert (job / "result.ko.md").read_text(encoding="utf-8") == ko_expected(RESULT_MD)
 
 
 def test_faulty_재시도후_원문유지(job, cfg):
@@ -274,8 +314,7 @@ def test_취소_래더단계_사이_감지_repair_호출없음(tmp_path, cfg):
             if src is None:
                 return ""
             ev.set()
-            import re
-            return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", src)
+            return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", koreanize(src))
 
     md = "The loss $L$ is minimized during training.\n"
     (tmp_path / "result.md").write_text(md, encoding="utf-8")
@@ -311,7 +350,7 @@ def test_force_재번역(job, cfg):
     res = run_translation(job, "ko", cfg, client=forced, force=True)
     assert forced.calls > 0                       # 캐시 무시하고 재번역
     assert res.translated == res.total and res.cached == 0
-    assert (job / "result.ko.md").read_text(encoding="utf-8") == RESULT_MD
+    assert (job / "result.ko.md").read_text(encoding="utf-8") == ko_expected(RESULT_MD)
 
 
 def test_result_md_없으면_에러(tmp_path, cfg):
@@ -332,7 +371,7 @@ def test_layout_없어도_동작(tmp_path, cfg):
     (tmp_path / "result.md").write_text(RESULT_MD, encoding="utf-8")
     res = run_translation(tmp_path, "ko", cfg, client=EchoClient())
     assert res.status == "done"
-    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == RESULT_MD
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(RESULT_MD)
     assert not (tmp_path / "layout.ko.json").exists()
 
 
@@ -474,7 +513,7 @@ def test_step0_API오류시_큐드레인_방지_및_부분캐시_flush(tmp_path,
                 self.unit_calls += 1
                 n = self.unit_calls
             if n <= 4:
-                return src
+                return koreanize(src)
             time.sleep(0.05)                     # 네트워크 왕복 재현 — 메인 스레드가 abort할 틈
             raise TranslateAPIError("번역 API 연결 실패: dead endpoint")
 
@@ -509,7 +548,7 @@ def test_초대형_표유닛은_행경계_분할로_복구(tmp_path, cfg):
     res = run_translation(tmp_path, "ko", cfg, client=TableSplitClient())
     assert res.kept_original == []
     # Echo 기반이라 성공 경로는 원문 복원 — 표 구조가 바이트 그대로 살아야 한다
-    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == md
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(md)
     rep = _json.loads((tmp_path / "translations" / "ko" / "report.json").read_text(encoding="utf-8"))
     assert rep["split"] == 1
 
@@ -522,20 +561,11 @@ def test_중복_유닛은_한_번만_API를_탄다_single_flight(tmp_path, cfg):
     두 워커가 확실히 겹치도록 응답을 지연시켜 그 창을 강제로 연다."""
     from dataclasses import replace
 
-    import threading as _th
     import time as _time
 
     class SlowEcho(EchoClient):
-        def __init__(self):
-            super().__init__()
-            self.lock = _th.Lock()
-            self.unit_calls = 0
-
         def complete(self, system, user, *, max_tokens):
-            src = _marker(user)
-            if src is not None:
-                with self.lock:
-                    self.unit_calls += 1
+            if _marker(user) is not None:
                 # waiter의 옛 deadline(아래 timeout_s=0.05)보다 길게 붙잡는다.
                 # deadline이 있으면 0.5초 첫 poll 뒤 같은 원문을 다시 API로 보낸다.
                 _time.sleep(0.65)
@@ -557,7 +587,7 @@ def test_중복_유닛은_한_번만_API를_탄다_single_flight(tmp_path, cfg):
     assert res.cached == 1, f"중복 유닛이 캐시로 처리되지 않았다 (cached={res.cached})"
     # 고유 유닛은 2개 — 중복 본문이 두 번 호출되면 3이 된다.
     assert client.unit_calls == 2, f"중복 유닛이 API를 두 번 탔다 (calls={client.unit_calls})"
-    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == md
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(md)
 
 
 def test_마스킹_미리보기가_같은_다른_수식은_캐시를_공유하지_않음(tmp_path, cfg):
@@ -578,7 +608,7 @@ def test_마스킹_미리보기가_같은_다른_수식은_캐시를_공유하�
             if src is None:
                 return ""
             self.unit_calls += 1
-            return src
+            return koreanize(src)
 
     first = "This method carefully uses $abcdefghijklm+1$ in every evaluation."
     second = "This method carefully uses $abcdefghijklm+2$ in every evaluation."
@@ -591,7 +621,7 @@ def test_마스킹_미리보기가_같은_다른_수식은_캐시를_공유하�
     assert res.status == "done"
     assert res.translated == 2 and res.cached == 0
     assert client.unit_calls == 2
-    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == md
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(md)
 
 
 def test_같은_문장이라도_직전_문맥이_다르면_캐시를_공유하지_않음(tmp_path, cfg):
@@ -609,7 +639,7 @@ def test_같은_문장이라도_직전_문맥이_다르면_캐시를_공유하�
             if src is None:
                 return ""
             self.unit_calls += 1
-            return src
+            return koreanize(src)
 
     repeated = "This ambiguous result should be interpreted using its preceding context."
     md = (
@@ -628,7 +658,7 @@ def test_같은_문장이라도_직전_문맥이_다르면_캐시를_공유하�
     assert res.status == "done"
     assert res.translated == 4 and res.cached == 0
     assert client.unit_calls == 4
-    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == md
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(md)
 
 
 def test_single_flight_owner_API오류도_waiter가_중복호출하지_않음(tmp_path, cfg):
@@ -688,7 +718,7 @@ def test_single_flight_cache_flush가_worker_publish와_경쟁하지_않음(
                 n = self.unit_calls
             if n > 10:
                 assert release.wait(3), "periodic units.json flush가 오지 않았다"
-            return src
+            return koreanize(src)
 
     original_write = engine._atomic_write_json
 
@@ -738,16 +768,9 @@ def test_single_flight_대기중_취소는_추가_API를_시작하지_않음(tmp
     ev = _th.Event()
 
     class BlockingEcho(EchoClient):
-        def __init__(self):
-            super().__init__()
-            self.lock = _th.Lock()
-            self.unit_calls = 0
-
         def complete(self, system, user, *, max_tokens):
             if _marker(user) is not None:
-                with self.lock:
-                    self.unit_calls += 1
-                ev.set()        # 유닛 번역 진입을 알리고
+                ev.set()          # 유닛 번역 진입을 알리고
                 _time.sleep(1.2)  # 대기자가 취소를 만나도록 붙잡아 둔다
             return super().complete(system, user, max_tokens=max_tokens)
 
@@ -769,3 +792,188 @@ def test_single_flight_대기중_취소는_추가_API를_시작하지_않음(tmp
     # requests의 이미 진행 중인 owner 호출 자체는 중단할 수 없지만, waiter는 새 호출을
     # 만들지 않고 executor가 owner를 회수한 뒤 제한 시간 안에 canceled로 끝난다.
     assert _time.monotonic() - started < 5
+
+
+# ── 출력 측 검증 (거부문·요약·영문 echo가 문단을 대체하는 것 차단) ──────────
+
+@pytest.mark.parametrize("refusal", [
+    "I cannot translate this text.",          # 영문 거부문 → 한글 비율 검사
+    "죄송합니다, 번역할 수 없습니다.",         # 한국어 거부문 → 길이비 검사
+])
+def test_모델_거부문은_원문유지되고_캐시에_남지_않는다(tmp_path, cfg, refusal):
+    """플레이스홀더가 온전해도 거부문은 성공으로 치지 않는다.
+
+    종전엔 report.json이 translated=1·kept_original=[]로 정상 완료를 보고했고,
+    거부문이 units.json에 캐시돼 모델을 고쳐도 force 없이는 손실이 재사용됐다."""
+
+    class RefusingClient(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            if _marker(user) is None and _repair_src(user) is None:
+                return ""                     # 용어집 프롬프트 → 시드 폴백
+            return refusal
+
+    md = "The accuracy improved on every benchmark dataset that we carefully evaluated.\n"
+    res, report, md_out = _run_md(tmp_path, cfg, md, RefusingClient())
+
+    assert res.status == "done"
+    assert res.kept_original == ["md:0:0"] and res.translated == 0
+    assert report["kept_original"] == ["md:0:0"] and report["retried"] >= 1
+    assert md_out == md                       # 무손실 — 원문 그대로 남는다
+    units = json.loads(
+        (tmp_path / "translations" / "ko" / "units.json").read_text(encoding="utf-8")
+    )
+    assert units == {}                        # 거부문이 캐시를 오염시키지 않는다
+
+
+def test_고유명사만_있는_짧은_유닛은_출력검증에_걸리지_않는다(tmp_path, cfg):
+    """입력 측 should_skip과 대칭 — 영단어 2개 미만이면 원문 유지가 정상이라 통과."""
+    md = "# Adam\n\nThe optimizer converges quickly on this benchmark task.\n"
+
+    class PartialEcho(EchoClient):
+        """제목은 원문 그대로, 본문만 한글로 — 제목이 kept로 떨어지면 안 된다."""
+
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            src = _marker(user)
+            if src is None:
+                return ""
+            return src if src.strip() == "# Adam" else koreanize(src)
+
+    res, _report_json, md_out = _run_md(tmp_path, cfg, md, PartialEcho())
+    assert res.kept_original == []
+    assert "# Adam" in md_out
+
+
+# ── 2단 패스 (md 유닛 + layout 유닛 이중 번역 제거) ─────────────────────────
+
+def _layout_of(lines, page=1):
+    return [{"page": page, "width": 1000, "height": 1400, "blocks": [
+        {"type": "text", "bbox": [0, i * 100, 999, i * 100 + 80], "content": ln}
+        for i, ln in enumerate(lines)
+    ]}]
+
+
+def test_md줄이_layout과_일치하면_유닛당_한_번만_번역한다(tmp_path, cfg):
+    """reconcile이 성공하면 md 유닛 번역은 전량 폐기된다 — 아예 호출하지 않는다."""
+    lines = [
+        "The accuracy improved on every benchmark dataset here.",
+        "We trained the model with a very small learning rate.",
+        "The evaluation protocol follows the earlier published work.",
+    ]
+    md = "\n\n".join(lines) + "\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    (tmp_path / "layout.json").write_text(
+        json.dumps(_layout_of(lines), ensure_ascii=False), encoding="utf-8")
+
+    client = EchoClient()
+    res = run_translation(tmp_path, "ko", cfg, client=client)
+
+    assert res.status == "done"
+    # layout 유닛 3회뿐. 종전엔 md 유닛 3회가 더 나가고 그 결과는 통째로 버려졌다.
+    assert client.unit_calls == len(lines)
+    assert res.total == len(lines)
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(md)
+
+
+def test_커버리지_미달이면_지연된_md유닛을_2차패스로_번역한다(tmp_path, cfg):
+    """layout이 md를 못 덮는 문서에서는 결과가 2단 패스 도입 전과 바이트 동일해야 한다."""
+    covered_line = "The accuracy improved on every benchmark dataset here."
+    others = [
+        "We trained the model with a very small learning rate.",
+        "The evaluation protocol follows the earlier published work.",
+        "Each configuration was repeated with three random seeds.",
+        "The remaining sections describe the ablation experiments.",
+    ]
+    md = "\n\n".join([covered_line, *others]) + "\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    (tmp_path / "layout.json").write_text(
+        json.dumps(_layout_of([covered_line]), ensure_ascii=False), encoding="utf-8")
+
+    client = EchoClient()
+    res = run_translation(tmp_path, "ko", cfg, client=client)
+
+    assert res.status == "done"
+    # 1차 total = md 4 + layout 1, 2차에서 지연된 md 유닛 1개가 더해진다
+    assert res.total == 6 and res.kept_original == []
+    assert client.unit_calls == 6            # 1차 5 + 2차(지연된 md 유닛) 1
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(md)
+
+
+# ── step-0 결정적 4xx 강등 ──────────────────────────────────────────────────
+
+def test_성공유닛_이후_결정적_4xx는_해당_유닛만_원문유지(tmp_path, cfg):
+    """초대형 유닛 하나가 HTTP 400을 받아도 문서 전체를 실패시키지 않는다 —
+    래더로 강등돼 kept_original에 남고 나머지는 정상 번역된다."""
+    from dataclasses import replace
+
+    from app.translate.types import TranslateUnitRejected
+
+    class RejectOneClient(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            src = _marker(user)
+            if src is None:
+                return ""
+            if "oversized" in src:
+                raise TranslateUnitRejected("번역 API 오류 (HTTP 400): context length")
+            return koreanize(src)
+
+    md = (
+        "The first paragraph explains the training procedure in detail.\n\n"
+        "This oversized merged table exceeds the server context window.\n\n"
+        "The last paragraph summarizes the evaluation protocol briefly.\n"
+    )
+    # concurrency=1 — 거부 유닛보다 앞선 유닛이 반드시 먼저 API를 탄다(결정성)
+    res, report, md_out = _run_md(
+        tmp_path, replace(cfg, concurrency=1), md, RejectOneClient(),
+    )
+
+    assert res.status == "done"
+    assert res.kept_original == ["md:0:1"] and res.translated == 2
+    assert report["retried"] == 1
+    assert "This oversized merged table exceeds the server context window." in md_out
+    assert _state(tmp_path)["status"] == "done"
+
+
+def test_첫_유닛부터_4xx면_종전대로_잡_전체_실패(tmp_path, cfg):
+    """전역 원인(잘못된 payload·모델명)일 때 전 유닛이 kept로 조용히 done 되면 안 된다."""
+    from dataclasses import replace
+
+    from app.translate.types import TranslateError, TranslateUnitRejected
+
+    class AlwaysRejectClient(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            if _marker(user) is None:
+                return ""
+            raise TranslateUnitRejected("번역 API 오류 (HTTP 400): bad request")
+
+    md = "The first paragraph explains the training procedure in detail.\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    with pytest.raises(TranslateError):
+        run_translation(
+            tmp_path, "ko", replace(cfg, concurrency=1), client=AlwaysRejectClient(),
+        )
+    assert _state(tmp_path)["status"] == "error"
+
+
+# ── 캐시 키에 샘플링 설정 포함 ─────────────────────────────────────────────
+
+def test_reasoning_설정이_바뀌면_캐시를_재사용하지_않는다(job, cfg):
+    """reasoning/temperature는 출력을 바꾸는 요청 파라미터다 — 캐시 키 재료."""
+    from dataclasses import replace
+
+    run_translation(job, "ko", cfg, client=EchoClient())
+
+    same = EchoClient()
+    run_translation(job, "ko", cfg, client=same)
+    assert same.calls == 0                       # 같은 설정 → 전 유닛 캐시 적중
+
+    changed = EchoClient()
+    res = run_translation(job, "ko", replace(cfg, reasoning="high"), client=changed)
+    assert changed.calls > 0 and res.cached == 0 and res.translated == res.total
+
+    hot = EchoClient()
+    res2 = run_translation(job, "ko", replace(cfg, temperature="0.7"), client=hot)
+    assert hot.calls > 0 and res2.cached == 0

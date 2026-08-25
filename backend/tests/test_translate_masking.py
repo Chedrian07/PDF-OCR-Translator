@@ -137,3 +137,74 @@ def test_should_skip_참고문헌_모양감지():
     # 본문이 인용으로 시작하는 산문은 스킵하면 안 됨 (서지 증거 없음)
     prose = "[1] shows that the method improves accuracy over strong baselines."
     assert should_skip(prose) == ""
+
+
+def test_통화_달러는_인라인수식으로_오인하지_않는다():
+    """문장 안의 통화 $ 두 개가 수식으로 잡히면 그 사이 산문이 통째로 마스킹돼
+    번역되지 않고 영어로 남는다 — 여는/닫는 $ 공백 금지 + 닫는 $ 뒤 숫자 금지로 차단."""
+    text = "The device costs $5 and the matching case costs $7 in total."
+    masked, mapping = mask(text)
+    assert mapping == {} and masked == text
+    assert should_skip(text) == ""                 # 여전히 번역 대상
+
+    # 붙어 있는 범위 표기도 마찬가지 ("$5-$10")
+    _, span_mapping = mask("Prices range from $5-$10 per unit at this store.")
+    assert span_mapping == {}
+
+    # 실제 인라인 수식은 그대로 보호된다
+    _, math_mapping = mask("The loss $L = \\sum_i x_i$ is minimized here.")
+    assert list(math_mapping.values()) == ["$L = \\sum_i x_i$"]
+
+
+def test_looks_untranslated_거부문_요약_영문echo_감지():
+    """출력 측 검증 — should_skip과 대칭인 최소 게이트."""
+    from app.translate.masking import looks_untranslated
+
+    src = "The accuracy improved on every benchmark dataset that we evaluated."
+    assert looks_untranslated(src, "I cannot translate this text.", {}) is True
+    assert looks_untranslated(src, src, {}) is True                 # 영문 echo
+    assert looks_untranslated(src, "죄송합니다, 번역할 수 없습니다.", {}) is True
+    assert looks_untranslated(
+        src, "우리가 평가한 모든 벤치마크 데이터셋에서 정확도가 향상되었다.", {},
+    ) is False
+    # 영단어 2개 미만(고유명사·짧은 라벨)은 원문 유지가 정상 → 통과
+    assert looks_untranslated("Adam", "Adam", {}) is False
+    # 플레이스홀더가 있는 유닛은 길이비를 완화한다
+    masked, mapping = mask("See $E = mc^2$ and https://example.com/a/very/long/path here.")
+    assert mapping
+    assert looks_untranslated(
+        "See $E = mc^2$ and https://example.com/a/very/long/path here.",
+        "$E = mc^2$와 https://example.com/a/very/long/path 를 참고하라.",
+        mapping,
+    ) is False
+
+
+def test_looks_untranslated_짧은_유닛_거부문도_잡는다():
+    """영단어 2개 미만 면제가 거부문까지 통과시키면 안 된다.
+
+    실 PDF 하네스(scripts/verify_e2e.py)의 결함 주입에서 'Abstract' 같은 한 단어
+    제목이 거부문으로 통째로 대체돼도 kept_original에 남지 않고 result.ko.md로
+    유출되던 경로의 회귀 테스트다.
+    """
+    from app.translate.masking import looks_untranslated
+
+    for short_src in ("Abstract", "Introduction", "Adam", "1"):
+        assert looks_untranslated(short_src, "I cannot translate this text.", {}) is True
+        assert looks_untranslated(short_src, "죄송합니다, 번역할 수 없습니다.", {}) is True
+        # 면제의 본래 목적(원문 그대로 되돌아오는 echo 허용)은 유지돼야 한다.
+        assert looks_untranslated(short_src, short_src, {}) is False
+
+    # 짧은 원문의 정상 번역은 통과한다.
+    assert looks_untranslated("Abstract", "초록", {}) is False
+    assert looks_untranslated("Introduction", "서론", {}) is False
+    assert looks_untranslated("GPU", "그래픽 처리 장치", {}) is False
+
+
+def test_looks_untranslated_거부문을_다루는_원문은_오탐하지_않는다():
+    """원문 자체가 거부 표현을 담고 있으면 그 번역도 담는 것이 정상이다."""
+    from app.translate.masking import looks_untranslated
+
+    src = "The model responds with 'I cannot translate this text.' when the policy filter fires."
+    assert looks_untranslated(
+        src, "정책 필터가 작동하면 모델은 'I cannot translate this text.'라고 응답한다.", {},
+    ) is False

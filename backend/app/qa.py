@@ -39,6 +39,10 @@ def get_page_context(job_dir: Path, page: int, page_separator: str) -> tuple[int
     page는 1-based. /html의 doc-page 분할과 동일한 규칙(구분자 단순 split)이며,
     구분자 잔여물(양끝 개행·공백)은 페이지별로 strip한다. 범위를 벗어나면 텍스트는
     빈 문자열 — 422 판정은 라우트 몫이다. result.md가 없거나 비어 있으면 (0, "").
+
+    "split 인덱스 == 리더의 페이지 번호"는 생산자 쪽에서 강제된다: merge의
+    `_clean()`이 페이지 본문에서 구분자와 리터럴로 충돌하는 줄(OCR이 뱉는 `---`
+    각주선 등)을 무해화하고, finalize가 "N페이지 = 구분자 N-1개"를 검증한다.
     """
     md_path = Path(job_dir) / "result.md"
     text = md_path.read_text(encoding="utf-8") if md_path.is_file() else ""

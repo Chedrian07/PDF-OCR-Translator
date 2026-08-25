@@ -25,7 +25,9 @@ from dataclasses import dataclass, field
 # v3: 신뢰도 래더(sanitize+repair+분할) + 규칙5 인명 음차 금지 강화 → kept_original 감소
 # v4: [원문 유지] 유닛별 A-용어 목록(MSE 풀어쓰기 실측 차단) + 용어 매칭 수식 제외 + 스톱워드
 # v5: 제목 유닛의 의미·정보량 보존 지시(짧은 UI 라벨식 축약 방지)
-PROMPT_V = "5"
+# v6: 출력 측 검증(masking.looks_untranslated) 도입 + 인라인 수식 통화 오인 수정
+#     → 거부문·요약·영문 echo가 이미 캐시된 units.json을 강제로 무효화한다
+PROMPT_V = "6"
 
 SUPPORTED_LANGS = ("ko",)
 MAX_TRANSLATE_CONCURRENCY = 8
@@ -48,6 +50,15 @@ class TranslateError(RuntimeError):
 
 class TranslateAPIError(TranslateError):
     """업스트림 API 오류 (상태코드·본문 요약 포함)."""
+
+
+class TranslateUnitRejected(TranslateAPIError):
+    """재시도해도 같은 결과인 4xx 거부 (400·413·422 등 — 429/408 제외).
+
+    거대 병합 표·초장문 문단 하나가 모델 컨텍스트를 넘긴 경우가 대표적이다.
+    엔진은 이 오류만 유닛 단위로 강등(래더 → 원문 유지)한다. 연결 실패·5xx 등
+    비결정적 오류는 종전대로 잡 전체 실패로 전파한다.
+    """
 
 
 def _clean(v: str | None) -> str:
@@ -149,8 +160,10 @@ def cache_key(
     original_src: str,
     unit_kind: str,
     context_tail: str | None,
+    temperature: str = "",
+    reasoning: str = "",
 ) -> str:
-    """유닛 캐시 키 — 원문·마스킹문·종류·모델·프롬프트·용어집에 민감.
+    """유닛 캐시 키 — 원문·마스킹문·종류·모델·프롬프트·용어집·샘플링에 민감.
 
     용어집이 바뀌면 영향받는 유닛만 자연 무효화된다. glossary_pairs는
     (src, ko) 튜플 목록이며 순서 무관하도록 정렬해 해시한다.
@@ -161,6 +174,8 @@ def cache_key(
     본문과 다른 프롬프트 정책을 쓰므로 unit_kind도 반드시 키 재료에 포함한다.
     직전 문맥이 프롬프트에 들어가는 유닛은 context_tail까지 포함해 같은 문장이
     다른 문맥에서 서로의 번역을 강제로 재사용하지 않게 한다.
+    temperature·reasoning도 출력을 바꾸는 요청 파라미터이므로 키에 넣는다 —
+    reasoning을 off→high로 올린 뒤 재개해도 이전 설정의 번역이 재사용되던 문제.
     """
     h = hashlib.sha256()
     h.update(PROMPT_V.encode())
@@ -179,4 +194,8 @@ def cache_key(
     h.update(unit_kind.encode())
     h.update(b"\x1f")
     h.update((context_tail or "").encode())
+    h.update(b"\x1f")
+    h.update(temperature.encode())
+    h.update(b"\x1f")
+    h.update(reasoning.encode())
     return h.hexdigest()

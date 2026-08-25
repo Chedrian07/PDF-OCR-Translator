@@ -23,7 +23,11 @@ import re
 _TOKEN_RE = re.compile(
     r"(?P<k1>```.*?```)"                                    # 1 펜스 코드
     r"|(?P<m1>\$\$.*?\$\$)"                                 # 2 디스플레이 수식
-    r"|(?P<m2>\$[^$\n]+(?:\n[^$\n]+)?\$)"                   # 3 인라인 수식(개행 1개 허용, 비어있지 않음)
+    # 3 인라인 수식(개행 1개 허용, 비어있지 않음). 통화 표기 오인 방지 3규칙:
+    #   여는 $ 뒤 공백 금지 / 닫는 $ 앞 공백 금지 / 닫는 $ 뒤 숫자 금지.
+    #   "costs $5 and $7 total"은 종전에 "$5 and $"를 수식으로 잡아 그 사이 산문을
+    #   통째로 마스킹했다(영어 그대로 잔존). 세 규칙 모두 실 LaTeX(`$x_i$`)엔 무해하다.
+    r"|(?P<m2>\$(?![\s$])[^$\n]*(?:\n[^$\n]*)?(?<![\s$])\$(?!\d))"
     # 3b LaTeX 델리미터 — render.py 포터빌리티 계약상 result.md는 \(..\)/\[..\]를
     #    원본 그대로 유지하므로 $-정규화 여부와 무관하게 수식으로 보호한다.
     r"|(?P<m3>\\\[.*?\\\])"                                 # 디스플레이 \[..\]
@@ -178,3 +182,48 @@ def should_skip(text: str) -> str:
     if non_ws_r == 0 or letters / non_ws_r < 0.3:
         return "non-linguistic"
     return ""
+
+
+# 모델 거부문 — 길이·한글 비율 검사를 빠져나가는 짧은 유닛까지 잡는 마지막 그물.
+# 원문에 같은 표현이 있으면(거부를 다루는 문서) 정상 번역이므로 호출부에서 제외한다.
+_REFUSAL_RE = re.compile(
+    r"(?:cannot|can'?t|unable to|won'?t)\s+(?:translate|assist|help|comply|process)"
+    r"|as an ai(?:\s+language)?\s+model"
+    r"|i'?m (?:sorry|unable)"
+    r"|i am (?:sorry|unable)"
+    r"|번역(?:할|을|이)?\s*(?:수)?\s*없"
+    r"|죄송(?:합니다|해요)"
+    r"|도와드릴\s*수\s*없",
+    re.IGNORECASE,
+)
+
+
+def looks_untranslated(src: str, out: str, mapping: dict) -> bool:
+    """출력 측 최소 검증 — 거부문·요약·원문 echo면 True(엔진이 래더로 보낸다).
+
+    입력 측 should_skip()과 대칭인 게이트다. 플레이스홀더 정합만으로는 모델
+    거부문("I cannot translate this text.")·한 줄 요약·영문 echo가 문단을 통째로
+    대체해도 '성공'으로 통과해 units.json에 캐시된다(무손실 원칙 위반).
+    오탐은 래더 왕복 비용만 늘리지만 미탐은 내용 손실이므로 판정은 보수적으로 둔다.
+    """
+    # 거부문은 길이·한글 비율 검사보다 먼저 본다. 아래 "짧은 원문 면제"는 고유명사가
+    # 그대로 되돌아오는 echo를 허용하려는 것이지 원문이 임의 문장으로 대체되는 것을
+    # 허용하려는 게 아니다. 면제가 앞서면 'Abstract' 같은 한 단어 제목이 거부문으로
+    # 통째로 바뀌어도 통과한다(실 PDF 하네스에서 실측된 유출 경로).
+    if _REFUSAL_RE.search(out) and not _REFUSAL_RE.search(src):
+        return True
+
+    residual = _PLACEHOLDER_RE.sub(" ", mask(src)[0])
+    if len(re.findall(r"[A-Za-z]{2,}", residual)) < 2:
+        return False  # 고유명사·짧은 라벨은 원문 그대로 나와도 정상
+    # 복원된 불변 토큰(수식·URL·코드)은 한글일 수 없으므로 비율 계산에서 뺀다 —
+    # 넣고 세면 수식·표가 많은 정상 번역이 거부문으로 오탐된다.
+    out_text = out
+    for original in mapping.values():
+        out_text = out_text.replace(original, " ")
+    non_ws = len(re.findall(r"\S", out_text))
+    if non_ws and len(re.findall(r"[가-힣]", out_text)) / non_ws < 0.15:
+        return True  # 한글이 사실상 없음 → 영문 거부문/echo
+    # 한국어 거부문·한 줄 요약은 한글 비율을 통과하므로 길이비로 잡는다.
+    lo, hi = (0.2, 4.0) if mapping else (0.3, 3.0)  # 수식·표 유닛은 완화
+    return not (lo * len(src) <= len(out) <= hi * len(src))

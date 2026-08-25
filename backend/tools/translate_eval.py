@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # app.translate는 순수 파이썬(torch/OCR 비의존) — 계약 API만 사용한다.
+# load_dotenv_file도 표준 라이브러리만 쓰는 얇은 파서라 같은 제약을 지킨다.
+from app.config import load_dotenv_file
 from app.translate.client import OpenAICompatClient
 from app.translate.glossary import Glossary
 from app.translate.masking import mask, should_skip
@@ -114,15 +116,21 @@ def load_job(job_dir, lang: str = "ko") -> Job:
 # ── 유닛 번역 재구성 (엔진과 동일한 cache_key 재현법) ─────────────────────
 
 def unit_cache_key(
-    unit, glossary: Glossary, model: str, *, context_tail: str | None = None,
+    unit,
+    glossary: Glossary,
+    model: str,
+    *,
+    context_tail: str | None = None,
+    temperature: str = "",
+    reasoning: str = "",
 ) -> str:
     """엔진의 유닛 캐시 키를 그대로 재현한다.
 
     masked,_=mask(src) → pairs,first=glossary.for_unit(src, id) + keep_terms(src)
     → cache_key(masked, model, pairs+first+[(k,k)…], original_src, unit_kind,
-    context_tail).
+    context_tail, temperature, reasoning).
     PROMPT_V는 cache_key가 임포트한 상수를 쓰므로 여기서 주입하지 않는다
-    (엔진 버전 상향에 자동 추종).
+    (엔진 버전 상향에 자동 추종). temperature·reasoning은 state.json에서 읽는다.
     """
     masked, _ = mask(unit.src)
     pairs, first = glossary.for_unit(unit.src, unit.id)
@@ -134,6 +142,8 @@ def unit_cache_key(
         original_src=unit.src,
         unit_kind=unit.kind,
         context_tail=context_tail,
+        temperature=temperature,
+        reasoning=reasoning,
     )
 
 
@@ -171,13 +181,21 @@ def reconstruct(job: Job) -> Recon:
                 prev = u
 
     model = job.state.get("model", "")
+    # 구버전 state.json에는 없는 키 — 없으면 빈 값(엔진 기본과 동일 해시)으로 둔다.
+    temperature = str(job.state.get("temperature", "") or "")
+    reasoning = str(job.state.get("reasoning", "") or "")
     kept = set(job.report.get("kept_original", []) or [])
     for u in rec.units:
         if u.skip_reason or should_skip(u.src):
             rec.skipped_ids.append(u.id)
             continue
         key = unit_cache_key(
-            u, job.glossary, model, context_tail=context_map.get(u.id),
+            u,
+            job.glossary,
+            model,
+            context_tail=context_map.get(u.id),
+            temperature=temperature,
+            reasoning=reasoning,
         )
         if key in job.cache:
             rec.found[u.id] = job.cache[key]
@@ -644,6 +662,11 @@ def main(argv=None) -> int:
 
     if args.judge:
         try:
+            # 문서화된 사용법(uv run python backend/tools/translate_eval.py …)에는
+            # .env를 읽는 주체가 없다 — API 서버의 Settings.from_env에만 묶여 있어
+            # OPENAI_BASE_URL 미설정으로 채점이 조용히 건너뛰어졌다. 이미 설정된
+            # 환경변수는 덮지 않으므로 compose/셸 주입과 충돌하지 않는다.
+            load_dotenv_file()
             cfg = TranslateConfig.from_env()
             job = load_job(args.job_dir, args.lang)
             rec = reconstruct(job)

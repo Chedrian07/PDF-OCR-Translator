@@ -395,6 +395,18 @@ def test_math_display_multiline():
     assert "<em>" not in html
 
 
+def test_unbalanced_display_delimiter_does_not_swallow_paragraphs():
+    """짝이 어긋난 여는 `$$`/`\\[`가 다음 델리미터까지의 문단을 통째로 tex로 삼켜
+    헤딩·이미지가 화면에서 사라지던 것 방지 — 폭주 범위는 한 문단으로 갇힌다."""
+    md = "Eq $$ a=b\n\n## 결과\n\n![](images/p1.jpg)\n\n다음 식 $$ c=d $$ 끝."
+    html = render_markdown_html(md, "/b")
+    assert "<h2>결과</h2>" in html and "<img" in html
+
+    md2 = "앞 \\[ a=b\n\n## 소제목\n\n뒤 \\[ c=d \\] 끝."
+    html2 = render_markdown_html(md2, "/b")
+    assert "<h3>소제목</h3>" in html2 or "<h2>소제목</h2>" in html2
+
+
 def test_math_untouched_inside_code():
     md = "```\n\\( raw \\) 코드\n```\n\n그리고 `\\( inline \\)` 코드 스팬."
     html = render_markdown_html(md, "/b")

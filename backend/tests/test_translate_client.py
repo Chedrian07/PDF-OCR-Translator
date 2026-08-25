@@ -63,7 +63,6 @@ def test_post는_connect와_read_timeout을_분리(timeout_s, expected):
 def test_request_semaphore는_여러_잡의_실제_HTTP_동시성을_제한():
     import concurrent.futures as cf
     import threading
-    import time
 
     active = 0
     peak = 0
@@ -78,6 +77,10 @@ def test_request_semaphore는_여러_잡의_실제_HTTP_동시성을_제한():
         def json():
             return {"output_text": "ok"}
 
+    # 두 요청이 실제로 겹치는지 sleep 타이밍에 맡기면 부하가 큰 CI에서 flaky하다.
+    # Barrier(2)로 짝을 이루게 하면 슬롯이 2개일 때만 통과한다(1개면 timeout으로 실패).
+    pair = threading.Barrier(2, timeout=10)
+
     class Session:
         @staticmethod
         def post(url, **kwargs):
@@ -85,7 +88,7 @@ def test_request_semaphore는_여러_잡의_실제_HTTP_동시성을_제한():
             with lock:
                 active += 1
                 peak = max(peak, active)
-            time.sleep(0.04)
+            pair.wait()
             with lock:
                 active -= 1
             return Response()
@@ -577,3 +580,42 @@ def test_translate_concurrency_default_and_server_cap():
     assert TranslateConfig.from_env({**base, "TRANSLATE_CONCURRENCY": "3"}).concurrency == 3
     assert TranslateConfig.from_env({**base, "TRANSLATE_CONCURRENCY": "99"}).concurrency == 8
     assert TranslateConfig.from_env({**base, "TRANSLATE_CONCURRENCY": "0"}).concurrency == 1
+
+
+def test_retry_after_헤더에도_백오프_상한을_적용():
+    """"Retry-After: 3600" 한 줄이 워커를 한 시간 묶으면 번역이 멈춘 것처럼 보인다."""
+    c = OpenAICompatClient(_cfg())
+    assert c._backoff({"Retry-After": "3600"}, 0) == 30.0
+    assert c._backoff({"retry-after": "2"}, 0) == 2.0          # 상한 이하면 그대로 따른다
+    assert c._backoff({"Retry-After": "-5"}, 0) == 0.0         # 음수 방어
+    # HTTP-date 형식은 파싱 실패 → 지수 백오프로 폴백
+    assert c._backoff({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}, 1) == 3.0
+    assert c._backoff({}, 5) == 30.0                           # 지수 백오프 상한도 동일
+
+
+@pytest.mark.parametrize("status", [400, 413, 422])
+def test_결정적_4xx는_유닛강등용_예외로_구분(status):
+    """엔진이 유닛 하나만 원문 유지로 강등할 수 있도록 재시도 불가 4xx를 구분한다."""
+    from app.translate.types import TranslateUnitRejected
+
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = lambda path, payload: (status, {"error": "context length exceeded"}, {})
+    with pytest.raises(TranslateUnitRejected):
+        c.complete("s", "u", max_tokens=16)
+
+
+def test_비결정적_오류는_종전대로_일반_API오류():
+    """5xx 소진·인증 실패는 전역 원인 — 유닛 강등 대상이 아니다."""
+    from app.translate.types import TranslateUnitRejected
+
+    c = OpenAICompatClient(_cfg(api_mode="chat", max_retries=0))
+    c._post = lambda path, payload: (503, "busy", {})
+    with pytest.raises(TranslateAPIError) as exc:
+        c.complete("s", "u", max_tokens=16)
+    assert not isinstance(exc.value, TranslateUnitRejected)
+
+    c2 = OpenAICompatClient(_cfg(api_mode="chat"))
+    c2._post = lambda path, payload: (401, "nope", {})
+    with pytest.raises(TranslateAPIError) as exc2:
+        c2.complete("s", "u", max_tokens=16)
+    assert not isinstance(exc2.value, TranslateUnitRejected)

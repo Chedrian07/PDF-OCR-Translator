@@ -183,3 +183,33 @@ def test_markdown_layout_대응률이_낮으면_기존_번역_유지():
     assert reconcile_markdown_with_layout(
         md, assembled, source, translated, "\n\n---\n\n",
     ) == assembled
+
+
+def test_layout_line_sources_는_reconcile과_같은_필터를_쓴다():
+    """엔진의 2단 패스가 md 유닛 지연 여부를 판단하는 집합 — ref_text·다중 줄·
+    중복 원문은 reconcile이 매핑하지 않으므로 여기서도 제외한다."""
+    from app.translate.segment import layout_line_sources
+
+    pages = [
+        {"page": 1, "blocks": [
+            {"type": "text", "content": "Single line block."},
+            {"type": "text", "content": "Multi line\nblock here."},
+            {"type": "ref_text", "content": "[1] Author, Paper."},
+            {"type": "text", "content": "   "},
+            {"type": "image", "content": "", "image": "p1.jpg"},
+        ]},
+        {"page": 2, "blocks": [
+            {"type": "text", "content": "Duplicated line."},
+            {"type": "text", "content": "Duplicated line."},
+        ]},
+    ]
+    assert layout_line_sources(pages) == {"Single line block."}
+    assert layout_line_sources("깨진 값") == set()
+
+
+def test_reconcile_폴백은_받은_assembled를_그대로_돌려준다():
+    """엔진이 `reconciled is assembled`로 폴백을 판정하므로 동일 객체여야 한다."""
+    md = "Unmatched one.\nUnmatched two.\nUnmatched three."
+    assembled = "번역 하나.\n번역 둘.\n번역 셋."
+    out = reconcile_markdown_with_layout(md, assembled, [], [], "\n\n---\n\n")
+    assert out is assembled

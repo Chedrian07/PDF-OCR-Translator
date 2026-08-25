@@ -119,6 +119,59 @@ def test_blank_edge_pages_keep_separators(tmp_path):
     assert (tmp_path / "result.md").read_text(encoding="utf-8") == out
 
 
+def test_page_body_hr_does_not_shift_page_boundaries(tmp_path):
+    """페이지 본문의 `---` 줄(OCR 각주선)이 페이지 경계로 오인되지 않는다.
+
+    무해화가 없으면 result.md의 split 인덱스가 밀려 Q&A·문서 뷰가 경고 없이
+    엉뚱한 페이지를 보게 된다 (N페이지 = 구분자 N-1개 계약 위반)."""
+    m = IncrementalMerger(tmp_path, SEP)
+    c = _mk_multi_chunk(tmp_path, "chunk_00", 3)
+    m.add_chunk(ChunkResult(
+        c, 1, 3,
+        "<PAGE>\n1쪽 본문\n\n---\n\n각주 내용\n"      # 본문 안 구분선
+        "<PAGE>\n2쪽 본문\n\n---\n"                    # 페이지 끝 구분선
+        "<PAGE>\n3쪽 본문",
+    ))
+    out = m.finalize()
+
+    assert m.warnings == []
+    segments = out.split(SEP)
+    assert len(segments) == 3                       # (a) 분할 수 == 실제 페이지 수
+    assert "1쪽 본문" in segments[0] and "각주 내용" in segments[0]
+    assert "2쪽 본문" in segments[1]
+    assert segments[2].strip() == "3쪽 본문"
+    assert "***" in segments[0]                     # 구분선은 동등한 마크다운 수평선으로
+    assert "---" not in segments[0]
+
+
+def test_setext_heading_underline_is_not_neutralized(tmp_path):
+    """setext 제목 밑줄(`제목` 바로 다음 줄의 `---`)은 구분자와 충돌할 수 없다 —
+    빈 줄 패딩이 없으므로 그대로 둬야 제목이 문단+수평선으로 깨지지 않는다."""
+    m = IncrementalMerger(tmp_path, SEP)
+    c = _mk_multi_chunk(tmp_path, "chunk_00", 2)
+    m.add_chunk(ChunkResult(c, 1, 2, "<PAGE>\n제목\n---\n본문\n<PAGE>\n2쪽"))
+    out = m.finalize()
+
+    assert m.warnings == []
+    segments = out.split(SEP)
+    assert len(segments) == 2
+    assert "제목\n---\n본문" in segments[0]
+
+
+def test_neutralization_skipped_for_non_hr_separator(tmp_path):
+    """구분선이 아닌 커스텀 구분자도 리터럴 일치만 깨고 텍스트는 보존한다."""
+    sep = "\n\n@@PAGE@@\n\n"
+    m = IncrementalMerger(tmp_path, sep)
+    c = _mk_multi_chunk(tmp_path, "chunk_00", 2)
+    m.add_chunk(ChunkResult(c, 1, 2, "<PAGE>\nA\n\n@@PAGE@@\n\ntail\n<PAGE>\nB"))
+    out = m.finalize()
+
+    assert m.warnings == []
+    segments = out.split(sep)
+    assert len(segments) == 2
+    assert "A" in segments[0] and "tail" in segments[0] and "@@PAGE@@" in segments[0]
+
+
 def test_special_tokens_stripped(tmp_path):
     m = IncrementalMerger(tmp_path, SEP)
     d = tmp_path / "work" / "chunk_00"

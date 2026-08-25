@@ -926,9 +926,10 @@ def test_changed_table_cell_redaction_preserves_adjacent_unchanged_value(
         parsed = _table_cells(original_html)
         assert table_rect is not None and parsed is not None
         cells, rows, cols = parsed
-        measured_rects = _table_cell_rects(
+        measured_rects, grid_trusted = _table_cell_rects(
             source_page, table_rect, cells, rows, cols,
         )
+        assert grid_trusted
         top_header_rect = next(
             rect
             for cell, rect in zip(cells, measured_rects)
@@ -1143,3 +1144,321 @@ def test_failed_table_reports_every_changed_cell_as_preserved(
 
     assert result.table_cells_replaced == 0, result.report()
     assert result.kept == 2, result.report()
+
+
+def test_원문_셀_검색이_전부_빗나간_표는_균등격자로_강행하지_않는다(
+    tmp_path: Path,
+    real_cjk_fontfile: str,
+):
+    """OCR 오독으로 격자 추정이 실패하면 표를 통째로 보존한다.
+
+    폭이 크게 다른 열(350pt vs 70pt)에서 균등 분할로 강행하면 번역문이 엉뚱한
+    셀에 겹쳐 찍히고 인접 셀 원문이 경고 없이 리댁션된다.
+    """
+    import fitz
+
+    job_dir = tmp_path / "table-untrusted-grid"
+    job_dir.mkdir()
+    source = fitz.open()
+    page = source.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    # 1열 350pt, 2·3열 70pt인 불균등 표. 텍스트 레이어가 실제로 존재한다.
+    page.insert_text((65, 95), "Method", fontsize=9)
+    page.insert_text((400, 95), "Acc", fontsize=9)
+    page.insert_text((470, 95), "F1", fontsize=9)
+    page.insert_text((65, 115), "Ours", fontsize=9)
+    page.insert_text((400, 115), "12.3", fontsize=9)
+    page.insert_text((470, 115), "45.6", fontsize=9)
+    for y in (85, 100, 122):
+        page.draw_line((60, y), (530, y))
+    source.save(job_dir / "source.pdf")
+    source.close()
+
+    # OCR이 셀 문자열을 조금씩 잘못 읽어 search_for가 전부 빗나가는 상황.
+    original_html = (
+        "<table>"
+        "<tr><td>Methoo</td><td>Acc.</td><td>Fl</td></tr>"
+        "<tr><td>Ourss</td><td>l2.3</td><td>45,6</td></tr>"
+        "</table>"
+    )
+    translated_html = (
+        "<table>"
+        "<tr><td>방법</td><td>정확도</td><td>F1</td></tr>"
+        "<tr><td>제안</td><td>l2.3</td><td>45,6</td></tr>"
+        "</table>"
+    )
+    original = [{
+        "type": "table",
+        "bbox": _layout_bbox(fitz.Rect(60, 82, 530, 122)),
+        "content": original_html,
+    }]
+    _write_layout_pair(job_dir, original, [translated_html])
+
+    result = build_translated_pdf(job_dir, "ko", fontfile=real_cjk_fontfile)
+    with fitz.open(result.path) as exported:
+        text = exported[0].get_text().replace("\xa0", " ")
+
+    assert result.table_cells_replaced == 0, result.report()
+    assert result.specialist_kept.get("table") == 1, result.report()
+    assert any("격자 추정 실패" in warning for warning in result.warnings), result.warnings
+    for value in ("Method", "Acc", "F1", "12.3", "45.6"):
+        assert value in text, text
+    assert "정확도" not in text, text
+
+
+def test_표_셀마다_페이지_텍스트를_재추출하지_않는다(
+    tmp_path: Path,
+    real_cjk_fontfile: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """셀 스타일 추정은 페이지에서 이미 읽어둔 span 목록을 재사용한다."""
+    import fitz
+
+    job_dir = tmp_path / "table-span-reuse"
+    job_dir.mkdir()
+    source = fitz.open()
+    page = source.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    page.insert_text((65, 95), "Method", fontsize=9)
+    page.insert_text((400, 95), "Acc", fontsize=9)
+    page.insert_text((470, 95), "F1", fontsize=9)
+    page.insert_text((65, 115), "Ours", fontsize=9)
+    page.insert_text((400, 115), "12.3", fontsize=9)
+    page.insert_text((470, 115), "45.6", fontsize=9)
+    source.save(job_dir / "source.pdf")
+    source.close()
+
+    original_html = (
+        "<table>"
+        "<tr><td>Method</td><td>Acc</td><td>F1</td></tr>"
+        "<tr><td>Ours</td><td>12.3</td><td>45.6</td></tr>"
+        "</table>"
+    )
+    translated_html = (
+        original_html.replace("Method", "방법").replace("Acc", "정확도")
+        .replace("Ours", "제안")
+    )
+    original = [{
+        "type": "table",
+        "bbox": _layout_bbox(fitz.Rect(60, 82, 530, 122)),
+        "content": original_html,
+    }]
+    _write_layout_pair(job_dir, original, [translated_html])
+
+    calls: list[int] = []
+    extract_records = pdf_export_module._source_span_records
+
+    def counted(fitz_module, page):
+        calls.append(page.number)
+        return extract_records(fitz_module, page)
+
+    monkeypatch.setattr(pdf_export_module, "_source_span_records", counted)
+    result = build_translated_pdf(job_dir, "ko", fontfile=real_cjk_fontfile)
+
+    assert result.table_cells_replaced == 3, result.report()
+    # 페이지당 1회 — 변경 셀 수만큼 곱해지면 안 된다.
+    assert calls == [0], calls
+
+
+def test_텍스트레이어_없는_스캔표는_균등격자로도_계속_번역된다(
+    tmp_path: Path,
+    real_cjk_fontfile: str,
+):
+    """격자 신뢰도 게이트가 이 프로젝트의 주 대상인 스캔 표를 막으면 안 된다."""
+    import fitz
+
+    job_dir = tmp_path / "table-scanned-grid"
+    job_dir.mkdir()
+    source = fitz.open()
+    page = source.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    # 스캔 표: 지울 원문 글리프가 없으므로 균등 격자가 무해하다.
+    pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 16, 16))
+    pixmap.clear_with(230)
+    page.insert_image(
+        fitz.Rect(60, 82, 530, 122), stream=pixmap.tobytes("png"),
+        keep_proportion=False,
+    )
+    source.save(job_dir / "source.pdf")
+    source.close()
+
+    original_html = (
+        "<table>"
+        "<tr><td>Method</td><td>Acc</td><td>F1</td></tr>"
+        "<tr><td>Ours</td><td>12.3</td><td>45.6</td></tr>"
+        "</table>"
+    )
+    translated_html = original_html.replace("Method", "방법").replace("Ours", "제안")
+    original = [{
+        "type": "table",
+        "bbox": _layout_bbox(fitz.Rect(60, 82, 530, 122)),
+        "content": original_html,
+    }]
+    _write_layout_pair(job_dir, original, [translated_html])
+
+    result = build_translated_pdf(job_dir, "ko", fontfile=real_cjk_fontfile)
+    with fitz.open(result.path) as exported:
+        text = exported[0].get_text().replace("\xa0", " ")
+
+    assert result.table_cells_replaced == 2, result.report()
+    assert not any("격자 추정 실패" in warning for warning in result.warnings), result.warnings
+    assert "방법" in text and "제안" in text, text
+
+
+# ── CropBox/회전 페이지 가드 ─────────────────────────────────────────────
+_CROP_BOX = (20.0, 30.0, 592.0, 700.0)
+_CROP_WIDTH = _CROP_BOX[2] - _CROP_BOX[0]
+_CROP_HEIGHT = _CROP_BOX[3] - _CROP_BOX[1]
+_LONG_KO_TEXT = "이 문단은 페이지 하단에 놓인 긴 한국어 번역문입니다. " * 8
+
+
+def _cropped_bottom_block_job(
+    job_dir: Path,
+    rotation: int,
+    block_rect,
+    translated: str,
+    *,
+    with_source_text: bool = True,
+):
+    """CropBox<MediaBox 페이지의 하단 텍스트 블록 한 개짜리 잡을 만든다.
+
+    `block_rect`은 표시(회전 반영) 좌표다 — 레이아웃 계약의 0–999 bbox와 같은
+    공간이므로 회전 여부와 무관하게 그대로 정규화할 수 있다.
+    """
+    import fitz
+
+    job_dir.mkdir()
+    source = fitz.open()
+    page = source.new_page(width=612, height=792)
+    page.set_cropbox(fitz.Rect(*_CROP_BOX))
+    if rotation:
+        page.set_rotation(rotation)
+    if with_source_text:
+        # 삽입 좌표는 비회전 내부 공간이다. `block_rect`(표시 좌표) 안에 실제로
+        # 글리프가 놓이도록 derotation을 거치고, 표시 공간에서 똑바로 읽히게
+        # 페이지 회전각만큼 글자도 돌린다.
+        origin = fitz.Point(block_rect.x0 + 2, block_rect.y0 + 25)
+        page.insert_text(
+            origin * page.derotation_matrix,
+            "BOTTOM SOURCE LINE",
+            fontsize=10,
+            rotate=rotation,
+        )
+    source.save(job_dir / "source.pdf")
+    source.close()
+
+    display_width, display_height = (
+        (_CROP_HEIGHT, _CROP_WIDTH) if rotation in (90, 270)
+        else (_CROP_WIDTH, _CROP_HEIGHT)
+    )
+    original = [{
+        "type": "text",
+        "bbox": _layout_bbox(
+            block_rect, page_width=display_width, page_height=display_height,
+        ),
+        "content": "BOTTOM SOURCE LINE",
+        "fs": 10 / display_width * 100,
+    }]
+    _write_layout_pair(
+        job_dir,
+        original,
+        [translated],
+        page_width=display_width,
+        page_height=display_height,
+    )
+
+
+def test_크롭박스_페이지_하단_번역문이_표시영역_밖으로_나가지_않는다(
+    tmp_path: Path,
+    real_cjk_fontfile: str,
+):
+    """CropBox<MediaBox 문서에서 확장 가드가 MediaBox를 쓰면 번역문이 사라진다."""
+    import fitz
+
+    job_dir = tmp_path / "cropbox-bottom-block"
+    # 표시 좌표(page.rect = 572x670) 기준 하단 블록.
+    _cropped_bottom_block_job(
+        job_dir, 0, fitz.Rect(40, 615, 530, 655), _LONG_KO_TEXT,
+    )
+
+    result = build_translated_pdf(job_dir, "ko", fontfile=real_cjk_fontfile)
+    with fitz.open(result.path) as exported:
+        page = exported[0]
+        entries = _line_entries(page)
+        extracted = page.get_text().replace("\xa0", " ")
+        page_rect = +page.rect
+
+    if result.replaced == 0:
+        # 공간이 없다고 판단해 원문을 보존하는 것도 안전한 결과다. 다만 원문을
+        # 지워 놓고 번역문만 잃어버리는 조합은 허용되지 않는다.
+        assert "BOTTOM SOURCE LINE" in extracted, extracted
+        return
+    for text, rect in entries:
+        assert page_rect.contains(rect), (text, rect, page_rect)
+    visible = re.sub(r"\s", "", extracted)
+    expected = re.sub(r"\s", "", _LONG_KO_TEXT)
+    assert len(visible) >= len(expected) * 0.95, (len(visible), len(expected))
+
+
+def test_회전된_크롭박스_페이지도_같은_표시영역_가드를_쓴다(
+    tmp_path: Path,
+    real_cjk_fontfile: str,
+):
+    """`page.rect.y1` 직접 치환 회귀 방지 — 90도 페이지는 derotation이 필요하다.
+
+    90도 페이지의 `page.rect`는 가로·세로가 뒤바뀌어 y1이 572다. 그 값을 하단
+    가드로 쓰면 비회전 내부 y가 588~664인 정상 블록이 '공간 부족'으로 보존된다.
+    """
+    import fitz
+
+    job_dir = tmp_path / "cropbox-rotated-block"
+    # 표시 좌표 x가 작을수록 비회전 내부 y가 크다(내부 y = 670 - 표시 x).
+    _cropped_bottom_block_job(
+        job_dir, 90, fitz.Rect(6, 85, 82, 427), "하단 회전 번역",
+        with_source_text=False,
+    )
+
+    result = build_translated_pdf(job_dir, "ko", fontfile=real_cjk_fontfile)
+    with fitz.open(result.path) as exported:
+        page = exported[0]
+        entries = _line_entries(page)
+        extracted = page.get_text().replace("\xa0", " ")
+        # 회전 페이지의 span bbox는 비회전 내부 좌표로 보고된다 — 표시 영역도
+        # 같은 좌표계(derotation)로 되돌려 비교한다.
+        page_rect = page.rect * page.derotation_matrix
+        page_rect.normalize()
+
+    assert result.replaced == 1, result.report()
+    assert "하단 회전 번역" in extracted, extracted
+    for text, rect in entries:
+        assert page_rect.contains(rect), (text, rect, page_rect)
+
+
+@pytest.mark.parametrize("rotation", [90, 180, 270])
+def test_회전_페이지에서도_원문_글리프가_리댁션된다(
+    tmp_path: Path,
+    real_cjk_fontfile: str,
+    rotation: int,
+):
+    """회전 페이지에서 번역문만 삽입되고 원문이 남으면 두 글이 겹쳐 찍힌다."""
+    import fitz
+
+    # 표시(회전 반영) 좌표 기준 하단 블록. 90/270도 페이지의 표시 크기는
+    # 가로·세로가 바뀐 670x572다.
+    block_rect = (
+        fitz.Rect(40, 500, 530, 540) if rotation in (90, 270)
+        else fitz.Rect(40, 600, 530, 640)
+    )
+    job_dir = tmp_path / f"rotated-redaction-{rotation}"
+    _cropped_bottom_block_job(job_dir, rotation, block_rect, "하단 회전 번역")
+
+    result = build_translated_pdf(job_dir, "ko", fontfile=real_cjk_fontfile)
+    with fitz.open(result.path) as exported:
+        page = exported[0]
+        entries = _line_entries(page)
+        extracted = page.get_text().replace("\xa0", " ")
+        page_rect = page.rect * page.derotation_matrix
+        page_rect.normalize()
+
+    assert result.replaced == 1, result.report()
+    assert "하단 회전 번역" in extracted, extracted
+    assert "BOTTOM SOURCE LINE" not in extracted, extracted
+    for text, rect in entries:
+        assert page_rect.contains(rect), (text, rect, page_rect)

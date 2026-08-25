@@ -24,7 +24,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
-from .types import TranslateAPIError, TranslateConfig
+from .types import TranslateAPIError, TranslateConfig, TranslateUnitRejected
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 _RETRYABLE = frozenset({408, 429, 500, 502, 503, 504})
 # auto 모드에서 responses → chat 폴백을 유발하는 상태코드
 _FALLBACK = frozenset({404, 405, 501})
+# 유닛 하나가 결정적으로 거부되는 상태코드 (입력이 너무 길거나 서버가 처리 불가).
+# 인증(401/403)·엔드포인트(404)처럼 전역 원인인 코드는 여기 넣지 않는다.
+_UNIT_REJECTED = frozenset({400, 413, 422})
 
 # 접속 단계 상한 — 응답 생성이 아무리 길어도 TCP 연결 자체는 10초 안에 되거나 안 된다.
 # 스칼라 timeout은 connect에도 read와 같은 값(기본 180s)을 걸어, 엔드포인트가 죽으면
@@ -39,6 +42,9 @@ _FALLBACK = frozenset({404, 405, 501})
 # 백오프까지 더하면 잡 하나가 오류를 알리는 데 500초를 넘긴다 — 동시성을 올릴수록
 # 그만큼 워커가 통째로 묶인다. read 타임아웃은 그대로라 정상 응답에는 영향이 없다.
 _CONNECT_TIMEOUT_S = 10.0
+
+# 재시도 대기 상한 — 지수 백오프와 Retry-After 헤더 양쪽에 같은 상한을 건다.
+_MAX_BACKOFF_S = 30.0
 
 _THINK_RE = re.compile(r"^\s*<think>.*?</think>", re.DOTALL)
 _FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)```\s*$", re.DOTALL)
@@ -342,16 +348,24 @@ class OpenAICompatClient:
                 self._wait_or_cancel(wait)
                 attempt += 1
                 continue
+            # 재시도 불가 4xx는 결정적 거부 — 같은 요청을 다시 보내도 같은 자리에서
+            # 죽는다. 엔진이 유닛 단위로 강등(래더 → 원문 유지)할 수 있게 구분한다.
+            if status in _UNIT_REJECTED:
+                raise TranslateUnitRejected(
+                    f"번역 API 오류 (HTTP {status}): {_body_preview(body)}"
+                )
             raise TranslateAPIError(f"번역 API 오류 (HTTP {status}): {_body_preview(body)}")
 
     def _backoff(self, headers: dict, attempt: int) -> float:
         ra = headers.get("Retry-After") or headers.get("retry-after")
         if ra is not None:
             try:
-                return max(0.0, float(ra))
+                # 상한 없이 따르면 "Retry-After: 3600" 한 줄이 워커를 한 시간 묶어
+                # 번역이 멈춘 것처럼 보인다. 지수 백오프와 같은 30초 상한을 적용한다.
+                return min(_MAX_BACKOFF_S, max(0.0, float(ra)))
             except (TypeError, ValueError):
                 pass
-        return min(30.0, float(3 ** attempt))  # 1 → 3 → 9 → 27 → 30
+        return min(_MAX_BACKOFF_S, float(3 ** attempt))  # 1 → 3 → 9 → 27 → 30
 
     def _parse(self, mode: str, body: dict | str) -> tuple[str, bool]:
         """(텍스트, 잘림 여부) 반환. 잘림 = chat finish_reason=="length" /

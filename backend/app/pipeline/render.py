@@ -75,9 +75,13 @@ _CODE_REGION = re.compile(
     r"^```.*?^```[ \t]*$|^~~~.*?^~~~[ \t]*$|`[^`\n]+`",
     re.DOTALL | re.MULTILINE,
 )
-_MATH_DISPLAY = re.compile(r"\\\[(.+?)\\\]", re.DOTALL)
+# 디스플레이 수식은 **문단 경계를 넘지 않는다**: 짝이 어긋난 여는 델리미터 하나가
+# 다음 델리미터까지의 문단들을 통째로 tex로 삼켜(그 안의 헤딩·이미지가 소실)
+# KaTeX 오류 덩어리로 바뀌던 것을 막는다 — 본문에 빈 줄(문단 경계)을 금지하는
+# tempered-dot으로 폭주 범위를 한 문단으로 가둔다(표 태그 정규식과 같은 방식).
+_MATH_DISPLAY = re.compile(r"\\\[((?:(?!\n[ \t]*\n).)+?)\\\]", re.DOTALL)
 _MATH_INLINE = re.compile(r"\\\((.+?)\\\)", re.DOTALL)
-_MATH_DOLLAR_DISPLAY = re.compile(r"\$\$(.+?)\$\$", re.DOTALL)
+_MATH_DOLLAR_DISPLAY = re.compile(r"\$\$((?:(?!\n[ \t]*\n).)+?)\$\$", re.DOTALL)
 _MATH_DOLLAR_INLINE = re.compile(r"\$([^$\n]+?)\$")
 _MATH_LIKE = re.compile(r"[\\^_{}]")  # LaTeX 명령/첨자
 _MASK_FMT = "\x00MDMASK{}\x00"

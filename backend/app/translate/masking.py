@@ -191,10 +191,26 @@ _REFUSAL_RE = re.compile(
     r"|as an ai(?:\s+language)?\s+model"
     r"|i'?m (?:sorry|unable)"
     r"|i am (?:sorry|unable)"
-    r"|번역(?:할|을|이)?\s*(?:수)?\s*없"
+    # 거부문만 잡도록 좁힌다 — 종전 `번역…없`는 "번역 없이"·"번역이 없는" 같은
+    # 정상 산문까지 거부문으로 판정했다(원문이 영어라 src 가드도 무력하다).
+    # "수 없"/"불가"를 반드시 요구하고 사이 어절도 거부문 관용구로 한정한다.
+    r"|번역(?:을|이|은|할|해)?\s*(?:드릴|제공할|수행할)?\s*수\s*없"
+    r"|번역(?:을|이|은)?\s*불가"
     r"|죄송(?:합니다|해요)"
     r"|도와드릴\s*수\s*없",
     re.IGNORECASE,
+)
+
+
+# 프롬프트 구조 마커 — 번역 결과에 절대 나올 수 없는 문자열이다. 모델이 프롬프트를
+# 되돌려주거나(echo 계열 장애) repair 프롬프트를 그대로 출력하면 이 마커가 산출물에
+# 박힌다. 실측: fault=echo 실행에서 repair 프롬프트가 result.ko.md에 20벌 들어갔다.
+# 문구는 prompts.py가 소유하며, 드리프트는 test_translate_masking.py의
+# test_스캐폴딩_마커가_실제_프롬프트와_일치한다 가 잡는다(import 결합 없이 계약만 고정).
+_SCAFFOLD_RE = re.compile(
+    r"\[번역할 원문|\[원문 유지|\[용어집|\[직전 문맥|\[첫 등장 병기|\[블록 유형"
+    r"|\[수정할 번역문|\[원문 — 아래 꺾쇠 태그|\[논문 개요|\[섹션 제목|\[용어 후보"
+    r"|다음 꺾쇠 태그가"
 )
 
 
@@ -204,17 +220,28 @@ def looks_untranslated(src: str, out: str, mapping: dict) -> bool:
     입력 측 should_skip()과 대칭인 게이트다. 플레이스홀더 정합만으로는 모델
     거부문("I cannot translate this text.")·한 줄 요약·영문 echo가 문단을 통째로
     대체해도 '성공'으로 통과해 units.json에 캐시된다(무손실 원칙 위반).
-    오탐은 래더 왕복 비용만 늘리지만 미탐은 내용 손실이므로 판정은 보수적으로 둔다.
+
+    **오탐도 미탐과 마찬가지로 번역 손실이다** — 거절된 출력은 래더(repair→분할)로
+    가고 래더가 소진되면 "kept"(원문 보존)로 떨어진다. 즉 정상 번역을 오탐하면
+    그 유닛은 영어 원문 그대로 PDF에 남는다. 따라서 임계값은 "실측 분포 밖"에만
+    둔다 — 아래 수치는 data/jobs 실번역 쌍 169건으로 측정했다
+    (tests/fixtures/real_translation_pairs.json에 고정).
     """
     # 거부문은 길이·한글 비율 검사보다 먼저 본다. 아래 "짧은 원문 면제"는 고유명사가
     # 그대로 되돌아오는 echo를 허용하려는 것이지 원문이 임의 문장으로 대체되는 것을
     # 허용하려는 게 아니다. 면제가 앞서면 'Abstract' 같은 한 단어 제목이 거부문으로
     # 통째로 바뀌어도 통과한다(실 PDF 하네스에서 실측된 유출 경로).
+    # 프롬프트 스캐폴딩이 섞인 출력은 어떤 경우에도 번역이 아니다. 원문 길이·언어와
+    # 무관하므로 모든 면제보다 앞에 둔다(원문에 같은 문구가 있으면 정상이므로 제외).
+    if _SCAFFOLD_RE.search(out) and not _SCAFFOLD_RE.search(src):
+        return True
+
     if _REFUSAL_RE.search(out) and not _REFUSAL_RE.search(src):
         return True
 
     residual = _PLACEHOLDER_RE.sub(" ", mask(src)[0])
-    if len(re.findall(r"[A-Za-z]{2,}", residual)) < 2:
+    src_words = [w.lower() for w in re.findall(r"[A-Za-z]{2,}", residual)]
+    if len(src_words) < 2:
         return False  # 고유명사·짧은 라벨은 원문 그대로 나와도 정상
     # 복원된 불변 토큰(수식·URL·코드)은 한글일 수 없으므로 비율 계산에서 뺀다 —
     # 넣고 세면 수식·표가 많은 정상 번역이 거부문으로 오탐된다.
@@ -222,8 +249,21 @@ def looks_untranslated(src: str, out: str, mapping: dict) -> bool:
     for original in mapping.values():
         out_text = out_text.replace(original, " ")
     non_ws = len(re.findall(r"\S", out_text))
-    if non_ws and len(re.findall(r"[가-힣]", out_text)) / non_ws < 0.15:
-        return True  # 한글이 사실상 없음 → 영문 거부문/echo
+    hangul_ratio = len(re.findall(r"[가-힣]", out_text)) / non_ws if non_ws else 0.0
+    if non_ws and hangul_ratio < 0.15:
+        # 한글이 적다고 곧바로 echo는 아니다 — 사사문·저자 소속처럼 고유명사가
+        # 대부분인 정상 번역은 실측 한글 비율이 0.09~0.13까지 내려간다. 진짜 echo는
+        # 원문 영단어가 그대로 다 남는다(잔존율 1.0). 두 신호를 함께 본다.
+        out_words = {w.lower() for w in re.findall(r"[A-Za-z]{2,}", out)}
+        retention = sum(1 for w in src_words if w in out_words) / len(src_words)
+        if hangul_ratio < 0.05 or retention >= 0.9:
+            return True  # 한글이 사실상 없음 / 원문 영단어 그대로 → 거부문·echo
     # 한국어 거부문·한 줄 요약은 한글 비율을 통과하므로 길이비로 잡는다.
-    lo, hi = (0.2, 4.0) if mapping else (0.3, 3.0)  # 수식·표 유닛은 완화
+    # 하한은 **원문 길이로 나눈다** — 한국어는 짧은 명사구일수록 압축이 극단적이다
+    # ('Writing the introduction'→'서론 쓰기' 0.208). 실측 165쌍 분포:
+    #   len(src)<=80  min 0.208 / p5 0.227 / p10 0.296
+    #   len(src)>80   min 0.444 / p10 0.474
+    # 하한을 각 구간 분포 밖(0.12 / 0.25)에 둬 오탐 0을 확보한다.
+    lo = 0.12 if len(src) <= 80 else 0.25
+    hi = 4.0 if mapping else 3.0  # 수식·표 유닛은 상한 완화
     return not (lo * len(src) <= len(out) <= hi * len(src))

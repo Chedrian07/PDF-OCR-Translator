@@ -1,5 +1,8 @@
 """마스킹 — 토큰 왕복·관용 복원·검증·should_skip."""
 
+import json
+import pathlib
+
 import pytest
 
 from app.translate.masking import mask, sanitize_translation, should_skip, unmask
@@ -208,3 +211,161 @@ def test_looks_untranslated_거부문을_다루는_원문은_오탐하지_않는
     assert looks_untranslated(
         src, "정책 필터가 작동하면 모델은 'I cannot translate this text.'라고 응답한다.", {},
     ) is False
+
+
+# ── 실번역 픽스처 회귀 — "오탐 0" 계약 ─────────────────────────────────────
+_PAIRS_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "real_translation_pairs.json"
+
+
+def _real_pairs() -> list[dict]:
+    return json.loads(_PAIRS_FIXTURE.read_text(encoding="utf-8"))
+
+
+def test_looks_untranslated_실번역_픽스처_오탐_0():
+    """실 LLM 번역 쌍 168건 전부가 게이트를 통과해야 한다(오탐 = 번역 손실).
+
+    픽스처는 data/jobs의 layout.json ↔ layout.ko.json 블록 쌍에서 뽑은 실번역이다
+    (should_skip 대상·원문 보존분·원문 영단어 잔존율 0.9 이상인 echo 등가 1건 제외).
+    오탐은 래더 소진 후 "kept"(원문 보존)로 귀결되므로 사용자 눈에는 "번역 안 된
+    문단"으로 보인다 — 따라서 이 목록은 전건 False여야 한다.
+    """
+    from app.translate.masking import looks_untranslated, mask
+
+    pairs = _real_pairs()
+    assert len(pairs) >= 150, "픽스처가 축소됐다 — 계약의 통계적 의미가 사라진다"
+    bad = [
+        (p["src"][:60], p["out"][:40], round(len(p["out"]) / max(1, len(p["src"])), 3))
+        for p in pairs
+        if looks_untranslated(p["src"], p["out"], mask(p["src"])[1])
+    ]
+    assert bad == [], f"실번역 오탐 {len(bad)}건: {bad[:5]}"
+
+
+@pytest.mark.parametrize(("src", "out"), [
+    ("Writing the introduction", "서론 쓰기"),          # 길이비 0.208 (실측 최소)
+    ("Experimental Results", "실험 결과"),              # 0.250
+    ("Topic sentence", "주제문"),                       # 0.214
+    ("The roadmap", "로드맵"),                          # 0.273
+    ("Writing the conclusion", "결론 쓰기"),            # 0.227
+    ("• An overview of a debate, the positions on both sides",
+     "• 논쟁의 개요와 양측의 입장"),                     # 0.296
+    ("2. THE THREE-PASS APPROACH", "2. 3회독 접근법"),  # 0.385
+])
+def test_looks_untranslated_짧은_제목의_압축_번역은_통과한다(src, out):
+    """한국어는 짧은 명사구에서 영어 대비 0.2배까지 압축된다 — 하한 0.3은 오탐이었다."""
+    from app.translate.masking import looks_untranslated
+
+    assert looks_untranslated(src, out, {}) is False
+
+
+def test_looks_untranslated_긴_원문은_하한이_그대로_엄격하다():
+    """길이비 하한 완화는 짧은 유닛 한정 — 긴 산문의 한 줄 요약은 계속 잡는다."""
+    from app.translate.masking import looks_untranslated
+
+    src = (
+        "Researchers spend a great deal of time reading research papers. However, this "
+        "skill is rarely taught, leading to much wasted effort. This article outlines a "
+        "practical and efficient three-pass method for reading research papers."
+    )
+    assert len(src) > 80
+    assert looks_untranslated(src, "논문 읽기 방법에 대한 글이다.", {}) is True   # 한 줄 요약
+    # 같은 길이비(0.11)라도 원문이 짧으면 통과 대상이 아님을 대비로 확인
+    assert looks_untranslated("Writing the introduction", "서", {}) is True
+
+
+def test_refusal_re_번역_없이_같은_정상_표현을_오탐하지_않는다():
+    """`번역…없` 패턴이 정상 산문("번역 없이", "번역이 없는")을 거부문으로 판정했다.
+
+    원문이 영어라 `_REFUSAL_RE.search(src)` 가드는 구조적으로 무력하므로 패턴 자체를
+    좁혔다 — "수 없"/"불가"를 반드시 요구한다.
+    """
+    from app.translate.masking import looks_untranslated
+
+    src = (
+        "The pipeline forwards the paragraph verbatim when no translation is available, "
+        "so downstream consumers still receive the original English text."
+    )
+    for ok in (
+        "번역 없이 원문을 그대로 전달하므로 하위 소비자는 영어 원문을 받는다.",
+        "번역이 없는 문단은 원문 그대로 전달되어 하위 소비자가 영어 원문을 받는다.",
+        "번역이 필요 없는 문단은 원문 그대로 전달되며 하위 소비자가 영어 원문을 받는다.",
+    ):
+        assert looks_untranslated(src, ok, {}) is False, ok
+
+    # 진짜 거부문은 여전히 잡는다.
+    for refusal in (
+        "죄송합니다, 번역할 수 없습니다.",
+        "이 문서는 번역을 제공할 수 없습니다.",
+        "요청하신 번역해 드릴 수 없습니다.",
+        "해당 텍스트는 번역이 불가능합니다.",
+        "I cannot translate this text.",
+        "As an AI language model, I'm unable to help with that request.",
+    ):
+        assert looks_untranslated(src, refusal, {}) is True, refusal
+
+
+def test_looks_untranslated_고유명사_많은_번역과_echo를_구분한다():
+    """한글 비율 하한만으로는 사사문·저자 블록이 오탐된다 — 원문 영단어 잔존율을 함께 본다."""
+    from app.translate.masking import looks_untranslated
+
+    src = (
+        "This work was supported by grants from the National Science and Engineering "
+        "Council of Canada and by a gift from the Cisco University Research Program."
+    )
+    # 실측 한글 비율 0.127 — 고유명사가 대부분인 정상 번역이다.
+    ok = (
+        "이 연구는 National Science and Engineering Council of Canada의 지원과 "
+        "Cisco University Research Program의 기부로 수행되었다."
+    )
+    assert looks_untranslated(src, ok, {}) is False
+    # 원문 영단어가 그대로 다 남는 echo는 계속 잡는다.
+    assert looks_untranslated(src, src, {}) is True
+    assert looks_untranslated(src, src + "  \n", {}) is True
+
+
+def test_스캐폴딩이_섞인_출력은_번역으로_채택하지_않는다():
+    """프롬프트가 산출물에 새는 경로 차단.
+
+    fault=echo 실행에서 repair 프롬프트가 result.ko.md에 20벌 박힌 실측 사례의
+    회귀 테스트다. 원문 길이·언어와 무관하므로 짧은 원문 면제보다 앞서야 한다.
+    """
+    from app.translate.masking import looks_untranslated
+
+    src = "The accuracy improved on every benchmark dataset that we evaluated."
+    for leaked in (
+        "[번역할 원문]\n무언가",
+        "[수정할 번역문]\n무언가",
+        "[원문 — 아래 꺾쇠 태그가 정답이다]\n무언가",
+        "다음 꺾쇠 태그가 누락되었거나 중복되었다: <m1/>",
+        "[용어집 — 반드시 이 역어 사용]\n- bias → 편향",
+    ):
+        assert looks_untranslated(src, leaked, {}) is True
+        # 짧은 원문(영단어 2개 미만) 면제 경로도 뚫리면 안 된다
+        assert looks_untranslated("Abstract", leaked, {}) is True
+
+    # 원문 자체가 그 문구를 담고 있으면(프롬프트를 다루는 문서) 정상이다
+    meta = "The template starts with [번역할 원문] and ends there."
+    assert looks_untranslated(meta, "템플릿은 [번역할 원문]으로 시작한다.", {}) is False
+
+
+def test_스캐폴딩_마커가_실제_프롬프트와_일치한다():
+    """masking._SCAFFOLD_RE는 prompts.py 문구를 복사한 것이다 — 드리프트를 잡는다.
+
+    import 결합 대신 계약만 고정한다. prompts.py가 문구를 바꾸면 여기서 실패해
+    게이트가 조용히 무력화되는 것을 막는다.
+    """
+    from app.translate.masking import _SCAFFOLD_RE
+    from app.translate.prompts import build_repair_prompt, build_unit_prompt
+
+    unit = build_unit_prompt(
+        "SRC", [("a", "b")], [("c", "d")],
+        context_tail="CTX", keep_terms=["K"], unit_kind="title",
+    )
+    repair = build_repair_prompt("SRC", "OUT", ["<m1/>"])
+    for prompt in (unit, repair):
+        headers = [ln for ln in prompt.splitlines() if ln.startswith("[")]
+        assert headers, "프롬프트에 대괄호 헤더가 없다 — 마커 추출 전제가 깨졌다"
+        for header in headers:
+            assert _SCAFFOLD_RE.search(header), (
+                f"프롬프트 헤더 {header!r}가 _SCAFFOLD_RE에 없다 — 마커를 갱신하라"
+            )

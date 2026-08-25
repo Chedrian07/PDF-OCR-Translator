@@ -1,0 +1,674 @@
+[
+ {
+  "src": "HARVARD\nWOM\nGRADUATE SCHOOL\nOF EDUCATION",
+  "out": "HARVARD  \nWOM  \n교육대학원"
+ },
+ {
+  "src": "Writing Center & Communications Lab",
+  "out": "쓰기 센터 및 커뮤니케이션 랩"
+ },
+ {
+  "src": "Simone A. Fried, TF\nSpring 2021",
+  "out": "Simone A. Fried, TF  \n2021년 봄"
+ },
+ {
+  "src": "The Structure of an Academic",
+  "out": "학술 ...의 구조"
+ },
+ {
+  "src": "Paper",
+  "out": "논문"
+ },
+ {
+  "src": "Academic papers are like hourglasses.",
+  "out": "학술 논문은 모래시계와 같다."
+ },
+ {
+  "src": "The paper opens at its widest point; the introduction makes broad connections to the reader's interests, hoping they will be persuaded to follow along, then gradually narrows to a tight, focused, thesis statement. The argument stays relatively narrow and focused on the thesis throughout the body, or the middle paragraphs. Like an hourglass, the conclusion broadens once more, reinforcing connections to the larger context.",
+  "out": "논문은 가장 넓은 지점에서 시작한다. 서론은 독자의 관심사와 폭넓게 연결되며 독자가 논문을 계속 따라가도록 설득하고자 하고, 이후 점차 좁혀져 명확하고 집중된 논제문에 이른다. 본문, 즉 중간 단락들에서는 논증이 비교적 좁은 범위를 유지하며 시종일관 논제에 집중한다. 모래시계와 마찬가지로 결론에서는 다시 범위를 넓혀 더 큰 맥락과의 연결을 강화한다."
+ },
+ {
+  "src": "This model is standard in the U.S. social sciences and at HGSE, so we will focus on it for the rest of the tutorial. That said, writing conventions vary widely across countries, cultures, and even disciplines. For example, although the hourglass model introduces the most important point right from the beginning as a guide to the rest of the paper, some traditions build the argument gradually and deliver the main idea as a punchline.",
+  "out": "이 모형은 미국의 사회과학 분야와 HGSE에서 표준적으로 사용되므로, 이 튜토리얼의 나머지 부분에서는 이에 초점을 맞춘다. 그러나 쓰기 관행은 국가와 문화, 심지어 학문 분야에 따라서도 크게 달라진다. 예를 들어 모래시계 모형은 논문의 나머지 부분을 이끄는 가장 중요한 요점을 시작부터 제시하는 반면, 일부 전통에서는 논지를 점진적으로 구축하고 핵심 아이디어를 결정적인 요점으로 제시한다."
+ },
+ {
+  "src": "Scholars in the U.S. sometimes joke that the style is to \"tell your audience what you are going to tell them, tell it to them, then tell them what you told them.\" This seems repetitive, so why do it?",
+  "out": "미국의 학자들은 때때로 그 문체가 “청중에게 여러분이 무엇을 말하려 하는지 말하고, 그것을 말한 다음, 청중에게 여러분이 무엇을 말했는지 말하는 것”이라고 농담하곤 한다. 이는 반복적으로 보이는데, 그렇다면 왜 그렇게 하는가?"
+ },
+ {
+  "src": "- The reader knows your position and can easily decide whether to read further.",
+  "out": "- 독자는 논지의 입장을 파악하여 계속 읽을지 쉽게 결정할 수 있다."
+ },
+ {
+  "src": "- Once you're familiar with the model, you can read academic papers more efficiently. It would be challenging to use some of the critical reading strategies from Unit 1 if every writer developed a unique structure.",
+  "out": "모델에 익숙해지면 여러분은 학술 논문을 더 효율적으로 읽을 수 있다. 모든 저자가 고유한 구조를 발전시켰다면 1단원에서 다룬 비판적 읽기 전략 중 일부를 활용하기가 어려울 것이다."
+ },
+ {
+  "src": "- A standard structure provides a template to help writers organize ideas and keep track of all the components required in an academic paper.",
+  "out": "- 표준 구조는 필자가 아이디어를 구성하고 학술 논문에 필요한 모든 구성 요소를 빠짐없이 확인하는 데 도움을 주는 틀을 제공한다."
+ },
+ {
+  "src": "Writing the introduction",
+  "out": "서론 쓰기"
+ },
+ {
+  "src": "As we've discussed, all introductions begin broadly. The audience, format, and purpose of your paper influence how broad it should be. You can expect more background knowledge from readers of a technical journal than you can from readers of a popular magazine.",
+  "out": "앞서 논의한 바와 같이, 모든 서론은 폭넓은 내용으로 시작한다. 논문의 독자층, 형식, 목적에 따라 서론이 얼마나 폭넓어야 하는지가 달라진다. 여러분은 대중 잡지의 독자보다 학술 기술지의 독자에게서 더 많은 배경지식을 기대할 수 있다."
+ },
+ {
+  "src": "Use a 'hook' to capture readers' interest.",
+  "out": "독자의 관심을 사로잡기 위한 ‘훅’ 사용"
+ },
+ {
+  "src": "The hook refers to the first sentence of your introduction, which is what you'll use to spark curiosity and entice readers to carry on. It should be concise and relatively simple. For example:",
+  "out": "훅은 서론의 첫 번째 문장을 가리키며, 여러분이 이를 사용하여 호기심을 불러일으키고 독자들이 계속 읽도록 유도한다. 훅은 간결하고 비교적 단순해야 한다. 예를 들면 다음과 같다:"
+ },
+ {
+  "src": "The prevalence of suicide thoughts and attempts among transgender adults is significantly higher than that of the U.S. general population\" (Herman, Brown, & Hass, 2019).",
+  "out": "트랜스젠더 성인에서 자살 사고와 시도의 유병률은 미국 일반 인구의 유병률보다 유의하게 높다\" (Herman, Brown, & Hass, 2019)."
+ },
+ {
+  "src": "In 1989, legal scholar Kimberlé Crenshaw coined the term \"intersectionality\" to refer to the idea that dimensions of identity such as race, sex, and class overlap and affect each other.",
+  "out": "1989년, 법학자 Kimberlé Crenshaw는 인종, 성, 계급과 같은 정체성의 차원들이 중첩되고 서로 영향을 미친다는 개념을 지칭하기 위해 “교차성”이라는 용어를 만들었다."
+ },
+ {
+  "src": "When I started my career at an almost all-Black elementary school in my home city, I was the only teacher of color.",
+  "out": "내 고향 도시의 거의 모든 학생이 흑인인 초등학교에서 경력을 시작했을 때, 나는 유일한 유색인종 교사였다."
+ },
+ {
+  "src": "Each of these examples is specific enough that we already have a sense of what the paper might discuss, but simple enough for most readers to quickly understand. Try one of the following to catch the reader's eye:",
+  "out": "이러한 예들은 논문에서 무엇을 다룰지 이미 짐작할 수 있을 만큼 구체적이면서도, 대부분의 독자가 빠르게 이해할 수 있을 만큼 단순하다. 독자의 눈길을 끌기 위해 다음 중 하나를 시도하라:"
+ },
+ {
+  "src": "• An eye-catching, startling fact or statistic.",
+  "out": "• 독자의 시선을 사로잡는 놀랍고 충격적인 사실이나 통계."
+ },
+ {
+  "src": "• An interesting or provocative question",
+  "out": "• 흥미롭거나 도발적인 질문"
+ },
+ {
+  "src": "• A definition of a key term or concept",
+  "out": "• 핵심 용어 또는 개념의 정의"
+ },
+ {
+  "src": "• An overview of a debate, the positions on both sides",
+  "out": "• 논쟁의 개요와 양측의 입장"
+ },
+ {
+  "src": "• A question, puzzle, or surprise",
+  "out": "• 질문, 퍼즐 또는 놀라움"
+ },
+ {
+  "src": "• An apparent problem or paradox",
+  "out": "• 명백한 문제 또는 역설"
+ },
+ {
+  "src": "• An intriguing anecdote, quote, or observation",
+  "out": "• 흥미로운 일화, 인용문 또는 관찰 내용"
+ },
+ {
+  "src": "The ‘so what’: Why is this important?",
+  "out": "‘그래서 무엇인가’라는 질문: 왜 이것이 중요한가?"
+ },
+ {
+  "src": "After you've hooked your readers, keep them by presenting your thesis clearly and persuasively. Set the context of your paper, situating your topic in the context of other research in the field. Why are you making this argument in the first place? What is the problem? Why is this work important? If a reader asks you \"So what?\", you'll want to be able to say why your thesis matters.",
+  "out": "여러분이 독자의 관심을 끌었다면, 여러분의 논지를 명확하고 설득력 있게 제시하여 독자의 관심을 계속 유지해야 한다. 논문의 맥락을 설정하고, 해당 분야의 다른 연구와 관련된 맥락 속에 주제를 위치시켜야 한다. 여러분은 애초에 왜 이 주장을 하는가? 문제는 무엇인가? 이 연구는 왜 중요한가? 독자가 여러분에게 “그래서 어쨌다는 것인가?”라고 묻는다면, 여러분은 왜 자신의 논지가 중요한지 말할 수 있어야 한다."
+ },
+ {
+  "src": "Sometimes it's hard to articulate why the reader might care. If you're stuck, think about what led you to the idea in the first place. Return to the purpose of the paper (as we discussed in Unit I). When you were first learning about the topic, what did you hope to understand, or what did your professor hope to teach you? Describe to your reader what they will know and/or be able to do after having read your paper, and you may discover why it is important.",
+  "out": "때로는 독자가 왜 관심을 가질 수 있는지 명확하게 표현하기가 어렵다. 막힌다면, 애초에 무엇이 여러분을 그 아이디어로 이끌었는지 생각해 보라. 논문의 목적(제1단원에서 논의한 바와 같이)으로 돌아가기. 여러분이 처음 그 주제에 관해 배울 때 무엇을 이해하고자 했는지, 또는 여러분의 교수가 무엇을 가르치고자 했는지 생각해 보라. 논문을 읽고 난 후 독자가 무엇을 알게 되고 무엇을 할 수 있게 되는지 설명하면, 여러분은 그 논문이 왜 중요한지 발견할 수 있을 것이다."
+ },
+ {
+  "src": "Thesis statement",
+  "out": "논제 진술"
+ },
+ {
+  "src": "The thesis is generally the narrowest part and last sentence of the introduction, and conveys your position, the essence of your argument or idea. See our handout on Writing a Thesis Statement for more.",
+  "out": "논제는 일반적으로 서론에서 가장 범위가 좁은 부분이자 마지막 문장으로, 자신의 입장과 주장의 핵심 또는 아이디어를 전달한다. 자세한 내용은 ‘논제 서술문 쓰기’에 관한 안내 자료를 참조하라."
+ },
+ {
+  "src": "The roadmap",
+  "out": "논문의 로드맵"
+ },
+ {
+  "src": "Not all academic papers include a roadmap, but many do. Usually following the thesis, a roadmap is a narrative table of contents that summarizes the flow of the rest of the paper. Below, see an example roadmap in which Cuevas (2019) succinctly outlines her argument. You may also see roadmaps that list the bodies of literature that the author will review, or key points from the study design and procedure.",
+  "out": "모든 학술 논문이 로드맵을 포함하는 것은 아니지만, 많은 논문이 이를 포함한다. 일반적으로 논제 다음에 제시되는 로드맵은 논문의 나머지 부분의 흐름을 요약하는 서술형 목차이다. 아래에서 Cuevas (2019)가 자신의 주장을 간결하게 개괄한 로드맵의 예를 확인할 수 있다. 여러분은 저자가 검토할 문헌군이나 연구 설계 및 절차의 핵심 요점을 나열한 로드맵을 볼 수도 있다."
+ },
+ {
+  "src": "\"In examining the experiences of fifteen undocumented Latina/o parents whose children were successfully admitted and matriculated to a prestigious public university, I present the concept of sacrifices (sacrifices) as a lens through which to understand undocumented Latina/o parents' engagement in their children's postsecondary aspirations. I define sacrifices as the conscious decisions and investments undocumented Latina/o parents make to support their children's educational attainment, which comes at a very high personal cost due to the sociopolitical context they face as undocumented immigrants. Specifically, I reveal how undocumented Latina/o parents' day-to-day sacrifices, or their quotidian sacrifices of money, effort, time, and safety, are forms of engagement in their children's education...these are intentional parenting decisions that are similar to ones the literature identifies as \"concerted cultivation,\" strategies belonging to upper- and middle-class White and Black US citizens (Lareau, 2003). But because of the constraints they face as undocumented immigrants, these parental investments come at a very personal cost, reconceptualizing these day-to-day sacrifices as concerted sacrifices. Undocumented parents' intention to sacrifice for their children's education despite the consequences of their undocumented status is what differentiates their actions as concerted sacrifices. Thus, when day-to-day sacrifices are made for their children's academic future in particular, they are also concerted sacrifices.\"",
+  "out": "“자녀가 명문 공립대학교에 성공적으로 입학 허가를 받고 등록까지 마친 서류미비 라티나/o 부모 15명의 경험을 검토하면서, 나는 서류미비 라티나/o 부모가 자녀의 중등교육 이후 교육에 대한 열망에 관여하는 방식을 이해하기 위한 렌즈로서 희생(sacrifices)이라는 개념을 제시한다. 나는 희생을 서류미비 라티나/o 부모가 자녀의 교육 성취를 지원하기 위해 내리는 의식적인 결정과 투자로 정의하며, 이는 이들이 서류미비 이민자로서 직면하는 사회정치적 맥락으로 인해 매우 큰 개인적 비용을 수반한다. 구체적으로, 나는 서류미비 라티나/o 부모의 일상적인 희생, 즉 돈, 노력, 시간, 안전을 치르는 일상적인 희생이 자녀 교육에 관여하는 형태임을 밝힌다… 이러한 희생은 문헌에서 ‘concerted cultivation’으로 규정하는 것과 유사한 의도적인 양육 결정이며, 상류층 및 중산층 백인과 Black US 시민에게 속하는 전략이다(Lareau, 2003). 그러나 이들이 서류미비 이민자로서 직면하는 제약 때문에 이러한 부모의 투자는 매우 개인적인 비용을 수반하며, 이에 따라 이러한 일상적인 희생을 concerted sacrifices로 재개념화할 수 있다. 서류미비 신분의 결과에도 불구하고 자녀의 교육을 위해 희생하려는 서류미비 부모의 의도가 이들의 행동을 concerted sacrifices로 구별하는 요인이다. 따라서 특히 자녀의 학업적 미래를 위해 일상적인 희생을 할 때, 이러한 희생은 concerted sacrifices이기도 하다.”"
+ },
+ {
+  "src": "Cuevas, Stephany (2019). 'Con Mucho Sacrificio, We Give Them Everything We Can': The Strategic Day-to-Day Sacrifices of Undocumented Latina/o Parents. Harvard Educational Review: Fall 2019, Vol. 89, No. 3, pp. 473-496.",
+  "out": "Cuevas, Stephany (2019). ‘많은 희생으로, 우리가 할 수 있는 모든 것을 그들에게 준다’: 미등록 라티나/오 부모의 전략적 일상적인 희생. Harvard Educational Review: 2019년 가을, 제89권, 제3호, 473~496쪽."
+ },
+ {
+  "src": "Writing the body",
+  "out": "신체 쓰기"
+ },
+ {
+  "src": "The body is the bulk of the paper, where the ‘convincing’ takes place. Each paragraph focuses on one piece of your argument, building on what you’ve already written and flowing logically to the next step. Ultimately, the body should fully persuade your reader that your thesis (which you have already provided) is substantiated by evidence and sound reasoning.",
+  "out": "본문은 논문의 대부분을 차지하는 부분으로, ‘설득’이 이루어지는 곳이다. 각 문단은 여러분의 논증을 구성하는 하나의 요소에 초점을 맞추며, 이미 작성한 내용을 바탕으로 다음 단계로 논리적으로 이어진다. 궁극적으로 본문은 여러분이 이미 제시한 논지가 근거와 타당한 추론에 의해 뒷받침된다는 점을 독자에게 충분히 설득해야 한다."
+ },
+ {
+  "src": "Most paragraphs have four components:",
+  "out": "대부분의 문단은 네 가지 구성 요소로 이루어진다."
+ },
+ {
+  "src": "• Topic sentence",
+  "out": "• 주제 문장"
+ },
+ {
+  "src": "- Evidence",
+  "out": "- 근거"
+ },
+ {
+  "src": "- Analysis",
+  "out": "- 분석"
+ },
+ {
+  "src": "- Transition",
+  "out": "전이"
+ },
+ {
+  "src": "Topic sentence",
+  "out": "주제 문장"
+ },
+ {
+  "src": "The topic sentence is usually the first in the paragraph. As the name implies, it tells the reader your main point, and should connect to the thesis stated in your introduction. Subsequent sentences in the paragraph should relate back to this topic.",
+  "out": "주제문은 일반적으로 문단의 첫 번째 문장이다. 명칭에서 알 수 있듯이, 주제문은 독자에게 핵심 요점을 제시하며 서론에서 제시한 논제와 연결되어야 한다. 문단의 이후 문장들은 이 주제문과 관련되어야 한다."
+ },
+ {
+  "src": "Evidence",
+  "out": "근거"
+ },
+ {
+  "src": "Ideas, facts, or information from external sources that support your claims – either data you collect yourself, or the research and writing of others.",
+  "out": "주장을 뒷받침하는 외부 출처의 아이디어, 사실 또는 정보로서, 여러분이 직접 수집한 데이터나 다른 사람들의 연구 및 쓰기를 의미한다."
+ },
+ {
+  "src": "Analysis",
+  "out": "분석"
+ },
+ {
+  "src": "You should never present evidence without some form of analysis, or explaining the meaning of what you have shown us. Even if the quote, idea, or statistic seems to speak for itself, you must offer the reader your interpretation of how it supports your topic sentence.",
+  "out": "여러분은 어떠한 형태의 분석도 없이 근거를 제시하거나, 여러분이 우리에게 보여 준 내용의 의미를 설명하지 않은 채 제시해서는 안 된다. 인용문, 아이디어 또는 통계가 그 자체로 의미를 전달하는 듯 보이더라도, 그것이 주제문을 어떻게 뒷받침하는지에 대한 여러분의 해석을 독자에게 제시해야 한다."
+ },
+ {
+  "src": "Although they are separate concepts, it can be hard to separate analysis from evidence in practice. They are closely linked, and often occur in the same sentence.",
+  "out": "두 개념은 서로 별개이지만, 실제로는 분석과 근거를 구분하기 어려울 수 있다. 두 개념은 긴밀하게 연결되어 있으며, 종종 같은 문장에 함께 나타난다."
+ },
+ {
+  "src": "<table><tr><td>The district is primarily made up of White (63.2%) and Asian (35.5%) students.</td><td>Evidence. We may believe this statement, but don’t know what it signifies unless the author writes another sentence.</td></tr><tr><td>Because the district was primarily White (63%) and Asian (35%), leaders saw no urgent reason to incorporate Black Studies into the curriculum.</td><td>Evidence with interpretation/analysis. The author interprets the evidence as relevant to a lack of urgency for Black studies.</td></tr><tr><td>The school district is 63% White and 35% Asian, with standardized test scores similar to the national averages for those groups.</td><td>Evidence with interpretation/analysis. The same evidence is used here to help the reader understand the district’s performance.</td></tr></table>",
+  "out": "<table><tr><td>해당 학군은 주로 백인(63.2%) 및 아시아인(35.5%) 학생으로 구성되어 있다.</td><td>근거. 우리는 이 진술을 믿을 수 있지만, 저자가 다른 문장을 쓰지 않는 한 그것이 무엇을 의미하는지는 알 수 없다.</td></tr><tr><td>학군이 주로 백인(63%)과 아시아인(35%)으로 구성되어 있었기 때문에, 지도자들은 교육과정에 흑인학을 포함해야 할 긴급한 이유가 없다고 보았다.</td><td>해석/분석이 덧붙은 근거. 저자는 이 근거를 흑인학 도입의 긴급성 부족과 관련된 것으로 해석한다.</td></tr><tr><td>해당 학군은 백인 63%, 아시아인 35%로 구성되어 있으며, 표준화 시험 점수는 해당 집단의 국가 평균과 유사하다.</td><td>해석/분석이 덧붙은 근거. 여기서는 동일한 근거를 사용하여 독자가 학군의 성과를 이해하도록 돕는다.</td></tr></table>"
+ },
+ {
+  "src": "Transition",
+  "out": "전환"
+ },
+ {
+  "src": "At the start of each paragraph, consider how it relates to the previous one. Also consider how the last sentence sets up your next point. A short transition phrase like “In contrast,” or “Similarly,” can guide the reader from one idea to the next. Too many transition words make writing clunky and hard to read, but they are handy for shifting between paragraphs.",
+  "out": "각 문단의 시작 부분에서는 해당 문단이 이전 문단과 어떤 관련이 있는지 고려한다. 또한 마지막 문장이 다음 요점을 어떻게 뒷받침하는지도 고려한다. “In contrast,” 또는 “Similarly,”와 같은 짧은 전환 구는 독자가 한 개념에서 다음 개념으로 이동하도록 안내할 수 있다. 전환어를 지나치게 많이 사용하면 쓰기가 어색하고 읽기 어려워지지만, 문단 사이를 전환할 때 유용하다."
+ },
+ {
+  "src": "Writing the conclusion",
+  "out": "결론 쓰기"
+ },
+ {
+  "src": "The conclusion is the last section of your paper. It should briefly review the argument you've built, but it's not a summary – it's your final pitch to the audience for your main idea. A conclusion should:",
+  "out": "결론은 논문의 마지막 절이다. 결론에서는 여러분이 구축한 논지를 간략히 검토해야 하지만, 요약이 아니라 핵심 아이디어를 독자에게 제시하는 최종적인 주장이다. 결론은 다음과 같아야 한다:"
+ },
+ {
+  "src": "- Remind the reader what you have just told them, clarifying the key ideas to ensure there is no misunderstanding.",
+  "out": "- 독자에게 여러분이 방금 전달한 내용을 상기시키고, 오해가 없도록 핵심 아이디어를 명확히 한다."
+ },
+ {
+  "src": "- Return to the hook used in the introduction",
+  "out": "- 서론에서 사용한 후크로 돌아가기"
+ },
+ {
+  "src": "- Return to a broader lens, reminding readers how the thesis applies to your context.",
+  "out": "- 더 넓은 관점으로 돌아가 독자에게 논지가 자신의 맥락에 어떻게 적용되는지 상기시킨다."
+ },
+ {
+  "src": "- Suggest what the reader should take away from your paper.",
+  "out": "- 독자가 논문에서 무엇을 얻어 가야 하는지 제시한다."
+ },
+ {
+  "src": "- Pose questions for future study, actions to take, policy interventions, or other implications of your ideas.",
+  "out": "- 향후 연구를 위한 질문, 취해야 할 조치, 정책적 개입 또는 자신의 아이디어가 지니는 기타 함의를 제시한다."
+ },
+ {
+  "src": "Take care not to repeat your words exactly in the conclusion. At the same time, you should not introduce any major new concepts or parts of your argument in this section. You are synthesizing and commenting on the ideas you've presented, but not making any substantially new points. By the end of your paper, readers should already understand your position and the evidence used to support it. The conclusion provides readers a sense of completion, a reminder why your paper was worth reading.",
+  "out": "결론에서 여러분의 표현을 그대로 반복하지 않도록 주의한다. 동시에 이 절에서 주요한 새로운 개념이나 논지의 새로운 부분을 도입해서는 안 된다. 여러분은 제시한 아이디어를 종합하고 논평하는 것이지, 실질적으로 새로운 주장을 제시하는 것이 아니다. 논문의 끝에 이르면 독자는 여러분의 입장과 이를 뒷받침하는 데 사용된 근거를 이미 이해하고 있어야 한다. 결론은 독자에게 완결감을 제공하며, 왜 여러분의 논문이 읽을 가치가 있었는지를 상기시킨다."
+ },
+ {
+  "src": "Writing Center & Communications Lab",
+  "out": "글쓰기 센터 & 커뮤니케이션 랩"
+ },
+ {
+  "src": "The Structure of an Academic",
+  "out": "학자의 구조"
+ },
+ {
+  "src": "The paper opens at its widest point; the introduction makes broad connections to the reader's interests, hoping they will be persuaded to follow along, then gradually narrows to a tight, focused, thesis statement. The argument stays relatively narrow and focused on the thesis throughout the body, or the middle paragraphs. Like an hourglass, the conclusion broadens once more, reinforcing connections to the larger context.",
+  "out": "논문은 가장 넓은 지점에서 시작한다. 서론은 독자의 관심사와 폭넓은 연결을 형성하여 독자가 논의를 따라오도록 설득하고자 하며, 이후 점차 좁아져 명확하고 집중된 논제 진술에 이른다. 본문, 즉 중간 단락들에서는 논증이 전반적으로 비교적 좁은 범위를 유지하면서 논제에 집중한다. 모래시계와 마찬가지로 결론에서는 다시 범위를 넓혀 더 큰 맥락과의 연결을 강화한다."
+ },
+ {
+  "src": "This model is standard in the U.S. social sciences and at HGSE, so we will focus on it for the rest of the tutorial. That said, writing conventions vary widely across countries, cultures, and even disciplines. For example, although the hourglass model introduces the most important point right from the beginning as a guide to the rest of the paper, some traditions build the argument gradually and deliver the main idea as a punchline.",
+  "out": "이 모델은 미국의 사회과학 분야와 HGSE에서 표준적이므로, 이 튜토리얼의 나머지 부분에서는 이에 초점을 맞춘다. 그렇다고 하더라도 글쓰기 관행은 국가와 문화, 심지어 학문 분야에 따라서도 크게 달라진다. 예를 들어, 아워글라스 모델은 나머지 논문의 방향을 제시하기 위해 처음부터 가장 중요한 요점을 소개하지만, 일부 전통에서는 논거를 점진적으로 전개하고 핵심 아이디어를 마지막에 제시한다."
+ },
+ {
+  "src": "Scholars in the U.S. sometimes joke that the style is to \"tell your audience what you are going to tell them, tell it to them, then tell them what you told them.\" This seems repetitive, so why do it?",
+  "out": "U.S.의 학자들은 때때로 이러한 문체가 “청중에게 당신이 무엇을 말할 것인지 말하고, 그것을 말한 다음, 당신이 무엇을 말했는지 말하는 것”이라고 농담한다. 이는 반복적으로 보이는데, 왜 그렇게 하는가?"
+ },
+ {
+  "src": "- The reader knows your position and can easily decide whether to read further.",
+  "out": "- 독자는 필자의 입장을 알고 있으므로 계속 읽을지 쉽게 결정할 수 있다."
+ },
+ {
+  "src": "- Once you're familiar with the model, you can read academic papers more efficiently. It would be challenging to use some of the critical reading strategies from Unit 1 if every writer developed a unique structure.",
+  "out": "일단 모델에 익숙해지면, 당신은 학술 논문을 더 효율적으로 읽을 수 있다. 모든 저자가 고유한 구조를 개발한다면 1단원에서 배운 일부 비판적 읽기 전략을 사용하기는 어려울 것이다."
+ },
+ {
+  "src": "- A standard structure provides a template to help writers organize ideas and keep track of all the components required in an academic paper.",
+  "out": "- 표준 구조는 필자가 아이디어를 조직하고 학술 논문에 필요한 모든 구성 요소를 빠짐없이 관리할 수 있도록 돕는 틀을 제공한다."
+ },
+ {
+  "src": "Writing the introduction",
+  "out": "글쓰기 서론"
+ },
+ {
+  "src": "As we've discussed, all introductions begin broadly. The audience, format, and purpose of your paper influence how broad it should be. You can expect more background knowledge from readers of a technical journal than you can from readers of a popular magazine.",
+  "out": "앞서 논의한 바와 같이, 모든 서론은 포괄적으로 시작한다. 논문의 독자, 형식, 목적에 따라 서론이 얼마나 포괄적이어야 하는지가 달라진다. 대중 잡지의 독자보다 전문 학술지의 독자에게서 더 많은 배경지식을 기대할 수 있다."
+ },
+ {
+  "src": "Use a 'hook' to capture readers' interest.",
+  "out": "‘후크’를 사용하여 독자의 관심을 사로잡는다."
+ },
+ {
+  "src": "The hook refers to the first sentence of your introduction, which is what you'll use to spark curiosity and entice readers to carry on. It should be concise and relatively simple. For example:",
+  "out": "훅은 서론의 첫 문장을 가리키며, 이는 호기심을 자극하고 독자가 계속 읽도록 유도하기 위해 사용하는 것이다. 훅은 간결하고 비교적 단순해야 한다. 예를 들면 다음과 같다."
+ },
+ {
+  "src": "The prevalence of suicide thoughts and attempts among transgender adults is significantly higher than that of the U.S. general population\" (Herman, Brown, & Hass, 2019).",
+  "out": "트랜스젠더 성인에서 자살 사고와 자살 시도의 유병률은 미국 일반 인구의 유병률보다 유의하게 높다\"(Herman, Brown, & Hass, 2019)."
+ },
+ {
+  "src": "In 1989, legal scholar Kimberlé Crenshaw coined the term \"intersectionality\" to refer to the idea that dimensions of identity such as race, sex, and class overlap and affect each other.",
+  "out": "1989년 법학자 Kimberlé Crenshaw는 인종, 성별, 계급과 같은 정체성의 차원이 서로 중첩되고 영향을 미친다는 개념을 지칭하기 위해 “교차성(intersectionality)”이라는 용어를 만들었다."
+ },
+ {
+  "src": "When I started my career at an almost all-Black elementary school in my home city, I was the only teacher of color.",
+  "out": "내 고향 도시의 거의 전교생이 흑인이었던 초등학교에서 경력을 시작했을 때, 나는 유일한 유색인종 교사였다."
+ },
+ {
+  "src": "Each of these examples is specific enough that we already have a sense of what the paper might discuss, but simple enough for most readers to quickly understand. Try one of the following to catch the reader's eye:",
+  "out": "이러한 예시들은 각각 논문에서 무엇을 다룰지에 대한 감을 이미 가질 수 있을 만큼 구체적이지만, 대부분의 독자가 빠르게 이해할 수 있을 만큼 간단하다. 독자의 눈길을 끌기 위해 다음 중 하나를 시도하라:"
+ },
+ {
+  "src": "• An eye-catching, startling fact or statistic.",
+  "out": "• 눈길을 끄는 놀랍고 충격적인 사실이나 통계."
+ },
+ {
+  "src": "• An apparent problem or paradox",
+  "out": "• 겉보기에는 문제이거나 역설인 것"
+ },
+ {
+  "src": "The ‘so what’: Why is this important?",
+  "out": "‘그래서 어쨌다는 것인가’: 왜 이것이 중요한가?"
+ },
+ {
+  "src": "After you've hooked your readers, keep them by presenting your thesis clearly and persuasively. Set the context of your paper, situating your topic in the context of other research in the field. Why are you making this argument in the first place? What is the problem? Why is this work important? If a reader asks you \"So what?\", you'll want to be able to say why your thesis matters.",
+  "out": "독자의 관심을 끈 뒤에는 논지를 명확하고 설득력 있게 제시하여 그 관심을 계속 유지한다. 논문의 맥락을 설정하고, 해당 분야의 다른 연구 맥락 속에 주제를 자리매김한다. 당신은 왜 애초에 이 주장을 펼치는가? 문제는 무엇인가? 이 연구는 왜 중요한가? 독자가 당신에게 “그래서 어쨌다는 것인가?”라고 묻는다면, 당신의 논지가 왜 중요한지 말할 수 있어야 한다."
+ },
+ {
+  "src": "Sometimes it's hard to articulate why the reader might care. If you're stuck, think about what led you to the idea in the first place. Return to the purpose of the paper (as we discussed in Unit I). When you were first learning about the topic, what did you hope to understand, or what did your professor hope to teach you? Describe to your reader what they will know and/or be able to do after having read your paper, and you may discover why it is important.",
+  "out": "때로는 독자가 왜 관심을 가질 수 있는지 명확히 표현하기 어려울 때가 있다. 막혔다면 애초에 무엇이 당신을 그 아이디어로 이끌었는지 생각해 본다. 논문의 목적(제1단원에서 논의한 바와 같이)으로 돌아가기. 당신이 처음 그 주제를 배울 때 무엇을 이해하기를 바랐는지, 또는 당신의 교수가 당신에게 무엇을 가르치기를 바랐는지 생각해 본다. 당신의 논문을 읽은 후 독자가 무엇을 알게 되고 및/또는 무엇을 할 수 있게 되는지 독자에게 설명하면, 당신은 그것이 왜 중요한지 발견할 수도 있다."
+ },
+ {
+  "src": "Thesis statement",
+  "out": "논제 문장"
+ },
+ {
+  "src": "The thesis is generally the narrowest part and last sentence of the introduction, and conveys your position, the essence of your argument or idea. See our handout on Writing a Thesis Statement for more.",
+  "out": "논제문은 일반적으로 서론에서 가장 범위가 좁은 부분이자 마지막 문장으로, 자신의 입장과 주장의 핵심 또는 아이디어의 핵심을 전달한다. 더 자세한 내용은 논제문 글쓰기에 관한 안내 자료를 참조하라."
+ },
+ {
+  "src": "The roadmap",
+  "out": "로드맵"
+ },
+ {
+  "src": "Not all academic papers include a roadmap, but many do. Usually following the thesis, a roadmap is a narrative table of contents that summarizes the flow of the rest of the paper. Below, see an example roadmap in which Cuevas (2019) succinctly outlines her argument. You may also see roadmaps that list the bodies of literature that the author will review, or key points from the study design and procedure.",
+  "out": "모든 학술 논문이 로드맵을 포함하는 것은 아니지만, 많은 논문이 로드맵을 포함한다. 대개 논지를 제시한 다음에 이어지는 로드맵은 논문의 나머지 부분의 전개를 요약하는 서술형 목차이다. 아래에는 Cuevas (2019)가 자신의 논지를 간결하게 개괄한 로드맵의 예를 제시한다. 저자가 검토할 문헌군이나 연구 설계와 절차의 핵심 사항을 나열하는 로드맵도 볼 수 있다."
+ },
+ {
+  "src": "\"In examining the experiences of fifteen undocumented Latina/o parents whose children were successfully admitted and matriculated to a prestigious public university, I present the concept of sacrifices (sacrifices) as a lens through which to understand undocumented Latina/o parents' engagement in their children's postsecondary aspirations. I define sacrifices as the conscious decisions and investments undocumented Latina/o parents make to support their children's educational attainment, which comes at a very high personal cost due to the sociopolitical context they face as undocumented immigrants. Specifically, I reveal how undocumented Latina/o parents' day-to-day sacrifices, or their quotidian sacrifices of money, effort, time, and safety, are forms of engagement in their children's education...these are intentional parenting decisions that are similar to ones the literature identifies as \"concerted cultivation,\" strategies belonging to upper- and middle-class White and Black US citizens (Lareau, 2003). But because of the constraints they face as undocumented immigrants, these parental investments come at a very personal cost, reconceptualizing these day-to-day sacrifices as concerted sacrifices. Undocumented parents' intention to sacrifice for their children's education despite the consequences of their undocumented status is what differentiates their actions as concerted sacrifices. Thus, when day-to-day sacrifices are made for their children's academic future in particular, they are also concerted sacrifices.\"",
+  "out": "“자녀들이 명문 공립대학교에 성공적으로 입학 허가를 받고 등록한 15명의 미등록 라티나/o 부모의 경험을 검토하면서, 미등록 라티나/o 부모가 자녀의 중등 이후 교육에 대한 열망에 관여하는 방식을 이해하기 위한 렌즈로 희생(sacrifices)이라는 개념을 제시한다. 나는 희생을 미등록 라티나/o 부모가 자녀의 교육 성취를 지원하기 위해 내리는 의식적인 결정과 투자로 정의하며, 이는 이들이 미등록 이민자로서 직면하는 사회정치적 맥락으로 인해 매우 높은 개인적 비용을 수반한다. 구체적으로, 미등록 라티나/o 부모의 일상적인 희생, 즉 돈·노력·시간·안전을 일상적으로 희생하는 행위가 자녀 교육에 관여하는 형태임을 밝힌다… 이러한 행위는 문헌에서 ‘집중 양육(concerted cultivation)’으로 규정하는 것과 유사한 의도적인 부모 역할 수행의 결정으로, 상류층 및 중산층 백인과 흑인 US 시민에게 속하는 전략이다(Lareau, 2003). 그러나 미등록 이민자로서 직면하는 제약 때문에 이러한 부모의 투자는 매우 개인적인 비용을 수반하며, 이로써 이러한 일상적인 희생을 집중적 희생으로 재개념화할 수 있다. 미등록 부모가 미등록 신분의 결과에도 불구하고 자녀의 교육을 위해 희생하려는 의도야말로 이들의 행동을 집중적 희생으로 구별하는 요인이다. 따라서 특히 자녀의 학업적 미래를 위해 일상적인 희생을 감수할 때, 그러한 희생은 집중적 희생이기도 하다.”"
+ },
+ {
+  "src": "Cuevas, Stephany (2019). 'Con Mucho Sacrificio, We Give Them Everything We Can': The Strategic Day-to-Day Sacrifices of Undocumented Latina/o Parents. Harvard Educational Review: Fall 2019, Vol. 89, No. 3, pp. 473-496.",
+  "out": "Cuevas, Stephany (2019). ‘Con Mucho Sacrificio, We Give Them Everything We Can’: 서류 미비 라티나/o 부모의 전략적인 일상적인 희생. Harvard Educational Review: 2019년 가을호, 제89권, 제3호, 473–496쪽."
+ },
+ {
+  "src": "Writing the body",
+  "out": "신체 글쓰기"
+ },
+ {
+  "src": "The body is the bulk of the paper, where the ‘convincing’ takes place. Each paragraph focuses on one piece of your argument, building on what you’ve already written and flowing logically to the next step. Ultimately, the body should fully persuade your reader that your thesis (which you have already provided) is substantiated by evidence and sound reasoning.",
+  "out": "본문은 논문의 대부분을 차지하는 부분으로, 여기에서 ‘설득’이 이루어진다. 각 문단은 당신의 논지를 구성하는 하나의 요소에 초점을 맞추며, 이미 작성한 내용을 바탕으로 다음 단계로 논리적으로 이어진다. 궁극적으로 본문은 당신이 이미 제시한 논지가 근거와 타당한 추론으로 뒷받침된다는 점을 독자에게 완전히 설득해야 한다."
+ },
+ {
+  "src": "- Transition",
+  "out": "전환"
+ },
+ {
+  "src": "Topic sentence",
+  "out": "주제문"
+ },
+ {
+  "src": "The topic sentence is usually the first in the paragraph. As the name implies, it tells the reader your main point, and should connect to the thesis stated in your introduction. Subsequent sentences in the paragraph should relate back to this topic.",
+  "out": "주제문은 대개 문단의 첫 문장이다. 이름에서 알 수 있듯이, 주제문은 독자에게 글의 핵심 요점을 제시하며 서론에서 제시한 논지와 연결되어야 한다. 문단의 뒤따르는 문장들은 이 주제와 관련되어야 한다."
+ },
+ {
+  "src": "Ideas, facts, or information from external sources that support your claims – either data you collect yourself, or the research and writing of others.",
+  "out": "당신의 주장을 뒷받침하는 외부 출처의 아이디어, 사실 또는 정보로서, 당신이 직접 수집한 데이터이거나 다른 사람들의 연구와 글쓰기이다."
+ },
+ {
+  "src": "You should never present evidence without some form of analysis, or explaining the meaning of what you have shown us. Even if the quote, idea, or statistic seems to speak for itself, you must offer the reader your interpretation of how it supports your topic sentence.",
+  "out": "당신은 어떤 형태의 분석이나 당신이 우리에게 보여 준 것의 의미에 대한 설명 없이 근거를 제시해서는 안 된다. 인용문, 아이디어 또는 통계가 그 자체로 의미를 전달하는 것처럼 보이더라도, 그것이 주제문을 어떻게 뒷받침하는지에 대한 당신의 해석을 독자에게 제시해야 한다."
+ },
+ {
+  "src": "Although they are separate concepts, it can be hard to separate analysis from evidence in practice. They are closely linked, and often occur in the same sentence.",
+  "out": "두 개념은 별개이지만, 실제로는 분석과 근거를 구분하기 어려울 수 있다. 두 개념은 밀접하게 연관되어 있으며, 같은 문장에 함께 나타나는 경우가 많다."
+ },
+ {
+  "src": "<table><tr><td>The district is primarily made up of White (63.2%) and Asian (35.5%) students.</td><td>Evidence. We may believe this statement, but don’t know what it signifies unless the author writes another sentence.</td></tr><tr><td>Because the district was primarily White (63%) and Asian (35%), leaders saw no urgent reason to incorporate Black Studies into the curriculum.</td><td>Evidence with interpretation/analysis. The author interprets the evidence as relevant to a lack of urgency for Black studies.</td></tr><tr><td>The school district is 63% White and 35% Asian, with standardized test scores similar to the national averages for those groups.</td><td>Evidence with interpretation/analysis. The same evidence is used here to help the reader understand the district’s performance.</td></tr></table>",
+  "out": "<table><tr><td>이 학군은 주로 백인(63.2%)과 아시아인(35.5%) 학생으로 구성되어 있다.</td><td>근거. 우리는 이 진술을 믿을 수 있지만, 저자가 다른 문장을 쓰지 않는 한 그것이 무엇을 의미하는지는 알 수 없다.</td></tr><tr><td>이 학군은 주로 백인(63%)과 아시아인(35%)으로 구성되어 있었기 때문에, 지도자들은 교육과정에 흑인학을 포함할 긴급한 이유가 없다고 보았다.</td><td>해석/분석이 포함된 근거. 저자는 이 근거를 흑인학 도입의 긴급성이 부족하다는 점과 관련된 것으로 해석한다.</td></tr><tr><td>이 학군은 백인 63%와 아시아인 35%로 구성되어 있으며, 표준화 시험 점수는 해당 집단의 전국 평균과 유사하다.</td><td>해석/분석이 포함된 근거. 여기에서는 독자가 학군의 성과를 이해하는 데 도움을 주기 위해 동일한 근거를 사용한다.</td></tr></table>"
+ },
+ {
+  "src": "At the start of each paragraph, consider how it relates to the previous one. Also consider how the last sentence sets up your next point. A short transition phrase like “In contrast,” or “Similarly,” can guide the reader from one idea to the next. Too many transition words make writing clunky and hard to read, but they are handy for shifting between paragraphs.",
+  "out": "각 문단을 시작할 때마다 해당 문단이 앞 문단과 어떤 관련이 있는지 고려한다. 또한 마지막 문장이 다음 요점을 어떻게 마련하는지도 고려한다. “반면에” 또는 “마찬가지로”와 같은 짧은 전환 구문은 독자가 한 아이디어에서 다음 아이디어로 이동하도록 안내할 수 있다. 전환어를 지나치게 많이 사용하면 글쓰기가 어색하고 읽기 어려워지지만, 문단 사이를 전환할 때 유용하다."
+ },
+ {
+  "src": "Writing the conclusion",
+  "out": "결론 글쓰기"
+ },
+ {
+  "src": "The conclusion is the last section of your paper. It should briefly review the argument you've built, but it's not a summary – it's your final pitch to the audience for your main idea. A conclusion should:",
+  "out": "결론은 당신의 논문에서 마지막 절이다. 결론에서는 당신이 전개한 논거를 간략히 검토해야 하지만, 이는 요약이 아니라 핵심 아이디어를 청중에게 제시하는 최종적인 설득이다. 결론은 다음과 같아야 한다:"
+ },
+ {
+  "src": "- Remind the reader what you have just told them, clarifying the key ideas to ensure there is no misunderstanding.",
+  "out": "- 독자에게 당신이 방금 전달한 내용을 상기시키고, 오해가 없도록 핵심 아이디어를 명확히 한다."
+ },
+ {
+  "src": "- Return to the hook used in the introduction",
+  "out": "- 도입부에서 사용한 훅으로 돌아가기"
+ },
+ {
+  "src": "- Return to a broader lens, reminding readers how the thesis applies to your context.",
+  "out": "- 더 넓은 관점으로 돌아가 독자에게 논지가 독자의 맥락에 어떻게 적용되는지 상기시킨다."
+ },
+ {
+  "src": "- Suggest what the reader should take away from your paper.",
+  "out": "- 독자가 논문에서 무엇을 얻어가야 하는지 제시한다."
+ },
+ {
+  "src": "- Pose questions for future study, actions to take, policy interventions, or other implications of your ideas.",
+  "out": "- 향후 연구를 위한 질문, 취해야 할 조치, 정책적 개입 또는 자신의 아이디어가 갖는 기타 함의를 제시한다."
+ },
+ {
+  "src": "Take care not to repeat your words exactly in the conclusion. At the same time, you should not introduce any major new concepts or parts of your argument in this section. You are synthesizing and commenting on the ideas you've presented, but not making any substantially new points. By the end of your paper, readers should already understand your position and the evidence used to support it. The conclusion provides readers a sense of completion, a reminder why your paper was worth reading.",
+  "out": "결론에서 당신의 표현을 그대로 반복하지 않도록 주의한다. 동시에 이 절에서 주요한 새로운 개념이나 논지의 일부를 새로 도입해서는 안 된다. 당신이 제시한 아이디어를 종합하고 논평하는 것이지, 실질적으로 새로운 주장을 제시하는 것은 아니다. 논문의 마지막에 이르면 독자는 이미 당신의 입장과 이를 뒷받침하는 데 사용된 근거를 이해하고 있어야 한다. 결론은 독자에게 완결감을 제공하고, 당신의 논문이 왜 읽을 가치가 있었는지를 상기시킨다."
+ },
+ {
+  "src": "Unlimited-OCR End-to-End Sample",
+  "out": "무제한 OCR 엔드투엔드 샘플"
+ },
+ {
+  "src": "This document validates PDF to Markdown conversion, including embedded figure extraction and table structure.",
+  "out": "이 문서는 내장 그림 추출 및 표 구조를 포함하여 PDF에서 Markdown으로 변환하는 과정을 검증한다."
+ },
+ {
+  "src": "Table 1. Model configurations",
+  "out": "Table 1. 모델 구성"
+ },
+ {
+  "src": "<table><tr><td>Mode</td><td>base_size</td><td>image_size</td><td>crop</td></tr><tr><td>gundam</td><td>1024</td><td>640</td><td>true</td></tr><tr><td>base</td><td>1024</td><td>1024</td><td>false</td></tr></table>",
+  "out": "<table><tr><td>모드</td><td>기본 크기</td><td>이미지 크기</td><td>크롭</td></tr><tr><td>gundam</td><td>1024</td><td>640</td><td>true</td></tr><tr><td>base</td><td>1024</td><td>1024</td><td>false</td></tr></table>"
+ },
+ {
+  "src": "The pricing follows  \\( E = mc^{2} \\)  style notation and includes 3.3B parameters.",
+  "out": "가격 책정은 \\( E = mc^{2} \\) 스타일 표기법을 따르며 3.3B개의 파라미터를 포함한다."
+ },
+ {
+  "src": "Section 2: Figures and Lists",
+  "out": "Section 2: 그림 및 목록"
+ },
+ {
+  "src": "- First bullet item about long-horizon parsing.",
+  "out": "- 장기 범위 파싱에 관한 첫 번째 글머리 항목."
+ },
+ {
+  "src": "- Second bullet item about page markers.",
+  "out": "- 페이지 마커에 관한 두 번째 항목."
+ },
+ {
+  "src": "- Third bullet item about figure grounding boxes.",
+  "out": "- 그림 그라운딩 박스에 관한 세 번째 글머리표 항목."
+ },
+ {
+  "src": "End of sample document. Page 2 of 2.",
+  "out": "샘플 문서의 끝. 2쪽 중 2쪽."
+ },
+ {
+  "src": "How to Read a Paper",
+  "out": "논문을 읽는 방법"
+ },
+ {
+  "src": "ABSTRACT",
+  "out": "초록"
+ },
+ {
+  "src": "Researchers spend a great deal of time reading research papers. However, this skill is rarely taught, leading to much wasted effort. This article outlines a practical and efficient three-pass method for reading research papers. I also describe how to use this method to do a literature survey.",
+  "out": "연구자들은 연구 논문을 읽는 데 많은 시간을 할애한다. 그러나 이러한 능력은 거의 가르쳐지지 않으며, 그 결과 많은 노력이 낭비된다. 본 논문은 연구 논문을 읽기 위한 실용적이고 효율적인 3회독 방법을 개괄한다. 또한 이 방법을 사용하여 문헌 조사를 수행하는 방법을 설명한다."
+ },
+ {
+  "src": "Categories and Subject Descriptors: A.1 [Introductory and Survey]",
+  "out": "분류 및 주제 설명자: A.1 [입문 및 개관]"
+ },
+ {
+  "src": "General Terms: Documentation.",
+  "out": "일반 용어: 문서화."
+ },
+ {
+  "src": "Keywords: Paper, Reading, Hints.",
+  "out": "키워드: 논문, 읽기, 힌트."
+ },
+ {
+  "src": "1. INTRODUCTION",
+  "out": "1. 서론"
+ },
+ {
+  "src": "Researchers must read papers for several reasons: to review them for a conference or a class, to keep current in their field, or for a literature survey of a new field. A typical researcher will likely spend hundreds of hours every year reading papers.",
+  "out": "연구자는 학회나 수업을 위해 논문을 검토하거나, 자신의 분야에서 최신 동향을 파악하거나, 새로운 분야의 문헌 조사를 수행하기 위해 여러 이유로 논문을 읽어야 한다. 일반적인 연구자는 매년 논문을 읽는 데 수백 시간을 사용할 가능성이 높다."
+ },
+ {
+  "src": "Learning to efficiently read a paper is a critical but rarely taught skill. Beginning graduate students, therefore, must learn on their own using trial and error. Students waste much effort in the process and are frequently driven to frustration.",
+  "out": "논문을 효율적으로 읽는 법을 배우는 것은 중요하지만 좀처럼 가르쳐지지 않는 기술이다. 따라서 대학원에 갓 입학한 학생들은 시행착오를 통해 스스로 이를 배워야 한다. 학생들은 이 과정에서 많은 노력을 허비하며 자주 좌절을 겪는다."
+ },
+ {
+  "src": "For many years I have used a simple approach to efficiently read papers. This paper describes the ‘three-pass’ approach and its use in doing a literature survey.",
+  "out": "나는 여러 해 동안 논문을 효율적으로 읽기 위해 간단한 접근법을 사용해 왔다. 이 논문은 ‘3회독’ 접근법과 문헌 조사를 수행할 때 이를 사용하는 방법을 설명한다."
+ },
+ {
+  "src": "2. THE THREE-PASS APPROACH",
+  "out": "2. 3회독 접근법"
+ },
+ {
+  "src": "The key idea is that you should read the paper in up to three passes, instead of starting at the beginning and plowing your way to the end. Each pass accomplishes specific goals and builds upon the previous pass: The first pass gives you a general idea about the paper. The second pass lets you grasp the paper's content, but not its details. The third pass helps you understand the paper in depth.",
+  "out": "핵심 아이디어는 독자가 논문을 처음부터 시작하여 끝까지 읽어 나가는 대신, 최대 세 번에 걸쳐 읽어야 한다는 것이다. 각 읽기는 특정한 목표를 달성하며 이전 읽기를 바탕으로 한다. 첫 번째 읽기는 독자에게 논문에 대한 전반적인 개념을 제공한다. 두 번째 읽기를 통해 독자는 논문의 내용을 파악할 수 있지만 세부사항까지는 파악하지 못한다. 세 번째 읽기는 독자가 논문을 깊이 이해하도록 돕는다."
+ },
+ {
+  "src": "2.1 The first pass",
+  "out": "2.1 첫 번째 읽기 단계"
+ },
+ {
+  "src": "The first pass is a quick scan to get a bird's-eye view of the paper. You can also decide whether you need to do any more passes. This pass should take about five to ten minutes and consists of the following steps:",
+  "out": "첫 번째 패스는 논문의 전체 개요를 파악하기 위한 빠른 훑어보기이다. 독자는 추가로 패스를 더 수행할 필요가 있는지도 결정할 수 있다. 이 패스에는 약 5~10분이 소요되며 다음 단계로 구성된다:"
+ },
+ {
+  "src": "1. Carefully read the title, abstract, and introduction",
+  "out": "1. 제목, 초록, 서론을 주의 깊게 읽기"
+ },
+ {
+  "src": "2. Read the section and sub-section headings, but ignore everything else",
+  "out": "2. 섹션 및 하위 섹션 제목을 읽되, 나머지는 모두 무시한다."
+ },
+ {
+  "src": "3. Read the conclusions",
+  "out": "3. 결론을 읽는다"
+ },
+ {
+  "src": "4. Glance over the references, mentally ticking off the ones you've already read",
+  "out": "4. 참고문헌을 훑어보면서 이미 읽은 문헌을 머릿속으로 하나씩 확인한다."
+ },
+ {
+  "src": "At the end of the first pass, you should be able to answer the five Cs:",
+  "out": "첫 번째 통독이 끝날 때, 독자는 다섯 가지 C에 답할 수 있어야 한다:"
+ },
+ {
+  "src": "1. Category: What type of paper is this? A measurement paper? An analysis of an existing system? A description of a research prototype?",
+  "out": "1. 분류: 이 논문의 유형은 무엇인가? 측정 논문인가? 기존 시스템에 대한 분석인가? 연구 프로토타입에 대한 설명인가?"
+ },
+ {
+  "src": "2. Context: Which other papers is it related to? Which theoretical bases were used to analyze the problem?",
+  "out": "2. 맥락: 이 논문은 어떤 다른 논문들과 관련되는가? 문제를 분석하는 데 어떤 이론적 기반이 사용되었는가?"
+ },
+ {
+  "src": "3. Correctness: Do the assumptions appear to be valid?",
+  "out": "3. 정확성: 가정이 타당한 것으로 보이는가?"
+ },
+ {
+  "src": "4. Contributions: What are the paper's main contributions?",
+  "out": "4. 기여: 논문의 주요 기여는 무엇인가?"
+ },
+ {
+  "src": "5. Clarity: Is the paper well written?",
+  "out": "5. 명확성: 논문은 잘 작성되었는가?"
+ },
+ {
+  "src": "Using this information, you may choose not to read further. This could be because the paper doesn't interest you, or you don't know enough about the area to understand the paper, or that the authors make invalid assumptions. The first pass is adequate for papers that aren't in your research area, but may someday prove relevant.",
+  "out": "이 정보를 바탕으로 독자는 더 읽지 않기로 선택할 수 있다. 이는 논문에 관심이 없거나, 해당 분야에 관해 논문을 이해할 만큼 충분히 알지 못하거나, 저자들이 타당하지 않은 가정을 하기 때문일 수 있다. 첫 번째 읽기는 독자의 연구 분야에 속하지 않지만 언젠가 관련성이 있는 것으로 판명될 수 있는 논문에 적합하다."
+ },
+ {
+  "src": "Incidentally, when you write a paper, you can expect most reviewers (and readers) to make only one pass over it. Take care to choose coherent section and sub-section titles and to write concise and comprehensive abstracts. If a reviewer cannot understand the gist after one pass, the paper will likely be rejected; if a reader cannot understand the highlights of the paper after five minutes, the paper will likely never be read.",
+  "out": "참고로, 독자가 논문을 작성할 때 대부분의 심사자(및 독자)가 논문을 한 번만 읽을 것이라고 예상할 수 있다. 일관성 있는 절 및 하위 절 제목을 선택하고, 간결하면서도 포괄적인 초록을 작성하도록 주의해야 한다. 심사자가 한 번 읽은 후에도 요지를 이해하지 못한다면 논문은 거부될 가능성이 높으며, 독자가 5분 안에 논문의 핵심 내용을 이해하지 못한다면 논문은 아마도 결코 읽히지 않을 것이다."
+ },
+ {
+  "src": "2.2 The second pass",
+  "out": "2.2 두 번째 읽기"
+ },
+ {
+  "src": "In the second pass, read the paper with greater care, but ignore details such as proofs. It helps to jot down the key points, or to make comments in the margins, as you read.",
+  "out": "두 번째 읽기에서는 논문을 더욱 주의 깊게 읽되, 증명과 같은 세부 사항은 무시한다. 읽으면서 핵심 사항을 간단히 적어 두거나 여백에 주석을 작성하는 것이 도움이 된다."
+ },
+ {
+  "src": "1. Look carefully at the figures, diagrams and other illustrations in the paper. Pay special attention to graphs. Are the axes properly labeled? Are results shown with error bars, so that conclusions are statistically significant? Common mistakes like these will separate the world, nobody work from the truly excellent.",
+  "out": "1. 논문의 도표, 다이어그램 및 기타 삽화를 주의 깊게 살펴본다. 그래프에 특히 주의를 기울인다. 축에는 적절한 레이블이 붙어 있는가? 결과가 오차 막대와 함께 제시되어 결론이 통계적으로 유의미한가? 이와 같은 흔한 실수는 평범한 연구와 진정으로 탁월한 연구를 가르는 기준이 된다."
+ },
+ {
+  "src": "2. Remember to mark relevant unread references for further reading (this is a good way to learn more about the background of the paper).",
+  "out": "2. 추가로 읽을 수 있도록 관련된 미열람 참고문헌을 표시해 둔다(이는 논문의 배경에 대해 더 많이 학습하는 좋은 방법이다)."
+ },
+ {
+  "src": "The second pass should take up to an hour. After this pass, you should be able to grasp the content of the paper. You should be able to summarize the main thrust of the paper, with supporting evidence, to someone else. This level of detail is appropriate for a paper in which you are interested, but does not lie in your research speciality.",
+  "out": "두 번째 검토에는 최대 한 시간이 걸린다. 이 검토를 마치면 독자는 논문의 내용을 파악할 수 있어야 한다. 독자는 뒷받침하는 근거와 함께 논문의 주요 논지를 다른 사람에게 요약하여 설명할 수 있어야 한다. 이러한 세부 수준은 독자가 관심을 가지는 논문이지만 독자의 연구 전문 분야에는 속하지 않는 논문에 적절하다."
+ },
+ {
+  "src": "Sometimes you won't understand a paper even at the end of the second pass. This may be because the subject matter is new to you, with unfamiliar terminology and acronyms. Or the authors may use a proof or experimental technique that you don't understand, so that the bulk of the paper is incomprehensible. The paper may be poorly written with unsubstantiated assertions and numerous forward references. Or it could just be that it's late at night and you're tired. You can now choose to: (a) set the paper aside, hoping you don't need to understand the material to be successful in your career, (b) return to the paper later, perhaps after reading background material or (c) persevere and go on to the third pass.",
+  "out": "때로는 두 번째 읽기를 마친 뒤에도 논문을 이해하지 못할 수 있다. 이는 익숙하지 않은 용어와 약어가 사용되어 주제 자체가 독자에게 새로운 것이기 때문일 수 있다. 또는 저자가 독자가 이해하지 못하는 증명이나 실험 기법을 사용하여 논문의 대부분을 이해할 수 없기 때문일 수도 있다. 논문이 근거가 뒷받침되지 않은 주장과 수많은 후속 참조로 서술이 부실할 수도 있다. 아니면 단지 밤이 늦어 독자가 피곤하기 때문일 수도 있다. 이제 다음 중 하나를 선택할 수 있다: (a) 경력에서 성공하는 데 해당 내용을 이해할 필요가 없기를 바라며 논문을 잠시 제쳐 두거나, (b) 배경 자료를 읽은 뒤와 같이 나중에 논문으로 돌아가거나, (c) 인내심을 갖고 세 번째 읽기로 넘어가는 것이다."
+ },
+ {
+  "src": "2.3 The third pass",
+  "out": "2.3 세 번째 통독"
+ },
+ {
+  "src": "To fully understand a paper, particularly if you are reviewer, requires a third pass. The key to the third pass is to attempt to virtually re-implement the paper: that is, making the same assumptions as the authors, re-create the work. By comparing this re-creation with the actual paper, you can easily identify not only a paper's innovations, but also its hidden failings and assumptions.",
+  "out": "논문을 완전히 이해하려면, 특히 독자가 심사자라면 세 번째 통과가 필요하다. 세 번째 통과의 핵심은 논문을 가상으로 재구현해 보는 것이다. 즉, 저자들과 동일한 가정을 하고 그 작업을 재현하는 것이다. 이러한 재현 결과를 실제 논문과 비교하면 논문의 혁신뿐만 아니라 숨겨진 결함과 가정도 쉽게 식별할 수 있다."
+ },
+ {
+  "src": "This pass requires great attention to detail. You should identify and challenge every assumption in every statement. Moreover, you should think about how you yourself would present a particular idea. This comparison of the actual with the virtual lends a sharp insight into the proof and presentation techniques in the paper and you can very likely add this to your repertoire of tools. During this pass, you should also jot down ideas for future work.",
+  "out": "이 과정에서는 세부 사항에 대한 어텐션이 매우 중요하다. 독자는 모든 진술에 담긴 모든 가정을 식별하고 이에 의문을 제기해야 한다. 더욱이 독자는 특정 아이디어를 스스로 어떻게 제시할지 생각해야 한다. 실제 논문과 가상의 재현물을 비교하면 논문의 증명 및 제시 기법을 날카롭게 통찰할 수 있으며, 이러한 기법을 자신의 도구 모음에 추가할 수 있을 가능성이 매우 높다. 이 과정에서 독자는 향후 연구를 위한 아이디어도 적어 두어야 한다."
+ },
+ {
+  "src": "This pass can take about four or five hours for beginners, and about an hour for an experienced reader. At the end of this pass, you should be able to reconstruct the entire structure of the paper from memory, as well as be able to identify its strong and weak points. In particular, you should be able to pinpoint implicit assumptions, missing citations to relevant work, and potential issues with experimental or analytical techniques.",
+  "out": "이 단계는 초보자에게는 약 네다섯 시간이 걸릴 수 있으며, 숙련된 독자에게는 약 한 시간이 걸릴 수 있다. 이 단계가 끝나면 독자는 논문의 전체 구조를 기억만으로 재구성할 수 있을 뿐만 아니라, 논문의 강점과 약점도 식별할 수 있어야 한다. 특히 암묵적 가정, 관련 연구에 대한 누락된 인용, 실험적 또는 분석적 기법에서 발생할 수 있는 문제를 정확히 짚어낼 수 있어야 한다."
+ },
+ {
+  "src": "3. DOING A LITERATURE SURVEY",
+  "out": "3. 문헌 조사 수행하기"
+ },
+ {
+  "src": "Paper reading skills are put to the test in doing a literature survey. This will require you to read tens of papers, perhaps in an unfamiliar field. What papers should you read? Here is how you can use the three-pass approach to help.",
+  "out": "논문 읽기 능력은 문헌 조사를 수행할 때 시험대에 오른다. 이를 위해 독자는 익숙하지 않은 분야일 수도 있는 분야에서 수십 편의 논문을 읽어야 한다. 독자는 무엇을 읽어야 하는가? 이를 돕기 위해 3회독 접근법을 활용하는 방법은 다음과 같다."
+ },
+ {
+  "src": "First, use an academic search engine such as Google Scholar or CiteSeer and some well-chosen keywords to find three to five recent papers in the area. Do one pass on each paper to get a sense of the work, then read their related work sections. You will find a thumbnail summary of the recent work, and perhaps, if you are lucky, a pointer to a recent survey paper. If you can find such a survey, you are done. Read the survey, congratulating yourself on your good luck.",
+  "out": "먼저 Google Scholar나 CiteSeer와 같은 학술 검색 엔진과 잘 선정한 몇 개의 키워드를 사용하여 해당 분야의 최근 논문 세 편에서 다섯 편을 찾는다. 각 논문에 대해 한 차례 읽기를 수행하여 연구 내용을 파악한 다음, 해당 논문들의 관련 연구 절을 읽는다. 그러면 최근 연구에 대한 개략적인 요약을 얻을 수 있으며, 운이 좋다면 최근에 작성된 리뷰 논문을 가리키는 단서도 찾을 수 있다. 그러한 리뷰 논문을 찾을 수 있다면 독자의 작업은 끝난다. 독자는 자신의 행운을 자축하면서 그 리뷰 논문을 읽는다."
+ },
+ {
+  "src": "Otherwise, in the second step, find shared citations and repeated author names in the bibliography. These are the key papers and researchers in that area. Download the key papers and set them aside. Then go to the websites of the key researchers and see where they've published recently.",
+  "out": "그렇지 않다면, 두 번째 단계로 참고문헌에서 공통으로 인용된 문헌과 반복해서 등장하는 저자명을 찾는다. 이들이 해당 분야의 핵심 논문과 연구자이다. 핵심 논문을 다운로드하여 따로 모아 둔다. 그런 다음 핵심 연구자들의 웹사이트를 방문하여 그들이 최근에 어디에 논문을 게재했는지 살펴본다."
+ },
+ {
+  "src": "That will help you identify the top conferences in that field because the best researchers usually publish in the top conferences.",
+  "out": "이는 독자가 해당 분야의 최상위 학회를 식별하는 데 도움이 될 것이다. 최고의 연구자들은 일반적으로 최상위 학회에 논문을 발표하기 때문이다."
+ },
+ {
+  "src": "The third step is to go to the website for these top conferences and look through their recent proceedings. A quick scan will usually identify recent high-quality related work. These papers, along with the ones you set aside earlier, constitute the first version of your survey. Make two passes through these papers. If they all cite a key paper that you did not find earlier, obtain and read it, iterating as necessary.",
+  "out": "세 번째 단계는 이러한 주요 학술대회의 웹사이트를 방문하여 최근 학술대회 논문집을 훑어보는 것이다. 빠르게 훑어보면 대개 최근의 수준 높은 관련 연구를 찾아낼 수 있다. 이 논문들은 앞서 따로 분류해 둔 논문들과 함께 문헌 조사의 첫 번째 버전을 구성한다. 이 논문들을 두 차례 읽기 방식으로 검토한다. 이 논문들이 모두 독자가 앞서 찾지 못한 핵심 논문을 인용한다면, 필요에 따라 반복하면서 해당 논문을 입수하여 읽는다."
+ },
+ {
+  "src": "4. EXPERIENCE",
+  "out": "4. 경험"
+ },
+ {
+  "src": "I've used this approach for the last 15 years to read conference proceedings, write reviews, do background research, and to quickly review papers before a discussion. This disciplined approach prevents me from drowning in the details before getting a bird's-eye-view. It allows me to estimate the amount of time required to review a set of papers. Moreover, I can adjust the depth of paper evaluation depending on my needs and how much time I have.",
+  "out": "나는 지난 15년 동안 학술대회 논문집을 읽고, 리뷰를 작성하고, 배경 조사를 수행하며, 토론에 앞서 논문을 신속하게 검토하기 위해 이 접근법을 사용하였다. 이러한 규율 있는 접근법은 전체를 조망하기도 전에 세부 사항에 파묻히는 것을 방지한다. 또한 일련의 논문을 검토하는 데 필요한 시간을 추정할 수 있게 한다. 더욱이 필요와 가용 시간에 따라 논문 평가의 깊이를 조절할 수 있다."
+ },
+ {
+  "src": "5. RELATED WORK",
+  "out": "5. 관련 연구"
+ },
+ {
+  "src": "If you are reading a paper to do a review, you should also read Timothy Roscoe's paper on “Writing reviews for systems conferences” [2]. If you're planning to write a technical paper, you should refer both to Henning Schulzrinne's comprehensive web site [3] and George Whitesides's excellent overview of the process [4]. Finally, Simon Peyton Jones has a website that covers the entire spectrum of research skills [1].",
+  "out": "독자가 논문을 읽고 리뷰를 작성하려는 경우에는 Timothy Roscoe의 “시스템 학회를 위한 리뷰 작성” 논문도 읽어야 한다 [2]. 기술 논문을 작성할 계획이라면 Henning Schulzrinne의 포괄적인 웹사이트 [3]와 George Whitesides의 해당 과정에 관한 훌륭한 개요 [4]를 모두 참고해야 한다. 마지막으로 Simon Peyton Jones는 연구 기술의 전 범위를 다루는 웹사이트를 운영하고 있다 [1]."
+ },
+ {
+  "src": "6. A REQUEST",
+  "out": "6. 요청 사항"
+ },
+ {
+  "src": "I would like to make this a living document, updating it as I receive comments. Please take a moment to email me any comments or suggestions for improvement. You can also add comments at CCRO, the online edition of CCR [5].",
+  "out": "이 문서를 살아 있는 문서로 만들고자 하며, 의견을 받는 대로 업데이트할 것이다. 독자는 잠시 시간을 내어 개선을 위한 의견이나 제안을 이메일로 보내기 바란다. 또한 CCR의 온라인 판인 CCRO [5]에 의견을 추가할 수도 있다."
+ },
+ {
+  "src": "7. ACKNOWLEDGMENTS",
+  "out": "7. 감사의 글"
+ },
+ {
+  "src": "The first version of this document was drafted by my students: Hossein Falaki, Earl Oliver, and Sumair Ur Rahman. My thanks to them. I also benefited from Christophe Diot's perceptive comments and Nicole Keshav's eagle-eyed copy-editing.",
+  "out": "이 문서의 첫 번째 버전은 나의 학생들인 Hossein Falaki, Earl Oliver, Sumair Ur Rahman이 초안을 작성하였다. 이들에게 감사한다. 또한 Christophe Diot의 통찰력 있는 논평과 Nicole Keshav의 세심한 교정으로부터 많은 도움을 받았다."
+ },
+ {
+  "src": "This work was supported by grants from the National Science and Engineering Council of Canada, the Canada Research Chair Program, Nortel Networks, Microsoft, Intel Corporation, and Sprint Corporation.",
+  "out": "이 연구는 National Science and Engineering Council of Canada, Canada Research Chair Program, Nortel Networks, Microsoft, Intel Corporation 및 Sprint Corporation의 연구비 지원을 받아 수행되었다."
+ },
+ {
+  "src": "8. REFERENCES",
+  "out": "8. 참고문헌"
+ }
+]

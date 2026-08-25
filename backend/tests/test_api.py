@@ -2,6 +2,7 @@ import io
 import json
 import threading
 import zipfile
+from types import SimpleNamespace
 
 from conftest import wait_done
 
@@ -20,6 +21,22 @@ def test_health(client):
     assert body["engine"] == "fake"
     assert body["device"] == "cpu"
     assert "native_ops" in body
+
+
+def test_health_reports_worker_alive(client):
+    """워커가 죽으면 잡이 영원히 queued로 남는다 — 운영 가시성용 필드."""
+    assert client.get("/api/health").json()["worker_alive"] is True
+
+    class _Dead:
+        def is_alive(self):
+            return False
+
+    real = client.app.state.worker
+    client.app.state.worker = _Dead()
+    try:
+        assert client.get("/api/health").json()["worker_alive"] is False
+    finally:
+        client.app.state.worker = real
 
 
 def test_health_reports_max_upload_mb(tmp_path):
@@ -298,6 +315,126 @@ def test_files_path_traversal_blocked(client, sample_pdf):
     assert client.get(f"/api/jobs/{jid}/files/pages/page_0001.png").status_code == 200
 
 
+_TRAVERSAL_PATHS = (
+    "pages/../source.pdf",
+    "pages/./../source.pdf",
+    "pages/%2e%2e/source.pdf",
+    "pages/../../../etc/passwd",
+    "images/../../etc/passwd",
+    "rendered/../meta.json",
+    "layout/../result.md",
+    "pages/subdir/../../source.pdf",
+    "pages/../translations/ko/units.json",
+)
+
+
+def test_files_allowlist_not_bypassable_by_parent_refs(client, sample_pdf):
+    """허용 디렉터리로 시작하기만 하면 상위참조로 잡 디렉터리 안 임의 파일(원본
+    업로드 PDF·meta.json·번역 산출물)을 받아갈 수 있었다 — 정규화 후 검사한다.
+
+    httpx는 URL의 `..`를 전송 전에 정규화하므로(실제 브라우저·curl --path-as-is는
+    그대로 보낸다) 라우트 함수를 직접 호출해 계약을 고정하고, HTTP 경로로도
+    차단되는지 함께 확인한다."""
+    import pytest
+    from fastapi import HTTPException
+
+    import app.api as api_mod
+
+    jid = _upload(client, sample_pdf).json()["job_id"]
+    wait_done(client, jid)
+    job = client.app.state.store.get(jid)
+    assert (job.dir / "source.pdf").is_file()   # 실제로 존재해야 회귀가 의미 있다
+
+    request = SimpleNamespace(app=client.app)   # job_file이 쓰는 표면은 app.state뿐
+    for path in _TRAVERSAL_PATHS:
+        with pytest.raises(HTTPException) as excinfo:
+            api_mod.job_file(request, jid, path)
+        assert excinfo.value.status_code == 404, path
+        assert client.get(f"/api/jobs/{jid}/files/{path}").status_code in (400, 404), path
+
+    # 정상 경로는 그대로 200
+    assert api_mod.job_file(request, jid, "pages/page_0001.png").status_code == 200
+    assert client.get(f"/api/jobs/{jid}/files/pages/page_0001.png").status_code == 200
+
+
+def test_files_symlink_escape_blocked(client, sample_pdf):
+    """허용 디렉터리 안의 심볼릭 링크로도 잡 디렉터리 안팎을 빠져나갈 수 없다."""
+    jid = _upload(client, sample_pdf).json()["job_id"]
+    wait_done(client, jid)
+    job = client.app.state.store.get(jid)
+    inside = job.dir / "pages" / "leak.pdf"
+    inside.symlink_to(job.dir / "source.pdf")
+    outside = job.dir / "pages" / "outside.json"
+    outside.symlink_to(job.dir.parent)
+
+    assert client.get(f"/api/jobs/{jid}/files/pages/leak.pdf").status_code == 404
+    assert client.get(f"/api/jobs/{jid}/files/pages/outside.json").status_code == 404
+    assert client.get(f"/api/jobs/{jid}/files/pages/page_0001.png").status_code == 200
+
+
+def test_job_list_omits_file_urls(client, sample_pdf):
+    """목록 폴링은 잡마다 pages/·images/ 전수 스캔이 필요 없다 — 키는 유지하되
+    빈 배열. 단건 조회는 기존 계약대로 전체 URL을 준다."""
+    jid = _upload(client, sample_pdf).json()["job_id"]
+    wait_done(client, jid)
+
+    listed = {j["job_id"]: j for j in client.get("/api/jobs").json()["jobs"]}[jid]
+    assert listed["result"]["images"] == []
+    assert listed["result"]["layouts"] == []
+    assert listed["result"]["pages"] == []
+    assert listed["result"]["has_layout"] is True
+
+    single = client.get(f"/api/jobs/{jid}").json()
+    assert len(single["result"]["pages"]) == 3
+    assert len(single["result"]["images"]) == 3
+    assert len(single["result"]["layouts"]) == 3
+
+
+def test_upload_failure_leaves_no_ghost_job(client, sample_pdf, monkeypatch):
+    """업로드 중 HTTPException이 아닌 예외(디스크 오류 등)에서도 잡 디렉터리와
+    목록 항목이 남으면 안 된다 — 남으면 영원히 queued인 유령 잡이 된다."""
+    import pytest
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("디스크 오류")
+
+    monkeypatch.setattr("app.api.probe_pdf", _boom)
+    with pytest.raises(RuntimeError):
+        _upload(client, sample_pdf)
+
+    assert client.get("/api/jobs").json()["jobs"] == []
+
+
+def test_job_render_lock_is_per_job(client):
+    """전역 락이면 200페이지 잡 하나의 첫 렌더가 다른 잡의 /layout·/page까지 막는다."""
+    import app.api as api_mod
+
+    lock_a = api_mod._job_render_lock("job-a")
+    assert api_mod._job_render_lock("job-a") is lock_a
+    assert api_mod._job_render_lock("job-b") is not lock_a
+    api_mod._forget_job_caches("job-a")
+    api_mod._forget_job_caches("job-b")
+
+
+def test_page_image_does_not_reparse_layout_each_request(client, sample_pdf, monkeypatch):
+    """페이지 이미지 요청마다 layout.json 전체를 재파싱하지 않는다(크기·mtime 캐시)."""
+    import app.api as api_mod
+
+    jid = _upload(client, sample_pdf).json()["job_id"]
+    wait_done(client, jid)
+    assert client.get(f"/api/jobs/{jid}/page/1").status_code == 200  # 캐시 워밍(폰트 백필 포함)
+
+    calls = []
+    real = api_mod._load_layout_pages
+    monkeypatch.setattr(
+        "app.api._load_layout_pages",
+        lambda job, lang=None: (calls.append(lang), real(job, lang))[1],
+    )
+    for page in (1, 2, 3, 1):
+        assert client.get(f"/api/jobs/{jid}/page/{page}").status_code == 200
+    assert calls == []
+
+
 def test_cancel_keeps_partial_results(tmp_path, sample_pdf):
     from fastapi.testclient import TestClient
 
@@ -351,6 +488,137 @@ def test_render_preview_body_limit(client, sample_pdf):
     assert r.status_code == 200
 
 
+# ── 업로드 본문 상한: 멀티파트 파싱 전에 차단 (UploadBodyLimitMiddleware) ──
+def _limited_app(tmp_path, max_upload_mb: int = 1):
+    """MAX_UPLOAD_MB가 작은 앱 — 상한 경계를 실제 업로드로 확인하기 위해."""
+    from fastapi.testclient import TestClient
+
+    from app.config import Settings
+    from app.main import create_app
+
+    settings = Settings(
+        engine="fake", device="cpu", data_dir=tmp_path / "data",
+        preload_model=False, fake_delay=0.0, frontend_dir=tmp_path / "no-frontend",
+        max_upload_mb=max_upload_mb,
+    )
+    return TestClient(create_app(settings)), settings
+
+
+def test_upload_over_limit_rejected_before_spooling(tmp_path, sample_pdf, monkeypatch):
+    """상한 초과 Content-Length는 폼 파싱 전에 413 — 스풀 임시 파일도, 잡 디렉터리도
+    만들어지지 않는다(무인증 서비스의 디스크 소진 벡터)."""
+    import starlette.formparsers as fp
+
+    spooled = []
+    real_spool = fp.SpooledTemporaryFile
+    monkeypatch.setattr(
+        fp, "SpooledTemporaryFile",
+        lambda *a, **kw: (spooled.append(1), real_spool(*a, **kw))[1],
+    )
+
+    client, settings = _limited_app(tmp_path)
+    with client:
+        r = _upload(client, sample_pdf + b"\n" * (2 * 1024 * 1024))
+        assert r.status_code == 413
+        assert "1MB" in r.json()["detail"]
+        assert spooled == []                                  # 본문이 디스크에 닿지 않았다
+        assert client.get("/api/jobs").json()["jobs"] == []   # 유령 잡 없음
+        assert list(settings.jobs_dir.iterdir()) == []
+
+
+def test_upload_exactly_at_limit_is_accepted(tmp_path, sample_pdf):
+    """멀티파트 봉투 여유분이 없으면 정확히 MAX_UPLOAD_MB인 파일이 거절된다 — 회귀 방지."""
+    client, settings = _limited_app(tmp_path)
+    at_limit = sample_pdf + b"\n" * (settings.max_upload_bytes - len(sample_pdf))
+    assert len(at_limit) == settings.max_upload_bytes
+    with client:
+        r = _upload(client, at_limit)
+        assert r.status_code == 202, r.text
+        wait_done(client, r.json()["job_id"])
+
+
+def test_upload_over_limit_without_content_length(tmp_path, sample_pdf):
+    """길이를 알 수 없는(chunked) 본문도 누적 바이트로 판정해 413."""
+    boundary = "----limit-test"
+    head = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="big.pdf"\r\n'
+        "Content-Type: application/pdf\r\n\r\n"
+    ).encode()
+    payload = sample_pdf + b"\n" * (2 * 1024 * 1024)
+
+    def gen():
+        yield head
+        yield payload
+        yield f"\r\n--{boundary}--\r\n".encode()
+
+    client, settings = _limited_app(tmp_path)
+    with client:
+        r = client.post(
+            "/api/jobs",
+            content=gen(),
+            headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+        )
+        assert r.status_code == 413
+        assert "content-length" not in {k.lower() for k in r.request.headers}
+        assert list(settings.jobs_dir.iterdir()) == []
+
+
+def test_upload_body_limit_middleware_cuts_streaming_body():
+    """chunked 경로는 앱이 본문을 다 받기 전에 끊긴다 — 누적 바이트가 상한을 넘는
+    즉시 413을 보내고 뒤따르는 청크는 읽지 않는다."""
+    import anyio
+
+    from app.main import UploadBodyLimitMiddleware
+
+    chunk = b"x" * 4096
+    total_chunks = 64
+    reads = {"n": 0}
+    seen: list[int] = []
+    sent: list[dict] = []
+
+    async def receive():
+        reads["n"] += 1
+        if reads["n"] <= total_chunks:
+            return {"type": "http.request", "body": chunk, "more_body": True}
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    async def app(scope, receive_, send_):
+        while True:
+            msg = await receive_()
+            if msg["type"] == "http.disconnect":
+                raise RuntimeError("client disconnected")  # 폼 파서와 같은 반응
+            seen.append(len(msg["body"]))
+            if not msg.get("more_body"):
+                break
+        await send_({"type": "http.response.start", "status": 202, "headers": []})
+        await send_({"type": "http.response.body", "body": b"{}"})
+
+    # max_bytes=0 → 상한은 멀티파트 여유분(64KiB)뿐
+    mw = UploadBodyLimitMiddleware(app, max_bytes=0, max_mb=0)
+    scope = {"type": "http", "method": "POST", "path": "/api/jobs", "headers": []}
+    anyio.run(mw, scope, receive, send)
+
+    assert [m["status"] for m in sent if m["type"] == "http.response.start"] == [413]
+    assert sum(seen) <= 64 * 1024 + len(chunk)   # 상한 언저리에서 멈췄다
+    assert reads["n"] < total_chunks             # 나머지 청크는 읽지 않았다
+
+
+def test_upload_limit_does_not_affect_other_routes(tmp_path, sample_pdf):
+    """미들웨어는 업로드 라우트 전용 — /render-preview는 자체 2MB 상한만 적용받는다."""
+    client, settings = _limited_app(tmp_path)
+    with client:
+        jid = _upload(client, sample_pdf).json()["job_id"]
+        # MAX_UPLOAD_MB(1MB)보다 크지만 프리뷰 상한(2MB) 안이면 통과해야 한다
+        big = b"# preview\n" + b"x" * 1_500_000
+        assert client.post(f"/api/jobs/{jid}/render-preview", content=big).status_code == 200
+        # SSE·다운로드 등 GET 경로도 그대로
+        assert client.get("/api/health").status_code == 200
+
+
 def test_archive_before_done_conflicts(client, sample_pdf, settings):
     # fake_delay=0이면 너무 빨리 끝나 409를 못 볼 수 있으므로 큰 파일로 시도하지 않고
     # 존재하지 않는 완료 전 상태를 시뮬레이션: 새 잡을 만들고 즉시 archive 요청 경합 허용
@@ -375,8 +643,10 @@ def test_result_block_has_layout_플래그(tmp_path):
 
 
 def test_queue_position_for_queued_jobs(tmp_path, sample_pdf):
-    """queued 잡에만 queue_position(1-base, 생성 순서)이 붙는다 — 단일 워커 FIFO 큐.
-    with 블록(lifespan) 없이 요청하면 워커가 기동하지 않아 큐가 소비되지 않는다."""
+    """queued 잡에만 queue_position(1-base, 워커 큐 제출 순서)이 붙는다 — 단일 워커
+    FIFO 큐. 업로드 본문 수신이 끝난 뒤 submit되므로 생성 순서와 어긋날 수 있고
+    (여기처럼 순차 업로드면 두 순서가 같다), with 블록(lifespan) 없이 요청하면
+    워커가 기동하지 않아 큐가 소비되지 않는다."""
     from fastapi.testclient import TestClient
 
     from app.config import Settings

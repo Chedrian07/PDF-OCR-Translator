@@ -54,3 +54,26 @@ def test_build_router_smoke_uses_settings_defaults() -> None:
     assert router.openai.responses_models == settings.llm_openai_responses_models
     assert router.ollama.base_url == settings.ollama_base_url
     assert router.ollama.default_model == settings.ollama_model
+
+
+def test_build_router는_번역키를_Q_A에_재사용하지_않는다() -> None:
+    """OPENAI_API_KEY는 임의 게이트웨이(OpenRouter 등)를 가리킬 수 있고
+    llm_openai_base_url은 api.openai.com 고정이라, 폴백은 곧 키 유출이다."""
+    settings = Settings(
+        engine="fake", device="cpu", openai_api_key="sk-or-v1-translation", llm_openai_api_key=""
+    )
+    router = build_router(settings)
+
+    assert router.openai.api_key == ""
+    assert router.openai.configured is False
+
+
+def test_build_router는_전용_Q_A키를_사용한다() -> None:
+    settings = Settings(
+        engine="fake", device="cpu", openai_api_key="sk-or-v1-translation",
+        llm_openai_api_key="sk-qa-only",
+    )
+    router = build_router(settings)
+
+    assert router.openai.api_key == "sk-qa-only"
+    assert router.openai.configured is True

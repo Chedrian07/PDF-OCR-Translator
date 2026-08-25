@@ -417,6 +417,227 @@ def test_translate_state_race_done_preserved(client, sample_pdf, settings, monke
     assert _tstate(client, jid)["status"] == "done"
 
 
+# ── 6c. api.py → 엔진 결선: 실 client가 앱 전역 세마포어를 들고 간다 ────────
+def test_translate_스레드가_실클라이언트를_전역슬롯과_함께_주입(
+    client, sample_pdf, provider_env, monkeypatch,
+):
+    """`request_semaphore` 키워드나 client 주입이 리팩터링에서 끊기면 프로덕션
+    POST /translate만 죽고 페이크 기반 테스트는 전부 초록으로 남는다."""
+    from app.translate.client import OpenAICompatClient
+
+    seen = {}
+    fake = _make_fake()
+
+    def _capture(*args, **kwargs):
+        seen["client"] = kwargs.get("client")
+        return fake(*args, **kwargs)
+
+    monkeypatch.setattr("app.api.run_translation", _capture)
+    jid = _done_job(client, sample_pdf)
+    assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 202
+    _wait_no_task(client, jid)
+
+    assert isinstance(seen["client"], OpenAICompatClient)
+    assert seen["client"]._request_semaphore is client.app.state.translate_api_slots
+
+
+# ── 6d. 202 직후 events가 404가 아니다 (state.json 기록 전 창) ──────────────
+def test_translate_events_open_right_after_202(client, sample_pdf, provider_env, monkeypatch):
+    """POST가 202를 준 직후에는 워커가 아직 state.json을 쓰기 전일 수 있다.
+    그 창에서 404를 주면 프런트가 SSE를 포기하고 폴백도 못 한다."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def _slow_start(job_dir, lang, cfg, **kwargs):
+        started.set()
+        release.wait(timeout=10)          # state.json을 쓰기 전에 멈춰 있는다
+        return _make_fake()(job_dir, lang, cfg, **kwargs)
+
+    monkeypatch.setattr("app.api.run_translation", _slow_start)
+    jid = _done_job(client, sample_pdf)
+    assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 202
+    assert started.wait(5)
+    assert not (
+        settings_state_path := client.app.state.store.get(jid).dir
+        / "translations" / "ko" / "state.json"
+    ).exists(), settings_state_path
+
+    try:
+        with client.stream(
+            "GET", f"/api/jobs/{jid}/translate/events?lang=ko"
+        ) as stream:
+            assert stream.status_code == 200
+            for line in stream.iter_lines():
+                if line.startswith("event: "):
+                    assert line.removeprefix("event: ").strip() == "progress"
+                    break
+    finally:
+        release.set()
+        _wait_no_task(client, jid)
+
+
+# ── 6e. 남용 방어: 번역 레이트리밋 / 동시 실행 상한 → 429 ───────────────────
+def test_translate_rate_limit_returns_429(tmp_path, sample_pdf, provider_env, monkeypatch):
+    """무인증 서비스에서 200페이지 번역을 반복 트리거하지 못하게 한다.
+    상한 안의 정상 사용은 통과하고, 초과분만 429 + Retry-After."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr("app.api.run_translation", _make_fake())
+    settings = Settings(
+        engine="fake", device="cpu", data_dir=tmp_path / "data",
+        preload_model=False, fake_delay=0.0, frontend_dir=tmp_path / "no-frontend",
+        translate_rate_limit_per_min=2,
+    )
+    with TestClient(create_app(settings)) as client:
+        jid = _done_job(client, sample_pdf)
+        assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 202
+        _wait_no_task(client, jid)
+        assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 200
+        r = client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"})
+        assert r.status_code == 429
+        assert int(r.headers["retry-after"]) >= 1
+
+
+def test_translate_concurrent_job_cap_returns_429(client, sample_pdf, provider_env, monkeypatch):
+    """동시에 도는 번역 스레드 수에도 상한이 있다 — 초과 요청은 429."""
+    # 가드는 첫 번역 요청에서 지연 생성되므로 그 전에 Settings 상한만 낮추면 된다
+    client.app.state.settings.translate_max_active = 1
+    monkeypatch.setattr("app.api.run_translation", _make_fake(wait_cancel=True))
+    jid = _done_job(client, sample_pdf)
+
+    assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 202
+    _wait_until_status(client, jid, "running")
+    # 다른 잡(다른 (job,lang) 키)의 번역 시작이 상한에 걸린다
+    other = _done_job(client, sample_pdf)
+    r = client.post(f"/api/jobs/{other}/translate", json={"lang": "ko"})
+    assert r.status_code == 429
+    assert r.headers["retry-after"] == "30"
+
+    client.post(f"/api/jobs/{jid}/translate/cancel?lang=ko")
+    _wait_no_task(client, jid)
+    # 슬롯이 비면 정상 사용 재개
+    monkeypatch.setattr("app.api.run_translation", _make_fake())
+    assert client.post(f"/api/jobs/{other}/translate", json={"lang": "ko"}).status_code == 202
+    _wait_no_task(client, other)
+
+
+# ── 6f. 번역 페이지 이미지 캐시: 원자적 재생성 / 폰트 무효화 / 4xx ───────────
+def _translate_and_render(client, sample_pdf, monkeypatch) -> tuple[str, Path]:
+    monkeypatch.setattr("app.api.run_translation", _make_fake())
+    jid = _done_job(client, sample_pdf)
+    assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 202
+    _wait_no_task(client, jid)
+    assert client.get(f"/api/jobs/{jid}/page/1?lang=ko").status_code == 200
+    return jid, client.app.state.store.get(jid).dir
+
+
+def test_translated_page_cache_regeneration_is_atomic(
+    client, sample_pdf, provider_env, monkeypatch,
+):
+    """재생성 실패가 이미 서빙 중인 PNG를 지우면 안 된다 — 예전에는 렌더 전에
+    기존 파일을 먼저 지워서, 실패하는 동안 /files가 404를 돌려줬다."""
+    from app.pipeline.pdf_export import PdfExportError
+
+    jid, job_dir = _translate_and_render(client, sample_pdf, monkeypatch)
+    rendered = job_dir / "rendered" / "ko"
+    stale = rendered / "page_0099.png"
+    stale.write_bytes(b"stale")
+    (rendered / ".source.json").unlink()        # 다음 요청에서 재생성되도록 무효화
+
+    def _boom(*args, **kwargs):
+        raise PdfExportError("렌더 실패")
+
+    monkeypatch.setattr("app.api.render_pdf_pages", _boom)
+    assert client.get(f"/api/jobs/{jid}/page/1?lang=ko").status_code == 409
+    # 실패했어도 기존 캐시는 그대로 서빙된다
+    assert (rendered / "page_0001.png").is_file()
+    assert client.get(f"/api/jobs/{jid}/files/rendered/ko/page_0001.png").status_code == 200
+    assert list((job_dir / "rendered").glob(".ko.*.tmp")) == []   # 임시 렌더 디렉터리 미잔존
+
+    monkeypatch.undo()
+    assert client.get(f"/api/jobs/{jid}/page/1?lang=ko").status_code == 200
+    assert not stale.exists()                   # 세대에 없는 옛 페이지는 정리된다
+    assert list((job_dir / "rendered").glob(".ko.*.tmp")) == []
+
+
+def test_concurrent_first_requests_build_translated_pdf_once(
+    client, sample_pdf, provider_env, monkeypatch,
+):
+    """같은 잡의 첫 진입이 동시에 들어와도 export.ko.pdf는 한 번만 만든다
+    (예전에는 PDF 빌드가 락 밖이라 수십 초짜리 작업이 중복 실행됐다)."""
+    import app.api as api_mod
+
+    monkeypatch.setattr("app.api.run_translation", _make_fake())
+    jid = _done_job(client, sample_pdf)
+    assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 202
+    _wait_no_task(client, jid)
+
+    builds = []
+    real_build = api_mod.build_translated_pdf
+
+    def _slow_build(*args, **kwargs):
+        builds.append(1)
+        time.sleep(0.2)                     # 동시 진입 창을 넓힌다
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr("app.api.build_translated_pdf", _slow_build)
+    codes = []
+    threads = [
+        threading.Thread(
+            target=lambda: codes.append(
+                client.get(f"/api/jobs/{jid}/page/1?lang=ko").status_code
+            )
+        )
+        for _ in range(3)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert codes == [200, 200, 200]
+    assert len(builds) == 1, builds
+
+
+def test_translated_pdf_cache_invalidated_by_font_setting(
+    client, sample_pdf, provider_env, monkeypatch,
+):
+    """PDF_EXPORT_FONT는 입력 파일이 아니라 설정이라 mtime 비교로는 잡히지 않는다 —
+    바꾸면 예전 폰트로 조판된 export.ko.pdf가 계속 나갔다."""
+    import app.api as api_mod
+
+    builds = []
+    real_build = api_mod.build_translated_pdf
+
+    def _counting_build(*args, **kwargs):
+        builds.append(kwargs.get("fontfile"))
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr("app.api.build_translated_pdf", _counting_build)
+    jid, _job_dir = _translate_and_render(client, sample_pdf, monkeypatch)
+    assert len(builds) == 1
+
+    assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200
+    assert len(builds) == 1                      # 설정이 그대로면 캐시 재사용
+
+    client.app.state.settings.pdf_export_font = str(Path("/does/not/exist/ko.ttf"))
+    assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200
+    assert builds[-1] == "/does/not/exist/ko.ttf"
+    assert len(builds) == 2                      # 폰트 설정 변경 → 재빌드
+
+
+def test_translated_page_export_failure_is_4xx(client, sample_pdf, provider_env, monkeypatch):
+    """내보내기 불가(입력 누락)는 서버 결함이 아니다 — 500이 아니라 4xx."""
+    jid, job_dir = _translate_and_render(client, sample_pdf, monkeypatch)
+    (job_dir / "source.pdf").unlink()
+    (job_dir / "export.ko.pdf").unlink()
+    (job_dir / "rendered" / "ko" / ".source.json").unlink()
+
+    r = client.get(f"/api/jobs/{jid}/page/1?lang=ko")
+    assert r.status_code == 409, r.text
+    assert "원본 PDF가 없습니다" in r.json()["detail"]
+
+
 # ── 7. /archive에 result.ko.md 포함 (캐시 삭제 후 재생성) ──────────────────
 def test_archive_includes_translation(client, sample_pdf, provider_env, monkeypatch):
     monkeypatch.setattr("app.api.run_translation", _make_fake())

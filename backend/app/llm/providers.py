@@ -10,6 +10,7 @@ httpx.MockTransport를 꽂는다 (tests/test_llm_providers.py가 계약을 고�
     중첩 reasoning {effort, summary}.
   * Ollama think 매핑: thinking=False → False, effort∈{low,medium,high} → effort, 그 외 True.
   * :cloud/remote_host 모델은 models() 필터링 + generate() 재검증으로 이중 차단.
+  * OpenAI model은 LLM_OPENAI_*_MODELS 허용목록(+기본 모델)에 없으면 요청 전에 거절.
   * 원시 chain-of-thought는 절대 노출하지 않는다 — Responses의 summary_text만 표면화.
 """
 
@@ -94,12 +95,21 @@ class OpenAIClient:
             return self.default_responses_model
         return self.default_chat_model
 
+    def allowed_models(self, provider: ProviderId) -> tuple[str, ...]:
+        """LLM_OPENAI_*_MODELS 허용목록 + 해당 공급자의 기본 모델.
+
+        기본 모델이 목록에 없게 설정된 배포에서도 기본 요청은 통과해야 한다."""
+        listed = (
+            self.responses_models if provider == "openai-responses" else self.chat_models
+        )
+        return tuple(dict.fromkeys((*listed, self.default_model(provider))))
+
     async def _post(
         self, path: str, payload: dict[str, Any], timeout: float = 600
     ) -> dict[str, Any]:
         if not self.configured:
             raise LlmError(
-                "OPENAI_API_KEY is not configured. Add it to the host environment or Docker .env file."
+                "LLM_OPENAI_API_KEY is not configured. Add it to the host environment or Docker .env file."
             )
         try:
             async with httpx.AsyncClient(
@@ -156,6 +166,14 @@ class OpenAIClient:
         if provider not in {"openai-responses", "openai-chat"}:
             raise LlmError(f"Unsupported OpenAI provider: {provider}")
         selected_model = model or self.default_model(provider)
+        # 요청 model을 그대로 업스트림에 넘기면 LLM_OPENAI_*_MODELS 허용목록이
+        # 실효가 없다 — Ollama의 온디바이스 재검증과 같은 자리에서 차단한다.
+        allowed = self.allowed_models(provider)
+        if selected_model not in allowed:
+            raise LlmError(
+                f"'{selected_model}' is not an allowed {provider} model. "
+                f"Allowed: {', '.join(allowed)}."
+            )
 
         if provider == "openai-responses":
             payload: dict[str, Any] = {

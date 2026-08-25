@@ -11,8 +11,9 @@ import asyncio
 import json
 
 import httpx
+import pytest
 
-from app.llm.providers import OllamaClient, OpenAIClient
+from app.llm.providers import LlmError, OllamaClient, OpenAIClient
 
 
 def openai_client(handler) -> OpenAIClient:
@@ -96,6 +97,56 @@ def test_chat_completions_payload_uses_reasoning_effort() -> None:
     assert "reasoning" not in observed
     assert result.content == "채팅 번역"
     assert result.reasoning_summary is None
+
+
+def test_허용목록_밖_모델은_업스트림_요청_전에_거절된다() -> None:
+    """LLM_OPENAI_*_MODELS가 실효를 갖게 — 임의 model 문자열이 그대로 전달되면 안 된다."""
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover — 호출되면 실패
+        raise AssertionError("허용목록 밖 모델로 업스트림 요청이 나갔다")
+
+    with pytest.raises(LlmError, match="not an allowed"):
+        asyncio.run(
+            openai_client(handler).generate(
+                provider="openai-responses",
+                model="gpt-4o-secret",
+                system="s",
+                prompt="p",
+                reasoning_effort="low",
+                reasoning_summary="none",
+                thinking=True,
+            )
+        )
+
+
+def test_전용키_미설정이면_LLM_OPENAI_API_KEY를_안내한다() -> None:
+    """안내 문구가 번역 키(OPENAI_API_KEY)를 다시 넣도록 유도하면 안 된다."""
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("키 없이 업스트림 요청이 나갔다")
+
+    client = OpenAIClient(
+        api_key="",
+        base_url="https://api.openai.test/v1",
+        responses_models=("gpt-test",),
+        chat_models=("chat-test",),
+        default_responses_model="gpt-test",
+        default_chat_model="chat-test",
+        transport=httpx.MockTransport(handler),
+    )
+    assert client.configured is False
+    with pytest.raises(LlmError, match="LLM_OPENAI_API_KEY"):
+        asyncio.run(
+            client.generate(
+                provider="openai-chat",
+                model=None,
+                system="s",
+                prompt="p",
+                reasoning_effort="low",
+                reasoning_summary="none",
+                thinking=False,
+            )
+        )
 
 
 def test_ollama_thinking_is_requested_but_raw_trace_is_not_exposed() -> None:

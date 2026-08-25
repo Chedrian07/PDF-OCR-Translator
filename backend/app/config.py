@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .llm.validate import local_url, openai_url
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_REVISION = "ee63731b6461c8afcdcc7b15352e7d2ffecc2ead"
 _DEFAULT_ALLOWED_HOSTS = "localhost,127.0.0.1"
@@ -68,6 +71,15 @@ def _env_limit(name: str, default: int) -> int | None:
     여기서 매핑하지 않으면 설정 실수가 잡 실행 시점의 혼란스러운 오류로 발현된다."""
     v = _env_int(name, default)
     return v if v > 0 else None
+
+
+def _env_int_or_warn(name: str, default: int) -> int:
+    """상한형 env — 오타(비정수)로 서비스가 500이 되지 않게 기본값으로 강등한다."""
+    try:
+        return _env_int(name, default)
+    except ValueError:
+        logger.warning("%s 값이 정수가 아닙니다 — 기본값 %d 사용", name, default)
+        return default
 
 
 def _split_hosts(v: str) -> list[str]:
@@ -157,10 +169,20 @@ class Settings:
     llm_openai_chat_model: str = "chat-latest"        # Chat Completions 기본 모델
     # 번역 서브시스템(TranslateConfig.from_env)과 공유하는 키 — 여기서는 읽기만 한다
     openai_api_key: str = ""
+    # Q&A 전용 OpenAI 키 — 번역 키와 분리(공유 금지). llm_openai_base_url이 공식
+    # api.openai.com으로 고정돼 있으므로, OpenRouter·로컬 게이트웨이용 OPENAI_API_KEY를
+    # 폴백으로 재사용하면 그 키가 제3자에게 전송된다. 미설정 시 openai-* 공급자는
+    # available:false로 광고된다.
+    llm_openai_api_key: str = ""
     # 여러 번역 잡을 합친 실제 upstream HTTP 요청 상한. 기본은 잡당 상한과 같은 8.
     translate_global_concurrency: int = 8
     # 번역 PDF 내보내기용 한글 폰트 파일 경로 — 빈 값이면 시스템 폰트 → 내장 CJK 폴백
     pdf_export_font: str = ""
+    # ── 남용 방어 상한 (api.py의 _AbuseGuard가 소비) — 0 이하면 해당 상한 비활성 ──
+    qa_rate_limit_per_min: int = 30      # 잡·IP 단위 Q&A 요청 수/분
+    qa_max_concurrent: int = 4           # 동시에 처리 중인 Q&A 수
+    translate_rate_limit_per_min: int = 12   # 잡·IP 단위 번역 시작 요청 수/분
+    translate_max_active: int = 4            # 동시에 도는 번역 스레드 수
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -225,8 +247,15 @@ class Settings:
             llm_openai_responses_model=os.environ.get("LLM_OPENAI_RESPONSES_MODEL", "gpt-5.6-luna"),
             llm_openai_chat_model=os.environ.get("LLM_OPENAI_CHAT_MODEL", "chat-latest"),
             openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip(),
+            # OPENAI_API_KEY 폴백을 두지 않는다 — 번역 키가 api.openai.com으로 새는 경로
+            llm_openai_api_key=os.environ.get("LLM_OPENAI_API_KEY", "").strip(),
             translate_global_concurrency=_translate_global_concurrency(),
             pdf_export_font=os.environ.get("PDF_EXPORT_FONT", "").strip(),
+            # 오타는 기본값으로 강등한다 — 운영 중 남용 방어가 500을 내면 안 된다
+            qa_rate_limit_per_min=_env_int_or_warn("QA_RATE_LIMIT_PER_MIN", 30),
+            qa_max_concurrent=_env_int_or_warn("QA_MAX_CONCURRENT", 4),
+            translate_rate_limit_per_min=_env_int_or_warn("TRANSLATE_RATE_LIMIT_PER_MIN", 12),
+            translate_max_active=_env_int_or_warn("TRANSLATE_MAX_ACTIVE", 4),
         )
 
     @property

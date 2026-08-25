@@ -5,7 +5,9 @@ openai_url: OpenAI 엔드포인트를 공식 https://api.openai.com 호스트로
 
 둘 다 잘못된 값이면 ValueError — Settings.from_env()가 호출하므로 잘못된
 OLLAMA_BASE_URL/LLM_OPENAI_BASE_URL은 기동 시점에 즉시 실패한다.
-(번역 서브시스템의 OPENAI_BASE_URL은 별개 키 — 여기서 검증하지 않는다.)
+(번역 서브시스템의 OPENAI_BASE_URL은 별개 키 — 여기서 검증하지 않는다.
+ 인증 키도 LLM_OPENAI_API_KEY로 분리한다 — 번역용 OPENAI_API_KEY는 임의 게이트웨이를
+ 가리킬 수 있어, 여기에 재사용하면 그 키가 api.openai.com으로 전송된다.)
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ def openai_url(value: str) -> str:
 def build_router(settings: "Settings") -> LlmRouter:
     """Settings의 llm_*/ollama_* 필드로 OpenAI/Ollama 클라이언트와 라우터를 조립한다."""
     openai = OpenAIClient(
-        api_key=settings.openai_api_key,
+        api_key=settings.llm_openai_api_key,
         base_url=settings.llm_openai_base_url,
         responses_models=settings.llm_openai_responses_models,
         chat_models=settings.llm_openai_chat_models,

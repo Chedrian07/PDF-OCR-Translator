@@ -19,6 +19,9 @@ native/build/
 *.log
 sample/e2e-*/
 nohup.out
+# 일회성 변환 산출물(.dockerignore와 동일 정책). ⚠ 이미 추적 중인 output/ 파일은
+# .gitignore만으로 빠지지 않는다 — `git rm -r --cached output/`을 한 번 돌려야 한다.
+/output/
 
 # Node (e2e 브라우저 테스트 의존성)
 node_modules/

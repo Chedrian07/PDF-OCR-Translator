@@ -34,6 +34,18 @@ services:
       start_period: 10s
     security_opt:
       - no-new-privileges:true
+    # 로그 로테이션·메모리 상한 — docker-compose.yml의 다른 서비스와 동일 정책.
+    # (앵커는 파일 간 공유되지 않아 여기서는 그대로 적는다.)
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          # 모델 가중치를 통째로 RAM에 올린다 — 큰 모델을 쓰면 .env로 올릴 것.
+          memory: ${OLLAMA_MEM_LIMIT:-16g}
     restart: unless-stopped
 
 volumes:

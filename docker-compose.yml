@@ -31,6 +31,16 @@
 #    OCR 추론과 무관하다(GPU는 sidecar 독점). 각 sidecar는 CUDA가 없으면 CPU로
 #    조용히 강등하지 않고 명확한 오류로 **하드 실패**한다(app/model.py::_require_cuda).
 
+# ── 전 서비스 공통 조각 (YAML 앵커) ────────────────────────────
+# 로그 로테이션: 기본 json-file 드라이버는 상한이 없어 무한히 커진다. OCR/번역은
+# 페이지·토큰 단위 진행 로그를 stdout으로 쏟으므로 restart: unless-stopped와 겹치면
+# 장기 구동 호스트의 디스크를 조용히 채운다. 서비스당 최대 10MB×3 = 30MB로 묶는다.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   ocr-cpu:
     build:
@@ -60,6 +70,11 @@ services:
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
       MAX_PAGE_OUTPUT_CHARS: ${MAX_PAGE_OUTPUT_CHARS:-16384}
       MAX_PAGE_OUTPUT_TOKENS: ${MAX_PAGE_OUTPUT_TOKENS:-6144}
+      # docs/ARCHITECTURE.md §7에 문서화된 노브 — 여기서 스레딩하지 않으면 .env 값이
+      # 컨테이너에서 조용히 무시된다(.env는 .dockerignore로 이미지에 없다).
+      MAX_LENGTH: ${MAX_LENGTH:-32768}
+      # 빈 값 = config.py 기본 "\n\n---\n\n" (config가 unicode_escape로 디코드한다)
+      PAGE_SEPARATOR: ${PAGE_SEPARATOR:-}
       # 기본 '*' = 모든 Host 허용 (외부 노출 기본과 정합 — IP/호스트명을 미리 알 수
       # 없어 허용 목록을 고정할 수 없다). 특정 호스트로 제한(DNS rebinding 방어
       # 복원)하려면 .env에 ALLOWED_HOSTS=localhost,127.0.0.1,<서버IP·도메인>
@@ -104,6 +119,10 @@ services:
       # 기본값은 config.py와 동일 — .env는 .dockerignore로 이미지·컨테이너에 없어서
       # 여기서 스레딩하지 않으면 사용자의 .env 값이 조용히 무시된다 (make dev와 대칭)
       LLM_OPENAI_BASE_URL: ${LLM_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      # Q&A 전용 키 — 번역용 OPENAI_API_KEY와 분리돼 있다(app/llm/validate.py).
+      # 없으면 컨테이너 배포에서 openai-* 공급자가 항상 available:false가 된다
+      # (컨테이너 안에는 .env가 없어 dotenv 폴백도 없다).
+      LLM_OPENAI_API_KEY: ${LLM_OPENAI_API_KEY:-}
       LLM_OPENAI_RESPONSES_MODELS: ${LLM_OPENAI_RESPONSES_MODELS:-gpt-5.6-luna,gpt-5.6-terra,gpt-5.6-sol}
       LLM_OPENAI_CHAT_MODELS: ${LLM_OPENAI_CHAT_MODELS:-chat-latest,gpt-5.6-luna,gpt-5.6-terra}
       LLM_OPENAI_RESPONSES_MODEL: ${LLM_OPENAI_RESPONSES_MODEL:-gpt-5.6-luna}
@@ -116,6 +135,15 @@ services:
       - "host.docker.internal:host-gateway"
     security_opt:
       - no-new-privileges:true
+    logging: *default-logging
+    # 메모리 상한 — 호스트 전체를 OOM으로 끌고 가는 것을 막는 안전판이다.
+    # 기본값은 넉넉하게 잡았고 .env에서 조정 가능하다(호스트 RAM보다 작게 둘 것).
+    # CPU는 상한 대신 OCR_CPU_THREADS(스레드 수)로 조절한다 — 코어를 통째로
+    # 묶으면 렌더/OCR 지연이 눈에 띄게 커진다.
+    deploy:
+      resources:
+        limits:
+          memory: ${OCR_CPU_MEM_LIMIT:-24g}
     restart: unless-stopped
 
   ocr-cuda:
@@ -143,6 +171,11 @@ services:
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
       MAX_PAGE_OUTPUT_CHARS: ${MAX_PAGE_OUTPUT_CHARS:-16384}
       MAX_PAGE_OUTPUT_TOKENS: ${MAX_PAGE_OUTPUT_TOKENS:-6144}
+      # docs/ARCHITECTURE.md §7에 문서화된 노브 — 여기서 스레딩하지 않으면 .env 값이
+      # 컨테이너에서 조용히 무시된다(.env는 .dockerignore로 이미지에 없다).
+      MAX_LENGTH: ${MAX_LENGTH:-32768}
+      # 빈 값 = config.py 기본 "\n\n---\n\n" (config가 unicode_escape로 디코드한다)
+      PAGE_SEPARATOR: ${PAGE_SEPARATOR:-}
       # 기본 '*' = 모든 Host 허용 (외부 노출 기본과 정합 — IP/호스트명을 미리 알 수
       # 없어 허용 목록을 고정할 수 없다). 특정 호스트로 제한(DNS rebinding 방어
       # 복원)하려면 .env에 ALLOWED_HOSTS=localhost,127.0.0.1,<서버IP·도메인>
@@ -187,6 +220,10 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-openai-responses}
       LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-low}
       LLM_OPENAI_BASE_URL: ${LLM_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      # Q&A 전용 키 — 번역용 OPENAI_API_KEY와 분리돼 있다(app/llm/validate.py).
+      # 없으면 컨테이너 배포에서 openai-* 공급자가 항상 available:false가 된다
+      # (컨테이너 안에는 .env가 없어 dotenv 폴백도 없다).
+      LLM_OPENAI_API_KEY: ${LLM_OPENAI_API_KEY:-}
       LLM_OPENAI_RESPONSES_MODELS: ${LLM_OPENAI_RESPONSES_MODELS:-gpt-5.6-luna,gpt-5.6-terra,gpt-5.6-sol}
       LLM_OPENAI_CHAT_MODELS: ${LLM_OPENAI_CHAT_MODELS:-chat-latest,gpt-5.6-luna,gpt-5.6-terra}
       LLM_OPENAI_RESPONSES_MODEL: ${LLM_OPENAI_RESPONSES_MODEL:-gpt-5.6-luna}
@@ -198,6 +235,12 @@ services:
       - "host.docker.internal:host-gateway"
     security_opt:
       - no-new-privileges:true
+    logging: *default-logging
+    # 메모리 상한 — 설명은 ocr-cpu 참조 (가중치는 VRAM, 여기 RAM은 렌더·조판용)
+    deploy:
+      resources:
+        limits:
+          memory: ${OCR_CUDA_MEM_LIMIT:-16g}
     restart: unless-stopped
 
   # ── OvisOCR2 스택 (profile: ovis) ────────────────────────────
@@ -255,12 +298,19 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-openai-responses}
       LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-low}
       LLM_OPENAI_BASE_URL: ${LLM_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      # Q&A 전용 키 — 번역용 OPENAI_API_KEY와 분리돼 있다(app/llm/validate.py).
+      # 없으면 컨테이너 배포에서 openai-* 공급자가 항상 available:false가 된다
+      # (컨테이너 안에는 .env가 없어 dotenv 폴백도 없다).
+      LLM_OPENAI_API_KEY: ${LLM_OPENAI_API_KEY:-}
       LLM_OPENAI_RESPONSES_MODELS: ${LLM_OPENAI_RESPONSES_MODELS:-gpt-5.6-luna,gpt-5.6-terra,gpt-5.6-sol}
       LLM_OPENAI_CHAT_MODELS: ${LLM_OPENAI_CHAT_MODELS:-chat-latest,gpt-5.6-luna,gpt-5.6-terra}
       LLM_OPENAI_RESPONSES_MODEL: ${LLM_OPENAI_RESPONSES_MODEL:-gpt-5.6-luna}
       LLM_OPENAI_CHAT_MODEL: ${LLM_OPENAI_CHAT_MODEL:-chat-latest}
     volumes:
-      - ocr-ovis-data:/data
+      # 잡 데이터는 네 백엔드가 공유한다 — 엔진(스택)을 바꿔도 잡 이력이 남아야 한다.
+      # ocr-cpu와 동일 이미지·동일 uid(1000)라 소유권 충돌은 없다.
+      - ocr-data:/data
+      - hf-cache:/data/hf
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:
@@ -270,6 +320,12 @@ services:
         # service_healthy 대신 service_started: 최초 모델 다운로드가 수십 분일 수
         # 있고, backend는 sidecar 미준비를 health/잡 오류로 안전하게 표면화한다.
         condition: service_started
+    logging: *default-logging
+    # 메모리 상한 — 설명은 ocr-cpu 참조 (.env로 조정 가능)
+    deploy:
+      resources:
+        limits:
+          memory: ${OCR_WEB_MEM_LIMIT:-8g}
     restart: unless-stopped
 
   ovisocr2:
@@ -305,6 +361,12 @@ services:
       - ovis-hf-cache:/data/hf
     security_opt:
       - no-new-privileges:true
+    logging: *default-logging
+    # 메모리 상한 — 설명은 ocr-cpu 참조 (.env로 조정 가능)
+    deploy:
+      resources:
+        limits:
+          memory: ${OVIS_MEM_LIMIT:-24g}
     restart: unless-stopped
 
   # ── PaddleOCR-VL-1.6 스택 (profile: paddle) ──────────────────
@@ -360,12 +422,17 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-openai-responses}
       LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-low}
       LLM_OPENAI_BASE_URL: ${LLM_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      # Q&A 전용 키 — 번역용 OPENAI_API_KEY와 분리돼 있다(app/llm/validate.py).
+      # 없으면 컨테이너 배포에서 openai-* 공급자가 항상 available:false가 된다
+      # (컨테이너 안에는 .env가 없어 dotenv 폴백도 없다).
+      LLM_OPENAI_API_KEY: ${LLM_OPENAI_API_KEY:-}
       LLM_OPENAI_RESPONSES_MODELS: ${LLM_OPENAI_RESPONSES_MODELS:-gpt-5.6-luna,gpt-5.6-terra,gpt-5.6-sol}
       LLM_OPENAI_CHAT_MODELS: ${LLM_OPENAI_CHAT_MODELS:-chat-latest,gpt-5.6-luna,gpt-5.6-terra}
       LLM_OPENAI_RESPONSES_MODEL: ${LLM_OPENAI_RESPONSES_MODEL:-gpt-5.6-luna}
       LLM_OPENAI_CHAT_MODEL: ${LLM_OPENAI_CHAT_MODEL:-chat-latest}
     volumes:
-      - ocr-paddle-data:/data
+      - ocr-data:/data      # 잡 데이터 공유 — 설명은 ocr-ovis 참조
+      - hf-cache:/data/hf
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:
@@ -373,6 +440,12 @@ services:
     depends_on:
       paddleocr-vl:
         condition: service_started
+    logging: *default-logging
+    # 메모리 상한 — 설명은 ocr-cpu 참조 (.env로 조정 가능)
+    deploy:
+      resources:
+        limits:
+          memory: ${OCR_WEB_MEM_LIMIT:-8g}
     restart: unless-stopped
 
   paddleocr-vl:
@@ -396,17 +469,27 @@ services:
       PADDLEOCR_MAX_UPLOAD_MB: ${PADDLEOCR_MAX_UPLOAD_MB:-128}  # backend 페이지 PNG 상한과 정합
     volumes:
       - paddle-hf-cache:/data/hf     # HF 모델 캐시 (Paddle 캐시와 분리)
-      - paddle-x-cache:/root/.paddlex  # PaddleX 파이프라인/layout 모델 캐시
+      - paddle-x-cache:/home/app/.paddlex  # PaddleX 캐시 ($HOME 기준 — 비루트 실행)
     security_opt:
       - no-new-privileges:true
+    logging: *default-logging
+    # 메모리 상한 — 설명은 ocr-cpu 참조 (.env로 조정 가능)
+    deploy:
+      resources:
+        limits:
+          memory: ${PADDLE_MEM_LIMIT:-24g}
     restart: unless-stopped
 
 volumes:
+  # 잡 데이터·HF 캐시는 네 백엔드 서비스가 공유한다(엔진 전환 시 잡 이력 보존).
+  # ⚠ 과거 버전의 ocr-ovis-data / ocr-paddle-data 볼륨은 더 이상 참조되지 않는다 —
+  #   그 안의 잡을 살리려면 한 번만 옮기고 지울 것:
+  #     docker run --rm -v ocr-ovis-data:/from -v ocr-data:/to alpine \
+  #       sh -c 'cp -an /from/. /to/'
+  #     docker volume rm ocr-ovis-data ocr-paddle-data
   ocr-data:
   hf-cache:
-  # sidecar 스택별 분리 볼륨 — 소유권(uid)·캐시 충돌 방지
-  ocr-ovis-data:
-  ocr-paddle-data:
+  # sidecar 모델 캐시는 런타임(vLLM/PaddleX)이 서로 달라 분리 유지한다.
   ovis-hf-cache:
   paddle-hf-cache:
   paddle-x-cache:

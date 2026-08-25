@@ -18,7 +18,24 @@ RUN pip install --no-cache-dir -r requirements.lock
 COPY app ./app
 
 ENV PYTHONUNBUFFERED=1 \
-    HF_HOME=/data/hf
+    HF_HOME=/data/hf \
+    HOME=/home/app
+
+# 비루트 실행 — 이 컨테이너는 사용자가 올린 임의 PDF의 렌더 이미지를 파서에 먹이는
+# 쪽이라 backend보다 신뢰 경계가 바깥이다. uid는 backend/Dockerfile과 동일한 1000.
+# ⚠ 볼륨 소유권: 이미지 안에서 /data/hf를 미리 만들고 chown해야 Docker가 **비어 있는**
+#   named volume을 초기화할 때 uid 1000 소유로 만든다. 이미 root 소유 내용이 들어 있는
+#   기존 볼륨(ovis-hf-cache)은 자동으로 바뀌지 않으므로 한 번만 손봐야 한다:
+#     docker run --rm -v ovis-hf-cache:/v alpine chown -R 1000:1000 /v
+#   (모델을 다시 받아도 되면 `docker volume rm ovis-hf-cache`로 대체 가능)
+# 베이스(vLLM) 이미지가 이미 uid 1000을 갖고 있을 수 있어 생성은 조건부로,
+# USER는 이름이 아닌 uid로 지정한다. HOME은 위 ENV가 passwd 항목보다 우선한다.
+RUN if ! getent passwd 1000 >/dev/null; then \
+        useradd --uid 1000 --home-dir /home/app --create-home app; \
+    fi \
+    && mkdir -p /data/hf /home/app \
+    && chown -R 1000:1000 /data /home/app /srv/ovisocr2
+USER 1000
 
 EXPOSE 8080
 

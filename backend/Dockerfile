@@ -21,7 +21,10 @@ ENV UV_LINK_MODE=copy \
 ARG TORCH_VARIANT
 WORKDIR /src/backend
 COPY backend/pyproject.toml backend/uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project --extra "${TORCH_VARIANT}"
+# --locked(≠ --frozen): lock이 pyproject와 어긋나면 **빌드에서 즉시 실패**한다.
+# --frozen은 실패하지 않고 lock에 없는 의존성을 빠뜨린 채 이미지를 만들어,
+# 컨테이너 기동 시 ImportError로만 드러난다.
+RUN uv sync --locked --no-dev --no-install-project --extra "${TORCH_VARIANT}"
 
 COPY native /src/native
 RUN uv pip install -p /venv/bin/python /src/native

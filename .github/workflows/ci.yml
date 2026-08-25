@@ -1,4 +1,5 @@
-# CI — 3계층 테스트(backend pytest·native 패리티·frontend node --test) + ruff 린트.
+# CI — backend pytest(+커버리지)·native 패리티·frontend node --test·sidecar 파서
+# 테스트 + ruff 린트(backend·services). nightly/수동에서는 hermetic 브라우저 E2E까지.
 # 실모델은 실행하지 않음: backend 테스트는 FakeEngine 기반, torch는 CPU 휠(uv 캐시 활용).
 name: CI
 
@@ -6,6 +7,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 러너 시간이 큰 잡(e2e-mock)은 PR을 막지 않고 nightly·수동으로만 돈다.
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,14 +27,25 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
+      # --locked: uv.lock 드리프트(pyproject만 고치고 lock 커밋 누락)를 CI에서 즉시
+      # 실패시킨다. 없으면 uv가 조용히 재잠금해 통과시키고, Dockerfile의 --frozen은
+      # 실패 대신 의존성을 빠뜨린 채 빌드해 컨테이너 기동 시 ImportError로 드러난다.
       - name: Install (torch CPU 휠)
-        run: uv sync --extra cpu
+        run: uv sync --locked --extra cpu
       # Docker 런타임(backend/Dockerfile)과 동일한 Noto CJK 경로로 폰트 해석을
       # 검증한다 — 없으면 내장 폴백 경고가 result.warnings에 남아 테스트가 깨진다.
       - name: Install CJK fonts (Docker 런타임과 동일 경로)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
-      - name: pytest
-        run: uv run pytest
+      # 커버리지는 게이트가 아니라 관측용 — pytest-cov는 lock을 건드리지 않도록
+      # --with로 임시 설치한다(설정은 backend/pyproject.toml [tool.coverage.*]).
+      - name: pytest (+ coverage)
+        run: uv run --locked --with pytest-cov pytest --cov --cov-report=term --cov-report=xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-coverage
+          path: backend/coverage.xml
+          if-no-files-found: ignore
 
   lint:
     runs-on: ubuntu-latest
@@ -43,8 +59,11 @@ jobs:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
       # dev 그룹만 설치(--only-group) — ruff에 base 의존성(transformers 등)은 불필요.
-      - name: ruff check
-        run: uv run --only-group dev ruff check .
+      # sidecar(services/*)는 자체 dev 그룹이 없어 backend uv.lock에 고정된 ruff를
+      # 그대로 재사용한다 (버전 미고정으로 돌리면 최신 룰셋에 바로 red가 된다).
+      # ruff는 파일별로 가장 가까운 [tool.ruff](services/*/pyproject.toml, py310)를 쓴다.
+      - name: ruff check (backend + sidecar)
+        run: uv run --locked --only-group dev ruff check . ../services
 
   frontend:
     runs-on: ubuntu-latest
@@ -73,3 +92,58 @@ jobs:
           uv pip install -p .venv/bin/python -e . pytest numpy
       - name: pytest (parity)
         run: .venv/bin/python -m pytest tests/ -v
+
+  # sidecar 파서/어댑터 테스트 — 최종 OCR 마크다운 형태를 결정하는 코드라 회귀가
+  # 나면 GPU 서버 배포 뒤에야 눈으로 드러난다. parser.py·adapter.py는 stdlib(re·json)
+  # 만 쓰므로 모델·CUDA·vLLM·paddle 없이 pytest만으로 돈다(≈0.03초).
+  sidecar:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        svc: [ovisocr2, paddleocr_vl]
+    defaults:
+      run:
+        working-directory: services/${{ matrix.svc }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.3.2
+      - name: pytest (파서/어댑터)
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install -p .venv/bin/python pytest
+          .venv/bin/python -m pytest tests/
+
+  # mock OpenAI(로컬 http) + FakeEngine 백엔드를 직접 띄우는 hermetic 브라우저 E2E.
+  # GPU·외부 API 불필요하지만 러너 시간이 커서 PR을 막지 않는다 — nightly(schedule)와
+  # 수동 실행(workflow_dispatch)에서만 돈다. de-flake가 확인되면 if:를 지워 PR에 붙인다.
+  e2e-mock:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      # 하네스가 backend/.venv/bin/python을 하드코딩 — uv 기본 환경 경로와 일치한다.
+      - name: Install backend (torch CPU 휠)
+        run: uv sync --locked --extra cpu
+        working-directory: backend
+      # backend 잡과 동일 이유 — 한국어 PDF 내보내기 검증에 CJK 폰트가 필요하다.
+      - name: Install CJK fonts
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 22
+      - name: Install playwright chromium
+        run: npm i && npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: mock full-flow E2E
+        run: npm run test:e2e-mock
+        working-directory: frontend
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-mock-shots
+          path: frontend/tests/e2e/shots
+          if-no-files-found: ignore

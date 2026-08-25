@@ -77,3 +77,21 @@ extend-exclude = ["app/vendor"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+# 커버리지 — pytest-cov는 dev 그룹에 넣지 않고 `uv run --with pytest-cov`로 임시
+# 설치한다(uv.lock을 커버리지 도구로 오염시키지 않기 위해서). 실행은 CI backend 잡과
+# `make coverage`. 게이트(fail_under)는 두지 않는다 — 지금은 관측만 한다.
+[tool.coverage.run]
+source = ["app"]
+branch = true
+# app/vendor는 업스트림 벤더 코드 — 린트와 동일하게 측정 대상에서 제외한다.
+omit = ["app/vendor/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

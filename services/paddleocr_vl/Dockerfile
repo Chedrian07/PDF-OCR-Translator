@@ -32,7 +32,21 @@ COPY app ./app
 
 ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/data/hf \
+    HOME=/home/app \
     PADDLE_PDX_MODEL_SOURCE=huggingface
+
+# 비루트 실행 — 이 컨테이너는 사용자가 올린 임의 PDF의 렌더 이미지를 파서에 먹이는
+# 쪽이라 backend보다 신뢰 경계가 바깥이다. uid는 backend/Dockerfile과 동일한 1000.
+# ⚠ PaddleX 캐시는 $HOME/.paddlex이므로 root가 아닌 /home/app/.paddlex가 된다 —
+#   docker-compose.yml의 paddle-x-cache 마운트 경로도 함께 바뀌었다.
+# ⚠ 볼륨 소유권: 비어 있는 named volume은 이 chown 결과(uid 1000)를 물려받지만,
+#   이미 root 소유로 채워진 기존 볼륨은 자동으로 바뀌지 않는다. 한 번만:
+#     docker run --rm -v paddle-hf-cache:/a -v paddle-x-cache:/b alpine \
+#       chown -R 1000:1000 /a /b
+RUN useradd --uid 1000 --home-dir /home/app --create-home app \
+    && mkdir -p /data/hf /home/app/.paddlex \
+    && chown -R 1000:1000 /data /home/app /srv/paddleocr_vl
+USER 1000
 
 EXPOSE 8080
 

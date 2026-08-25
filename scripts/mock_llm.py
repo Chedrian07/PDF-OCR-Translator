@@ -7,6 +7,12 @@
   - 결함 주입 모드: ?fault=refusal|echo|drop_placeholder|http400|http429
     쿼리 또는 FAULT 환경변수로 A-1(출력 검증) 회귀를 실증한다.
 
+정상 모드는 **실제 한국어의 길이 압축률을 재현한다**(MOCK_TRANSLATE_RATIO, 기본 0.4).
+영→한 번역문은 원문의 0.3~0.5배 길이인데, 목이 길이를 보존하면
+translate/masking.py `looks_untranslated()`의 길이비 하한(0.3) 회귀가 하네스에
+전혀 잡히지 않는다(목 출력이 하한의 2배라 하한을 0.5까지 올려도 통과한다).
+MOCK_TRANSLATE_RATIO=0 으로 두면 예전 길이 보존 동작으로 되돌아간다.
+
 Responses API(/v1/responses)와 Chat Completions(/v1/chat/completions)를 모두 지원한다.
 """
 from __future__ import annotations
@@ -38,8 +44,71 @@ _DICT = {
 }
 
 
-def _translate(text: str) -> str:
+# 압축 모드에서 통째로 지우는 기능어 — 실제 한국어는 관사·전치사·대명사를
+# 조사로 흡수하므로 단어 수 자체가 줄어든다. 길이비만 맞추려고 글자를 깎으면
+# 재현되지 않는 압축 경로다.
+_DROP_WORDS = frozenset({
+    "the", "a", "an", "of", "and", "or", "is", "are", "was", "were", "be", "been",
+    "to", "in", "on", "at", "for", "with", "that", "this", "these", "those", "as",
+    "by", "it", "its", "from", "we", "our", "their", "which", "has", "have", "had",
+    "not", "but", "than", "can", "may",
+})
+
+# 기본 압축률 — 실측(sample/2504.19874v1.pdf 블록 248개)에서 전체 0.50배,
+# 유닛 최솟값 0.36배가 나온다. 게이트 하한 0.3 대비 20% 여유.
+_DEFAULT_RATIO = 0.4
+# 목 때문에 정상 경로가 깨지면 안 되므로 유닛별 하한을 둔다. 압축 결과가 이보다
+# 짧으면 그 조각만 길이 보존 방식으로 되돌린다(짧은 유닛이 전부 기능어인 경우 등).
+_MIN_SAFE_RATIO = 0.36
+
+
+def _target_ratio() -> float:
+    """MOCK_TRANSLATE_RATIO — 0 이하이거나 파싱 실패면 길이 보존(예전) 모드."""
+    raw = os.environ.get("MOCK_TRANSLATE_RATIO", "")
+    if not raw.strip():
+        return _DEFAULT_RATIO
+    try:
+        return float(raw)
+    except ValueError:
+        return _DEFAULT_RATIO
+
+
+def _hangulize(word: str, n: int) -> str:
+    """영단어 → 결정적 한글 의사단어. 라틴 문자를 남기면 거부문으로 오인된다."""
+    h = 0
+    for ch in word.lower():
+        h = (h * 31 + ord(ch)) & 0xFFFFFFFF
+    # 가(0xAC00) ~ 힣(0xD7A3) 범위에서 결정적으로 고른다.
+    return "".join(chr(0xAC00 + (h >> (i * 5)) % 11172) for i in range(n))
+
+
+def _sub_keep(word: re.Match[str]) -> str:
+    """길이 보존 치환(예전 동작) — 영단어 하나를 한글 2~4자로."""
+    w = word.group(0)
+    return _DICT.get(w.lower()) or _hangulize(w, max(2, min(4, len(w) // 2)))
+
+
+def _translate_chunk(chunk: str, ratio: float) -> str:
+    """플레이스홀더가 없는 텍스트 조각 하나를 "번역"한다."""
+    if ratio <= 0:
+        return re.sub(r"[A-Za-z]{2,}", _sub_keep, chunk)
+
+    def sub_compress(word: re.Match[str]) -> str:
+        w = word.group(0)
+        lo = w.lower()
+        if lo in _DROP_WORDS:
+            return ""
+        return _DICT.get(lo) or _hangulize(w, max(1, round(len(w) * ratio)))
+
+    out = re.sub(r"[A-Za-z]{2,}", sub_compress, chunk)
+    # 기능어를 지운 자리에 남은 연속 공백을 접는다(줄바꿈은 건드리지 않는다 —
+    # 마크다운 구조와 layout 정렬이 줄 단위로 걸려 있다).
+    return re.sub(r"[^\S\n]{2,}", " ", out)
+
+
+def _translate(text: str, ratio: float | None = None) -> str:
     """플레이스홀더를 보존한 채 영문 토큰만 한글로 바꾼다."""
+    r = _target_ratio() if ratio is None else ratio
     parts = []
     last = 0
     for m in PLACEHOLDER_RE.finditer(text):
@@ -48,31 +117,15 @@ def _translate(text: str) -> str:
         last = m.end()
     parts.append(("t", text[last:]))
 
-    out = []
-    for kind, chunk in parts:
-        if kind == "p":
-            out.append(chunk)
-            continue
-
-        def sub(word: re.Match[str]) -> str:
-            w = word.group(0)
-            lo = w.lower()
-            if lo in _DICT:
-                return _DICT[lo]
-            # 사전에 없는 영단어는 **결정적 한글 의사단어**로 바꾼다.
-            # 실제 한국어 번역문의 한글 밀도를 재현해야 출력 검증 게이트를
-            # 현실적으로 통과한다(라틴 문자를 남기면 거부문으로 오인된다).
-            n = max(2, min(4, len(w) // 2))
-            h = 0
-            for ch in lo:
-                h = (h * 31 + ord(ch)) & 0xFFFFFFFF
-            out_chars = []
-            for i in range(n):
-                # 가(0xAC00) ~ 힣(0xD7A3) 범위에서 결정적으로 고른다.
-                out_chars.append(chr(0xAC00 + (h >> (i * 5)) % 11172))
-            return "".join(out_chars)
-
-        out.append(re.sub(r"[A-Za-z]{2,}", sub, chunk))
+    body = "".join(chunk for kind, chunk in parts if kind == "t")
+    out = [chunk if kind == "p" else _translate_chunk(chunk, r) for kind, chunk in parts]
+    if r > 0:
+        # 유닛 단위 하한 — 짧은 유닛이 통째로 기능어라 지나치게 짧아지면 정상 경로가
+        # 게이트에 걸린다(목 때문에 파이프라인이 깨지면 안 된다). 그때만 길이 보존.
+        got = sum(len(t) for t, (kind, _) in zip(out, parts) if kind == "t")
+        if body.strip() and got < _MIN_SAFE_RATIO * len(body):
+            out = [chunk if kind == "p" else re.sub(r"[A-Za-z]{2,}", _sub_keep, chunk)
+                   for kind, chunk in parts]
     return "".join(out)
 
 

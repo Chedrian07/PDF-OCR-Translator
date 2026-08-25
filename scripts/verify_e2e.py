@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -63,6 +64,127 @@ def layout_pages(obj) -> list:
     if isinstance(obj, dict):
         return obj.get("pages", [])
     return []
+
+
+# ─────────────────── 공유 판정 로직 (정상 경로·결함 주입 공통) ───────────────────
+
+# prompts.py import 실패 시에만 쓰는 최소 목록. 정상 경로에서는 실제 문구를 뽑아온다.
+_SCAFFOLD_FALLBACK = (
+    "[번역할 원문", "[직전 문맥", "[용어집", "[원문 유지", "[첫 등장 병기",
+    "[블록 유형", "[수정할 번역문", "다음 꺾쇠 태그가",
+)
+_SENTINEL = "ZQXSENTINELZQX"
+_scaffold_cache: tuple[str, ...] = ()
+
+
+def scaffolding_markers() -> tuple[str, ...]:
+    """번역 결과에 새면 안 되는 프롬프트 스캐폴딩 문구.
+
+    문구를 하네스에 하드코딩하면 prompts.py가 바뀔 때 검사만 조용히 무력화된다.
+    실제 빌더를 호출해 센티널이 아닌 줄 = 스캐폴딩으로 간주하고 뽑아낸다.
+    **repair 프롬프트도 포함한다** — fault=echo 실행에서 "[수정할 번역문]" 등
+    repair 스캐폴딩 25줄이 result.ko.md에 그대로 박힌 사례가 실측됐다.
+    """
+    global _scaffold_cache
+    if _scaffold_cache:
+        return _scaffold_cache
+    markers: set[str] = set()
+    try:
+        if str(REPO / "backend") not in sys.path:
+            sys.path.insert(0, str(REPO / "backend"))
+        from app.translate.prompts import build_repair_prompt, build_unit_prompt
+
+        probes = [
+            build_unit_prompt(
+                f"{_SENTINEL}SRC",
+                [(f"{_SENTINEL}A", f"{_SENTINEL}B")],
+                [(f"{_SENTINEL}C", f"{_SENTINEL}D")],
+                context_tail=f"{_SENTINEL}CTX",
+                keep_terms=[f"{_SENTINEL}K"],
+                unit_kind="title",
+            ),
+            build_repair_prompt(f"{_SENTINEL}SRC", f"{_SENTINEL}OUT", [f"<{_SENTINEL}1/>"]),
+        ]
+        for probe in probes:
+            for line in probe.splitlines():
+                line = line.strip()
+                if not line or _SENTINEL in line:
+                    continue  # 번역 대상 본문·용어 목록은 스캐폴딩이 아니다
+                if line.startswith("["):
+                    # 대괄호 헤더는 "—" 앞까지만 쓴다(부제가 바뀌어도 계속 잡히게).
+                    head = re.split(r"[—\]]", line[1:], maxsplit=1)[0].strip()
+                    if head:
+                        markers.add("[" + head)
+                elif len(line) >= 12:
+                    markers.add(line[:24])
+    except Exception as e:  # noqa: BLE001 — 하네스: import 실패해도 검사는 남긴다
+        info(f"prompts.py에서 스캐폴딩 문구를 읽지 못함 ({type(e).__name__}) — 기본 목록 사용")
+    markers.update(_SCAFFOLD_FALLBACK)
+    _scaffold_cache = tuple(sorted(markers))
+    return _scaffold_cache
+
+
+def scaffolding_hits(text: str) -> list[str]:
+    """text에 들어 있는 스캐폴딩 문구 목록(부분일치)."""
+    return [m for m in scaffolding_markers() if m in text]
+
+
+def hangul_latin(text: str) -> tuple[int, int]:
+    hangul = sum("가" <= c <= "힣" for c in text)
+    latin = sum(("a" <= c <= "z") or ("A" <= c <= "Z") for c in text)
+    return hangul, latin
+
+
+def hangul_share(text: str) -> float:
+    """한글 / (한글+라틴) — 수식·숫자·공백은 분모에서 빼 표·수식 페이지 오탐을 막는다."""
+    hangul, latin = hangul_latin(text)
+    return hangul / (hangul + latin) if (hangul + latin) else 0.0
+
+
+def dropped_translation_pages(
+    layout_ko_pages: list,
+    pdf_page_texts: list[str],
+    *,
+    translated_floor: float = 0.6,
+    retention: float = 0.5,
+) -> list[tuple[int, float, float]]:
+    """번역은 존재하는데 PDF가 버린 페이지 목록 → [(페이지번호, layout비, pdf비)].
+
+    사용자 신고("한글로 번역 안 되는 문단")의 실제 정체다: layout.ko.json은 전 페이지가
+    한글 91~99%인데 export.ko.pdf는 p16이 0%, p15가 32%였다(조판 실패 → 원문 보존).
+    번역 자체가 없는 페이지(참고문헌 등 원문 유지 설계)는 translated_floor로 걸러낸다.
+    """
+    bad = []
+    for idx, page in enumerate(layout_ko_pages):
+        if idx >= len(pdf_page_texts):
+            break
+        text = "".join(b.get("content") or "" for b in page.get("blocks", []))
+        lay = hangul_share(text)
+        if lay < translated_floor:
+            continue  # 애초에 번역면이 원문 유지 — PDF가 버린 게 아니다
+        pdf = hangul_share(pdf_page_texts[idx])
+        if pdf < lay * retention:
+            bad.append((idx + 1, round(lay, 2), round(pdf, 2)))
+    return bad
+
+
+def kept_reason_summary(report: dict) -> dict[str, int]:
+    """export.{lang}.report.json의 보존 사유별 집계.
+
+    fitting 그룹이 사유 집계 필드를 추가하는 중이라 **필드 이름을 고정하지 않는다** —
+    int 값을 가진 dict 필드는 전부 접두사와 함께 합치고, warnings 문자열은
+    페이지·블록 번호를 지운 사유 문구로 묶는다.
+    """
+    counts: dict[str, int] = {}
+    for key, val in report.items():
+        if isinstance(val, dict) and val and all(isinstance(v, int) for v in val.values()):
+            for k, v in val.items():
+                counts[f"{key}.{k}"] = counts.get(f"{key}.{k}", 0) + v
+    for warn in report.get("warnings") or []:
+        reason = re.sub(r"^p\d+:\s*", "", str(warn))
+        reason = re.sub(r"블록\s*\d+", "블록 N", reason)
+        counts[f"warning: {reason}"] = counts.get(f"warning: {reason}", 0) + 1
+    return counts
 
 
 def check(name: str, ok: bool, detail: str = "") -> bool:
@@ -182,6 +304,9 @@ class Servers:
         # 목에 닿지 않아 [8] 결함 주입 단계가 조용히 무력화된다. 목에도 전달한다.
         mock_env = dict(os.environ)
         mock_env["FAULT"] = self.env_extra.get("FAULT", "")
+        # 실제 한국어의 길이 압축률을 재현시킨다(0=길이 보존 옛 동작). 목이 길이를
+        # 보존하면 looks_untranslated()의 길이비 하한 회귀가 하네스에 안 잡힌다.
+        mock_env.setdefault("MOCK_TRANSLATE_RATIO", "0.4")
         self.mock = subprocess.Popen(
             [py, str(MOCK_SERVER), str(MOCK_PORT)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=mock_env,
@@ -299,10 +424,25 @@ def verify_translation(job_id: str, jd: Path, expect_pages: int) -> None:
         same_blocks = all(len(x.get("blocks", [])) == len(y.get("blocks", []))
                           for x, y in zip(pa, pb))
         check("원문/번역 layout 블록 수 전 페이지 동일", same_blocks)
+    src_md = jd / "result.md"
+    if ko.is_file() and src_md.is_file():
+        ratio = len(ko.read_text(encoding="utf-8")) / max(1, len(src_md.read_text(encoding="utf-8")))
+        # 목이 실제 한국어 압축률(원문의 0.3~0.5배)을 내고 있는지 — 길이 보존 목이면
+        # 아래 kept_original 단언이 길이비 게이트 회귀를 못 잡는다.
+        check("번역문 길이가 실제 한국어 압축률 범위 (목 압축 모드 동작 확인)",
+              0.25 <= ratio <= 0.75, f"ko/원문 길이비 {ratio:.2f}")
+
     rep = jd / "translations/ko/report.json"
     if rep.is_file():
         r = json.loads(rep.read_text())
-        info(f"report: kept_original={len(r.get('kept_original', []))} retried={r.get('retried')}")
+        kept = len(r.get("kept_original", []))
+        done = int(r.get("translated") or 0) + int(r.get("cached") or 0)
+        info(f"report: kept_original={kept} translated={done} retried={r.get('retried')}")
+        # 정상 경로에서 출력 게이트가 정상 번역을 원문 보존으로 떨구면 무성 손실이다.
+        # 목이 하한(0.3)의 1.2배 근처를 내므로, 하한을 올리는 회귀는 여기서 드러난다.
+        check("정상 경로에서 출력 검증 게이트가 정상 번역을 버리지 않음 (길이비 하한 회귀 탐지)",
+              kept <= max(2, 0.02 * (kept + done)),
+              f"kept_original={kept} / 번역 {done} (예: {r.get('kept_original', [])[:2]})")
 
 
 def verify_pdf_export(job_id: str, jd: Path, expect_pages: int) -> None:
@@ -326,9 +466,11 @@ def verify_pdf_export(job_id: str, jd: Path, expect_pages: int) -> None:
     total_hangul = 0
     outside = []
     tofu = 0
+    page_texts: list[str] = []
     for pno in range(doc.page_count):
         page = doc[pno]
         txt = page.get_text()
+        page_texts.append(txt)
         total_hangul += sum("가" <= c <= "힣" for c in txt)
         tofu += txt.count("�") + txt.count("□")
         pr = page.rect
@@ -344,6 +486,8 @@ def verify_pdf_export(job_id: str, jd: Path, expect_pages: int) -> None:
     check("폰트 폴백 tofu 없음", tofu == 0, f"tofu {tofu}자")
     doc.close()
 
+    verify_pdf_reflects_translation(jd, page_texts, "ko")
+
     status, payload, hdrs = req("GET", f"/api/jobs/{job_id}/pdf?lang=ko&view=dual",
                                 raw=True, timeout=600)
     if check("GET /pdf?view=dual 200", status == 200, f"{status}"):
@@ -355,6 +499,56 @@ def verify_pdf_export(job_id: str, jd: Path, expect_pages: int) -> None:
             w, h = d[0].rect.width, d[0].rect.height
             check("대조판이 가로로 2배 폭", w > h, f"{round(w)}x{round(h)}")
         d.close()
+
+
+def verify_pdf_reflects_translation(jd: Path, page_texts: list[str], lang: str) -> None:
+    """번역이 존재하는데 PDF가 버린 페이지를 페이지 단위로 대조한다.
+
+    사용자 신고("한글로 번역 안 되는 문단")의 실제 정체 — layout.ko.json은 전 페이지가
+    한글 91~99%인데 export.ko.pdf는 p16 0%, p15 32%였다. 총합(한글 200자 이상)만 보면
+    전 페이지가 통째로 원문으로 남아도 통과한다. 이 단언 하나가 그 결함 유형을 잡는다.
+    """
+    kl = jd / f"layout.{lang}.json"
+    if not kl.is_file():
+        check(f"layout.{lang}.json 존재 (PDF 반영 대조용)", False)
+        return
+    pages = layout_pages(json.loads(kl.read_text(encoding="utf-8")))
+    dropped = dropped_translation_pages(pages, page_texts)
+    translated = [i + 1 for i, p in enumerate(pages)
+                  if hangul_share("".join(b.get("content") or "" for b in p.get("blocks", [])))
+                  >= 0.6]
+    info(f"번역면 한글 페이지 {len(translated)}/{len(pages)}, PDF 반영 실패 {len(dropped)}")
+
+    # 유실을 **설명된 것**과 **조용한 것**으로 가른다. 조판 한계로 원문을 지킨 경우는
+    # export report의 kept_reasons/경고가 그 페이지를 설명한다(예: 의사코드 리스팅을
+    # 리플로우하면 줄 구조가 깨지므로 보존하는 편이 옳다). 잡아야 할 회귀는
+    # **아무 사유도 남기지 않고 사라지는** 유실이다 — 그건 사용자가 원인을 알 수 없다.
+    rep_path = jd / f"export.{lang}.report.json"
+    explained_pages: set[int] = set()
+    if rep_path.is_file():
+        rep_json = json.loads(rep_path.read_text(encoding="utf-8"))
+        for warn in rep_json.get("warnings") or []:
+            m = re.match(r"p(\d+):", str(warn))
+            if m:
+                explained_pages.add(int(m.group(1)))
+    silent = [d for d in dropped if d[0] not in explained_pages]
+    if dropped and not silent:
+        info(f"유실 {len(dropped)}페이지는 전부 export report에 사유가 남아 있다 "
+             f"(조판 한계): {[d[0] for d in dropped]}")
+    check(f"사유 없이 번역이 사라진 페이지 없음 (layout.{lang}.json ↔ export PDF)",
+          not silent,
+          f"무성 유실 {len(silent)}페이지 (페이지, layout비, pdf비)={silent[:6]}")
+
+    rep = jd / f"export.{lang}.report.json"
+    if rep.is_file():
+        report = json.loads(rep.read_text(encoding="utf-8"))
+        info(f"export report: replaced={report.get('replaced')} kept={report.get('kept')} "
+             f"relocated={report.get('relocated')} warning_count={report.get('warning_count')}")
+        summary = kept_reason_summary(report)
+        for reason, n in sorted(summary.items(), key=lambda kv: -kv[1])[:10]:
+            info(f"  보존 사유 {n:>3}건 — {reason}")
+        if (report.get("warning_count") or 0) > len(report.get("warnings") or []):
+            info("  (warnings는 상위 50건만 저장됨 — 집계는 표본이다)")
 
 
 def verify_cropbox(jd: Path, expect_pages: int) -> None:
@@ -443,10 +637,10 @@ def verify_viewer(job_id: str, expect_pages: int) -> None:
         blocks = al.get("blocks", [])
         check("alignment 블록이 원문/번역 쌍을 제공", bool(blocks), f"{len(blocks)} blocks")
         # 프롬프트 스캐폴딩이 번역 결과로 새면 안 된다 (마스킹/복원 계약).
-        leaked = [b["id"] for b in blocks
-                  if any(m in (b.get("target") or "")
-                         for m in ("[번역할 원문]", "[직전 문맥", "[용어집", "[원문 유지"))]
-        check("프롬프트 스캐폴딩이 번역 결과로 새지 않음", not leaked, f"오염 {len(leaked)}블록")
+        leaked = [(b["id"], scaffolding_hits(b.get("target") or "")) for b in blocks]
+        leaked = [x for x in leaked if x[1]]
+        check("프롬프트 스캐폴딩이 번역 결과로 새지 않음", not leaked,
+              f"오염 {len(leaked)}블록 (예: {leaked[:2]})")
 
     status, vp, _ = req("GET", f"/api/jobs/{job_id}/viewer/pages?start=1&limit=4&lang=ko&include=alignment")
     if check("GET /viewer/pages 200", status == 200, f"{status}"):
@@ -485,11 +679,23 @@ def verify_security(job_id: str) -> None:
     check("ALLOWED_HOSTS 위반 Host 거절", status == 400, f"status={status}")
 
 
+# fault별 "손상 출력이 그대로 반영됐다"는 증거 문구. mock_llm._apply_fault()가 내는
+# 문자열에서 왔다 — **부분일치**로 본다. 예전 코드는 6,491자 파일 전체를
+# `body.strip() == "요약입니다."` 로 비교해 절대 참이 될 수 없었다(공허한 검사).
+_FAULT_EXPECT: dict[str, tuple[str, tuple[str, ...]]] = {
+    "refusal": ("영문 거부문", ("cannot translate",)),
+    "refusal_ko": ("한국어 거부문", ("죄송합니다", "번역할 수 없습니다")),
+    "echo": ("원문 echo", ()),  # echo는 문구가 아니라 구조(줄 수·라틴 문자)로 잡는다
+    "summary": ("한 줄 요약", ("요약입니다",)),
+}
+
+
 def verify_translation_faults(pdf: Path, data_dir: Path) -> None:
     """A-1 실증 — 거부문/echo/플레이스홀더 유실을 주입하고 무성 손실이 없는지 본다."""
     print("\n[8] A-1 번역 결함 주입 (거부문 · echo · 플레이스홀더 유실)")
-    for fault, label in (("refusal", "영문 거부문"), ("refusal_ko", "한국어 거부문"),
-                         ("echo", "원문 echo"), ("summary", "한 줄 요약")):
+    info(f"스캐폴딩 마커 {len(scaffolding_markers())}종: "
+         + ", ".join(scaffolding_markers())[:200])
+    for fault, (label, _) in _FAULT_EXPECT.items():
         dd = data_dir.parent / f"fault-{fault}"
         if dd.exists():
             shutil.rmtree(dd)
@@ -510,11 +716,30 @@ def verify_translation_faults(pdf: Path, data_dir: Path) -> None:
             n_units = len(json.loads(units.read_text())) if units.is_file() else 0
             ko = (jd / "result.ko.md")
             body = ko.read_text(encoding="utf-8") if ko.is_file() else ""
-            leaked = ("cannot translate" in body.lower()
-                      or "죄송합니다, 번역할 수 없습니다" in body
-                      or body.strip() == "요약입니다.")
-            check(f"A-1[{label}]: 손상 출력이 result.ko.md에 반영되지 않음", not leaked,
-                  f"state={st.get('status')}")
+            src = (jd / "result.md").read_text(encoding="utf-8") if (jd / "result.md").is_file() else ""
+
+            # (a) 이 fault가 내는 손상 문구가 산출물에 남았는가 — 부분일치.
+            hits = [p for p in _FAULT_EXPECT[fault][1] if p in body.lower() or p in body]
+            check(f"A-1[{label}]: 손상 출력이 result.ko.md에 반영되지 않음", not hits,
+                  f"오염 문구 {hits} state={st.get('status')}")
+
+            # (b) 모든 fault 공통 — 프롬프트/repair 스캐폴딩 누출.
+            hits = scaffolding_hits(body)
+            check(f"A-1[{label}]: 프롬프트·repair 스캐폴딩이 result.ko.md에 새지 않음",
+                  not hits, f"누출 {hits[:4]}")
+
+            # (c) echo 전용 구조 단언 — 원문 echo면 산출물이 원문과 같은 규모여야 한다.
+            #     실측: 원문 108줄 → 170줄로 불어나며 repair 스캐폴딩 25줄이 박혔는데
+            #     기존 검사는 통과했다. 문구가 바뀌어도 이 단언은 남는다.
+            if fault == "echo" and src:
+                src_lines, ko_lines = src.count("\n") + 1, body.count("\n") + 1
+                src_latin, ko_latin = hangul_latin(src)[1], hangul_latin(body)[1]
+                check(f"A-1[{label}]: 산출물 줄 수가 원문 대비 부풀지 않음",
+                      ko_lines <= src_lines * 1.15 + 3, f"원문 {src_lines}줄 → {ko_lines}줄")
+                check(f"A-1[{label}]: 라틴 문자 수가 원문 대비 부풀지 않음",
+                      ko_latin <= src_latin * 1.15 + 50,
+                      f"원문 {src_latin}자 → {ko_latin}자")
+
             check(f"A-1[{label}]: kept_original에 기록되어 관측 가능", len(kept) > 0,
                   f"kept={len(kept)} units_cached={n_units}")
 

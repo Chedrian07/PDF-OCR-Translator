@@ -17,6 +17,7 @@ import pytest
 
 from app.pipeline import pdf_export as pdf_export_module
 from app.pipeline.pdf_export import (
+    _SourceSpan,
     _block_rect,
     _load_pages,
     _plain_text,
@@ -24,6 +25,7 @@ from app.pipeline.pdf_export import (
     _plan_single_line,
     _protect_trailing_words,
     _reconstruct_rich_runs,
+    _reflow_flattened_text,
     _resolve_font,
     _rich_prefix_markup,
     _restore_title_prefix,
@@ -1462,3 +1464,268 @@ def test_회전_페이지에서도_원문_글리프가_리댁션된다(
     assert "BOTTOM SOURCE LINE" not in extracted, extracted
     for text, rect in entries:
         assert page_rect.contains(rect), (text, rect, page_rect)
+
+
+def _span(text: str, x0: float, baseline: float, size: float = 9.0):
+    """`_reflow_flattened_text` 단위 테스트용 원문 span."""
+    import fitz
+
+    return _SourceSpan(
+        fitz.Rect(x0, baseline - size, x0 + len(text) * size * 0.5, baseline + 2),
+        text,
+        size,
+        0,
+        (x0, baseline),
+    )
+
+
+def test_가로_평탄화_헤더는_원문_시각_줄_수로_리플로우된다():
+    """한 줄에 나란히 놓인 셀이 OCR 줄바꿈으로 평탄화된 블록만 되접는다."""
+    spans = [
+        _span("Dataset", 60, 100),
+        _span("Long Evaluation", 160, 100),
+        _span("Short Evaluation", 300, 100),
+    ]
+
+    reflowed = _reflow_flattened_text(
+        "Dataset\nLong Evaluation\nShort Evaluation",
+        "데이터셋\n긴 평가\n짧은 평가",
+        spans,
+        9.3,
+    )
+
+    assert reflowed == "데이터셋 긴 평가 짧은 평가"
+
+
+def test_가로_평탄화_리플로우가_표의_행_구조를_보존한다():
+    """여러 행이 평탄화된 블록은 한 줄이 아니라 원래 행 수로 되접는다."""
+    spans = [
+        _span("Model", 60, 100),
+        _span("Score", 200, 100),
+        _span("Alpha", 60, 112),
+        _span("1.0", 200, 112),
+    ]
+
+    reflowed = _reflow_flattened_text(
+        "Model\nScore\nAlpha\n1.0",
+        "모델\n점수\n알파\n1.0",
+        spans,
+        9.3,
+    )
+
+    assert reflowed == "모델 점수\n알파 1.0"
+
+
+def test_정상적으로_줄바꿈된_산문은_리플로우하지_않는다():
+    """진짜 여러 줄 문단을 한 줄로 뭉치면 원문보다 나빠진다 — 건드리지 않는다."""
+    spans = [
+        _span("This approach differs fundamentally", 60, 100),
+        _span("from traditional prompt engineering", 60, 112),
+        _span("as we are not instructing the model", 60, 124),
+    ]
+
+    reflowed = _reflow_flattened_text(
+        "This approach differs fundamentally\n"
+        "from traditional prompt engineering\n"
+        "as we are not instructing the model",
+        "이 접근은 근본적으로 다르다\n전통적인 프롬프트 공학과\n"
+        "우리는 모델에 지시하지 않는다",
+        spans,
+        10.3,
+    )
+
+    assert reflowed is None
+
+
+def test_원문_span이_없으면_리플로우하지_않는다():
+    """소유한 원문 span이 없으면 시각 줄 수를 잴 수 없다 — 보수적으로 보존."""
+    assert _reflow_flattened_text("A\nB", "가\n나", [], 9.3) is None
+
+
+def _flattened_header_job(
+    job_dir: Path,
+    translated: list[str],
+    *,
+    header_cells: tuple[str, ...] = ("Dataset", "Long Evaluation", "Short Evaluation"),
+) -> None:
+    """헤더 한 줄이 OCR에서 여러 줄로 평탄화된 얕은 블록 + 위아래 보존 블록.
+
+    위아래를 보존 블록으로 막아야 flow planner가 위로 밀거나 아래로 늘려서
+    세 줄을 그대로 조판하는 우회로가 없어진다 — 실제 표 헤더와 같은 상황.
+    """
+    import fitz
+
+    source = fitz.open()
+    page = source.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    page.insert_text((60, 84), "PRESERVED CAPTION LINE", fontsize=9)
+    for text, x0 in zip(header_cells, (60, 160, 300)):
+        page.insert_text((x0, 100), text, fontsize=9)
+    page.insert_text((60, 118), "PRESERVED FOOTNOTE LINE", fontsize=9)
+    source.save(job_dir / "source.pdf")
+    source.close()
+
+    original = [
+        {
+            "type": "ref_text",
+            "bbox": _layout_bbox(fitz.Rect(55, 74, 430, 88)),
+            "content": "PRESERVED CAPTION LINE",
+            "fs": 9 / PAGE_WIDTH * 100,
+        },
+        {
+            "type": "text",
+            "bbox": _layout_bbox(fitz.Rect(55, 90, 430, 104)),
+            "content": "\n".join(header_cells),
+            "fs": 9 / PAGE_WIDTH * 100,
+        },
+        {
+            "type": "ref_text",
+            "bbox": _layout_bbox(fitz.Rect(55, 108, 430, 122)),
+            "content": "PRESERVED FOOTNOTE LINE",
+            "fs": 9 / PAGE_WIDTH * 100,
+        },
+    ]
+    _write_layout_pair(job_dir, original, translated)
+
+
+def test_평탄화된_표_헤더가_얕은_bbox에서도_번역된다(
+    tmp_path: Path, real_cjk_fontfile: str,
+):
+    """사용자 신고의 직접 원인: 한 줄 높이 bbox + 세 줄 OCR → 통째로 미번역."""
+    import fitz
+
+    job_dir = tmp_path / "flattened-header"
+    job_dir.mkdir()
+    _flattened_header_job(
+        job_dir,
+        [
+            "PRESERVED CAPTION LINE",
+            "데이터셋\n긴 평가\n짧은 평가",
+            "PRESERVED FOOTNOTE LINE",
+        ],
+    )
+
+    result = build_translated_pdf(job_dir, "ko", fontfile=real_cjk_fontfile)
+    with fitz.open(result.path) as exported:
+        text = exported[0].get_text().replace("\xa0", " ")
+
+    assert result.replaced == 1, result.report()
+    assert "데이터셋 긴 평가 짧은 평가" in text, text
+    assert "Long Evaluation" not in text, text
+    # 아래 보존 블록의 원문은 그대로 남아야 한다.
+    assert "PRESERVED FOOTNOTE LINE" in text, text
+
+
+def test_리플로우로도_못_들어가는_평탄화_블록은_사유가_구분된다(
+    tmp_path: Path, real_cjk_fontfile: str,
+):
+    """'공간 부족'과 '가로 평탄화'를 한 문구로 뭉뚱그리면 다음 신고를 진단할 수 없다."""
+    job_dir = tmp_path / "flattened-no-fit"
+    job_dir.mkdir()
+    _flattened_header_job(
+        job_dir,
+        [
+            "PRESERVED CAPTION LINE",
+            "매우긴번역문장" * 60 + "\n두번째\n세번째",
+            "PRESERVED FOOTNOTE LINE",
+        ],
+    )
+
+    result = build_translated_pdf(job_dir, "ko", fontfile=real_cjk_fontfile)
+
+    assert result.replaced == 0, result.report()
+    assert result.kept_reasons.get("flattened_no_fit") == 1, result.report()
+    assert any("가로 평탄화" in warning for warning in result.warnings), result.warnings
+
+
+def test_보존_사유가_모든_kept_블록을_설명한다(
+    tmp_path: Path, real_cjk_fontfile: str,
+):
+    """kept는 58인데 경고는 26이던 상태를 막는다 — 사유별 집계의 합이 kept와 같다."""
+    import fitz
+
+    job_dir = tmp_path / "keep-reasons"
+    job_dir.mkdir()
+    source = fitz.open()
+    page = source.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    page.insert_text((60, 100), "UNCHANGED LINE", fontsize=10)
+    page.insert_text((60, 130), "REFERENCE ENTRY", fontsize=10)
+    source.save(job_dir / "source.pdf")
+    source.close()
+
+    original = [
+        {
+            "type": "text",
+            "bbox": _layout_bbox(fitz.Rect(55, 88, 430, 104)),
+            "content": "UNCHANGED LINE",
+            "fs": 10 / PAGE_WIDTH * 100,
+        },
+        {
+            "type": "ref_text",
+            "bbox": _layout_bbox(fitz.Rect(55, 118, 430, 134)),
+            "content": "REFERENCE ENTRY",
+            "fs": 10 / PAGE_WIDTH * 100,
+        },
+    ]
+    _write_layout_pair(job_dir, original, ["UNCHANGED LINE", "참고문헌 항목"])
+
+    result = build_translated_pdf(job_dir, "ko", fontfile=real_cjk_fontfile)
+    report = result.report()
+
+    assert result.kept == 2, report
+    assert sum(result.kept_reasons.values()) == result.kept, report
+    assert result.kept_reasons["unchanged"] == 1, report
+    assert result.kept_reasons["preserve_type:ref_text"] == 1, report
+    assert report["kept_reasons"] == result.kept_reasons
+
+
+def test_한_블록이_안_들어가도_같은_단의_이웃은_번역된다(
+    tmp_path: Path, real_cjk_fontfile: str,
+):
+    """flow 그룹이 전부 실패하면 개별 배치로 들어가는 만큼 회수한다."""
+    import fitz
+
+    job_dir = tmp_path / "partial-flow"
+    job_dir.mkdir()
+    source = fitz.open()
+    page = source.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    page.insert_text((60, 100), "FIRST HEADING LINE", fontsize=10)
+    page.insert_text((60, 118), "SECOND DENSE LINE", fontsize=10)
+    page.insert_text((60, 140), "PRESERVED TAIL LINE", fontsize=10)
+    source.save(job_dir / "source.pdf")
+    source.close()
+
+    original = [
+        {
+            "type": "text",
+            "bbox": _layout_bbox(fitz.Rect(55, 88, 430, 104)),
+            "content": "FIRST HEADING LINE",
+            "fs": 10 / PAGE_WIDTH * 100,
+        },
+        {
+            "type": "text",
+            "bbox": _layout_bbox(fitz.Rect(55, 106, 430, 122)),
+            "content": "SECOND DENSE LINE",
+            "fs": 10 / PAGE_WIDTH * 100,
+        },
+        {
+            "type": "ref_text",
+            "bbox": _layout_bbox(fitz.Rect(55, 130, 430, 146)),
+            "content": "PRESERVED TAIL LINE",
+            "fs": 10 / PAGE_WIDTH * 100,
+        },
+    ]
+    _write_layout_pair(
+        job_dir,
+        original,
+        ["첫째 제목", "들어갈수없는아주긴번역" * 40, "PRESERVED TAIL LINE"],
+    )
+
+    result = build_translated_pdf(job_dir, "ko", fontfile=real_cjk_fontfile)
+    with fitz.open(result.path) as exported:
+        text = exported[0].get_text().replace("\xa0", " ")
+
+    assert result.replaced == 1, result.report()
+    assert result.kept_reasons.get("no_fit") == 1, result.report()
+    assert "첫째 제목" in text, text
+    assert "SECOND DENSE LINE" in text, text
+    assert "FIRST HEADING LINE" not in text, text

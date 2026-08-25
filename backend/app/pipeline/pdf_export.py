@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 # 캐시된 export PDF가 이전 조판 규칙으로 생성됐는지 판별하는 공개 포맷 버전.
 # 조판 결과가 달라지는 변경에서는 반드시 올려 기존 잡도 다음 요청 때 재생성한다.
-PDF_EXPORT_FORMAT_VERSION = 4
+PDF_EXPORT_FORMAT_VERSION = 5
 
 # 번역 텍스트로 교체할 수 있는 블록 타입. 이 밖의 타입(image·equation·table·
 # algorithm 등)은 내용이 달라도 원본을 유지한다 — 표 HTML·수식 LaTeX를 평문으로
@@ -124,9 +124,18 @@ _SERIF_NAME_HINT = re.compile(r"serif|myeongjo|myungjo|batang", re.IGNORECASE)
 
 # 과도한 축소는 한 블록만 각주처럼 작아지는 계층 붕괴를 만든다. 76%에서도
 # 들어가지 않으면 원문을 보존하고 리포트에 남기는 편이 읽을 수 없는 번역보다 낫다.
+# 65%까지 열어 실측한 결과 회수는 0건이고 본문 최소 한글 크기만 7.02pt→6.00pt로
+# 줄었다(16p 논문 재현본). 미번역의 주 원인은 축소 부족이 아니라 OCR의 가로
+# 평탄화와 flow 그룹의 전부-아니면-전무 실패다(보존 26건 → 4건: 개별 배치 13건,
+# `_reflow_flattened_text` 9건 회수). 축소 하한은 76%로 유지한다.
 _SHRINK_STEPS = (1.0, 0.94, 0.88, 0.82, 0.76)
 _SINGLE_LINE_SCALES = (1.0, 0.96, 0.92, 0.88, 0.84, 0.80, 0.76)
 _MIN_FONT_PT = 4.0
+# 본문 흐름 조판의 가독성 절대 하한. 논문 인쇄에서 6pt는 표 각주·판권 표기의
+# 최소 크기이고 그 아래는 한글 받침이 뭉친다. 알고리즘 리스팅처럼 base_pt가
+# 7.9pt 미만인 블록은 76% 축소만으로도 6pt 밑으로 내려가므로 비율이 아니라 실제
+# pt로 막는다(실측 회수 손실 0건). 하한에 걸린 블록은 원문을 보존한다(사유: no_fit).
+_MIN_BODY_FONT_PT = 6.0
 _MAX_FONT_PT = 72.0
 _MAX_TABLE_CELLS = 500  # search_for 셀별 탐색의 CPU 상한 + 비정상 HTML 표 방어
 _MIN_TABLE_FONT_PT = 6.0
@@ -159,7 +168,18 @@ class PdfExportResult:
     relocated: int = 0
     table_cells_replaced: int = 0
     specialist_kept: dict[str, int] = field(default_factory=dict)
+    kept_reasons: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+
+    def keep(self, reason: str, count: int = 1) -> None:
+        """보존 블록 수와 사유를 함께 기록한다.
+
+        경고는 사용자에게 보여줄 만한 이상 징후만 남기므로 `kept`의 일부만
+        설명한다. 다음 미번역 신고를 코드 없이 진단하려면 보존된 *모든* 블록의
+        사유가 필요하다. `kept_reasons`의 합은 항상 `kept`와 같다.
+        """
+        self.kept += count
+        self.kept_reasons[reason] = self.kept_reasons.get(reason, 0) + count
 
     def report(self) -> dict:
         """경로·본문 없이 UI에 안전하게 노출할 ASCII/숫자 중심 생성 리포트."""
@@ -170,6 +190,9 @@ class PdfExportResult:
             "relocated": self.relocated,
             "table_cells_replaced": self.table_cells_replaced,
             "specialist_kept": dict(sorted(self.specialist_kept.items())),
+            # 교체 대상 타입이 아닌 블록(image/equation/algorithm 등)은 애초에
+            # kept로 세지 않고 specialist_kept로만 집계한다.
+            "kept_reasons": dict(sorted(self.kept_reasons.items())),
             "warning_count": len(self.warnings),
             "warnings": self.warnings[:50],
         }
@@ -226,6 +249,9 @@ class _FlowCandidate:
     redact_rects: tuple[object, ...]
     source_rect: object
     bold_prefix: tuple[str, str] | None = None
+    # 가로로 나란히 놓였던 셀이 OCR 줄바꿈으로 평탄화된 블록을 원문의 시각 줄
+    # 수로 되접은 대안 텍스트. 원래 조판이 실패할 때만 쓰며 평탄화가 아니면 None.
+    reflow_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1269,6 +1295,99 @@ def _leading_bold_prefix(
     return (leading, prefix) if prefix else None
 
 
+def _visual_lines(spans: list[_SourceSpan], base_pt: float) -> list[str]:
+    """원문 PDF에서 이 블록이 실제로 차지한 시각 줄의 텍스트를 위→아래로 만든다.
+
+    같은 줄의 span은 baseline이 정확히 같지 않다. 아래/위 첨자(β1, NS)는 약
+    0.1em, 표 헤더의 세로 가운데 맞춤 셀은 0.5em까지 어긋난다. 반면 다음 행은
+    1.0em 이상 떨어진다(실측 /tmp/p9repro 9.24pt 표: 첨자 1.0pt, 가운데 맞춤
+    헤더 4.98pt, 행 간격 8.96~10.36pt). 0.55em 경계가 그 빈 구간 안이다.
+    """
+    if not spans:
+        return []
+    tolerance = max(1.25, base_pt * 0.55)
+    clusters: list[list[_SourceSpan]] = []
+    anchor: float | None = None
+    for span in sorted(spans, key=lambda item: item.origin[1]):
+        if anchor is None or span.origin[1] - anchor > tolerance:
+            clusters.append([])
+            anchor = span.origin[1]
+        clusters[-1].append(span)
+    return [
+        "".join(span.text for span in sorted(cluster, key=lambda item: item.rect.x0))
+        for cluster in clusters
+    ]
+
+
+def _align_ocr_lines(ocr_lines: list[str], visual_texts: list[str]) -> list[int] | None:
+    """각 OCR 논리 줄이 원문의 몇 번째 시각 줄에서 왔는지 단조 정렬로 찾는다."""
+    normalized = [_ownership_text(text) for text in visual_texts]
+    if not normalized:
+        return None
+    groups: list[int] = []
+    index, remaining = 0, normalized[0]
+    for line in ocr_lines:
+        target = _ownership_text(line)
+        if not target:
+            groups.append(index)
+            continue
+        # OCR은 합자·첨자·특수기호를 원문 span과 다르게 펼치므로 줄 전체가 항상
+        # 일치하지는 않는다. 앞 10자로 위치만 찾고 일치하는 만큼만 소비한다.
+        probe = target[:10]
+        cursor, rest = index, remaining
+        while probe not in rest and cursor + 1 < len(normalized):
+            cursor += 1
+            rest = normalized[cursor]
+        if probe not in rest:
+            return None
+        consumed = (
+            rest.index(target) + len(target)
+            if target in rest
+            else rest.index(probe) + len(probe)
+        )
+        index, remaining = cursor, rest[consumed:]
+        groups.append(index)
+    return groups
+
+
+def _reflow_flattened_text(
+    original: str, translated: str, spans: list[_SourceSpan], base_pt: float,
+) -> str | None:
+    """가로 배치가 OCR 줄바꿈으로 평탄화된 블록의 번역문을 원문 줄 수로 되접는다.
+
+    원문에서 한 줄이던 표 헤더 `Dataset | Long Evaluation | Short Evaluation`이
+    OCR에서 세 줄로 평탄화되면 bbox 높이는 한 줄뿐인데 textbox 조판은 세 줄을
+    요구한다 — 어떤 크기로 축소해도 구조적으로 들어가지 않는다. 원문 span의
+    baseline으로 실제 줄 수를 재고 그만큼만 줄바꿈을 남기면 원문의 시각적 모습에
+    가까우면서 조판도 가능해진다.
+
+    진짜 여러 줄 문단을 뭉개지 않도록 조건을 좁게 건다: 원문 시각 줄 수가 OCR
+    줄 수보다 적고, 번역문의 줄 수가 원문과 1:1로 대응하며, 모든 OCR 줄을 원문
+    시각 줄에 단조 정렬할 수 있을 때만 리플로우한다. 하나라도 어긋나면 None을
+    반환해 기존 보존 경로를 그대로 탄다.
+    """
+    original_lines = original.splitlines()
+    translated_lines = translated.splitlines()
+    if len(original_lines) < 2 or len(original_lines) != len(translated_lines):
+        return None
+    visual_texts = _visual_lines(spans, base_pt)
+    if not visual_texts or len(visual_texts) >= len(original_lines):
+        return None
+    groups = _align_ocr_lines(original_lines, visual_texts)
+    if groups is None:
+        return None
+    merged = [
+        " ".join(
+            translated_lines[index].strip()
+            for index, group in enumerate(groups)
+            if group == line and translated_lines[index].strip()
+        )
+        for line in range(groups[-1] + 1)
+    ]
+    reflowed = "\n".join(line for line in merged if line)
+    return reflowed if reflowed and reflowed != translated else None
+
+
 def _microfix_plan(
     fitz,
     rect,
@@ -2051,9 +2170,16 @@ def _plan_flow_group(
     if end <= shifted_start + 0.5:
         return None
 
-    scale_sets = [(scale,) for scale in _SHRINK_STEPS]
+    # 이 flow에서 가장 작은 블록이 _MIN_BODY_FONT_PT 아래로 내려가는 축소는
+    # 읽을 수 없는 번역이 된다 — 시도하지 않고 원문을 보존한다.
+    smallest_pt = min(item.base_pt for item in ordered)
+    readable_scales = tuple(
+        scale for scale in _SHRINK_STEPS
+        if smallest_pt * scale >= _MIN_BODY_FONT_PT
+    ) or (_SHRINK_STEPS[0],)
+    scale_sets = [(scale,) for scale in readable_scales]
     # 모든 블록이 같은 scale에서 불가능할 때만 개별 first-fit을 허용한다.
-    scale_sets.append(_SHRINK_STEPS)
+    scale_sets.append(readable_scales)
     for start in starts:
         for compact in (False, True):
             for scales in scale_sets:
@@ -2414,7 +2540,7 @@ def build_translated_pdf(
                         page, table_rect, old_cells, row_count, col_count,
                     )
                     if not grid_trusted:
-                        result.kept += 1
+                        result.keep("table_grid_untrusted")
                         result.specialist_kept["table"] = result.specialist_kept.get("table", 0) + 1
                         result.warnings.append(
                             f"p{pno}: 표 셀 격자 추정 실패(원문 검색 불일치) — 원문 표 보존"
@@ -2485,7 +2611,7 @@ def build_translated_pdf(
                             block_index,
                         ))
                     if failed_cell is not None:
-                        result.kept += changed_cells
+                        result.keep("table_cell_no_fit", changed_cells)
                         result.specialist_kept["table"] = result.specialist_kept.get("table", 0) + 1
                         result.warnings.append(
                             f"p{pno}: 표 {failed_cell.row + 1}행 {failed_cell.col + 1}열 "
@@ -2496,7 +2622,7 @@ def build_translated_pdf(
                     continue
 
                 if block_type in _PRESERVE_TYPES:
-                    result.kept += 1
+                    result.keep(f"preserve_type:{block_type}")
                     preserve_kind = "reference" if block_type == "ref_text" else "running_text"
                     result.specialist_kept[preserve_kind] = (
                         result.specialist_kept.get(preserve_kind, 0) + 1
@@ -2523,7 +2649,7 @@ def build_translated_pdf(
                         )
                     continue
                 if (tb.get("vertical") or ob.get("vertical")) in _VERTICAL_SKIP:
-                    result.kept += 1
+                    result.keep("vertical")
                     result.specialist_kept["vertical"] = result.specialist_kept.get("vertical", 0) + 1
                     continue
                 old = _plain_text(str(ob.get("content") or ""))
@@ -2531,11 +2657,11 @@ def build_translated_pdf(
                 if block_type == "title":
                     new = _restore_title_prefix(old, new)
                 if not new or new == old:
-                    result.kept += 1
+                    result.keep("unchanged")
                     continue
                 rect = block_rects[block_index]
                 if rect is None:
-                    result.kept += 1
+                    result.keep("no_rect")
                     continue
                 # 그림 패널·로고 위 OCR 텍스트 블록은 교체하지 않는다. 그림 속
                 # 텍스트는 OCR 오독이 잦고 원본 조판이 항상 우월하며, 번역을
@@ -2546,7 +2672,7 @@ def build_translated_pdf(
                     _rect_overlap_area(rect, region) / rect_area >= 0.30
                     for region in image_regions
                 ):
-                    result.kept += 1
+                    result.keep("figure_text")
                     result.specialist_kept["figure_text"] = (
                         result.specialist_kept.get("figure_text", 0) + 1
                     )
@@ -2606,13 +2732,19 @@ def build_translated_pdf(
                 if block_index in ambiguous_blocks or (
                     not owned_records and local_source_records
                 ):
-                    result.kept += 1
+                    result.keep("ambiguous_source")
                     result.warnings.append(
                         f"p{pno}: 블록 {block_index + 1} 교체 생략"
                         "(안전한 원문 span 없음) — 원문 보존"
                     )
                     continue
                 owned_rects = [span.rect for span in owned_records]
+                # 원문 PDF의 실제 baseline 수보다 OCR 줄 수가 많으면 그 줄바꿈은
+                # 문단의 줄바꿈이 아니라 가로 배치(표 헤더·행)의 평탄화다.
+                # bbox 높이는 원문 줄 수만큼뿐이라 축소로는 절대 들어가지 않는다.
+                reflow_text = _reflow_flattened_text(
+                    old, new, owned_records, base_pt,
+                )
                 flow_candidates.append(_FlowCandidate(
                     block_index,
                     block_type,
@@ -2627,6 +2759,7 @@ def build_translated_pdf(
                     _source_text_rects(page, rect, owned_rects),
                     rect,
                     None if bold else _leading_bold_prefix(owned_records, new),
+                    reflow_text,
                 ))
 
             # 일반 텍스트는 페이지에서 모두 수집한 뒤 같은 단의 인접 블록을
@@ -2646,15 +2779,63 @@ def build_translated_pdf(
                     for target in targets
                     if target.plan.ink_rect is not None
                 )
-                planned = _plan_flow_group(page, component, fixed_rects)
+                # 가로 평탄화 블록은 OCR 줄바꿈을 그대로 조판하면 구조적으로
+                # 들어갈 수 없다. 원문의 시각적 줄 수로 되돌린 대안을 함께 시도한다.
+                variants = [component]
+                if any(candidate.reflow_text for candidate in component):
+                    variants.append([
+                        replace(candidate, text=candidate.reflow_text)
+                        if candidate.reflow_text
+                        else candidate
+                        for candidate in component
+                    ])
+                planned = None
+                for variant in variants:
+                    planned = _plan_flow_group(page, variant, fixed_rects)
+                    if planned is not None:
+                        break
                 if planned is None:
-                    result.kept += len(component)
-                    for candidate in component:
+                    # 최후 수단: 한 블록이 안 들어간다고 같은 단의 나머지 문단까지
+                    # 원문으로 되돌리면 사용자에게는 문단 대여섯 개가 통째로
+                    # 미번역으로 보인다. 위에서 아래로 개별 배치해 들어가는 만큼만
+                    # 회수하고, 아직 계획하지 않은 이웃의 원문은 보존될 수 있으므로
+                    # 장애물로 예약해 번역문이 그 위에 겹치지 않게 한다.
+                    planned = []
+                    for position, candidate in enumerate(component):
+                        obstacles = list(fixed_rects)
+                        obstacles.extend(
+                            target.plan.ink_rect
+                            for target in planned
+                            if target.plan.ink_rect is not None
+                        )
+                        obstacles.extend(
+                            span.rect
+                            for other in component[position + 1:]
+                            for span in source_ownership.get(other.block_index, [])
+                        )
+                        single = None
+                        for text in (candidate.text, candidate.reflow_text):
+                            if text is None:
+                                continue
+                            single = _plan_flow_group(
+                                page, [replace(candidate, text=text)], obstacles,
+                            )
+                            if single:
+                                break
+                        if single:
+                            planned.extend(single)
+                            continue
+                        flattened = candidate.reflow_text is not None
+                        result.keep("flattened_no_fit" if flattened else "no_fit")
+                        reason = (
+                            "가로 평탄화 블록 — 리플로우 실패"
+                            if flattened
+                            else "공간 부족"
+                        )
                         result.warnings.append(
                             f"p{pno}: 블록 {candidate.block_index + 1} 교체 생략"
-                            "(공간 부족) — 원문 보존"
+                            f"({reason}) — 원문 보존"
                         )
-                    continue
                 targets.extend(planned)
 
             if not targets:

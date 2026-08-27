@@ -38,8 +38,21 @@ _TOKEN_RE = re.compile(
     r"|(?P<u1>https?://\S+|\b10\.\d{4,}/\S+|[\w.+%-]+@[\w-]+\.[\w.-]+)"  # 7 URL/DOI/이메일
     r"|(?P<c1>\[\d+(?:\s*[,–-]\s*\d+)*\])"             # 8 인용 [1] [1, 2] [3-5]
     r"|(?P<f1>\b(?:Figure|Fig\.?|Table|Tab\.?|Equation|Eqs?\.?|Section|Sec\.?"
-    r"|Appendix|Algorithm|Alg\.?)\s*\(?\d+(?:\.\d+)*\)?)",  # 9 Fig/Table/Eq/Sec 참조
-    re.DOTALL,
+    r"|Appendix|Algorithm|Alg\.?)\s*\(?\d+(?:\.\d+)*\)?)"  # 9 Fig/Table/Eq/Sec 참조
+    # 10 셸 프롬프트 줄 · 11 단계 마커 · 12 `ls -l` 타임스탬프.
+    # 부록의 에이전트 트랜스크립트는 명령과 산문이 한 유닛에 섞여 있어 블록 단위
+    # skip(should_skip)이 (오탐을 피하려고 올바르게) 거부한다. 그러면 명령까지
+    # 번역돼 재현 불가능한 산출물이 된다 — 실측 result.ko.md:
+    #   `$ condensation` → `$ 응축`,  `May 6 10:26` → `5월 6일 10:26`,
+    #   `[Step 85/100]` → `[단계 85/100]`.
+    # 줄 단위로 불변 토큰으로 묶으면 산문은 번역되고 명령은 그대로 지나간다.
+    r"|(?P<k3>^[ \t]*[$%>][ \t]+[^\n]*)"
+    r"|(?P<k4>^[ \t]*\[?[ \t]*Step[ \t]*:?[ \t]*\d+[ \t]*/[ \t]*\d+[ \t]*\]?[ \t]*(?=\n|$))"
+    # 크기 + 월 + 일 + 시각 + 파일명이 이어지는 `ls -l` 행의 타임스탬프만. 산문 속
+    # 날짜(`in May 2024 we …`)는 크기·파일명이 없어 걸리지 않는다.
+    r"|(?P<k5>(?<=\s)\d+[ \t]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+    r"[ \t]+\d{1,2}[ \t]+(?:\d{1,2}:\d{2}|\d{4})(?=[ \t]+\S))",
+    re.DOTALL | re.MULTILINE,
 )
 
 # 복원·잔여 검사에 쓰는 플레이스홀더 인식 패턴 (id 접두 = 종류 코드)
@@ -53,18 +66,47 @@ def _preview(s: str) -> str:
     return s.strip()[:12]
 
 
+# 프롬프트 줄을 "프롬프트+명령 이름" / "나머지 인자"로 가르는 패턴.
+# `$ think "There is no evidence that …"`처럼 인자가 자연어인 명령이 실제로 있고,
+# 줄 전체를 불변으로 묶으면 그 문장이 번역면에 영어로 남는다(사용자 규칙 3 위반).
+# 반대로 줄 전체를 번역하면 명령 이름까지 번역된다(`$ condense` → `$ 응축`).
+# 그래서 명령 이름까지만 불변으로 묶고 자연어 인자는 번역 대상으로 남긴다.
+_K3_HEAD = re.compile(r"^([ \t]*[$%][ \t]+\S+)([ \t]+.*)?$")
+# `>`는 셸 연속 프롬프트이기도 하고 마크다운 인용 기호이기도 하다. 뒤따르는 명령
+# 이름이 없으므로 기호만 보호하고 나머지는 전부 번역 대상으로 넘긴다 — 그래야
+# `> The rest of the paper is organized as follows…` 같은 인용문이 번역된다.
+_K3_MARK = re.compile(r"^([ \t]*>)([ \t]+.*)?$")
+
+
 def mask(text: str) -> tuple[str, dict[str, str]]:
     """비언어 토큰을 플레이스홀더로 치환. (masked, {placeholder_id → 원문}) 반환."""
     mapping: dict[str, str] = {}
     counter = [0]
+    depth = [0]
 
-    def _repl(m: re.Match) -> str:
+    def _place(kind: str, original: str) -> str:
         counter[0] += 1
-        kind = m.lastgroup[0]  # 그룹명 첫 글자 = 종류 코드
-        original = m.group()
         pid = f"{kind}{counter[0]}"
         mapping[pid] = original
         return f'<{pid} v="{_preview(original)}"/>'
+
+    def _repl(m: re.Match) -> str:
+        kind = m.lastgroup[0]  # 그룹명 첫 글자 = 종류 코드
+        original = m.group()
+        # 프롬프트 줄의 인자가 자연어면 명령 이름까지만 보호하고 인자는 번역시킨다.
+        # depth 가드: 잘라낸 꼬리를 재스캔할 때 이 분기를 다시 타지 않게 한다.
+        if m.lastgroup == "k3" and depth[0] == 0:
+            pat = _K3_MARK if original.lstrip()[:1] == ">" else _K3_HEAD
+            head = pat.match(original)
+            tail = (head.group(2) or "") if head else ""
+            if tail.strip() and _prose_line(tail):
+                out = _place("k", head.group(1))
+                depth[0] += 1
+                try:
+                    return out + _TOKEN_RE.sub(_repl, tail)
+                finally:
+                    depth[0] -= 1
+        return _place(kind, original)
 
     return _TOKEN_RE.sub(_repl, text), mapping
 
@@ -150,12 +192,128 @@ def _looks_reference_list(text: str) -> bool:
     return hits == len(lines) == 1 and bool(_REF_EVIDENCE_RE.search(text))
 
 
+# ── 코드·CLI 트랜스크립트 판별 ────────────────────────────────────────────
+# 부록의 에이전트 트랜스크립트·소스 리스팅은 번역 대상이 아니다. 그런데 셸 명령과
+# 코드에는 알파벳이 많아 아래 non-linguistic 규칙(문자 비율 0.3)을 그대로 통과한다.
+# 그 결과 왕복 한 번을 쓰고, 출력 게이트(hangul-ratio)가 거부하고, 래더를 소진한 뒤
+# 원문 유지로 떨어진다 — PDF에는 "미번역"으로 집계된다. 더 나쁜 경우는 게이트를
+# 통과해 **명령이 실제로 번역되는 것**이다(실측: `$ condensation` → `$ 응축`,
+# `ls -l` 출력의 `May 6 10:26` → `5월 6일 10:26`). 그러면 재현 불가능한 명령이
+# 산출물에 실린다. 그래서 입력 단계에서 걸러 "의도적 원문 유지"로 만든다.
+#
+# 오탐이 미탐보다 나쁘다: 건너뛴 산문은 재시도도 경고도 없이 영문으로 굳는다.
+# 그래서 **산문 줄이 하나라도 있으면 건너뛰지 않는다**. 실측(46p 논문 556블록):
+# 코드로 판정 61건 · 그중 산문 오탐 0건 · 현재 실패하는 47건 중 39건 회수.
+# 프롬프트 문자 뒤에는 **공백**이 있어야 한다 — `$E = mc^2$`(인라인 수식)를
+# 셸 명령으로 오인하지 않기 위해서다. `#`은 아예 뺀다: 마크다운 제목(`# Deep
+# Learning`)과 구분할 수 없고, 제목을 건너뛰면 산문이 통째로 영문으로 남는다.
+_SHELL_PROMPT = re.compile(r"^\s*[$>%]\s+\S")
+_STEP_MARKER = re.compile(r"^\s*#?\s*\[?\s*(?:Step|단계)\s*:?\s*\d+\s*/\s*\d+\s*\]?\s*$")
+# OCR이 권한 문자열에 가짜 하이픈을 끼워 넣는다(`-r-w-r--r--`) — 길이에 여유를 둔다.
+_LS_LONG = re.compile(r"^\s*[-dlbcps][-rwxsStT]{8,12}\s+\d+\s+\S+")
+_JSONISH = re.compile(r"""^\s*[\{\[].*["'][A-Za-z_]+["']\s*[:=]""")
+# 셸 정형 출력. 로그 레벨(INFO/ERROR/MESSAGE …)은 넣지 않는다 — 필드 라벨 뒤의
+# 산문을 통째로 삼켜 커밋 메시지 16건을 오탐했다(실측 p19).
+_SHELL_OUTPUT = re.compile(
+    r"^\s*(?:total\s+\d+\s*$"
+    r"|\w[\w.-]*:\s*(?:cannot |No such |command not found|Permission denied))"
+)
+_DECL_KEYWORD = re.compile(
+    r"^\s*(?:use|import|from|package|require|#include|#define|def|class|fn|func|"
+    r"impl|struct|pub|let|const|var|module|namespace)\s+\S"
+)
+_CODE_OPS = re.compile(r"::|->|=>|!==|===|==|!=|\+=|-=|&&|\|\||\bself\b")
+_ASSIGN = re.compile(r"^\s*[A-Za-z_][\w.\[\]'\"+:-]*\s*=\s*\S")
+_BLOCK_OPEN = re.compile(r"[:{]\s*$")
+_PATHY = re.compile(
+    r"(?:^|\s)(?:\.{0,2}/[\w./-]+|[\w-]+\.(?:py|rs|sh|c|cc|cpp|h|js|ts|json|jpg|md))"
+)
+_CALLISH = re.compile(r"\w\([^)]*\)")
+_IDENT_TOKEN = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
+_SENTENCE_END = re.compile(r"[.!?][\"')\]]?\s*$")
+_WORD = re.compile(r"[A-Za-z][A-Za-z'-]{2,}")
+_PROMPT_OR_COMMENT = re.compile(r"^\s*(?:[$#>%]+|//|--|;;)\s*")
+# 산문 판정 전용 기능어. `with`/`as`/`in`/`for`/`if`/`not`은 파이썬·러스트 키워드
+# 이기도 해서 코드 한 줄을 산문으로 오인시킨다(`with open(...) as f:`) — 뺐다.
+_PROSE_WORDS = frozenset("""
+the of to this that these those it its we our you your they them their there here
+was were been being has have had does did would could should might must
+which what when where why how because however therefore although while whereas
+than such more most also both each any every other another same different
+""".split())
+
+
+def _identifier_list(text: str) -> bool:
+    """공백 없는 소문자 식별자를 쉼표로 나열한 블록 (프로젝트명 목록 등)."""
+    parts = [p.strip() for p in text.replace("\n", " ").split(",")]
+    parts = [p for p in parts if p]
+    if len(parts) < 8:
+        return False
+    return sum(1 for p in parts if _IDENT_TOKEN.match(p)) / len(parts) >= 0.9
+
+
+def _code_line(line: str) -> bool:
+    s = line.strip()
+    if not s:
+        return False
+    if (_SHELL_PROMPT.match(s) or _STEP_MARKER.match(s) or _LS_LONG.match(s)
+            or _JSONISH.match(s) or _SHELL_OUTPUT.match(s)):
+        return True
+    if _DECL_KEYWORD.match(s) and not _SENTENCE_END.search(s):
+        return True
+    if _ASSIGN.match(s) and not _SENTENCE_END.search(s):
+        return True   # 단독 대입문은 그 자체로 코드다 (`data[sos+4] = 2`)
+    if _SENTENCE_END.search(s):
+        return False
+    signals = sum((
+        bool(_CODE_OPS.search(s)), bool(_BLOCK_OPEN.search(s)), s.endswith(";"),
+        bool(_PATHY.search(s)), bool(_CALLISH.search(s)),
+    ))
+    return signals >= 2
+
+
+def _prose_line(line: str) -> bool:
+    """자연어 문장으로 볼 만한 줄인가 — 하나라도 있으면 블록을 건너뛰지 않는다.
+
+    OCR이 산문 줄 앞에 프롬프트 기호를 잘못 붙이기도 하므로(`$ Since there are no
+    pre-built binaries, …`) 기호를 벗겨 낸 본문으로 판정한다.
+    """
+    s = line.strip()
+    if (not s or _LS_LONG.match(s) or _JSONISH.match(s) or _STEP_MARKER.match(s)
+            or _SHELL_OUTPUT.match(s)):
+        return False
+    body = _PROMPT_OR_COMMENT.sub("", s)
+    words = [w.lower() for w in _WORD.findall(body)]
+    if len(words) < 6:
+        return False
+    if _DECL_KEYWORD.match(body) or body.rstrip().endswith(";"):
+        return False
+    if sum(1 for w in words if w in _PROSE_WORDS) < 2:
+        return False
+    return len(re.findall(r"[^\w\s]", body)) / max(1, len(body)) < 0.18
+
+
+def looks_like_code(text: str) -> str:
+    """코드·CLI 트랜스크립트면 사유 슬러그, 아니면 빈 문자열."""
+    if re.search(r"[가-힣]", text or ""):
+        return ""                       # 이미 한국어가 섞였으면 판단하지 않는다
+    if _identifier_list(text):
+        return "identifier-list"
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    if any(_prose_line(ln) for ln in lines):
+        return ""                       # 산문이 섞였다 — 번역 대상
+    return "code" if sum(1 for ln in lines if _code_line(ln)) * 2 > len(lines) else ""
+
+
 def should_skip(text: str) -> str:
     """번역 불필요 사유를 반환(빈 문자열이면 번역 대상).
 
     already-korean: 한글이 비공백 문자의 과반 → 이미 번역됨.
     identifier: 전체가 arXiv id 패턴뿐.
     references: 참고문헌 항목 목록 — 서지 정보는 원문 유지가 정책.
+    code / identifier-list: 셸 트랜스크립트·소스 코드·식별자 나열 — 번역하면 안 된다.
     non-linguistic: 마스킹 후 잔여에 2자+ 알파벳 단어가 없거나 영문자 비율 < 0.3.
     """
     stripped = text.strip()
@@ -172,6 +330,10 @@ def should_skip(text: str) -> str:
 
     if re.fullmatch(r"(?:arXiv:\d{4}\.\d{4,5}(?:v\d+)?\s*)+", stripped):
         return "identifier"
+
+    code_reason = looks_like_code(text)
+    if code_reason:
+        return code_reason
 
     masked, _ = mask(text)
     residual = _PLACEHOLDER_RE.sub(" ", masked)

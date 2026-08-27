@@ -219,15 +219,28 @@ def reference_rule_mismatch(md_units: list[Unit], lay_units: list[Unit]) -> dict
     return {"md_only": md_only, "layout_only": layout_only, "sample_units": sample_units}
 
 
-def apply_layout(pages: list, translations: dict[str, str]) -> list:
-    """deep copy 후 content만 교체 — bbox/fs/bold/vertical/fonts_v 등은 그대로."""
+def apply_layout(
+    pages: list,
+    translations: dict[str, str],
+    preserved: dict[str, str] | None = None,
+) -> list:
+    """deep copy 후 content만 교체 — bbox/fs/bold/vertical/fonts_v 등은 그대로.
+
+    preserved는 "번역하지 않기로 **결정한**" 블록의 사유(code / identifier-list /
+    references …)다. 블록에 그대로 실어 두면 PDF 내보내기가 그 블록을 실패가 아니라
+    의도적 보존으로 집계한다 — 그러지 않으면 원문과 번역이 같아 `unchanged`로
+    떨어져 번역 결함과 구분되지 않는다.
+    """
     out = copy.deepcopy(pages)
+    marks = preserved or {}
     for page in out:
         pno = page.get("page")
         for i, block in enumerate(page.get("blocks", [])):
             uid = f"lay:{pno}:{i}"
             if uid in translations:
                 block["content"] = translations[uid]
+            elif uid in marks:
+                block["preserved"] = marks[uid]
     return out
 
 

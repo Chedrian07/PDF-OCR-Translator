@@ -736,12 +736,17 @@ class _TranslationRun:
 
         targets = []
         self.skipped = 0
+        # 번역하지 않기로 결정한 layout 블록의 사유 — layout.{lang}.json에 실어
+        # 보내면 PDF 내보내기가 "실패"가 아니라 "의도적 보존"으로 집계한다.
+        self.preserved_layout: dict[str, str] = {}
         for u in all_units:
             # 유닛 자체 사유(references)가 우선, 없으면 게이트 판정 사유를 그대로 쓴다.
             reason = u.skip_reason or should_skip(u.src)
             if reason:
                 self.skipped += 1
                 self.skip_reasons[reason] = self.skip_reasons.get(reason, 0) + 1
+                if u.id.startswith("lay:"):
+                    self.preserved_layout[u.id] = reason
             else:
                 targets.append(u)
         self.targets = targets
@@ -842,7 +847,9 @@ class _TranslationRun:
         new_pages = None
         if self.layout_pages is not None:
             lay_trans = {u.id: self.results[u.id] for u in self.lay_units if u.id in self.results}
-            new_pages = apply_layout(self.layout_pages, lay_trans)
+            new_pages = apply_layout(
+                self.layout_pages, lay_trans, getattr(self, "preserved_layout", None),
+            )
             reconciled = reconcile_markdown_with_layout(
                 self.md_text,
                 assembled,

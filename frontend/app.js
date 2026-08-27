@@ -65,6 +65,7 @@ export {
   readerImageUrl, readerPageBands, readerRailBandAt, replayExtendsRaw, scanQuads,
   selectionSummary, splitInlineMath, splitPreviewPages, ssePromoteDelay, statusLabel,
   streamPaneTrimCount, structurePreview, summarizeIssues, syncedStreamPageNo,
+  truncateRawToPage,
   translateKeptSummary, translateUiStateFor, translatedHtmlExportState, viewerThumbnailWindow,
   withLangUrl,
 } from './js/core.js';

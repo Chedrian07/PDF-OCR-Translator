@@ -3,7 +3,8 @@ import { el, state } from './state.js';
 import { isTerminal, parseEventData } from './ui.js';
 import { apiGet } from './api.js';
 import {
-  appendSystemLine, drainGroundToUI, enqueueToken, flushStream, restoreTokenReplay,
+  appendSystemLine, applyStreamReset, drainGroundToUI, enqueueToken, flushStream,
+  restoreTokenReplay,
 } from './live.js';
 import {
   applyProgress, hasLiveContent, refreshJobs, removeJobFromList, renderJob, setStopButton,
@@ -95,6 +96,13 @@ export function startStream(id) {
     restoreTokenReplay(parseEventData(e));
   });
 
+  // 서버가 이미 보낸 출력을 폐기하고 그 페이지부터 다시 처리한다 (재시도·
+  // 반복 감지 폴백·텍스트 레이어 복구·실패 플레이스홀더).
+  es.addEventListener('reset', (e) => {
+    if (state.currentJobId !== id) return;
+    applyStreamReset(parseEventData(e));
+  });
+
   es.addEventListener('done', (e) => {
     if (state.currentJobId !== id) return;
     onJobDone(id, parseEventData(e) || {});
@@ -170,6 +178,10 @@ export function startFallbackPolling(id) {
       return;
     }
     if (state.currentJobId !== id) return;
+    // SSE가 이 fetch 사이에 재승격됐다면 이 스냅샷은 이미 낡았다. 그대로 적용하면
+    // groundAnnounce가 expectAnnounce를 다시 세워 다음 <PAGE> 마커를 재확인으로
+    // 삼켜 버리고, 그 뒤 페이지 번호가 한 칸씩 밀린다.
+    if (!state.fallbackActive && !isTerminal(job.status)) return;
     if (isTerminal(job.status)) {
       clearInterval(state.fallbackTimer);
       state.fallbackTimer = 0;

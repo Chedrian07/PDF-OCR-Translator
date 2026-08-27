@@ -96,6 +96,28 @@ def parse_page_blocks(raw: str) -> list[dict]:
     return blocks
 
 
+def blocks_to_raw(blocks: list[dict]) -> str:
+    """`parse_page_blocks`의 역 — 블록 목록을 grounding 원문 형식으로 되돌린다.
+
+    복구 패스가 이미 병합한 정상 페이지를 라이브 스트림에 **다시 내보낼 때** 쓴다.
+    병합된 마크다운을 그대로 흘리면 `<|det|>` 태그가 없어 그 페이지들의 레이아웃
+    박스가 라이브 뷰에서 통째로 사라진다(RAW·미리보기는 남고 박스만 빠진다).
+    """
+    out: list[str] = []
+    for b in blocks or []:
+        if not isinstance(b, dict):
+            continue
+        bbox = b.get("bbox")
+        content = str(b.get("content") or "")
+        kind = str(b.get("type") or "text")
+        if bbox and len(bbox) == 4:
+            coords = ", ".join(str(int(v)) for v in bbox)
+            out.append(f"<|det|>{kind} [{coords}]<|/det|>{content}")
+        elif content:
+            out.append(content)
+    return "\n".join(out)
+
+
 def _pct(v: int) -> str:
     return f"{v / 999 * 100:.2f}"
 

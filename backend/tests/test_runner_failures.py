@@ -330,3 +330,38 @@ def test_cancel_wins_over_multi_repetition_fallback(tmp_path):
     assert job.status == "canceled"
     assert engine.multi_calls == 1
     assert engine.single_calls == {}
+
+
+def test_canceled_job_keeps_the_warnings_it_accumulated(tmp_path):
+    """취소로 끝나도 그때까지의 경고는 남는다 — 부분 결과만 있고 이유가 없으면
+    사용자는 정상 변환된 부분과 구분할 수 없다."""
+
+    class FailThenCancelEngine(FakeEngine):
+        def __init__(self):
+            super().__init__(delay=0.0)
+            self.calls = 0
+
+        def run_multi(self, image_paths, out_dir, sink, cancel):
+            self.calls += 1
+            if self.calls <= 2:  # 청크1: 최초 + 재시도 실패 → 플레이스홀더 + 경고
+                raise RuntimeError("모의 실패")
+            cancel.set()  # 청크2 진입 시 취소
+            raise JobCanceled()
+
+    store = JobStore(tmp_path / "jobs")
+    broker = EventBroker()
+    job = store.create("doc.pdf", "multi", dpi=72)
+    (job.dir / "source.pdf").write_bytes(make_pdf_bytes(pages=4, with_image=False))
+    settings = Settings(
+        engine="fake", device="cpu", data_dir=tmp_path / "data",
+        preload_model=False, fake_delay=0.0, pages_per_chunk=2,
+    )
+    engine = FailThenCancelEngine()
+    engine.load()
+    execute_job(job, store, broker, engine, settings, threading.Event())
+
+    assert job.status == "canceled"
+    assert job.warnings, "취소 전에 쌓인 경고가 사라졌다"
+    assert any("플레이스홀더" in w for w in job.warnings)
+    meta = json.loads((job.dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["warnings"] == job.warnings

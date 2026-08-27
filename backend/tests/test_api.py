@@ -1337,3 +1337,69 @@ def test_웜캐시_다운로드는_진행중인_빌드_뒤에_줄서지_않는�
         release.set()
         holder.join(5)
         api_mod._forget_job_caches(job.id)
+
+
+def test_click_during_warm_build_waits_for_it_instead_of_503(tmp_path, monkeypatch):
+    """번역 직후 다운로드 클릭이 예열 빌드에 밀려 503이 나갔다 — 실측 재현.
+
+    46쪽 문서의 내보내기는 ~75s인데 대기열 상한은 30s다. `warm_translated_pdf_async`가
+    슬롯과 잡 락을 쥔 채로 도는 동안 들어온 사용자 클릭은 30s를 다 쓰고 거절됐다.
+    그 기다림은 줄서기가 아니라 **바로 그 PDF가 만들어지는 시간**이므로, 예열이
+    도는 동안에는 예열 대기 상한을 쓴다.
+    """
+    from app.pipeline import derived
+
+    monkeypatch.setenv("PDF_EXPORT_MAX_CONCURRENT", "1")
+    monkeypatch.setenv("PDF_EXPORT_QUEUE_TIMEOUT_S", "0.2")   # 일반 대기열은 짧게
+    monkeypatch.setenv("PDF_EXPORT_WARM_WAIT_S", "30")        # 예열 대기는 넉넉히
+    derived._PDF_EXPORT_SLOTS = None                          # 상한 재적용
+
+    job, translated = _dual_job(tmp_path, "warming")
+    translated.unlink()                                       # 캐시 없음 — 빌드 필요
+    (job.dir / "layout.json").write_text("{}", encoding="utf-8")
+    (job.dir / "layout.ko.json").write_text("{}", encoding="utf-8")
+    settings = SimpleNamespace(pdf_export_font="", pdf_export_font_id="")
+
+    released = threading.Event()
+
+    def _slow_build(job_dir, lang, *, fontfile=""):
+        released.wait(timeout=10)
+        out = job_dir / f"export.{lang}.pdf"
+        out.write_bytes(b"%PDF-1.4 warm")
+        return SimpleNamespace(path=out, report=lambda: {"format_version": 1})
+
+    warm = threading.Thread(
+        target=derived.warm_translated_pdf,
+        args=(job, "ko", settings),
+        kwargs={"build": _slow_build},
+        daemon=True,
+    )
+    with derived._WARM_GUARD:
+        derived._WARM_INFLIGHT.add((job.id, "ko"))
+    outcome: list[object] = []
+
+    def _click():
+        started = time.monotonic()
+        try:
+            derived._ensure_translated_pdf(job, "ko", settings, build=_slow_build)
+            outcome.append(("ok", time.monotonic() - started))
+        except derived.PdfExportBusyError:
+            outcome.append(("busy", time.monotonic() - started))
+
+    click = threading.Thread(target=_click, daemon=True)
+    try:
+        warm.start()
+        time.sleep(0.3)          # 예열이 슬롯·락을 먼저 잡게 한다
+        click.start()
+        time.sleep(0.6)          # 일반 상한(0.2s)이었다면 여기서 이미 503이다
+        assert not outcome, f"예열 대기 중인데 조기 종료: {outcome}"
+        released.set()
+        click.join(timeout=15)
+        warm.join(timeout=15)
+    finally:
+        released.set()
+        with derived._WARM_GUARD:
+            derived._WARM_INFLIGHT.discard((job.id, "ko"))
+        derived._PDF_EXPORT_SLOTS = None
+
+    assert outcome and outcome[0][0] == "ok", outcome

@@ -43,6 +43,7 @@ export const state = {
   previewFails: 0,
   previewStopped: false,   // 413/연속 실패로 라이브 프리뷰 중단됨
   previewPageCache: [],    // 확정 페이지 렌더 HTML 캐시 (인덱스 = 확정 페이지 순번)
+  previewPageNodes: [],    // 확정 페이지별 DOM 노드 (reset으로 되돌릴 때 제거 대상)
   previewTailNodes: [],    // 현재 꼬리 렌더가 소유한 DOM 노드들 (선행 hr 포함)
   previewTailMd: '',       // 마지막으로 렌더된 꼬리 markdown
   previewTailSep: false,   // 마지막 꼬리 렌더의 선행 hr 유무

@@ -235,6 +235,23 @@ export function structurePreview(raw, final) {
   return parts.join('\n\n');
 }
 
+// 서버가 "page 이후 출력을 폐기했다"(reset 이벤트)고 알려올 때 누적 원문을 그
+// 지점까지 되돌린다. 스트림 불변식은 "k번째 <PAGE> 마커가 페이지 k를 시작한다"
+// (서버가 보장 — backend/app/pipeline/runner.py BrokerSink)이므로, 페이지
+// fromPage의 마커 위치에서 자르면 1..fromPage-1 페이지가 정확히 남는다.
+// 그 마커를 받은 적이 없으면(늦게 접속·앞부분 유실) 원문을 그대로 둔다 —
+// 잘못 자르는 것보다 중복이 낫다.
+export function truncateRawToPage(raw, fromPage) {
+  const n = Math.max(1, Math.floor(Number(fromPage) || 1));
+  const text = String(raw || '');
+  let pos = -1;
+  for (let k = 0; k < n; k += 1) {
+    pos = text.indexOf(PAGE_MARKER, pos + 1);
+    if (pos === -1) return text;
+  }
+  return text.slice(0, pos);
+}
+
 // ── 라이브 프리뷰 증분 분할 (순수 — frontend/tests/에서 직접 검증) ──────────
 // raw를 <PAGE> 마커 기준으로 "확정 페이지(뒤에 새 페이지가 시작된 세그먼트)"와
 // "미확정 꼬리"로 나눈다. 마커가 조각나 도착하면(<PA + GE>) 완성되기 전까지

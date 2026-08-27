@@ -70,6 +70,12 @@ _PDF_EXPORT_MAX_CONCURRENT_DEFAULT = 2
 # 길면 재시도가 낫다. 캐시 적중은 이제 락을 기다리지 않으므로(_ensure_translated_pdf)
 # 이 예산에 걸리는 것은 진짜로 빌드를 기다리는 요청뿐이다.
 _PDF_EXPORT_QUEUE_TIMEOUT_DEFAULT = 30.0
+# 같은 (job, lang) 예열이 도는 동안 들어온 **사용자 클릭**의 대기 상한. 일반
+# 대기열 상한(30s)과 분리한다: 예열은 사용자가 원하는 바로 그 PDF를 만드는
+# 중이므로 기다림이 곧 진행이고, 끝나면 캐시 적중이다. 30s로 묶으면 46쪽
+# 문서(실측 75s)에서 번역 직후 다운로드가 항상 503이 된다 — 실제로 그랬다.
+PDF_EXPORT_WARM_WAIT_ENV = "PDF_EXPORT_WARM_WAIT_S"
+_PDF_EXPORT_WARM_WAIT_DEFAULT = 180.0
 
 _PDF_EXPORT_SLOTS: threading.BoundedSemaphore | None = None
 _PDF_EXPORT_SLOTS_SIZE = 0
@@ -126,12 +132,21 @@ def _export_queue_timeout() -> float:
     return _env_float(PDF_EXPORT_QUEUE_TIMEOUT_ENV, _PDF_EXPORT_QUEUE_TIMEOUT_DEFAULT)
 
 
+def _warm_wait_timeout() -> float:
+    return _env_float(PDF_EXPORT_WARM_WAIT_ENV, _PDF_EXPORT_WARM_WAIT_DEFAULT)
+
+
+def _warm_inflight(job_id: str, lang: str) -> bool:
+    with _WARM_GUARD:
+        return (job_id, lang) in _WARM_INFLIGHT
+
+
 def _busy_error() -> PdfExportBusyError:
     return PdfExportBusyError(retry_after=max(1, int(_export_queue_timeout())))
 
 
 @contextlib.contextmanager
-def export_wait_budget():
+def export_wait_budget(seconds: float | None = None):
     """이 스레드의 대기 예산을 연다 — 이미 열려 있으면 그대로 공유한다(중첩 안전).
 
     라우트 하나가 여러 ensure를 연달아 호출할 때(예: /pdf?view=dual은 단일 PDF +
@@ -139,7 +154,9 @@ def export_wait_budget():
     """
     owner = getattr(_EXPORT_WAIT, "remaining", None) is None
     if owner:
-        _EXPORT_WAIT.remaining = max(0.0, _export_queue_timeout())
+        _EXPORT_WAIT.remaining = max(
+            0.0, _export_queue_timeout() if seconds is None else seconds,
+        )
     try:
         yield
     finally:
@@ -393,7 +410,11 @@ def _ensure_translated_pdf(job, lang: str, settings, *, build=build_translated_p
     current, out, report = _translated_pdf_cache(job, lang, font_id)
     if current:
         return out, report
-    with _job_render_guard(job.id):
+    # 캐시가 없고 같은 잡의 예열이 돌고 있으면, 그 예열이 곧 이 요청의 답이다.
+    # 일반 대기열 상한 대신 예열 대기 상한을 연다(중첩 안전 — 예열 스레드 자신은
+    # 이미 예산 0을 열어 둔 상태라 여기서 덮어쓰지 않는다).
+    budget = _warm_wait_timeout() if _warm_inflight(job.id, lang) else None
+    with export_wait_budget(budget), _job_render_guard(job.id):
         # 락을 기다리는 사이 다른 스레드가 같은 PDF를 완성했을 수 있다.
         current, out, report = _translated_pdf_cache(job, lang, font_id)
         if current:

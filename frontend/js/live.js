@@ -4,6 +4,7 @@ import {
 import {
   PAGE_MARKER, createGroundState, groundDrain, groundPush, livePageImageUrl, normalizeLabel,
   planPreviewRender, replayExtendsRaw, streamPaneTrimCount, syncedStreamPageNo,
+  truncateRawToPage,
 } from './core.js';
 import { el, state } from './state.js';
 import { h, typesetMath } from './ui.js';
@@ -20,6 +21,7 @@ export function resetLiveState() {
   state.previewFails = 0;
   state.previewStopped = false;
   state.previewPageCache = [];
+  state.previewPageNodes = [];
   state.previewTailNodes = [];
   state.previewTailMd = '';
   state.previewTailSep = false;
@@ -111,7 +113,7 @@ export function restoreTokenReplay(d) {
   state.previewDirty = false;
   state.previewFails = 0;
   state.previewStopped = false;
-  if (!keepPreview) state.previewPageCache = [];
+  if (!keepPreview) { state.previewPageCache = []; state.previewPageNodes = []; }
   // 꼬리는 어느 경우든 다시 렌더한다 — 소유 노드만 걷어내고 확정 노드는 남긴다.
   for (const n of state.previewTailNodes) n.remove();
   state.previewTailNodes = [];
@@ -153,6 +155,85 @@ export function restoreTokenReplay(d) {
   updateLeftPane();
   schedulePreviewRender();
   appendSystemLine('누적 OCR 출력을 복구해 실시간 뷰를 동기화했습니다.');
+}
+
+// 서버가 이미 흘려보낸 출력을 폐기하고 그 페이지부터 다시 처리한다고 알리는
+// reset 이벤트(backend/app/pipeline/runner.py BrokerSink.rewind_to). 클라이언트의
+// 원문은 append-only라 이 신호 없이는 폐기된 출력이 영원히 남는다:
+//   · 같은 페이지 박스가 두 번 쌓이고, 마커 없는 재처리 출력이 한 페이지에 몰린다
+//   · 출력 상한에서 잘린 <table>이 미리보기의 뒤 내용을 통째로 삼킨 채 굳는다
+//   · RAW 패널에 같은 페이지가 두 번 흐른다
+// 세 패널을 잘라낸 원문 하나로 함께 되돌린다 — replay와 같은 재구축 경로다.
+export function applyStreamReset(d) {
+  const from = Math.floor(Number(d && d.from_page) || 0);
+  if (from < 1) return;
+  flushStream(false);            // 대기 중 토큰까지 원문에 반영한 뒤 자른다
+  const truncated = truncateRawToPage(state.rawText, from);
+  if (truncated.length === state.rawText.length) {
+    // 그 페이지의 마커를 받은 적이 없다(늦게 접속·앞부분 유실) — 자를 지점을
+    // 모르면 그대로 두고 사용자에게만 알린다.
+    appendSystemLine(`${from}페이지부터 재처리합니다 — 이후 출력이 중복될 수 있습니다.`, 'warn');
+    return;
+  }
+
+  state.liveGen += 1;            // 진행 중 preview 응답 무효화
+  if (state.rafId) { cancelAnimationFrame(state.rafId); state.rafId = 0; }
+  clearTimeout(state.previewTimer);
+  state.previewTimer = 0;
+  state.previewDirty = false;
+  state.previewFails = 0;
+  state.previewStopped = false;
+  state.streamPending = '';
+  state.rawText = truncated;
+  state.streamAutoScroll = true;
+
+  // ① RAW 패널: 페이지 from의 디바이더부터 뒤를 전부 걷어낸다. 디바이더가 없으면
+  //    (앞부분 정리로 잘려 나갔거나 아직 그려지지 않음) 자를 지점을 모르므로
+  //    남은 원문으로 통째로 다시 그린다 — 폐기분이 화면에 남는 것보다 낫다.
+  const divider = el.streamPane.querySelector(`.stream-page-break[data-page="${from}"]`);
+  if (divider) {
+    while (divider.nextSibling) divider.nextSibling.remove();
+    divider.remove();
+    state.streamPageNo = from - 1;
+  } else {
+    el.streamPane.textContent = '';
+    state.streamTrimNote = null;
+    state.streamPageNo = 0;
+    state.streamPending = truncated;
+    flushStream(false);
+  }
+
+  // ② 미리보기: 확정 페이지 캐시/노드를 잘라낸 원문에 맞춘다.
+  //    잘라낸 원문에는 마커가 from-1개 남으므로 splitPreviewPages의 확정 페이지도
+  //    from-1개다(인덱스 0 = 첫 마커 앞의 빈 서두, 1..from-2 = 페이지 1..from-2).
+  //    페이지 from-1은 다시 "미확정 꼬리"가 되므로 캐시에서 빼야 중복 렌더되지 않는다.
+  const keep = Math.max(0, from - 1);
+  for (let i = keep; i < state.previewPageNodes.length; i += 1) {
+    for (const n of state.previewPageNodes[i]) n.remove();
+  }
+  state.previewPageCache.length = Math.min(state.previewPageCache.length, keep);
+  state.previewPageNodes.length = Math.min(state.previewPageNodes.length, keep);
+  for (const n of state.previewTailNodes) n.remove();
+  state.previewTailNodes = [];
+  state.previewTailMd = '';
+  state.previewTailSep = false;
+  for (const note of el.livePreview.querySelectorAll('.lp-note')) note.remove();
+
+  // ③ 레이아웃 박스: 잘라낸 원문으로 페이지 상태머신과 박스를 다시 만든다
+  const total = state.ground.totalPages;
+  state.ground = createGroundState();
+  state.ground.totalPages = total;
+  state.ground.ocrSeen = true;
+  state.pageBoxes = new Map();
+  el.boxOverlay.textContent = '';
+  groundPush(state.ground, truncated);
+  drainGroundToUI(false);
+  if (state.followLive) state.viewPage = state.ground.page;
+  updateLeftPane();
+
+  schedulePreviewRender();
+  const why = (d && typeof d.reason === 'string' && d.reason) ? ` (${d.reason})` : '';
+  appendSystemLine(`${from}페이지부터 다시 처리합니다 — 앞선 출력은 폐기했습니다${why}.`, 'warn');
 }
 
 export function scheduleFlush() {
@@ -210,7 +291,9 @@ export function flushStream(final) {
 }
 
 export function makePageDivider(n) {
-  return h('div', { class: 'stream-page-break' }, h('span', { class: 'spb-label', text: `페이지 ${n}` }));
+  const div = h('div', { class: 'stream-page-break' }, h('span', { class: 'spb-label', text: `페이지 ${n}` }));
+  div.dataset.page = String(n); // applyStreamReset가 이 지점부터 잘라낸다
+  return div;
 }
 
 export function appendSystemLine(text, kind) {
@@ -459,7 +542,8 @@ export async function runPreviewRender() {
   state.previewTailNodes = [];
   plan.newPages.forEach((p, i) => {
     state.previewPageCache.push(pageHtmls[i]); // p.idx === 캐시 길이 (순서 보장)
-    if (pageHtmls[i]) appendPreviewFragment(pageHtmls[i], p.sep);
+    // 노드 목록도 같은 인덱스로 남긴다 — reset(재처리)이 그 페이지들만 걷어낸다
+    state.previewPageNodes.push(pageHtmls[i] ? appendPreviewFragment(pageHtmls[i], p.sep) : []);
   });
   if (plan.tailChanged) {
     state.previewTailMd = plan.tailMd;

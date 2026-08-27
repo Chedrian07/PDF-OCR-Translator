@@ -613,6 +613,22 @@ async def job_events(request: Request, job_id: str) -> StreamingResponse:
                 item = await anyio.to_thread.run_sync(
                     functools.partial(_sse_poll, q), limiter=_SSE_LIMITER,
                 )
+                # 이 연결이 느려 브로커가 token을 버렸다면 누적 원문으로 되살린다.
+                # 조용히 넘기면 <PAGE> 마커나 <|det|> 절반이 사라져 라이브 뷰의
+                # 페이지 귀속이 이후 내내 어긋난다.
+                if getattr(q, "token_dropped", False):
+                    text, truncated = broker.resync(job_id, q)
+                    if text:
+                        yield _sse_format("replay", {
+                            "text": text,
+                            "truncated": truncated,
+                            "current_page": job.progress.get("current_page", 0),
+                            "total_pages": job.progress.get("total_pages", 0),
+                        })
+                    # 방금 꺼낸 token은 히스토리에 이미 들어 있다(publish가 같은
+                    # 락에서 히스토리 먼저 갱신) — 다시 보내면 replay와 중복된다.
+                    if item is not None and item[0] == "token":
+                        continue
                 if item is None:
                     idle += 1
                     if idle >= 15:

@@ -1,0 +1,1064 @@
+# 실캡처 — 재처리(rewind) SSE. GET /api/jobs/{id}/events 원문에서 타임스탬프와
+# ping 주석만 걷어냈다. 6페이지 PDF(2506.02548v3의 15-20페이지 발췌)를 기본
+# 설정(PAGES_PER_CHUNK=8 -> 1청크, MAX_PAGE_OUTPUT_TOKENS=6144)으로 변환하는
+# 동안 청크 내 4페이지가 토큰 상한을 넘어 multi 생성이 중단되고, 서버가 청크를
+# 페이지별로 다시 처리했다: event reset {"from_page": 1} 뒤에 페이지마다 서버가
+# 주입한 <PAGE>가 온다. 수정 전에는 이 구간에서 진행률이 멈춘 채 재처리 출력
+# 전부가 한 페이지에 쌓였다(실측 46페이지 잡: 18페이지에 박스 107개, 19-24페이지
+# 는 통째로 소실). 다른 픽스처보다 큰 이유는 이 결함이 실제 페이지 분량의 출력
+# 없이는 재현되지 않기 때문이다.
+retry: 3000
+
+event: progress
+data: {"phase": "render", "current_page": 0, "total_pages": 0, "chunk": 0, "total_chunks": 0, "status": "queued"}
+
+event: progress
+data: {"phase": "render", "current_page": 0, "total_pages": 0, "chunk": 0, "total_chunks": 0, "status": "running"}
+
+event: progress
+data: {"phase": "render", "current_page": 1, "total_pages": 6, "chunk": 0, "total_chunks": 0, "status": "running"}
+
+event: progress
+data: {"phase": "render", "current_page": 2, "total_pages": 6, "chunk": 0, "total_chunks": 0, "status": "running"}
+
+event: progress
+data: {"phase": "render", "current_page": 3, "total_pages": 6, "chunk": 0, "total_chunks": 0, "status": "running"}
+
+event: progress
+data: {"phase": "render", "current_page": 4, "total_pages": 6, "chunk": 0, "total_chunks": 0, "status": "running"}
+
+event: progress
+data: {"phase": "render", "current_page": 5, "total_pages": 6, "chunk": 0, "total_chunks": 0, "status": "running"}
+
+event: progress
+data: {"phase": "render", "current_page": 6, "total_pages": 6, "chunk": 0, "total_chunks": 0, "status": "running"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 1, "total_pages": 6, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: token
+data: {"text": "<PAGE><|det|>header "}
+
+event: token
+data: {"text": "[173, 33, 482, "}
+
+event: token
+data: {"text": "49]<|/det|>Published as a conference paper "}
+
+event: token
+data: {"text": "at ICLR "}
+
+event: token
+data: {"text": "2026\n<|det|>list [167, 99, "}
+
+event: token
+data: {"text": "833, "}
+
+event: token
+data: {"text": "541]<|/det|>\n<|det|>ref_text [173, "}
+
+event: token
+data: {"text": "103, 829, "}
+
+event: token
+data: {"text": "147]<|/det|>Seunghoon Woo, Eunjin "}
+
+event: token
+data: {"text": "Choi, Heejo Lee, and "}
+
+event: token
+data: {"text": "Hakjoo Oh. "}
+
+event: token
+data: {"text": "{V1SCAN}: Discovering 1-day vulnerabilities "}
+
+event: token
+data: {"text": "in reused \\(\\{\\mathrm{C / C "}
+
+event: token
+data: {"text": "+ + }\\}\\) open-source software components "}
+
+event: token
+data: {"text": "using code classification techniques. In "}
+
+event: token
+data: {"text": "USENIX Security Symposium, pp. "}
+
+event: token
+data: {"text": "6541-6556, 2023.\n"}
+
+event: token
+data: {"text": "<|det|>ref_text [173, "}
+
+event: token
+data: {"text": "155, 826, 199]<|/det|>John Yang, Carlos Jimenez, "}
+
+event: token
+data: {"text": "Alexander Wettig, Kilian Liert, Shunyu Yao, Karthik Narasimhan, and Ofir "}
+
+event: token
+data: {"text": "Press. Swe-agent: Agent-computer interfaces enable automated software engineering. In Neural Information Processing Systems (NeurIPS), "}
+
+event: token
+data: {"text": "2024.\n<|det|>ref_text [173, 207, 826, 251]<|/det|>Songtao "}
+
+event: token
+data: {"text": "Yang, Yubo He, Kaixiang Chen, Zheyu Ma, Xiapu Luo, Yong Xie, Jianjun "}
+
+event: token
+data: {"text": "Chen, and Chao Zhang. 1dfuzz: Reproduce 1-day vulnerabilities with directed differential fuzzing. In "}
+
+event: token
+data: {"text": "ACM SIGSOFT International Symposium on Software Testing and Analysis, pp. 867–879, "}
+
+event: token
+data: {"text": "2023.\n<|det|>ref_text [173, 258, 826, 302]<|/det|>Aohan Zeng, Xin Lv, "}
+
+event: token
+data: {"text": "Zhenyu Hou, Zhengxiao Du, Qinkai Zheng, Bin Chen, Da Yin, Chendi Ge, "}
+
+event: token
+data: {"text": "Chengxing Xie, Cunxiang Wang, et al. Glm-5: from vibe coding to "}
+
+event: token
+data: {"text": "agentic engineering. arXiv preprint arXiv:2602.15763, 2026.\n<|det|>ref_text [173, "}
+
+event: token
+data: {"text": "310, 826, 368]<|/det|>Andy K Zhang, Joey Ji, Celeste Menders, Riya "}
+
+event: token
+data: {"text": "Dulepet, Thomas Qin, Ron Y Wang, Junrong Wu, Kyleen Liao, Jiliang Li, "}
+
+event: token
+data: {"text": "Jinghan Hu, et al. Bountybench: Dollar impact of ai agent attackers and defenders on real-world cybersecurity "}
+
+event: token
+data: {"text": "systems. In Neural Information Processing Systems (NeurIPS), 2025a.\n<|det|>ref_text [173, "}
+
+event: token
+data: {"text": "376, 829, 475]<|/det|>Andy K Zhang, Neil Perry, Riya Dulepet, Joey Ji, "}
+
+event: token
+data: {"text": "Celeste Menders, Justin W Lin, Eliot Jones, Gashon Hussein, Samantha Liu, Donovan Julian Jasper, "}
+
+event: token
+data: {"text": "Pura Peetathawatchai, Ari Glenn, Vikram Sivashankar, Daniel "}
+
+event: token
+data: {"text": "Zamoshchin, Leo Glikbarg, Derek Askaryar, Haoxiang Yang, Aolin Zhang, Rishi "}
+
+event: token
+data: {"text": "Alluri, Nathan Tran, Rinnara Sangpisit, Kenny O Oseleonommen, Dan Boneh, "}
+
+event: token
+data: {"text": "Daniel E. Ho, and Percy Liang. Cybench: A framework for evaluating cybersecurity capabilities and risks of language models. "}
+
+event: token
+data: {"text": "In International Conference on Learning Representations (ICLR), 2025b. URL https://openreview.net/forum?id=tc90LV0yRL.\n<|det|>ref_text [173, "}
+
+event: token
+data: {"text": "483, 826, 540]<|/det|>Yuxuan Zhu, Antony Kellermann, Dylan Bowman, Philip Li, "}
+
+event: token
+data: {"text": "Akul Gupta, Adarsh Danda, Richard Fang, Conner Jensen, Eric Ihli, Jason Benn, et "}
+
+event: token
+data: {"text": "al. Cve-bench: A benchmark for ai agents' ability to exploit real-world web application vulnerabilities. In International Conference "}
+
+event: token
+data: {"text": "on Machine Learning (ICML), 2025.\n<|det|>page_number [490, 948, 508, "}
+
+event: progress
+data: {"phase": "ocr", "current_page": 2, "total_pages": 6, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: token
+data: {"text": "960]<|/det|>15\n<PAGE><|det|>header [173, 33, 480, 49]<|/det|>Published "}
+
+event: token
+data: {"text": "as a conference paper at ICLR 2026\n<|det|>title [172, 102, 557, "}
+
+event: token
+data: {"text": "119]<|/det|>A THE USE OF LARGE LANGUAGE MODELS\n<|det|>text [171, 134, "}
+
+event: token
+data: {"text": "828, 218]<|/det|>Large Language Models (LLMs) were primarily used to support writing, revision, and other "}
+
+event: token
+data: {"text": "text-focused tasks, such as improving clarity, refining grammar and style, and assisting with the organization of written content. In "}
+
+event: token
+data: {"text": "addition, LLMs were utilized to aid in the process of data construction, as described in detail in Section "}
+
+event: token
+data: {"text": "3.3. All text and data generated or revised with LLM assistance were carefully reviewed and validated by the authors to ensure accuracy, "}
+
+event: token
+data: {"text": "appropriateness, and compliance with academic standards.\n<|det|>title [172, 239, 533, 254]<|/det|>B "}
+
+event: token
+data: {"text": "DETAILS OF CYBERGYM BENCHMARK\n<|det|>text [171, 270, 825, "}
+
+event: token
+data: {"text": "300]<|/det|>We now provide more details of our benchmark, including general statistics in Table 3, crash types in Table "}
+
+event: token
+data: {"text": "4, and included projects in Table 5. A discussion of these details can be found in Section "}
+
+event: token
+data: {"text": "3.\n<|det|>text [312, 311, 684, 326]<|/det|>Table 3: Statistics of CyberGym's "}
+
+event: token
+data: {"text": "benchmark instances.\n<|det|>table [279, 330, 722, 466]<|/det|><table><tr><td></td><td>Median</td><td>Max</td></tr><tr><td>Vulnerability description</td><td># "}
+
+event: token
+data: {"text": "Words</td><td>24</td></tr><tr><td>Ground truth PoC</td><td># Bytes</td><td>259</td></tr><tr><td>Codebase</td><td># Files# "}
+
+event: token
+data: {"text": "Lines</td><td>1,117387,491</td></tr><tr><td>Patch</td><td># Files edited# Lines "}
+
+event: token
+data: {"text": "edited</td><td>1/7</td></tr></table>\n<|det|>page_number [490, 948, 509, "}
+
+event: progress
+data: {"phase": "ocr", "current_page": 3, "total_pages": 6, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: token
+data: {"text": "960]<|/det|>16\n<PAGE><|det|>header [174, 33, 480, 49]<|/det|>Published as a conference paper at "}
+
+event: token
+data: {"text": "ICLR 2026\n<|det|>text [300, 283, 699, 354]<|/det|>Table "}
+
+event: token
+data: {"text": "4: All crash types in CyberGym and the corresponding numbers of benchmark instances. Most of these crashes are due to memory "}
+
+event: token
+data: {"text": "safety issues. Note that these crash types are reported by sanitizers and may not fully reflect the underlying root causes of the "}
+
+event: token
+data: {"text": "vulnerabilities.\n<|det|>table [300, 357, 700, 741]<|/det|><table><tr><td>Crash "}
+
+event: token
+data: {"text": "Type</td><td># Instances</td></tr><tr><td>Heap-buffer-overflow READ</td><td>458</td></tr><tr><td>Use-of-uninitialized-value</td><td>287</td></tr><tr><td>Wild-address "}
+
+event: token
+data: {"text": "READ</td><td>163</td></tr><tr><td>Heap-buffer-overflow WRITE</td><td>116</td></tr><tr><td>Heap-use-after-free "}
+
+event: token
+data: {"text": "READ</td><td>110</td></tr><tr><td>Stack-buffer-overflow READ</td><td>66</td></tr><tr><td>Stack-buffer-overflow "}
+
+event: token
+data: {"text": "WRITE</td><td>52</td></tr><tr><td>Index-out-of-bounds</td><td>48</td></tr><tr><td>Global-buffer-overflow "}
+
+event: token
+data: {"text": "READ</td><td>43</td></tr><tr><td>Wild-address WRITE</td><td>27</td></tr><tr><td>Heap-double-free</td><td>23</td></tr><tr><td>Negative-size-param</td><td>17</td></tr><tr><td>Bad-cast</td><td>13</td></tr><tr><td>Bad-free</td><td>10</td></tr><tr><td>Use-after-poison "}
+
+event: token
+data: {"text": "READ</td><td>9</td></tr><tr><td>Stack-use-after-return READ</td><td>9</td></tr><tr><td>Heap-use-after-free "}
+
+event: token
+data: {"text": "WRITE</td><td>8</td></tr><tr><td>Null-dereference READ</td><td>8</td></tr><tr><td>Memcpy-param-overlap</td><td>7</td></tr><tr><td>Stack-buffer-underflow "}
+
+event: token
+data: {"text": "READ</td><td>7</td></tr><tr><td>Global-buffer-overflow WRITE</td><td>5</td></tr><tr><td>Stack-use-after-scope "}
+
+event: token
+data: {"text": "READ</td><td>5</td></tr><tr><td>Container-overflow READ</td><td>4</td></tr><tr><td>Use-after-poison "}
+
+event: token
+data: {"text": "WRITE</td><td>4</td></tr><tr><td>Dynamic-stack-buffer-overflow WRITE</td><td>3</td></tr><tr><td>Incorrect-function-pointer-type</td><td>2</td></tr><tr><td>Container-overflow "}
+
+event: token
+data: {"text": "WRITE</td><td>2</td></tr><tr><td>Stack-buffer-underflow WRITE</td><td>1</td></tr></table>\n<|det|>page_number [491, 948, "}
+
+event: progress
+data: {"phase": "ocr", "current_page": 4, "total_pages": 6, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: token
+data: {"text": "509, 960]<|/det|>17\n<PAGE><|det|>header [174, 33, 480, "}
+
+event: token
+data: {"text": "49]<|/det|>Published as a conference paper at ICLR 2026\n<|det|>text [-171, 224, "}
+
+event: token
+data: {"text": "828, 268]<|/det|>Table 5: All projects in CyberGym, including links to their "}
+
+event: token
+data: {"text": "homepages, primary programming languages, GitHub stars (if hosted on GitHub), lines of code (in thousands), and the number of "}
+
+event: token
+data: {"text": "benchmark instances. Most of these projects are in C/C++.\n<|det|>table [174, 274, 825, "}
+
+event: token
+data: {"text": "796]<|/det|><table><tr><td>Project</td><td>Lang.</td><td>Stars</td><td>LoC. "}
+
+event: token
+data: {"text": "(s)</td><td># Inst.</td><td>Project</td><td>Lang.</td><td>Stars</td><td>LoC. "}
+
+event: token
+data: {"text": "(s)</td><td># Inst.</td></tr><tr><td>bonafis</td><td>C++</td><td>593</td><td>6602</td><td>103</td><td>kamailio</td><td>C</td><td>2446</td><td>1039</td><td>5</td></tr><tr><td>ghostscript</td><td>C++</td><td>-</td><td>1852</td><td>88</td><td>libsips</td><td>C++</td><td>10294</td><td>224</td><td>5</td></tr><tr><td>ffmpeg</td><td>C++</td><td>-</td><td>1069</td><td>99</td><td>sxck</td><td>C++</td><td>6860</td><td>1887</td><td>5</td></tr><tr><td>opens-</td><td>C++</td><td>2745</td><td>214</td><td>59</td><td>minix</td><td>C</td><td>2384</td><td>10</td><td>13</td></tr><tr><td>viuscrubk</td><td>C++</td><td>-</td><td>-</td><td>-</td><td>proj4</td><td>C++</td><td>1831</td><td>45</td><td>5</td></tr><tr><td>libxorposed</td><td>C++</td><td>395</td><td>35</td><td>46</td><td>fresnel</td><td>C++</td><td>5304</td><td>5</td><td>2</td></tr><tr><td>libmuj</td><td>C++</td><td>5377</td><td>-</td><td>-</td><td>freetype2</td><td>C++</td><td>14</td><td>162</td><td>5</td></tr><tr><td>libxml2</td><td>C++</td><td>-</td><td>-</td><td>38</td><td>rotate2</td><td>C++</td><td>14</td><td>162</td><td>5</td></tr><tr><td>purflist</td><td>C++</td><td>4609</td><td>82</td><td>38</td><td>kingreform.cs</td><td>C++</td><td>21654</td><td>7</td><td>1</td></tr><tr><td>mupdf</td><td>C++</td><td>-</td><td>-</td><td>1506</td><td>nstrog</td><td>C++</td><td>6684</td><td>643</td><td>5</td></tr><tr><td>nlpp</td><td>C++</td><td>4079</td><td>242</td><td>32</td><td>cagstone</td><td>C++</td><td>8006</td><td>628</td><td>5</td></tr><tr><td>librelay</td><td>C++</td><td>1120</td><td>1032</td><td>35</td><td>net-snmp</td><td>C++</td><td>528</td><td>-</td><td>13</td></tr><tr><td>graphicsociety</td><td>C++</td><td>-</td><td>-</td><td>2009</td><td>libspectre</td><td>C++</td><td>1863</td><td>-</td><td>1</td></tr><tr><td>serenity</td><td>C++</td><td>31742</td><td>554</td><td>36</td><td>gstreamer</td><td>C++</td><td>3302</td><td>-</td><td>17</td></tr><tr><td>glue</td><td>C++</td><td>2992</td><td>843</td><td>35</td><td>mongodb</td><td>C++</td><td>133</td><td>-</td><td>1</td></tr><tr><td>c4öse2</td><td>C++</td><td>495</td><td>105</td><td>27</td><td>dontalk1</td><td>C++</td><td>2798</td><td>257</td><td>17</td></tr><tr><td>libbsurf</td><td>C++</td><td>308</td><td>2825</td><td>35</td><td>green</td><td>C++</td><td>259</td><td>659</td><td>-</td></tr><tr><td>glp</td><td>C++</td><td>93018</td><td>2519</td><td>19</td><td>glib</td><td>C++</td><td>-</td><td>-</td><td>-</td></tr><tr><td>gsl</td><td>C++</td><td>5267</td><td>2770</td><td>18</td><td>ghbzomb</td><td>C+</td><td>375</td><td>274</td><td>95</td></tr><tr><td>gplot</td><td>C++</td><td>-</td><td>-</td><td>18</td><td>libpng</td><td>C++</td><td>2368</td><td>108</td><td>-</td></tr><tr><td>qsur</td><td>C++</td><td>15730</td><td>287</td><td>16</td><td>cyclocomfs</td><td>C+</td><td>671</td><td>60</td><td>-</td></tr><tr><td>libuauc</td><td>C++</td><td>48</td><td>0</td><td>17</td><td>mpi</td><td>C++</td><td>206</td><td>108</td><td>-</td></tr><tr><td>asup</td><td>C++</td><td>11615</td><td>627</td><td>16</td><td>gpusl</td><td>C</td><td>185</td><td>11</td><td>-</td></tr><tr><td>flann-lib</td><td>C++</td><td>6086</td><td>1070</td><td>16</td><td>fautl</td><td>C</td><td>185</td><td>59</td><td>-</td></tr><tr><td>libarchive</td><td>C++</td><td>3183</td><td>154</td><td>15</td><td>wann</td><td>C++</td><td>5344</td><td>202</td><td>-</td></tr><tr><td>yann</td><td>C++</td><td>876</td><td>46</td><td>16</td><td>lucrifier</td><td>C++</td><td>132</td><td>9</td><td>-</td></tr><tr><td>leptonica</td><td>C++</td><td>1907</td><td>107</td><td>17</td><td>libua8g</td><td>C++</td><td>322</td><td>173</td><td>-</td></tr><tr><td>libgcrypt</td><td>C++</td><td>3939</td><td>127</td><td>17</td><td>opencrypt</td><td>C++</td><td>1026</td><td>133</td><td>-</td></tr><tr><td>libgcrypt</td><td>C++</td><td>1248</td><td>65</td><td>16</td><td>luc</td><td>C++</td><td>1046</td><td>106</td><td>-</td></tr><tr><td>opentraffic</td><td>C++</td><td>8648</td><td>101</td><td>12</td><td>gocss</td><td>C++</td><td>5582</td><td>2361</td><td>-</td></tr><tr><td>libxc</td><td>C++</td><td>111</td><td>242</td><td>18</td><td>gspy</td><td>C++</td><td>9076</td><td>1177</td><td>-</td></tr><tr><td>libxc</td><td>C++</td><td>1942</td><td>251</td><td>17</td><td>gfst</td><td>C++</td><td>261</td><td>1302</td><td>-</td></tr><tr><td>libxml</td><td>C++</td><td>2955</td><td>427</td><td>12</td><td>cpdf</td><td>C++</td><td>3076</td><td>1171</td><td>-</td></tr><tr><td>webosf</td><td>C++</td><td>2499</td><td>103</td><td>10</td><td>cfmllib</td><td>C++</td><td>2761</td><td>71</td><td>-</td></tr><tr><td>hamspell</td><td>C++</td><td>2268</td><td>107</td><td>9</td><td>ncscp</td><td>C++</td><td>2870</td><td>85</td><td>-</td></tr><tr><td>lcms</td><td>C++</td><td>840</td><td>0</td><td>0</td><td>cyphix</td><td>C++</td><td>66939</td><td>1589</td><td>-</td></tr><tr><td>opens</td><td>C++</td><td>610</td><td>100</td><td>7</td><td>botan</td><td>C++</td><td>2933</td><td>137</td><td>-</td></tr><tr><td>ios</td><td>C++</td><td>3062</td><td>5734</td><td>6</td><td>hdf5</td><td>C++</td><td>731</td><td>1246</td><td>-</td></tr><tr><td>igmp2</td><td>C++</td><td>235</td><td>156</td><td>7</td><td>perlmc</td><td>C++</td><td>1387</td><td>88</td><td>-</td></tr><tr><td>sass</td><td>C++</td><td>1540</td><td>161</td><td>9</td><td>trig</td><td>C++</td><td>2099</td><td>306</td><td>-</td></tr><tr><td>sly</td><td>C++</td><td>1540</td><td>161</td><td>9</td><td>boringscl</td><td>C++</td><td>1387</td><td>893</td><td>-</td></tr><tr><td>samba</td><td>C++</td><td>146</td><td>60</td><td>7</td><td>hcitest</td><td>C++</td><td>292</td><td>395</td><td>-</td></tr><tr><td>sults</td><td>C++</td><td>261</td><td>281</td><td>8</td><td>kabir</td><td>C</td><td>413</td><td>414</td><td>-</td></tr><tr><td>openSsl1</td><td>C++</td><td>576</td><td>27</td><td>7</td><td>pwinitest</td><td>Rust</td><td>16348</td><td>945</td><td>grasp</td></tr><tr><td>openg2tls4</td><td>C++</td><td>2784</td><td>78</td><td>5</td><td>clamay</td><td>C++</td><td>1023</td><td>718</td><td>-</td></tr><tr><td>qack</td><td>C++</td><td>37892</td><td>225</td><td>7</td><td>pci2tls</td><td>C++</td><td>1045</td><td>147</td><td>-</td></tr><tr><td>umengmack3</td><td>C++</td><td>13553</td><td>566</td><td>8</td><td>shenanig</td><td>C++</td><td>1076</td><td>89</td><td>fiddler</td></tr><tr><td>oils</td><td>C++</td><td>279</td><td>105</td><td>34</td><td>mlzaj</td><td>C++</td><td>2863</td><td>756</td><td>-</td></tr><tr><td>libtav</td><td>C++</td><td>4186</td><td>15</td><td>6</td><td>opensea</td><td>C++</td><td>2745</td><td>23</td><td>-</td></tr><tr><td>libtav</td><td>C++</td><td>1394</td><td>34</td><td>6</td><td>iphone4</td><td>C++</td><td>1862</td><td>107</td><td>-</td></tr><tr><td>libtavctl</td><td>C++</td><td>1974</td><td>34</td><td>6</td><td>iphone4</td><td>C++</td><td>1872</td><td>-</td><td>-</td></tr><tr><td>libsched</td><td>C++</td><td>2863</td><td>10</td><td>6</td><td>sched</td><td>C++</td><td>2067</td><td>-</td><td>-</td></tr><tr><td>libschedctl</td><td>C++</td><td>2863</td><td>10</td><td>6</td><td>sched</td><td>C++</td><td>2067</td><td>703</td><td>2</td></tr><tr><td>libschedctl</td><td>C++</td><td>2863</td><td>10</td><td>6</td><td>sched</td><td>C++</td><td>1103</td><td>623</td><td>2</td></tr><tr><td>libxml3</td><td>C++</td><td>17</td><td>5</td><td>4</td><td>libxml3</td><td>C++</td><td>285</td><td>31</td><td>2</td></tr><tr><td>mysql</td><td>C++</td><td>47</td><td>4</td><td>4</td><td>libmysql</td><td>C++</td><td>2851</td><td>68</td><td>2</td></tr><tr><td>mysql</td><td>C++</td><td>2868</td><td>6</td><td>4</td><td>libmysql</td><td>C++</td><td>1062</td><td>77</td><td>1</td></tr><tr><td>mysql</td><td>C++</td><td>2869</td><td>6</td><td>4</td><td>libmysql</td><td>C++</td><td>1062</td><td>77</td><td>1</td></tr><tr><td>mysql</td><td>C++</td><td "}
+
+event: token
+data: {"text": "colspan=\"8\">\\( "}
+
+event: reset
+data: {"from_page": 1, "reason": "반복/출력 상한 감지 — 페이지별 재처리"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 0, "total_pages": 6, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 1, "total_pages": 6, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: token
+data: {"text": "<PAGE>"}
+
+event: token
+data: {"text": "<|det|>header [173, 33, 480, "}
+
+event: token
+data: {"text": "49]<|/det|>Published as a conference paper at "}
+
+event: token
+data: {"text": "ICLR 2026\n<|det|>ref_text "}
+
+event: token
+data: {"text": "[173, 103, "}
+
+event: token
+data: {"text": "829, "}
+
+event: token
+data: {"text": "147]<|/det|>Seunghoon Woo, Eunjin Choi, "}
+
+event: token
+data: {"text": "Heejo Lee, and "}
+
+event: token
+data: {"text": "Hakjoo Oh. "}
+
+event: token
+data: {"text": "{V1SCAN}: Discovering 1-day vulnerabilities in reused "}
+
+event: token
+data: {"text": "{C/C++} open-source software "}
+
+event: token
+data: {"text": "components using code classification techniques. In "}
+
+event: token
+data: {"text": "USENIX Security Symposium, pp. "}
+
+event: token
+data: {"text": "6541–6556, "}
+
+event: token
+data: {"text": "2023.\n<|det|>ref_text [173, "}
+
+event: token
+data: {"text": "155, 826, "}
+
+event: token
+data: {"text": "199]<|/det|>John Yang, Carlos "}
+
+event: token
+data: {"text": "Jimenez, Alexander Wettig, Kilian "}
+
+event: token
+data: {"text": "Lieret, Shunyu Yao, Karthik Narasimhan, and "}
+
+event: token
+data: {"text": "Ofir Press. Swe-agent: Agent-computer interfaces enable automated software engineering. In Neural Information Processing Systems "}
+
+event: token
+data: {"text": "(NeurIPS), 2024.\n<|det|>ref_text [173, 207, 826, "}
+
+event: token
+data: {"text": "251]<|/det|>Songtao Yang, Yubo He, Kaixiang Chen, Zheyu Ma, Xiapu Luo, Yong Xie, "}
+
+event: token
+data: {"text": "Jianjun Chen, and Chao Zhang. 1dfuzz: Reproduce 1-day vulnerabilities with directed differential "}
+
+event: token
+data: {"text": "fuzzing. In ACM SIGSOFT International Symposium on Software Testing and Analysis, pp. 867–879, 2023.\n"}
+
+event: token
+data: {"text": "<|det|>ref_text [173, 258, 826, 302]<|/det|>Aohan Zeng, Xin "}
+
+event: token
+data: {"text": "Lv, Zhenyu Hou, Zhengxiao Du, Qinkai Zheng, Bin Chen, Da Yin, Chendi "}
+
+event: token
+data: {"text": "Ge, Chengxing Xie, Cunxiang Wang, et al. Glm-5: from vibe coding to "}
+
+event: token
+data: {"text": "agentic engineering. arXiv preprint arXiv:2602.15763, 2026.\n<|det|>ref_text [173, "}
+
+event: token
+data: {"text": "310, 826, 368]<|/det|>Andy K Zhang, Joey Ji, Celeste Menders, Riya "}
+
+event: token
+data: {"text": "Dulepet, Thomas Qin, Ron Y Wang, Junrong Wu, Kyleen Liao, Jiliang "}
+
+event: token
+data: {"text": "Li, Jinghan Hu, et al. Bountybench: Dollar impact of ai agent attackers and defenders on real-world cybersecurity "}
+
+event: token
+data: {"text": "systems. In Neural Information Processing Systems (NeurIPS), 2025a.\n<|det|>ref_text [173, "}
+
+event: token
+data: {"text": "376, 826, 474]<|/det|>Andy K Zhang, Neil Perry, Riya Dulepet, Joey "}
+
+event: token
+data: {"text": "Ji, Celeste Menders, Justin W Lin, Eliot Jones, Gashon Hussein, Samantha Liu, Donovan Julian "}
+
+event: token
+data: {"text": "Jasper, Pura Peetathawatchai, Ari Glenn, Vikram Sivashankar, Daniel "}
+
+event: token
+data: {"text": "Zamoshchin, Leo Glikbarg, Derek Askaryar, Haoxiang Yang, Aolin Zhang, Rishi "}
+
+event: token
+data: {"text": "Alluri, Nathan Tran, Rinnara Sangpisit, Kenny O Oseleonommen, Dan Boneh, "}
+
+event: token
+data: {"text": "Daniel E. Ho, and Percy Liang. Cybench: A framework for evaluating cybersecurity capabilities and risks of language models. "}
+
+event: token
+data: {"text": "In International Conference on Learning Representations (ICLR), 2025b. URL https://openreview.net/forum?id=tc90LV0yRL.\n<|det|>ref_text [173, "}
+
+event: token
+data: {"text": "482, 826, 539]<|/det|>Yuxuan Zhu, Antony Kellermann, Dylan Bowman, Philip Li, "}
+
+event: token
+data: {"text": "Akul Gupta, Adarsh Danda, Richard Fang, Conner Jensen, Eric Ihli, Jason Benn, et "}
+
+event: token
+data: {"text": "al. Cve-bench: A benchmark for ai agents' ability to exploit real-world web application vulnerabilities. In International Conference "}
+
+event: token
+data: {"text": "on Machine Learning (ICML), 2025.\n<|det|>page_number [490, 948, 508, "}
+
+event: token
+data: {"text": "960]<|/det|>15\n"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 2, "total_pages": 6, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: token
+data: {"text": "<PAGE>"}
+
+event: token
+data: {"text": "<|det|>header [173, 33, 480, "}
+
+event: token
+data: {"text": "49]<|/det|>Published as a conference paper at "}
+
+event: token
+data: {"text": "ICLR 2026\n<|det|>title "}
+
+event: token
+data: {"text": "[173, 102, 557, "}
+
+event: token
+data: {"text": "119]<|/det|>A THE USE OF "}
+
+event: token
+data: {"text": "LARGE LANGUAGE "}
+
+event: token
+data: {"text": "MODELS\n<|det|>text [171, 134, "}
+
+event: token
+data: {"text": "828, 218]<|/det|>Large Language "}
+
+event: token
+data: {"text": "Models (LLMs) were primarily used "}
+
+event: token
+data: {"text": "to support writing, revision, and other "}
+
+event: token
+data: {"text": "text-focused tasks, such as improving "}
+
+event: token
+data: {"text": "clarity, refining grammar and style, and assisting "}
+
+event: token
+data: {"text": "with the organization of written content. In "}
+
+event: token
+data: {"text": "addition, LLMs were utilized to aid "}
+
+event: token
+data: {"text": "in the process of data construction, as "}
+
+event: token
+data: {"text": "described in detail in Section "}
+
+event: token
+data: {"text": "3.3. All text and data generated or "}
+
+event: token
+data: {"text": "revised with LLM assistance were carefully reviewed and validated by the authors to ensure "}
+
+event: token
+data: {"text": "accuracy, appropriateness, and compliance with academic standards.\n<|det|>title [173, 239, 533, "}
+
+event: token
+data: {"text": "254]<|/det|>B DETAILS OF CYBERGYM BENCHMARK\n<|det|>text [171, 270, 825, "}
+
+event: token
+data: {"text": "300]<|/det|>We now provide more details of our benchmark, including general statistics in Table 3, crash types in Table "}
+
+event: token
+data: {"text": "4, and included projects in Table 5. A discussion of these details can be found in Section "}
+
+event: token
+data: {"text": "3.\n<|det|>text [313, 311, 684, 326]<|/det|>Table 3: Statistics of "}
+
+event: token
+data: {"text": "CyberGym's benchmark instances.\n<|det|>table [281, 330, 720, 468]<|/det|><table><tr><td></td><td></td><td>Median</td><td>Max</td></tr><tr><td>Vulnerability "}
+
+event: token
+data: {"text": "description</td><td># Words</td><td>24</td><td>158</td></tr><tr><td>Ground truth PoC</td><td># "}
+
+event: token
+data: {"text": "Bytes</td><td>259</td><td>1,048,576</td></tr><tr><td rowspan=\"2\">Codebase</td><td># "}
+
+event: token
+data: {"text": "Files</td><td>1,117</td><td>40,356</td></tr><tr><td># Lines</td><td>387,491</td><td>7,371,584</td></tr><tr><td "}
+
+event: token
+data: {"text": "rowspan=\"2\">Patch</td><td># Files edited</td><td>1</td><td>40</td></tr><tr><td># Lines "}
+
+event: token
+data: {"text": "edited</td><td>7</td><td>3,456</td></tr></table>\n<|det|>page_number [490, 948, 509, "}
+
+event: token
+data: {"text": "960]<|/det|>16\n"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 3, "total_pages": 6, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: token
+data: {"text": "<PAGE>"}
+
+event: token
+data: {"text": "<|det|>header [173, 33, 480, "}
+
+event: token
+data: {"text": "49]<|/det|>Published as a conference paper at "}
+
+event: token
+data: {"text": "ICLR 2026\n<|det|>text "}
+
+event: token
+data: {"text": "[301, 283, 699, "}
+
+event: token
+data: {"text": "354]<|/det|>Table 4: "}
+
+event: token
+data: {"text": "All crash types in CyberGym and "}
+
+event: token
+data: {"text": "the corresponding numbers of benchmark instances. Most "}
+
+event: token
+data: {"text": "of these crashes are due to memory safety "}
+
+event: token
+data: {"text": "issues. Note that these crash types are "}
+
+event: token
+data: {"text": "reported by sanitizers and may not fully "}
+
+event: token
+data: {"text": "reflect the underlying root causes of the vulnerabilities.\n"}
+
+event: token
+data: {"text": "<|det|>table [302, "}
+
+event: token
+data: {"text": "357, 699, "}
+
+event: token
+data: {"text": "743]<|/det|><table><tr><td>Crash "}
+
+event: token
+data: {"text": "Type</td><td># "}
+
+event: token
+data: {"text": "Instances</td></tr><tr><td>Heap-buffer-overflow "}
+
+event: token
+data: {"text": "READ</td><td>458</td></tr><tr><td>Use-of-uninitialized-value</td><td>287</td></tr><tr><td>Wild-address "}
+
+event: token
+data: {"text": "READ</td><td>163</td></tr><tr><td>Heap-buffer-overflow WRITE</td><td>116</td></tr><tr><td>Heap-use-after-free "}
+
+event: token
+data: {"text": "READ</td><td>110</td></tr><tr><td>Stack-buffer-overflow READ</td><td>66</td></tr><tr><td>Stack-buffer-overflow "}
+
+event: token
+data: {"text": "WRITE</td><td>52</td></tr><tr><td>Index-out-of-bounds</td><td>48</td></tr><tr><td>Global-buffer-overflow "}
+
+event: token
+data: {"text": "READ</td><td>43</td></tr><tr><td>Wild-address WRITE</td><td>27</td></tr><tr><td>Heap-double-free</td><td>23</td></tr><tr><td>Negative-size-param</td><td>17</td></tr><tr><td>Bad-cast</td><td>13</td></tr><tr><td>Bad-free</td><td>10</td></tr><tr><td>Use-after-poison "}
+
+event: token
+data: {"text": "READ</td><td>9</td></tr><tr><td>Stack-use-after-return READ</td><td>9</td></tr><tr><td>Heap-use-after-free "}
+
+event: token
+data: {"text": "WRITE</td><td>8</td></tr><tr><td>Null-dereference READ</td><td>8</td></tr><tr><td>Memcpy-param-overlap</td><td>7</td></tr><tr><td>Stack-buffer-underflow "}
+
+event: token
+data: {"text": "READ</td><td>7</td></tr><tr><td>Global-buffer-overflow WRITE</td><td>5</td></tr><tr><td>Stack-use-after-scope "}
+
+event: token
+data: {"text": "READ</td><td>5</td></tr><tr><td>Container-overflow READ</td><td>4</td></tr><tr><td>Use-after-poison "}
+
+event: token
+data: {"text": "WRITE</td><td>4</td></tr><tr><td>Dynamic-stack-buffer-overflow WRITE</td><td>3</td></tr><tr><td>Incorrect-function-pointer-type</td><td>2</td></tr><tr><td>Container-overflow "}
+
+event: token
+data: {"text": "WRITE</td><td>2</td></tr><tr><td>Stack-buffer-underflow WRITE</td><td>1</td></tr></table>\n<|det|>page_number [491, 949, "}
+
+event: token
+data: {"text": "508, 960]<|/det|>17\n"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 4, "total_pages": 6, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: token
+data: {"text": "<PAGE>"}
+
+event: token
+data: {"text": "<|det|>header [174, 33, 480, "}
+
+event: token
+data: {"text": "49]<|/det|>Published as a conference paper at "}
+
+event: token
+data: {"text": "ICLR 2026\n<|det|>text "}
+
+event: token
+data: {"text": "[171, 227, 828, "}
+
+event: token
+data: {"text": "270]<|/det|>Table 5: "}
+
+event: token
+data: {"text": "All projects in CyberGym, including "}
+
+event: token
+data: {"text": "links to their homepages, primary programming "}
+
+event: token
+data: {"text": "languages, GitHub stars (if hosted on "}
+
+event: token
+data: {"text": "GitHub), lines of code (in "}
+
+event: token
+data: {"text": "thousands), and the number of benchmark instances. "}
+
+event: token
+data: {"text": "Most of these projects are in "}
+
+event: token
+data: {"text": "C/C++.\n<|det|>table [173, "}
+
+event: token
+data: {"text": "274, 825, "}
+
+event: token
+data: {"text": "796]<|/det|><table><tr><td>Project</td><td>Lang.</td><td>Stars</td><td>LoC (k)</td><td># "}
+
+event: token
+data: {"text": "Inst.</td><td>Project</td><td>Lang.</td><td>Stars</td><td>LoC "}
+
+event: token
+data: {"text": "(k)</td><td># Inst.</td><td>Project</td><td>Lang.</td><td>Stars</td><td>Lo</td><td>C "}
+
+event: token
+data: {"text": "(k)</td><td># Inst.</td></tr><tr><td>binutils</td><td>C++</td><td>593</td><td>6002</td><td>103</td><td>kamailio</td><td>C</td><td>2446</td><td>1039</td><td>5</td><td>libfdk-aac</td><td>C++</td><td>-</td><td>123</td><td>2</td></tr><tr><td>ghostscript</td><td>C++</td><td>-</td><td>1852</td><td>88</td><td>libvips</td><td>C++</td><td>10294</td><td>224</td><td>5</td><td>jsoncpp</td><td>C++</td><td>8518</td><td>145</td><td>2</td></tr><tr><td>ffmpeg</td><td>C++</td><td>-</td><td>1069</td><td>69</td><td>zeek</td><td>C++</td><td>6860</td><td>1887</td><td>5</td><td>libcups</td><td>C++</td><td>51</td><td>167</td><td>2</td></tr><tr><td>opensc</td><td>C++</td><td>2745</td><td>214</td><td>59</td><td>miniz</td><td>C</td><td>2384</td><td>10</td><td>5</td><td>libssh2</td><td>C++</td><td>1417</td><td>51</td><td>2</td></tr><tr><td>wireshark</td><td>C++</td><td>-</td><td>3860</td><td>51</td><td>proj4</td><td>C++</td><td>1831</td><td>45</td><td>5</td><td>jq</td><td>C</td><td>31725</td><td>147</td><td>2</td></tr><tr><td>libraswpeed</td><td>C++</td><td>395</td><td>35</td><td>46</td><td>h3</td><td>C</td><td>5304</td><td>1502</td><td>5</td><td>hermes</td><td>C++</td><td>10266</td><td>703</td><td>2</td></tr><tr><td>mruby</td><td>C++</td><td>5377</td><td>72</td><td>42</td><td>freetype2</td><td>C++</td><td>14</td><td>162</td><td>5</td><td>h2o</td><td>C++</td><td>11103</td><td>623</td><td>2</td></tr><tr><td>libxml2</td><td>C++</td><td>-</td><td>496</td><td>38</td><td>radare2</td><td>C++</td><td>21654</td><td>1025</td><td>5</td><td>readstat</td><td>C++</td><td>285</td><td>31</td><td>2</td></tr><tr><td>harfbuzz</td><td>C++</td><td>4609</td><td>82</td><td>35</td><td>kimageformats</td><td>C++</td><td>-</td><td>7</td><td>5</td><td>libpcap</td><td>C++</td><td>2851</td><td>68</td><td>2</td></tr><tr><td>mupdf</td><td>C++</td><td>-</td><td>1506</td><td>35</td><td>ntopng</td><td>C++</td><td>6684</td><td>643</td><td>5</td><td>libultrahdr</td><td>C++</td><td>217</td><td>16</td><td>2</td></tr><tr><td>ndpi</td><td>C++</td><td>4039</td><td>242</td><td>34</td><td>capstone</td><td>C++</td><td>8006</td><td>628</td><td>5</td><td>mongoose</td><td>C++</td><td>11682</td><td>77</td><td>1</td></tr><tr><td>libredwg</td><td>C</td><td>1120</td><td>1032</td><td>31</td><td>net-snmp</td><td>C++</td><td>-</td><td>528</td><td>5</td><td>jbig2dec</td><td>C++</td><td>-</td><td>13</td><td>1</td></tr><tr><td>graphicsmagick</td><td>C++</td><td>-</td><td>2069</td><td>30</td><td>libspectre</td><td>C++</td><td>-</td><td>1863</td><td>4</td><td>cryptofuzz</td><td>C++</td><td>-</td><td>171</td><td>1</td></tr><tr><td>serenity</td><td>C++</td><td>31742</td><td>5854</td><td>29</td><td>gstreamer</td><td>C++</td><td>-</td><td>3202</td><td>4</td><td>libidn2</td><td>C++</td><td>-</td><td>667</td><td>1</td></tr><tr><td>gpac</td><td>C</td><td>2992</td><td>843</td><td>27</td><td>mosquitto</td><td>C</td><td>-</td><td>133</td><td>4</td><td>coturn</td><td>C</td><td>12333</td><td>44</td><td>1</td></tr><tr><td>c-blosc2</td><td>C++</td><td>495</td><td>1015</td><td>25</td><td>sleuthkit</td><td>C++</td><td>2798</td><td>257</td><td>4</td><td>gdbm</td><td>C</td><td>-</td><td>17</td><td>1</td></tr><tr><td>libdwarf</td><td>C</td><td>203</td><td>1442</td><td>24</td><td>freeradius</td><td>C++</td><td>2259</td><td>659</td><td>4</td><td>zlib</td><td>C++</td><td>6151</td><td>48</td><td>1</td></tr><tr><td>php</td><td>C++</td><td>39018</td><td>28325</td><td>22</td><td>glib</td><td>C++</td><td>-</td><td>816</td><td>4</td><td>postgis</td><td>C++</td><td>-</td><td>915</td><td>1</td></tr><tr><td>selinux</td><td>C</td><td>1408</td><td>519</td><td>18</td><td>libaom</td><td>C++</td><td>-</td><td>359</td><td>4</td><td>pcl</td><td>C++</td><td>10384</td><td>672</td><td>1</td></tr><tr><td>gdal</td><td>C++</td><td>5267</td><td>2770</td><td>17</td><td>cyclonedds</td><td>C</td><td>971</td><td>274</td><td>4</td><td>wolfmqtt</td><td>C</td><td>542</td><td>24</td><td>1</td></tr><tr><td>poppler</td><td>C++</td><td>-</td><td>176</td><td>17</td><td>libbpf</td><td>C</td><td>2368</td><td>108</td><td>4</td><td>json-c</td><td>C++</td><td>3087</td><td>10</td><td>1</td></tr><tr><td>upx</td><td>C++</td><td>15730</td><td>2067</td><td>16</td><td>rnp</td><td>C++</td><td>210</td><td>60</td><td>4</td><td>libass</td><td>C++</td><td>999</td><td>19</td><td>1</td></tr><tr><td>libxaac</td><td>C++</td><td>48</td><td>244</td><td>16</td><td>gpsd</td><td>C</td><td>-</td><td>113</td><td>4</td><td>fmt</td><td>C++</td><td>21775</td><td>61</td><td>1</td></tr><tr><td>assimp</td><td>C++</td><td>11615</td><td>6527</td><td>16</td><td>faad2</td><td>C</td><td>185</td><td>59</td><td>4</td><td>spirv-tools</td><td>C++</td><td>1174</td><td>372</td><td>1</td></tr><tr><td>fluent-bit</td><td>C++</td><td>6866</td><td>1070</td><td>15</td><td>wamr</td><td>C</td><td>5344</td><td>262</td><td>4</td><td>libwebsockets</td><td>C</td><td>-</td><td>373</td><td>1</td></tr><tr><td>librarchive</td><td>C++</td><td>3183</td><td>154</td><td>15</td><td>karchive</td><td>C++</td><td>-</td><td>10</td><td>4</td><td>spicy</td><td>C++</td><td>263</td><td>320</td><td>1</td></tr><tr><td>yara</td><td>C++</td><td>8756</td><td>46</td><td>15</td><td>libical</td><td>C++</td><td>322</td><td>75</td><td>3</td><td>pigweed</td><td>C++</td><td>-</td><td>503</td><td>1</td></tr><tr><td>leptonica</td><td>C++</td><td>1907</td><td>197</td><td>14</td><td>openjpeg</td><td>C++</td><td>1026</td><td>173</td><td>3</td><td>p11-kit</td><td>C</td><td>159</td><td>80</td><td>1</td></tr><tr><td>libjpeg-turbo</td><td>C</td><td>3939</td><td>13</td><td></td><td>lxc</td><td>C</td><td>4864</td><td>73</td><td>3</td><td>lldpd</td><td>C</td><td>646</td><td>106</td><td>1</td></tr><tr><td>libraw</td><td>C++</td><td>1248</td><td>65</td><td>12</td><td>haproyx</td><td>C++</td><td>5582</td><td>260</td><td>3</td><td>opencv</td><td>C++</td><td>82143</td><td>2371</td><td>1</td></tr><tr><td>openthread</td><td>C++</td><td>3648</td><td>481</td><td>12</td><td>geos</td><td>C++</td><td>-</td><td>239</td><td>3</td><td>duckdb</td><td>C++</td><td>29066</td><td>1371</td><td>1</td></tr><tr><td>libavc</td><td>C++</td><td>11</td><td>242</td><td>12</td><td>lua</td><td>C</td><td>9057</td><td>33</td><td>3</td><td>qemu</td><td>C</td><td>-</td><td>7372</td><td>1</td></tr><tr><td>flac</td><td>C++</td><td>1942</td><td>89</td><td>11</td><td>qpdf</td><td>C++</td><td>3976</td><td>117</td><td>3</td><td>tarantool</td><td>C</td><td>3493</td><td>1450</td><td>1</td></tr><tr><td>libjxl</td><td>C++</td><td>2955</td><td>427</td><td>10</td><td>elfutils</td><td>C++</td><td>-</td><td>161</td><td>3</td><td>unicorn</td><td>C++</td><td>8158</td><td>409</td><td>1</td></tr><tr><td>wolfssl</td><td>C++</td><td>2499</td><td>803</td><td>10</td><td>libtpms</td><td>C++</td><td>235</td><td>116</td><td>3</td><td>libgd</td><td>C++</td><td>926</td><td>58</td><td>1</td></tr><tr><td>hunspell</td><td>C++</td><td>2265</td><td>107</td><td>9</td><td>stb</td><td>C++</td><td>28761</td><td>71</td><td>3</td><td>wget2</td><td>C++</td><td>-</td><td>711</td><td>1</td></tr><tr><td>lwan</td><td>C++</td><td>5960</td><td>19</td><td>9</td><td>usrsctp</td><td>C++</td><td>707</td><td>85</td><td>3</td><td>irssi</td><td>C++</td><td>2968</td><td>75</td><td>1</td></tr><tr><td>lcms</td><td>C++</td><td>620</td><td>100</td><td>9</td><td>cpython3</td><td>C++</td><td>66939</td><td>1589</td><td>3</td><td>resiprocate</td><td>C++</td><td>655</td><td>1014</td><td>1</td></tr><tr><td>htslib</td><td>C++</td><td>849</td><td>508</td><td>9</td><td>botan</td><td>C++</td><td>2933</td><td>137</td><td>3</td><td>nginx</td><td>C</td><td>26858</td><td>170</td><td>1</td></tr><tr><td>opensips</td><td>C</td><td>1349</td><td>1674</td><td>8</td><td>hdf5</td><td>C</td><td>731</td><td>1246</td><td>3</td><td>s2opc</td><td>C++</td><td>-</td><td>1036</td><td>1</td></tr><tr><td>icu</td><td>C++</td><td>9977</td><td>2255</td><td>8</td><td>perfetto</td><td>C++</td><td>-</td><td>115</td><td>3</td><td>wavpack</td><td>C++</td><td>406</td><td>51</td><td>1</td></tr><tr><td>libgit2</td><td>C++</td><td>9977</td><td>2174</td><td>8</td><td>openexr</td><td>C++</td><td>1699</td><td>240</td><td>3</td><td>libavif</td><td>C++</td><td>1749</td><td>149</td><td>1</td></tr><tr><td>skia</td><td>C++</td><td>-</td><td>6174</td><td>8</td><td>njs</td><td>C++</td><td>1387</td><td>88</td><td>3</td><td>hiredis</td><td>C</td><td>6396</td><td>9</td><td>1</td></tr><tr><td>arrow</td><td>C++</td><td>15400</td><td>1041</td><td>8</td><td>tinygltf</td><td>C++</td><td>2199</td><td>306</td><td>2</td><td>wt</td><td>C++</td><td>1756</td><td>556</td><td>1</td></tr><tr><td>openvswitch</td><td>C++</td><td>3706</td><td>4001</td><td>8</td><td>boringssl</td><td>C++</td><td>-</td><td>893</td><td>2</td><td>flatbuffers</td><td>C++</td><td>24184</td><td>187</td><td>1</td></tr><tr><td>libsndfile</td><td>C</td><td>1559</td><td>86</td><td>8</td><td>liblouis</td><td>C</td><td>292</td><td>1476</td><td>2</td><td>swift-protobuf</td><td>Swift</td><td>4669</td><td>304</td><td>1</td></tr><tr><td>samba</td><td>C</td><td>-</td><td>2886</td><td>8</td><td>krb5</td><td>C</td><td>553</td><td>414</td><td>2</td><td>gnupg</td><td>C++</td><td>-</td><td>453</td><td>1</td></tr><tr><td>libxslt</td><td>C++</td><td>576</td><td>87</td><td>7</td><td>wasmtime</td><td>Rust</td><td>16348</td><td>945</td><td>2</td><td>espeak-ng</td><td>C++</td><td>5063</td><td>63</td><td>1</td></tr><tr><td>open62541</td><td>C++</td><td>2784</td><td>78</td><td>7</td><td>clamav</td><td>C++</td><td>-</td><td>718</td><td>2</td><td>spice-usrbedir</td><td>C++</td><td>-</td><td>8</td><td>1</td></tr><tr><td>curl</td><td>C++</td><td>37892</td><td>225</td><td>7</td><td>pcre2</td><td>C++</td><td>1023</td><td>147</td><td>2</td><td>fribidi</td><td>C</td><td>378</td><td>633</td><td>1</td></tr><tr><td>imagemagick</td><td>C++</td><td>13553</td><td>566</td><td>6</td><td>libzmq</td><td>C++</td><td>10196</td><td>89</td><td>2</td><td>libssh</td><td>C</td><td>-</td><td>62</td><td>1</td></tr><tr><td>zstd</td><td>C++</td><td>24893</td><td>100</td><td>6</td><td>util-linux</td><td>C</td><td>2853</td><td>774</td><td>2</td><td>quickjs</td><td>C</td><td>9137</td><td>84</td><td>1</td></tr><tr><td>ots</td><td>C++</td><td>279</td><td>195</td><td>6</td><td>matio</td><td>C++</td><td>366</td><td>36</td><td>2</td><td>md4c</td><td>C</td><td>996</td><td>23</td><td>1</td></tr><tr><td>file</td><td>C++</td><td>1386</td><td>15</td><td>6</td><td>openssl</td><td>C++</td><td>27363</td><td>1742</td><td>2</td><td>uriparser</td><td>C++</td><td>358</td><td>20</td><td>1</td></tr><tr><td>libheif</td><td>C++</td><td>1934</td><td>34</td><td>6</td><td>libcoap</td><td>C++</td><td>848</td><td>56</td><td>2</td><td>gnutls</td><td>C++</td><td>-</td><td>934</td><td>1</td></tr><tr><td>pcapplusplus</td><td>C++</td><td>2867</td><td>283</td><td>6</td><td>unit</td><td>C</td><td>5516</td><td>142</td><td>2</td><td>libspng</td><td>C++</td><td>782</td><td>4</td><td>1</td></tr><tr><td>sudoers</td><td>C</td><td>1267</td><td>234</td><td>6</td><td>knot-dns</td><td>C++</td><td>-</td><td>140</td><td>2</td><td>wasm3</td><td>C</td><td>7548</td><td>29</td><td>1</td></tr><tr><td>mlapserver</td><td>C++</td><td>1095</td><td>368</td><td>6</td><td>fio</td><td>C++</td><td>5586</td><td>80</td><td>2</td><td>hostap</td><td>C++</td><td>-</td><td>518</td><td>1</td></tr><tr><td>libhevc</td><td>C++</td><td>5</td><td>255</td><td>5</td><td>uwebsockets</td><td>C++</td><td>17924</td><td>1814</td><td>2</td><td>arduinojson</td><td>C++</td><td>6918</td><td>30</td><td>1</td></tr><tr><td>libexif</td><td>C++</td><td>331</td><td>86</td><td>5</td><td>libwebp</td><td>C++</td><td>-</td><td>576</td><td>2</td><td>hoextdown</td><td>C++</td><td>22</td><td>13</td><td>1</td></tr><tr><td>libucl</td><td>C</td><td>1667</td><td>22</td><td>5</td><td>skcms</td><td>C++</td><td>-</td><td>4</td><td>2</td><td>bind9</td><td>C</td><td>-</td><td>1437</td><td>1</td></tr><tr><td>igraph</td><td>C</td><td>1833</td><td>276</td><td>5</td><td>dav1d</td><td>C++</td><td>-</td><td>246</td><td>2</td><td></td><td></td><td></td><td></td><td></td></tr><tr><td>exiv2</td><td>C++</td><td>1008</td><td>387</td><td>5</td><td>wpantund</td><td>C++</td><td>176</td><td>95</td><td>2</td><td></td><td></td><td></td><td></td><td></td></tr></table>\n<|det|>page_number "}
+
+event: token
+data: {"text": "[491, 949, 508, 961]<|/det|>18\n"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 5, "total_pages": 6, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: token
+data: {"text": "<PAGE>"}
+
+event: token
+data: {"text": "<|det|>header [173, 33, 480, "}
+
+event: token
+data: {"text": "49]<|/det|>Published as a conference paper at "}
+
+event: token
+data: {"text": "ICLR 2026\n<|det|>title "}
+
+event: token
+data: {"text": "[172, 102, 512, "}
+
+event: token
+data: {"text": "119]<|/det|>C DETAILS ON "}
+
+event: token
+data: {"text": "EXPERIMENTAL SETUP\n<|det|>text "}
+
+event: token
+data: {"text": "[171, 133, "}
+
+event: token
+data: {"text": "828, 205]<|/det|>Prompts Used "}
+
+event: token
+data: {"text": "in Benchmark Construction We use "}
+
+event: token
+data: {"text": "GPT-4.1 to filter and rephrase commit "}
+
+event: token
+data: {"text": "messages. Figure 9 presents the prompt "}
+
+event: token
+data: {"text": "used to exclude commit messages that either lack "}
+
+event: token
+data: {"text": "informative descriptions of the vulnerability or address multiple issues. We include a comprehensive list of "}
+
+event: token
+data: {"text": "example commit messages and our preferred answers to "}
+
+event: token
+data: {"text": "help the LLM make more accurate "}
+
+event: token
+data: {"text": "decisions. Figure 10 shows the prompt used "}
+
+event: token
+data: {"text": "to rephrase patch commit messages into vulnerability descriptions.\n<|det|>text [197, "}
+
+event: token
+data: {"text": "227, 792, 290]<|/det|>I will provide you the message of a commit that fixes a security vulnerability. "}
+
+event: token
+data: {"text": "Your task is to determine if the commit message is high-quality. By \"high-quality\", we require that the message must "}
+
+event: token
+data: {"text": "(i) contains at least one full sentence that describes the vulnerability or the fix to the vulnerability or (ii) provides "}
+
+event: token
+data: {"text": "the location of the vulnerability. We consider a commit message as low-quality also if the commit fixes multiple issues. Only output "}
+
+event: token
+data: {"text": "YES or No. Do not output anything else.\n<|det|>text [198, 297, 490, "}
+
+event: token
+data: {"text": "308]<|/det|>The input will be in the following format:\n<|det|>text [199, 308, 388, "}
+
+event: token
+data: {"text": "318]<|/det|>MESSAGE: the commit message\n<|det|>text [198, 327, 536, 337]<|/det|>Below "}
+
+event: token
+data: {"text": "I give you a few examples and explanations:\n<|det|>text [199, 337, 388, "}
+
+event: token
+data: {"text": "346]<|/det|>MESSAGE: Code modernization\n<|det|>text [199, 347, 741, 357]<|/det|>OUTPUT: "}
+
+event: token
+data: {"text": "NO. The message is too unspecific and does not mention vulnerabilities.\n<|det|>text [198, 366, "}
+
+event: token
+data: {"text": "580, 376]<|/det|>MESSAGE: RawDecoder::decodeUncompressed(): sanitize bpp\n<|det|>text "}
+
+event: token
+data: {"text": "[199, 376, 729, 396]<|/det|>OUTPUT: YES. The message mentions a vulnerability fix and "}
+
+event: token
+data: {"text": "the location of the vulnerability (RawDecoder::decodeUncompressed()).\n<|det|>text [198, 404, "}
+
+event: token
+data: {"text": "661, 415]<|/det|>MESSAGE: https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=7436\n<|det|>text "}
+
+event: token
+data: {"text": "[199, 415, 721, 425]<|/det|>OUTPUT: NO. The message is only a link and "}
+
+event: token
+data: {"text": "contains no detailed information.\n<|det|>text [198, 434, 585, 445]<|/det|>MESSAGE: "}
+
+event: token
+data: {"text": "[network-data] add prefix length checks (#3498)\n<|det|>text [199, 445, 789, "}
+
+event: token
+data: {"text": "455]<|/det|>OUTPUT: NO. The message neither describes the vulnerability nor provides the location.\n<|det|>text [198, "}
+
+event: token
+data: {"text": "464, 655, 474]<|/det|>MESSAGE: codegen.c (mrb_last_insn): no "}
+
+event: token
+data: {"text": "previous instruction on top.\n<|det|>text [199, 474, 755, 484]<|/det|>OUTPUT: "}
+
+event: token
+data: {"text": "YES. The message describes the fix and the location of the vulnerability.\n<|det|>text [198, 493, 771, "}
+
+event: token
+data: {"text": "513]<|/det|>MESSAGE: Merge pull request #6222 from JacobBarthelmeh/alerts. don't "}
+
+event: token
+data: {"text": "try to send an alert to a disconnected peer\n<|det|>text [199, 513, 771, "}
+
+event: token
+data: {"text": "534]<|/det|>OUTPUT: NO. The message does not describe any vulnerability. Instead, it looks more like a functionality "}
+
+event: token
+data: {"text": "change.\n<|det|>text [198, 543, 748, 553]<|/det|>MESSAGE: cookley: Do not interpret "}
+
+event: token
+data: {"text": "empty answers as success. Thanks to oss-fuzz.\n<|det|>text [199, 553, 607, "}
+
+event: token
+data: {"text": "563]<|/det|>https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=18868\n<|det|>text "}
+
+event: token
+data: {"text": "[199, 563, 798, 593]<|/det|>OUTPUT: YES. The message mentions that the bug "}
+
+event: token
+data: {"text": "is found by oss-fuzz. Therefore, it is a security vulnerability. The message also mentions the rough location "}
+
+event: token
+data: {"text": "(cookley) and the fix.\n<|det|>text [198, 603, 463, "}
+
+event: token
+data: {"text": "613]<|/det|>MESSAGE: RMF: avoid double free. Fixes\n<|det|>text [199, 613, 791, "}
+
+event: token
+data: {"text": "633]<|/det|>https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=9138. Credit to "}
+
+event: token
+data: {"text": "OSS Fuzz. master only\n<|det|>text [199, 633, 736, "}
+
+event: token
+data: {"text": "663]<|/det|>OUTPUT: NO. The message only confirms that the commit fixes a double free vulnerability. However, it does not contain any "}
+
+event: token
+data: {"text": "detailed information about the vulnerability's description, cause, or location.\n<|det|>text [198, 672, 470, "}
+
+event: token
+data: {"text": "682]<|/det|>MESSAGE: [kern] Sanitize 4 bytes, not 2\n<|det|>text "}
+
+event: token
+data: {"text": "[199, 682, 755, 692]<|/det|>OUTPUT: NO. The message is too short and "}
+
+event: token
+data: {"text": "does not provide sufficient information.\n<|det|>text [198, 701, 578, 711]<|/det|>MESSAGE: "}
+
+event: token
+data: {"text": "[aat] Fix two wrongs that made a right before!\n<|det|>text [199, 711, 557, "}
+
+event: token
+data: {"text": "721]<|/det|>OUTPUT: NO. The commit seems to fix multiple issues.\n<|det|>text [198, "}
+
+event: token
+data: {"text": "730, 722, 740]<|/det|>MESSAGE: Fix overflow introduced in ce0d453222ca51c056f4f442988710eb0696365\n<|det|>text [199, "}
+
+event: token
+data: {"text": "740, 562, 750]<|/det|>OUTOUT: NO. The message lacks self-contained details.\n<|det|>text "}
+
+event: token
+data: {"text": "[198, 759, 672, 780]<|/det|>MESSAGE: Limit the number of elements in a vector "}
+
+event: token
+data: {"text": "(found by oss-fuzz) OUTPUT: NO. The message is too unspecified.\n<|det|>text [198, "}
+
+event: token
+data: {"text": "788, 434, 798]<|/det|>MESSAGE: Fix illegal memory access\n<|det|>text [199, 798, "}
+
+event: token
+data: {"text": "488, 808]<|/det|>OUTPUT: NO. The message is too unspecified.\n<|det|>text [198, "}
+
+event: token
+data: {"text": "817, 442, 827]<|/det|>MESSAGE: Avoid uninitialized memory\n<|det|>text [199, "}
+
+event: token
+data: {"text": "827, 488, 837]<|/det|>OUTPUT: NO. The message is too unspecified.\n<|det|>text "}
+
+event: token
+data: {"text": "[198, 846, 757, 866]<|/det|>MESSAGE: Fixed a bug in keyword arguments in block parameters; "}
+
+event: token
+data: {"text": "fix #4810. This is caused by incomplete fix in #4746\n<|det|>text [199, 866, "}
+
+event: token
+data: {"text": "611, 876]<|/det|>OUTPUT: NO. The message relies too much on cross "}
+
+event: token
+data: {"text": "references.\n<|det|>image_caption [350, 900, 647, 915]<|/det|>Figure 9: Prompt for filtering "}
+
+event: token
+data: {"text": "vulnerabilities.\n<|det|>page_number [491, 947, 508, 958]<|/det|>19\n"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 6, "total_pages": 6, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: token
+data: {"text": "<PAGE>"}
+
+event: token
+data: {"text": "<|det|>header [173, 33, 480, "}
+
+event: token
+data: {"text": "49]<|/det|>Published as a conference paper at "}
+
+event: token
+data: {"text": "ICLR 2026\n<|det|>text "}
+
+event: token
+data: {"text": "[197, 112, 784, "}
+
+event: token
+data: {"text": "234]<|/det|>I will provide you "}
+
+event: token
+data: {"text": "the message of a commit that fixes a "}
+
+event: token
+data: {"text": "security vulnerability. Your task is to "}
+
+event: token
+data: {"text": "rephrase the commit message as a description of "}
+
+event: token
+data: {"text": "the vulnerability. Include the information in the "}
+
+event: token
+data: {"text": "commit message, keep the same meaning and "}
+
+event: token
+data: {"text": "the original tone as much as possible. "}
+
+event: token
+data: {"text": "Include the necessary function names, file names "}
+
+event: token
+data: {"text": "mentioned in the commit message. Do not "}
+
+event: token
+data: {"text": "include information about oss-fuzz or any "}
+
+event: token
+data: {"text": "other cross references such as issue number and "}
+
+event: token
+data: {"text": "bug number. Do not describe how the "}
+
+event: token
+data: {"text": "vulnerability can be addressed. Do not add "}
+
+event: token
+data: {"text": "your own speculations and ideas. No need to extend the explanation. Only output "}
+
+event: token
+data: {"text": "the rephrased description and do not output anything else. Use present tense and do not use past "}
+
+event: token
+data: {"text": "tense.\n<|det|>text [198, 232, 489, 253]<|/det|>The input will be in the following format: "}
+
+event: token
+data: {"text": "MESSAGE: the commit message\n<|det|>image_caption [325, 277, 670, 292]<|/det|>Figure "}
+
+event: token
+data: {"text": "10: Prompt for rephrasing commit messages.\n<|det|>text [170, 307, 828, "}
+
+event: token
+data: {"text": "502]<|/det|>Human Verification of LLM-Based Filtering and Rephrasing We conduct expert audits to evaluate the quality of "}
+
+event: token
+data: {"text": "LLM-based filtering and rephrasing. The audit includes 300 stratified samples (150 retained by the pipeline and "}
+
+event: token
+data: {"text": "150 filtered out) covering 96 projects and all crash types. The distribution of PoC lengths, which serves as "}
+
+event: token
+data: {"text": "a proxy for task difficulty, is similar between this audited subset and the full dataset, as illustrated in Figure "}
+
+event: token
+data: {"text": "11. Two authors collaboratively define the evaluation criteria, independently review the samples, and adjudicate disagreements. Inter-annotator agreement "}
+
+event: token
+data: {"text": "is strong, with Cohen's \\(\\kappa\\) of \\(0.82 \\pm 0.03\\) prior to "}
+
+event: token
+data: {"text": "adjudication. For filtering, experts examine whether each vulnerability description include sufficient detail for reproducing the corresponding vulnerability; 6 cases "}
+
+event: token
+data: {"text": "(4% of all selected samples) lack the necessary locating information, corresponding to an estimated precision of \\(96\\%\\). We "}
+
+event: token
+data: {"text": "also identify 10 false negatives, indicating that only a small fraction of valid samples are excluded. For "}
+
+event: token
+data: {"text": "rephrasing, experts evaluate whether the rewritten descriptions preserved all essential technical content while removing patch-specific details (e.g., patching "}
+
+event: token
+data: {"text": "instructions, commit hashes, and issue IDs); all reviewed instances meet these criteria. These results reflect the stability of our pipeline.\n"}
+
+event: token
+data: {"text": "<|det|>chart [339, 520, 652, 662]<|/det|>\n<|det|>image_caption [222, "}
+
+event: token
+data: {"text": "675, 773, 690]<|/det|>Figure 11: Distribution of PoC lengths for the audited subset "}
+
+event: token
+data: {"text": "versus the full dataset.\n<|det|>text [170, 715, 828, 844]<|/det|>Agent Instructions We provide "}
+
+event: token
+data: {"text": "the user prompt to agents as shown in Figure 12. We provide all necessary information and inputs under the agent workspace directory "}
+
+event: token
+data: {"text": "“/workspace”. The agent is free to check these contents using its built-in tools or command line. For "}
+
+event: token
+data: {"text": "CTF agents, if the submitted PoC triggers a crash, a flag is also returned to accommodate their evaluation process. This "}
+
+event: token
+data: {"text": "simulates typical CTF scenarios, which is required in the workflow designed in the CTF agent frameworks. Figure 13 "}
+
+event: token
+data: {"text": "presents the template used to construct the detailed README.md file for each task. Different difficulty levels specify different files in the "}
+
+event: token
+data: {"text": "Files section: Level 0 includes only repo-vul.tar.gz; Level 1 adds description.txt; Level 2 "}
+
+event: token
+data: {"text": "adds error.txt; Level 3 further adds patch.diff and repo-fix.tar.gz.\n<|det|>text [170, "}
+
+event: token
+data: {"text": "848, 826, 904]<|/det|>Compute Resources We use a machine equipped with 2x AMD EPYC "}
+
+event: token
+data: {"text": "9654 96-Core Processors and 1.5T RAM to host the submission environment. The submission "}
+
+event: token
+data: {"text": "server uses about 10TB of disk to store all tasks' environments. We run the agents on the same machine and "}
+
+event: token
+data: {"text": "call LLM APIs to do model inference. These APIs are either provided by the model vendors or hosted by "}
+
+event: token
+data: {"text": "ourselves.\n<|det|>page_number [490, 949, 509, 960]<|/det|>20\n"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 6, "total_pages": 6, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: progress
+data: {"phase": "merge", "current_page": 6, "total_pages": 6, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: done
+data: {"markdown_url": "/api/jobs/j_dd1cdfdff464/markdown", "archive_url": "/api/jobs/j_dd1cdfdff464/archive"}
+

@@ -130,6 +130,14 @@ class Settings:
     frontend_dir: Path | None = None    # None이면 리포 상대 경로에서 탐색
     render_dpi: int = 200
     pages_per_chunk: int = 8
+    # 페이지 OCR 충실도 게이트 — born-digital PDF의 텍스트 레이어와 대조해 임계값
+    # 미만인 페이지만 단독 재실행한다(pipeline/fidelity.py 참조). 0 이하 = 비활성.
+    # 기본 0.70의 근거(46쪽 실측, 열화 4쪽이 확인된 실행): 열화 페이지 최고 0.494 vs
+    # **전 페이지 중** 비열화 최저 0.813. 유효 구간의 가운데다.
+    ocr_fidelity_threshold: float = 0.70
+    # 재시도 상한 — 문서 페이지 수 대비 비율. 스캔·손상 문서에서 전 페이지 재실행으로
+    # 런타임이 폭발하지 않게 막는다. 짧은 문서도 복구할 수 있게 최소 2쪽은 허용한다.
+    ocr_fidelity_max_retry_ratio: float = 0.2
     max_pages: int = 200
     max_upload_mb: int = 100
     max_length: int = 32768
@@ -203,6 +211,10 @@ class Settings:
             frontend_dir=Path(frontend) if frontend else None,
             render_dpi=_env_int("RENDER_DPI", 200),
             pages_per_chunk=_env_int("PAGES_PER_CHUNK", 8),
+            ocr_fidelity_threshold=_env_float("OCR_FIDELITY_THRESHOLD", 0.70),
+            ocr_fidelity_max_retry_ratio=_env_float(
+                "OCR_FIDELITY_MAX_RETRY_RATIO", 0.2
+            ),
             max_pages=_env_int("MAX_PAGES", 200),
             max_upload_mb=_env_int("MAX_UPLOAD_MB", 100),
             max_length=_env_int("MAX_LENGTH", 32768),

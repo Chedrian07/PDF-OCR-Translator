@@ -310,8 +310,15 @@ class JobStore:
 class EventBroker:
     """잡별 SSE 구독 큐 + 실행 중 OCR token 재연결 히스토리.
 
-    느린 구독자의 큐가 가득 차면 token 이벤트는 계속 버리지만, 새 구독은
-    subscribe_with_replay()로 누적 원문을 한 번 받아 중간 접속·재연결 갭을 복구한다.
+    느린 구독자의 큐가 가득 차면 token 이벤트를 버리되 그 구독자에 표식을 남긴다 —
+    SSE 루프가 표식을 보고 누적 원문 replay로 재동기화한다(조용한 유실 금지:
+    토큰 하나가 빠지면 <PAGE> 마커나 <|det|> 절반이 사라져 이후 페이지 귀속이
+    영구히 어긋난다). 새 구독은 subscribe_with_replay()로 누적 원문을 한 번 받아
+    중간 접속·재연결 갭을 복구한다.
+
+    재처리(rewind)로 서버가 이미 보낸 출력을 폐기할 때는 truncate_token_history()로
+    히스토리도 같은 지점까지 되돌린다 — 그러지 않으면 재연결 replay가 폐기된
+    출력을 다시 실어 나른다.
     """
 
     def __init__(self) -> None:
@@ -319,10 +326,22 @@ class EventBroker:
         self._token_history: dict[str, deque[str]] = {}
         self._token_history_chars: dict[str, int] = {}
         self._token_history_truncated: set[str] = set()
+        # 잡 시작부터 지금까지 발행한 token 문자 수(절대 오프셋). 앞쪽 절단과
+        # 무관하게 단조 증가하므로 rewind 지점을 절대 좌표로 지정할 수 있다.
+        self._token_emitted: dict[str, int] = {}
         self._lock = threading.Lock()
 
-    def subscribe(self, job_id: str) -> queue.Queue:
+    @staticmethod
+    def _new_queue() -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=_EVENT_QUEUE_MAX)
+        # 느린 구독자에게서 token을 버렸다는 표식 — SSE 루프가 이 플래그를 보고
+        # 누적 원문 replay로 재동기화한다. 버린 채 조용히 넘어가면 <PAGE> 마커나
+        # <|det|> 절반이 사라져 이후 페이지 귀속이 영구히 어긋난다.
+        q.token_dropped = False
+        return q
+
+    def subscribe(self, job_id: str) -> queue.Queue:
+        q = self._new_queue()
         with self._lock:
             self._subs.setdefault(job_id, []).append(q)
         return q
@@ -334,7 +353,7 @@ class EventBroker:
         락에서 히스토리 갱신과 구독자 스냅샷을 함께 하므로, 경계의 token은
         replay 또는 새 큐 중 정확히 한 곳에 들어간다(중복·유실 없음).
         """
-        q: queue.Queue = queue.Queue(maxsize=_EVENT_QUEUE_MAX)
+        q = self._new_queue()
         with self._lock:
             replay = "".join(self._token_history.get(job_id, ()))
             truncated = job_id in self._token_history_truncated
@@ -350,12 +369,16 @@ class EventBroker:
                 del self._subs[job_id]
 
     def publish(self, job_id: str, event: str, data: dict) -> None:
+        # 히스토리 갱신과 구독자 배달을 같은 락 안에서 수행한다 — resync()가
+        # "대기 중 token을 비우고 히스토리를 스냅샷"하는 사이에 새 token이 큐로
+        # 들어가면 replay와 중복된다. put_nowait는 블로킹하지 않아 안전하다.
         with self._lock:
             if event == "token":
                 text = data.get("text")
                 if isinstance(text, str) and text:
                     history = self._token_history.setdefault(job_id, deque())
                     history.append(text)
+                    self._token_emitted[job_id] = self._token_emitted.get(job_id, 0) + len(text)
                     total = self._token_history_chars.get(job_id, 0) + len(text)
                     while history and total > _TOKEN_HISTORY_MAX_CHARS:
                         total -= len(history.popleft())
@@ -366,17 +389,79 @@ class EventBroker:
                 self._token_history.pop(job_id, None)
                 self._token_history_chars.pop(job_id, None)
                 self._token_history_truncated.discard(job_id)
-        for q in subs:
-            try:
-                q.put_nowait((event, data))
-            except queue.Full:
-                if event == "token":
-                    continue  # 토큰은 손실 허용
-                try:  # 오래된 것 하나 버리고 재시도
-                    q.get_nowait()
+                self._token_emitted.pop(job_id, None)
+            for q in subs:
+                try:
                     q.put_nowait((event, data))
-                except (queue.Empty, queue.Full):  # pragma: no cover
-                    pass
+                except queue.Full:
+                    if event == "token":
+                        # 유실을 표식으로 남긴다 — SSE 루프가 replay로 되살린다
+                        q.token_dropped = True
+                        continue
+                    try:  # 오래된 것 하나 버리고 재시도
+                        evicted = q.get_nowait()
+                        if evicted[0] == "token":
+                            # 제어 이벤트 자리를 만드느라 밀어낸 token도 유실이다
+                            q.token_dropped = True
+                        q.put_nowait((event, data))
+                    except (queue.Empty, queue.Full):  # pragma: no cover
+                        pass
+
+    def truncate_token_history(self, job_id: str, keep_chars: int) -> None:
+        """재처리로 폐기한 출력을 재연결 히스토리에서도 되돌린다.
+
+        keep_chars는 잡 시작부터의 **절대** 문자 오프셋이다(BrokerSink가 발행한
+        누계와 같은 좌표계). 앞쪽이 상한으로 잘린 잡은 절대 좌표를 복원할 수
+        없으므로 건드리지 않는다 — 그런 잡의 replay는 클라이언트가 이미 거부한다.
+        """
+        with self._lock:
+            history = self._token_history.get(job_id)
+            emitted = self._token_emitted.get(job_id, 0)
+            if history is None or keep_chars >= emitted:
+                return
+            if job_id in self._token_history_truncated:
+                return
+            drop = emitted - keep_chars
+            while drop > 0 and history:
+                last = history[-1]
+                if len(last) <= drop:
+                    history.pop()
+                    drop -= len(last)
+                else:
+                    history[-1] = last[: len(last) - drop]
+                    drop = 0
+            self._token_emitted[job_id] = keep_chars
+            self._token_history_chars[job_id] = sum(len(x) for x in history)
+
+    def resync(self, job_id: str, q: queue.Queue) -> tuple[str, bool]:
+        """유실 표식이 붙은 구독자를 누적 원문으로 되살린다.
+
+        큐에 남은 token 이벤트를 버리고(그 내용은 히스토리에 이미 있다) 히스토리
+        스냅샷을 돌려준다. publish()가 같은 락에서 배달하므로 스냅샷과 배달 사이에
+        새 token이 끼어들지 않는다 — 중복·유실 없이 정확히 한 번씩만 전달된다.
+        """
+        with self._lock:
+            q.token_dropped = False
+            keep: list[tuple[str, dict]] = []
+            while True:
+                try:
+                    item = q.get_nowait()
+                except queue.Empty:
+                    break
+                # token은 히스토리에 이미 있다. reset도 마찬가지 — truncate가 publish
+                # 보다 먼저 같은 락에서 일어나므로 스냅샷이 이미 절단된 상태다. 늦게
+                # 배달하면 이미 되돌린 원문을 한 번 더 잘라 멀쩡한 페이지가 사라진다.
+                if item[0] not in ("token", "reset"):
+                    keep.append(item)
+            for item in keep:
+                try:
+                    q.put_nowait(item)
+                except queue.Full:  # pragma: no cover — 방금 비운 큐
+                    break
+            return (
+                "".join(self._token_history.get(job_id, ())),
+                job_id in self._token_history_truncated,
+            )
 
     def publish_progress(self, job: Job) -> None:
         self.publish(job.id, "progress", {**job.progress, "status": job.status})

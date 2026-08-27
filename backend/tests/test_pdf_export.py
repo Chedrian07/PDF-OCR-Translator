@@ -1113,3 +1113,22 @@ def test_리댁션_청킹은_지울_것이_없으면_페이지를_건드리지_�
 
     _redact_in_chunks(_Page(), [])
     assert calls == []
+
+
+def test_latex_escapes_become_literal_symbols():
+    """`\\%`는 LaTeX 이스케이프지 명령이 아니다 — 평문에서는 기호 자체가 답이다.
+
+    `_LATEX_COMMAND_RE`가 알파벳 명령만 잡아 번역 면에 백슬래시가 그대로 찍혔다
+    (실측 8건: "96\\% 정밀도"). `\\_`·`\\^`는 첨자 표기가 아니라 글자 그대로의
+    밑줄·캐럿이므로 첨자 정규식보다 먼저 봉인한다.
+    """
+    from app.pipeline.pdf_export.text import _plain_text
+
+    assert _plain_text(r"96\% 정밀도") == "96% 정밀도"
+    assert _plain_text(r"R\&D 예산") == "R&D 예산"
+    assert _plain_text(r"\#1 항목") == "#1 항목"
+    assert _plain_text(r"snake\_case 이름") == "snake_case 이름"
+    assert _plain_text(r"x\^2 표기") == "x^2 표기"
+    # 이스케이프가 아닌 기호와 실제 수식은 그대로 동작한다
+    assert _plain_text("50% 감소") == "50% 감소"
+    assert _plain_text(r"\(E=mc^{2}\)") == "E=mc²"

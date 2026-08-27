@@ -9,7 +9,12 @@ from pathlib import Path
 # 7: 폰트 서브셋(20.8MB → 0.94MB) + `\sim` tofu를 ASCII 물결표로 낮춤. 크기가
 #    바뀌는 것만으로도 올릴 값어치가 있다 — 올리지 않으면 이미 캐시된 잡은
 #    입력이 그대로라 계속 20MB짜리를 내려보낸다.
-PDF_EXPORT_FORMAT_VERSION = 7
+# 8: 페이지 등록 게이트(대조되지 않는 페이지는 수정하지 않음) + 계획/리댁션
+#    장애물 모델 일치(겹침 제거 · "공간 부족" 오판 제거). 조판 결과가 달라진다.
+# 9: 피할 수 없는 전폭 내부 띠를 장애물에서 제외 + 윗변이 가려진 상자는 장애물
+#    아래에서 시작하는 후보를 추가. 자리가 있는데도 버려지던 번역이 들어간다
+#    (실측 no_fit 66 → 25). 조판 결과가 달라진다.
+PDF_EXPORT_FORMAT_VERSION = 9
 
 
 class PdfExportError(RuntimeError):
@@ -37,6 +42,19 @@ class PdfExportResult:
         """
         self.kept += count
         self.kept_reasons[reason] = self.kept_reasons.get(reason, 0) + count
+
+    def merge(self, other: "PdfExportResult") -> None:
+        """다른 집계를 흡수한다 — 계획을 여러 패스 시도할 때 마지막 것만 반영."""
+        self.replaced += other.replaced
+        self.kept += other.kept
+        self.relocated += other.relocated
+        self.table_cells_replaced += other.table_cells_replaced
+        self.listing_lines_replaced += other.listing_lines_replaced
+        for key, count in other.specialist_kept.items():
+            self.specialist_kept[key] = self.specialist_kept.get(key, 0) + count
+        for key, count in other.kept_reasons.items():
+            self.kept_reasons[key] = self.kept_reasons.get(key, 0) + count
+        self.warnings.extend(other.warnings)
 
     def report(self) -> dict:
         """경로·본문 없이 UI에 안전하게 노출할 ASCII/숫자 중심 생성 리포트."""

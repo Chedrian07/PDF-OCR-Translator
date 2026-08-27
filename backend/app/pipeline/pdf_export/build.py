@@ -23,6 +23,8 @@ from .constants import (
     _MAX_TABLE_CELLS,
     _MIN_FONT_PT,
     _MIN_TABLE_FONT_PT,
+    _LASTRESORT_MIN_FONT_PT,
+    _LASTRESORT_SHRINK_STEPS,
     _PRESERVE_TYPES,
     _REDACT_CHUNK,
     _REPLACEABLE_TYPES,
@@ -54,6 +56,7 @@ from .spans import (
     _block_rect,
     _leading_bold_prefix,
     _listing_segments,
+    _ownership_text,
     _reflow_flattened_text,
     _source_span_matches_rect,
     _source_span_records,
@@ -62,6 +65,8 @@ from .spans import (
 from .subset import drawable_charset, subset_font_files
 from .tables import _table_cell_rects, _table_cell_source_style, _table_cells
 from .text import (
+    match_paragraph_shape,
+    strip_markdown,
     _TITLE_PREFIX_RE,
     _normalize_inline_spacing,
     _plain_text,
@@ -226,6 +231,54 @@ class _PageContext:
     image_regions: list
     fixed_visuals: list
     fonts: _ExportFonts
+    # 이번 계획 패스에서 원문이 **지워질 것으로 가정**하는 블록 인덱스.
+    # 계획 단계의 장애물 모델과 실제 리댁션이 어긋나면 두 방향으로 모두 깨진다:
+    # 지워질 원문을 장애물로 남기면 들어갈 자리가 있는 번역이 "공간 부족"으로
+    # 버려지고(실측 no_fit 81건 중 74건), 반대로 남을 원문을 장애물에서 빼면
+    # 그 위에 번역이 찍힌다(실측 겹침 30건). _process_page가 수렴할 때까지
+    # 이 집합을 줄여 가며 두 모델을 일치시킨다.
+    cleared_indices: frozenset = frozenset()
+
+    def obstacle_spans(self, exclude: "set[int] | frozenset[int]" = frozenset()):
+        """이번 패스에서 **남을** 원문 span들 — 계획의 장애물 집합."""
+        for owner, spans in self.source_ownership.items():
+            if owner in self.cleared_indices or owner in exclude:
+                continue
+            for span in spans:
+                yield span.rect
+
+
+# 페이지 면적의 이 비율을 넘는 벡터 도형은 "큰 도형"으로 본다. 10%면 A4에서
+# 대략 8x8cm — 그보다 큰 상자의 내부를 통째로 막으면 본문 한 단이 사라진다.
+_LARGE_DRAWING_FRACTION = 0.10
+# 이보다 밝은 단색 채움은 배경으로 간주한다(흰 상자·연회색 코드 배경).
+_INVISIBLE_FILL_LEVEL = 0.90
+
+
+def _drawing_interior_is_open(drawing: dict) -> bool:
+    """이 도형의 **안쪽**에 글자를 놓아도 가려지지 않는가.
+
+    채움이 없으면(테두리만) 안쪽은 비어 있고, 채움이 배경색이면 글자를 덮지
+    않는다. 둘 다 아니면(그래프의 색 채움 등) 통째로 장애물이다.
+    """
+    fill = drawing.get("fill")
+    if fill is None:
+        return True
+    try:
+        return min(float(c) for c in fill) >= _INVISIBLE_FILL_LEVEL
+    except (TypeError, ValueError):
+        return False
+
+
+def _rect_edge_bands(fitz, rect, stroke_width: float) -> list:
+    """사각형의 네 변만 얇은 띠로 — 테두리는 피하되 내부는 쓸 수 있게."""
+    band = max(1.0, float(stroke_width or 1.0)) + 0.5
+    return [
+        fitz.Rect(rect.x0, rect.y0, rect.x1, min(rect.y1, rect.y0 + band)),
+        fitz.Rect(rect.x0, max(rect.y0, rect.y1 - band), rect.x1, rect.y1),
+        fitz.Rect(rect.x0, rect.y0, min(rect.x1, rect.x0 + band), rect.y1),
+        fitz.Rect(max(rect.x0, rect.x1 - band), rect.y0, rect.x1, rect.y1),
+    ]
 
 
 def _page_visual_obstacles(fitz, page, block_rects, oblocks):
@@ -238,6 +291,12 @@ def _page_visual_obstacles(fitz, page, block_rects, oblocks):
         raster_rects = []
     # 벡터 표·그래프·구분선도 번역문 확장 영역의 장애물이다. path의 rect가
     # 수평/수직 0폭 선이면 먼저 1pt 패딩해 유효한 사각형으로 만든다.
+    #
+    # 다만 **큰 도형의 bbox를 통째로** 장애물로 쓰면 안 된다. 흰 배경 채움이나
+    # 코드 상자 테두리는 안쪽에 글자를 얼마든지 놓을 수 있는데도 페이지 절반을
+    # 막아 버려, 들어갈 자리가 있는 번역이 "공간 부족"으로 버려진다. 큰 도형 중
+    # 안쪽이 비었거나(테두리만) 배경색으로 칠해진 것은 **테두리 띠만** 남긴다.
+    page_area_all = page.rect.width * page.rect.height or 1.0
     drawing_rects = []
     try:
         for drawing in page.get_drawings():
@@ -247,8 +306,17 @@ def _page_visual_obstacles(fitz, page, block_rects, oblocks):
             drawing_rect = fitz.Rect(bbox)
             drawing_rect += (-0.5, -0.5, 0.5, 0.5)
             drawing_rect &= page.mediabox
-            if not drawing_rect.is_empty:
-                drawing_rects.append(drawing_rect)
+            if drawing_rect.is_empty:
+                continue
+            area_fraction = (drawing_rect.width * drawing_rect.height) / page_area_all
+            if area_fraction >= _LARGE_DRAWING_FRACTION and _drawing_interior_is_open(
+                drawing,
+            ):
+                drawing_rects.extend(
+                    _rect_edge_bands(fitz, drawing_rect, drawing.get("width") or 1.0)
+                )
+                continue
+            drawing_rects.append(drawing_rect)
     except Exception:  # noqa: BLE001 — 벡터 목록 실패가 텍스트 교체를 막지 않는다
         drawing_rects = []
     # 그림 위 텍스트 방어용 영역: layout image 블록 ∪ 래스터 인스턴스.
@@ -325,6 +393,21 @@ def _plan_table_block(
         )
     ]
     changed_cells = len(changed_cell_specs)
+    # 이 표에서 **지워지지 않는** 원문 span은 셀 조판의 장애물이다. 격자 추정은
+    # 셀 경계를 대략만 맞추므로, 장애물 없이 조판하면 번역 셀이 옆 칸에 남은
+    # 원문 글리프에 닿는다(실측 p3: 번역 "실세계"가 앞 칸 끝의 ")"와 겹침).
+    cell_zone = [rect for _o, _n, rect in changed_cell_specs]
+    table_avoid = [
+        span.rect
+        for span in ctx.source_records
+        if table_rect is not None
+        and not (span.rect & table_rect).is_empty
+        and not any(
+            _rect_overlap_area(span.rect, rect)
+            >= max(0.01, span.rect.width * span.rect.height) * 0.5
+            for rect in cell_zone
+        )
+    ]
     failed_cell: _TableCell | None = None
     for old_cell, new_cell, cell_rect in changed_cell_specs:
         old_text = _plain_text(old_cell.text)
@@ -344,6 +427,7 @@ def _plan_table_block(
             max_rect=cell_rect,
             align=cell_align,
             bold=cell_bold,
+            avoid_rects=table_avoid,
         )
         if plan is None:
             plan = _plan_shrink_to_fit(
@@ -357,6 +441,7 @@ def _plan_table_block(
                 align=cell_align,
                 bold=cell_bold,
                 lineheights=_CAPTION_LINEHEIGHTS,
+                avoid_rects=table_avoid,
             )
         source_size = base_pt / 1.03
         readable_floor = max(
@@ -392,8 +477,13 @@ def _plan_text_block(
     targets: list[_Replacement], result: PdfExportResult,
 ) -> _FlowCandidate | None:
     """일반 텍스트 블록의 flow 후보. 줄 단위로 확정되면 targets에 직접 넣는다."""
-    old = _plain_text(str(ob.get("content") or ""))
-    new = _plain_text(str(tb.get("content") or ""))
+    source_raw = str(ob.get("content") or "")
+    old = _plain_text(source_raw)
+    # 번역문의 마크다운 표기를 걷어내고, 원문이 한 문단이면 문단 구조도 맞춘다 —
+    # 둘 다 지면에 그대로 찍히거나(마커) 높이를 부풀려 블록을 통째로 버리게 한다.
+    new = _plain_text(
+        strip_markdown(match_paragraph_shape(source_raw, str(tb.get("content") or "")))
+    )
     if block_type == "title":
         new = _restore_title_prefix(old, new)
     if not new or new == old:
@@ -576,6 +666,16 @@ def _plan_page_targets(ctx: _PageContext, result: PdfExportResult):
                     and target.source_rect is not None
                 )
             continue
+        # 번역 단계가 "번역하지 않기로 결정"한 블록(코드·CLI 트랜스크립트·식별자
+        # 나열). 원문과 번역이 같아 아래 `unchanged`로 떨어지면 번역 결함과
+        # 구분되지 않는다 — 의도적 보존으로 따로 집계한다.
+        preserved = str(tb.get("preserved") or "")
+        if preserved:
+            result.keep(f"preserved:{preserved}")
+            result.specialist_kept[preserved] = (
+                result.specialist_kept.get(preserved, 0) + 1
+            )
+            continue
         if block_type not in _REPLACEABLE_TYPES:
             if block_type in _SPECIALIST_TYPES:
                 result.specialist_kept[block_type] = (
@@ -604,12 +704,8 @@ def _plan_flow_targets(
     for component in _flow_components(flow_candidates):
         component_indices = {candidate.block_index for candidate in component}
         fixed_rects = [span.rect for span in ctx.unowned_source]
-        fixed_rects.extend(
-            span.rect
-            for owner, spans in ctx.source_ownership.items()
-            if owner not in component_indices
-            for span in spans
-        )
+        # 이번 패스에서 지워질 블록의 원문은 장애물이 아니다 — 남을 블록만 센다.
+        fixed_rects.extend(ctx.obstacle_spans(exclude=component_indices))
         fixed_rects.extend(ctx.fixed_visuals)
         fixed_rects.extend(
             target.plan.ink_rect
@@ -638,7 +734,12 @@ def _plan_flow_targets(
             # 회수하고, 아직 계획하지 않은 이웃의 원문은 보존될 수 있으므로
             # 장애물로 예약해 번역문이 그 위에 겹치지 않게 한다.
             planned = []
-            for position, candidate in enumerate(component):
+            # 아직 배치되지 않은 형제의 원문은 남을 수 있으므로 장애물로 예약한다.
+            # 앞쪽(이미 실패한) 형제도 반드시 포함해야 한다 — 빼면 그 자리를 빈
+            # 공간으로 보고 번역문을 최대 48pt 위로 끌어올려 지워지지 않은 영문
+            # 위에 찍는다(실측: p2 "Main Contributions" 100% 피복, p8 5줄 겹침).
+            pending = {candidate.block_index for candidate in component}
+            for candidate in component:
                 obstacles = list(fixed_rects)
                 obstacles.extend(
                     target.plan.ink_rect
@@ -647,8 +748,9 @@ def _plan_flow_targets(
                 )
                 obstacles.extend(
                     span.rect
-                    for other in component[position + 1:]
-                    for span in ctx.source_ownership.get(other.block_index, [])
+                    for other in pending
+                    if other != candidate.block_index
+                    for span in ctx.source_ownership.get(other, [])
                 )
                 single = None
                 for text in (candidate.text, candidate.reflow_text):
@@ -661,6 +763,7 @@ def _plan_flow_targets(
                         break
                 if single:
                     planned.extend(single)
+                    pending.discard(candidate.block_index)
                     continue
                 # 흘려 넣기가 전부 실패해도 리스팅·표는 줄 단위로는 제자리에
                 # 들어간다. 폭이 모자란 줄만 원문으로 남기고 나머지를 회수한다.
@@ -675,6 +778,7 @@ def _plan_flow_targets(
                 )
                 if listing_targets:
                     planned.extend(listing_targets)
+                    pending.discard(candidate.block_index)
                     missing = listing_changed - len(listing_targets)
                     if missing:
                         result.keep("listing_line_no_fit", missing)
@@ -682,6 +786,28 @@ def _plan_flow_targets(
                             f"p{ctx.pno}: 블록 {candidate.block_index + 1}의 "
                             f"{missing}줄 교체 생략(줄 폭 부족) — 그 줄만 원문 보존"
                         )
+                    continue
+                # 최후 수단: 가독성 하한 아래로 축소해서라도 놓는다. 여기서
+                # 포기하면 번역 면에 영문 원문이 그대로 남고, 그건 사용자가
+                # 금지한 상태다(미번역·원문 혼재). 계층이 무너지는 편이 낫다.
+                for text in (candidate.text, candidate.reflow_text):
+                    if text is None:
+                        continue
+                    single = _plan_flow_group(
+                        ctx.page, [replace(candidate, text=text)], obstacles,
+                        scales=_LASTRESORT_SHRINK_STEPS,
+                        min_pt=_LASTRESORT_MIN_FONT_PT,
+                    )
+                    if single:
+                        break
+                if single:
+                    planned.extend(single)
+                    pending.discard(candidate.block_index)
+                    smallest = min(t.plan.fontsize for t in single)
+                    result.warnings.append(
+                        f"p{ctx.pno}: 블록 {candidate.block_index + 1} 축소 배치"
+                        f"({smallest:.1f}pt) — 원문을 남기지 않으려 가독성 하한 아래로 조판"
+                    )
                     continue
                 flattened = candidate.reflow_text is not None
                 result.keep("flattened_no_fit" if flattened else "no_fit")
@@ -913,8 +1039,162 @@ def _insert_page_targets(page, targets, result: PdfExportResult) -> None:
             result.listing_lines_replaced += 1
 
 
-def _process_page(fitz, page, pno, tpage, opage, fonts, result) -> None:
+# 판정에 쓸 블록의 최소 길이 — 짧은 라벨은 우연 일치가 잦다.
+_REGISTRATION_MIN_CHARS = 20
+_REGISTRATION_PROBE = 40
+# 판정에 필요한 최소 프로브 수. 블록이 한둘뿐인 페이지는 비율이 요동쳐 오탐이 난다.
+_REGISTRATION_MIN_PROBES = 3
+# 이웃 페이지가 이만큼 더 잘 맞으면 "이 페이지의 layout이 아니다"로 본다.
+# 절대 점수는 OCR 잡음 때문에 정상 페이지도 0.5까지 내려간다(실측 p7 0.55) —
+# 판별력이 있는 건 **이웃과의 차이**다(실측: 어긋난 페이지는 이웃이 0.83~1.00,
+# 자기 자리는 0.08~0.30으로 격차가 0.5 이상 벌어졌다).
+_REGISTRATION_MARGIN = 0.25
+_REGISTRATION_NEIGHBOUR_MIN = 0.50
+_REGISTRATION_RADIUS = 2
+
+
+def _registration_probes(oblocks) -> list[str]:
+    probes = [
+        _ownership_text(b.get("content"))[:_REGISTRATION_PROBE]
+        for b in oblocks
+        if (b.get("type") or "").lower() not in _SPECIALIST_TYPES
+    ]
+    return [t for t in probes if len(t) >= _REGISTRATION_MIN_CHARS]
+
+
+def _registration_score(probes: list[str], haystack: str) -> float:
+    if not probes or not haystack:
+        return 0.0
+    return sum(1 for t in probes if t in haystack) / len(probes)
+
+
+def _unregistered_layout_pages(doc, orig_pages: dict) -> dict:
+    """layout 페이지가 **다른** 물리 페이지를 설명하고 있는 경우를 찾는다.
+
+    OCR 단계가 페이지를 밀어 매핑하면(모델이 페이지를 쪼개거나 건너뛴 경우)
+    여기서 걸러야 한다. 걸러지지 않으면 `_assign_source_spans`가 순전히 기하로
+    소유권을 배정해 **엉뚱한 페이지의 원문을 영구 리댁션**하고 그 자리에 다른
+    페이지의 번역을 찍는다(실측: 46p 논문에서 23쪽 프로젝트명 29개가 삭제되고
+    24쪽 캡션이 그 자리에 찍혔다).
+
+    반환: {layout 페이지 번호: (더 잘 맞는 물리 페이지, 그 점수, 제자리 점수)}
+    """
+    texts: dict = {}
+
+    def page_text(idx: int) -> str:
+        if idx not in texts:
+            texts[idx] = (
+                _ownership_text(doc[idx].get_text())
+                if 0 <= idx < doc.page_count else ""
+            )
+        return texts[idx]
+
+    out: dict = {}
+    for pno, opage in orig_pages.items():
+        if not isinstance(pno, int):
+            continue
+        probes = _registration_probes(opage.get("blocks", []))
+        if len(probes) < _REGISTRATION_MIN_PROBES:
+            continue  # 판정 근거 부족 — 기존 동작 유지
+        mine = _registration_score(probes, page_text(pno - 1))
+        best_score, best_page = mine, pno
+        for delta in range(-_REGISTRATION_RADIUS, _REGISTRATION_RADIUS + 1):
+            if delta == 0:
+                continue
+            other = _registration_score(probes, page_text(pno - 1 + delta))
+            if other > best_score:
+                best_score, best_page = other, pno + delta
+        if (
+            best_page != pno
+            and best_score >= _REGISTRATION_NEIGHBOUR_MIN
+            and best_score >= mine + _REGISTRATION_MARGIN
+        ):
+            out[pno] = (best_page, best_score, mine)
+    return out
+
+
+# 계획 ↔ 리댁션 일치까지 허용하는 최대 패스 수. 매 패스마다 "지워진다고 가정한
+# 블록" 집합이 **엄격히 줄어들므로** 블록 수 안에서 반드시 수렴한다. 상한은
+# 병리적 입력의 CPU 방어일 뿐이다(실측 46p 논문: 페이지당 1~2패스).
+_MAX_PLAN_PASSES = 6
+
+
+def _optimistically_cleared(oblocks, tblocks) -> frozenset:
+    """원문이 지워질 **후보** 블록 — 계획 1패스의 낙관적 가정.
+
+    표는 셀 단위로 리댁션하므로 블록 통째로 지워진다고 가정하지 않는다.
+    """
+    out = set()
+    for i, (ob, tb) in enumerate(zip(oblocks, tblocks)):
+        if not isinstance(ob, dict) or not isinstance(tb, dict):
+            continue
+        btype = str(tb.get("type") or "")
+        if btype not in _REPLACEABLE_TYPES:
+            continue
+        if (tb.get("vertical") or ob.get("vertical")) in _VERTICAL_SKIP:
+            continue
+        if str(tb.get("content") or "").strip() == str(ob.get("content") or "").strip():
+            continue
+        out.add(i)
+    return frozenset(out)
+
+
+def _plan_until_consistent(base_ctx: _PageContext, result: PdfExportResult):
+    """계획의 장애물 모델과 실제 리댁션이 일치할 때까지 다시 계획한다.
+
+    1패스는 교체 후보의 원문이 **전부 지워진다**고 가정한다 — 그래야 같은 단의
+    이웃 원문이 자리를 막아 번역이 통째로 버려지는 일이 없다. 배치에 실패한
+    블록은 원문이 남으므로 그 원문을 장애물로 되돌리고 다시 계획한다. 가정
+    집합이 매 패스 줄어들어 수렴하며, 수렴 시점에는 "장애물로 본 것 = 실제로
+    남는 것"이 되어 번역문이 남은 원문 위에 찍히는 일이 구조적으로 없다.
+    """
+    cleared = _optimistically_cleared(base_ctx.oblocks, base_ctx.tblocks)
+    targets: list[_Replacement] = []
+    links: list[object] = []
+    trial = result
+    for attempt in range(_MAX_PLAN_PASSES):
+        # 마지막 패스가 아니면 집계를 버린다 — 중간 패스의 keep 사유가 리포트에
+        # 섞이면 실제 산출물과 다른 수치가 남는다.
+        trial = PdfExportResult(path=result.path)
+        ctx = replace(base_ctx, cleared_indices=cleared)
+        targets, flow_candidates, links = _plan_page_targets(ctx, trial)
+        _plan_flow_targets(ctx, flow_candidates, targets, trial)
+        placed = {t.block_index for t in targets if t.block_index >= 0}
+        missing = cleared - placed
+        if not missing:
+            break
+        if attempt == _MAX_PLAN_PASSES - 1:
+            logger.warning(
+                "PDF 내보내기: p%d 계획이 %d패스 안에 수렴하지 않음 — 마지막 계획 사용",
+                base_ctx.pno, _MAX_PLAN_PASSES,
+            )
+            break
+        cleared = cleared - missing
+    result.merge(trial)
+    return targets, links
+
+
+def _process_page(
+    fitz, page, pno, tpage, opage, fonts, result, misregistered=None,
+) -> None:
     """한 페이지를 계획 → 리댁션 → 삽입 순서로 처리한다."""
+    # 0) 페이지 등록 확인 — 다른 페이지를 설명하는 레이아웃이면 **한 글자도
+    #    건드리지 않는다**. 건드리면 그 페이지의 원문이 영구 삭제된다.
+    hit = (misregistered or {}).get(pno)
+    if hit is not None:
+        elsewhere, score, mine = hit
+        blocks = opage.get("blocks", [])
+        result.keep("page_source_mismatch", max(1, len(blocks)))
+        result.warnings.append(
+            f"p{pno}: 레이아웃이 {elsewhere}쪽 내용과 일치해 이 페이지는 건너뜀 "
+            f"(대조 {score:.0%} vs 제자리 {mine:.0%}) — 재변환이 필요합니다"
+        )
+        logger.warning(
+            "PDF 내보내기: p%d 레이아웃이 p%d와 일치(%.2f vs %.2f) — 페이지 미수정",
+            pno, elsewhere, score, mine,
+        )
+        return
+
     _hide_visible_link_borders(page)
     width = tpage.get("width") or 1
     height = tpage.get("height") or 1
@@ -932,15 +1212,12 @@ def _process_page(fitz, page, pno, tpage, opage, fonts, result) -> None:
     raster_rects, image_regions, fixed_visuals = _page_visual_obstacles(
         fitz, page, block_rects, oblocks,
     )
-    ctx = _PageContext(
+    base_ctx = _PageContext(
         fitz, page, pno, aspect, oblocks, tblocks, block_rects,
         source_records, source_ownership, unowned_source, ambiguous_blocks,
         image_regions, fixed_visuals, fonts,
     )
-    targets, flow_candidates, repeated_scheme_link_rects = _plan_page_targets(
-        ctx, result,
-    )
-    _plan_flow_targets(ctx, flow_candidates, targets, result)
+    targets, repeated_scheme_link_rects = _plan_until_consistent(base_ctx, result)
     if not targets:
         return
 
@@ -1021,6 +1298,9 @@ def build_translated_pdf(
         )
         _reserve_font_resource_names(doc, fonts)
 
+        # 어느 페이지의 레이아웃이 **다른** 물리 페이지를 설명하는지 먼저 판정한다.
+        # 리댁션은 되돌릴 수 없으므로 한 페이지라도 건드리기 전에 알아야 한다.
+        misregistered = _unregistered_layout_pages(doc, orig_pages)
         try:
             for tpage in trans_pages:
                 pno = tpage.get("page")
@@ -1031,7 +1311,10 @@ def build_translated_pdf(
                     or opage is None
                 ):
                     continue
-                _process_page(fitz, doc[pno - 1], pno, tpage, opage, fonts, result)
+                _process_page(
+                    fitz, doc[pno - 1], pno, tpage, opage, fonts, result,
+                    misregistered,
+                )
             tmp = job_dir / f".export.{lang}.{uuid.uuid4().hex}.tmp"
             try:
                 doc.save(tmp, garbage=3, deflate=True)

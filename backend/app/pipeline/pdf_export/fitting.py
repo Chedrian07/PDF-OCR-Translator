@@ -227,6 +227,35 @@ def _preserved_reference_microfixes(
     return fixes
 
 
+def _top_cleared_rect(rect, limit_y1: float, avoid) -> object | None:
+    """윗변을 가리는 장애물 **아래에서** 시작하는 상자. 가릴 게 없으면 None.
+
+    상자 후보는 지금까지 `rect`(원래 상자)와 `grown`(아래로 늘린 상자) 둘뿐이고
+    둘 다 `rect.y0`에서 시작한다. 그림 범례 조각처럼 상자의 윗변만 2~3pt 덮는
+    장애물이 있으면 첫 줄이 항상 충돌해 전부 실패한다 — 바로 아래에 쓸 공간이
+    남아 있는데도(실측 p5 그림 캡션: 남은 12pt에 7.8pt 한 줄이 들어간다).
+    옆으로 비켜 갈 수 있는 장애물(가로 겹침이 절반 미만)은 대상이 아니다.
+    """
+    cleared = rect.y0
+    for other in avoid:
+        if other is None or other.is_empty:
+            continue
+        if other.y0 > rect.y0 + 0.5 or other.y1 <= rect.y0 + 0.5:
+            continue                       # 윗변을 덮고 있지 않다
+        if other.y0 >= rect.y1 - 0.5:
+            continue
+        overlap = min(other.x1, rect.x1) - max(other.x0, rect.x0)
+        if overlap < min(rect.width, other.width) * 0.5:
+            continue                       # 옆으로 흘려 보낼 수 있다
+        cleared = max(cleared, other.y1 + _FLOW_OBSTACLE_GAP_PT)
+    if cleared <= rect.y0 + 0.5 or cleared >= limit_y1 - 0.5:
+        return None
+    out = +rect
+    out.y0 = cleared
+    out.y1 = limit_y1
+    return out
+
+
 def _plan_shrink_to_fit(
     page, rect, text: str, base_pt: float, fontname: str, fontfile: str | None,
     *, max_rect=None, align: int = 0, bold: bool = False,
@@ -258,6 +287,9 @@ def _plan_shrink_to_fit(
     if grown.y1 > base.y1 + 0.5:
         candidates.append((grown, True))
     avoid = avoid_rects or []
+    cleared = _top_cleared_rect(base, grown.y1, avoid)
+    if cleared is not None:
+        candidates.append((cleared, True))
     orphan_fallback: _TextFitPlan | None = None
 
     # OCR bbox는 원본 글리프에 딱 맞지만 CJK 폰트의 ascender/descender는 더 높다.
@@ -768,8 +800,15 @@ def _plan_flow_group(
     page,
     candidates: list[_FlowCandidate],
     fixed_rects: list[object],
+    *,
+    scales: tuple[float, ...] = _SHRINK_STEPS,
+    min_pt: float = _MIN_BODY_FONT_PT,
 ) -> list[_Replacement] | None:
-    """인접 블록을 순차 reflow하고 전부 성공할 때만 계획을 확정한다."""
+    """인접 블록을 순차 reflow하고 전부 성공할 때만 계획을 확정한다.
+
+    scales/min_pt는 최후 수단 호출이 가독성 하한을 낮춰 다시 시도할 때만 넘긴다
+    (원문을 남기는 것보다 작게라도 번역을 놓는 편이 낫기 때문 — constants의
+    _LASTRESORT_SHRINK_STEPS 주석 참조)."""
     if not candidates:
         return []
     ordered = sorted(candidates, key=lambda item: (item.rect.y0, item.rect.x0))
@@ -787,6 +826,18 @@ def _plan_flow_group(
             quiet_fitz().Rect(column_x0, rect.y0, column_x1, rect.y1), rect,
         ) >= min(column_width, rect.width) * 0.15
     ]
+    # 자기 세로 구간을 가로지르는 **단 폭 전체** 장애물은 피할 방법이 없다.
+    # 큰 도형(코드 상자 테두리·배경 채움)을 테두리 띠로 바꿀 때 생기는 가로 띠가
+    # 하필 본문 블록 안쪽에 놓이는 경우가 그렇다(실측 p5 블록8: 338–438pt 상자
+    # 안의 y=343.0–344.5 전폭 띠). 원문 글자는 그 띠를 가로질러 인쇄돼 있으므로
+    # 장애물이 아니라 장식이다 — 남겨 두면 자리가 있는 번역이 no_fit으로 버려진다.
+    def _unavoidable_interior(rect) -> bool:
+        if not (original_start + 0.5 < rect.y0 and rect.y1 < original_bottom - 0.5):
+            return False
+        covered = min(rect.x1, column_x1) - max(rect.x0, column_x0)
+        return covered >= column_width * 0.95
+
+    relevant_fixed = [r for r in relevant_fixed if not _unavoidable_interior(r)]
     page_area_bounds = _page_bounds(page)
     lower_bound = page_area_bounds.y0 + _BLOCK_GAP_PT
     for obstacle in relevant_fixed:
@@ -812,9 +863,9 @@ def _plan_flow_group(
     # 읽을 수 없는 번역이 된다 — 시도하지 않고 원문을 보존한다.
     smallest_pt = min(item.base_pt for item in ordered)
     readable_scales = tuple(
-        scale for scale in _SHRINK_STEPS
-        if smallest_pt * scale >= _MIN_BODY_FONT_PT
-    ) or (_SHRINK_STEPS[0],)
+        scale for scale in scales
+        if smallest_pt * scale >= min_pt
+    ) or (scales[0],)
     scale_sets = [(scale,) for scale in readable_scales]
     # 모든 블록이 같은 scale에서 불가능할 때만 개별 first-fit을 허용한다.
     scale_sets.append(readable_scales)

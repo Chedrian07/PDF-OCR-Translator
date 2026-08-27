@@ -61,7 +61,51 @@ def _restore_table_tags(html: str) -> str:
                 safe += f' {name}="{val}"'
         return f"<{slash}{tag}{safe}>"
 
-    return _TABLE_TAG.sub(_repl, html)
+    return _balance_table_tags(_TABLE_TAG.sub(_repl, html))
+
+
+# 표 구조 태그 균형 맞추기. 모델 출력이 잘리면(페이지 출력 상한·스트리밍 꼬리)
+# `</table>` 없는 표가 남는데, HTML 파서는 그 뒤의 문서 전체를 마지막 `<td>` 안으로
+# 빨아들인다 — 실제로 라이브 미리보기가 "빈 표 격자 + 오른쪽 끝으로 밀린 본문"이
+# 되던 원인이다. 열린 표 구조는 그 표가 속한 블록(문단·목록 항목·인용·제목·코드
+# 블록)이 끝나는 지점에서 닫고, 짝 없는 닫는 태그는 버린다.
+# 정상(균형 잡힌) 표는 스택이 비므로 무변경이다.
+_TABLE_STRUCT = re.compile(
+    r"<(/?)(table|thead|tbody|tr|th|td)\b[^>]*>"
+    r"|</(?:p|li|blockquote|pre|h[1-6])>"
+)
+
+
+def _balance_table_tags(html: str) -> str:
+    stack: list[str] = []
+    out: list[str] = []
+    pos = 0
+    for m in _TABLE_STRUCT.finditer(html):
+        if not stack and m.group(2) is None:
+            continue  # 표 밖의 블록 경계 — 볼 일 없다
+        if m.group(2) is None:  # 블록 경계 — 열린 표를 여기서 닫는다
+            out.append(html[pos:m.start()])
+            out.extend(f"</{t}>" for t in reversed(stack))
+            stack.clear()
+            pos = m.start()
+            continue
+        closing, tag = m.group(1), m.group(2)
+        if not closing:
+            stack.append(tag)
+            continue
+        if tag not in stack:
+            # 짝 없는 닫는 태그 — 파서가 무시하지만 원문에 남기지 않는다
+            out.append(html[pos:m.start()])
+            pos = m.end()
+            continue
+        out.append(html[pos:m.start()])
+        pos = m.start()
+        while stack and stack[-1] != tag:
+            out.append(f"</{stack.pop()}>")
+        stack.pop()
+    out.append(html[pos:])
+    out.extend(f"</{t}>" for t in reversed(stack))
+    return "".join(out)
 
 
 # ── 수식 델리미터 정규화 (렌더 전용) ──────────────────────────────────

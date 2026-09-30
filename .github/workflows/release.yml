@@ -111,6 +111,20 @@ jobs:
           PY
           OUT_DIR="$RUNNER_TEMP/release-smoke" TIMEOUT_SECS=120 \
             ./scripts/smoke_e2e.sh http://127.0.0.1:18000
+      - name: Export tested image for offline installation
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}-cpu-${{ matrix.arch }}
+          ARCHIVE: pdf-ocr-translator-${{ steps.image.outputs.version }}-cpu-${{ matrix.arch }}.tar.gz
+        run: |
+          set -euo pipefail
+          docker save "$IMAGE" | gzip > "$RUNNER_TEMP/$ARCHIVE"
+          gzip -t "$RUNNER_TEMP/$ARCHIVE"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-image-${{ matrix.arch }}
+          path: ${{ runner.temp }}/pdf-ocr-translator-*.tar.gz
+          compression-level: 0
+          retention-days: 7
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io

@@ -69,6 +69,18 @@ docker run -d --name pdf-ocr-translator --restart unless-stopped \
 # → http://localhost:8000
 ```
 
+릴리스 첨부파일의 `pdf-ocr-translator-0.1.0-cpu-amd64.tar.gz` 또는
+`pdf-ocr-translator-0.1.0-cpu-arm64.tar.gz`를 받아 오프라인으로 설치할 수도 있습니다.
+GHCR 이미지 접근 권한이 없어도 이 방법을 사용할 수 있습니다. 다운로드한
+아키텍처의 이름을 사용해 이미지를 불러오고 위 실행 명령의 공통 태그를 붙입니다:
+
+```bash
+docker load -i pdf-ocr-translator-0.1.0-cpu-amd64.tar.gz
+docker tag ghcr.io/chedrian07/pdf-ocr-translator:0.1.0-cpu-amd64 \
+  ghcr.io/chedrian07/pdf-ocr-translator:0.1.0-cpu
+# arm64를 받았다면 두 명령의 amd64를 arm64로 바꿉니다.
+```
+
 번역·Q&A를 활성화하려면 실행 명령에 `--env-file .env`를 추가합니다. `.env`의
 설정 예시는 아래 한국어 번역·페이지 Q&A 절을 참조하세요. CPU Unlimited-OCR을
 사용하려면 `OCR_ENGINE=unlimited`로 바꿉니다. CUDA·sidecar 배포는 아래

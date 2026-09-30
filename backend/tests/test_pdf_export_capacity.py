@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.pipeline.pdf_export import _plan_shrink_to_fit, _plan_single_line, _resolve_font
+from app.pipeline.pdf_export import fitting
 from app.pipeline.pdf_export.fitting import _text_exceeds_box_capacity
 
 
@@ -83,6 +84,103 @@ def test_capacity_guard_retains_successful_native_layout(text):
         page, box, text, 10, "helv", None, max_rect=box, scales=(1.0,),
     )
     assert plan is not None
+    doc.close()
+
+
+@pytest.mark.parametrize("planner", [_plan_shrink_to_fit, _plan_single_line])
+def test_capacity_guard_includes_wider_original_candidate(planner):
+    """A narrower growth rectangle must not reject the usable original box."""
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    original = fitz.Rect(60, 85, 460, 110)
+    growth = fitz.Rect(60, 85, 70, 110)
+    plan = planner(
+        page,
+        original,
+        "A" * 50,
+        10,
+        "helv",
+        None,
+        max_rect=growth,
+        scales=(1.0,),
+    )
+    assert plan is not None
+    doc.close()
+
+
+def test_capacity_guard_respects_smaller_explicit_lineheight():
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    font = fitz.Font(fontname="helv")
+    box = fitz.Rect(60, 85, 110, 185)
+    text = "aaaa " * 40
+    assert not _text_exceeds_box_capacity(
+        text, box, font, "helv", None, 10, (1.0,), (0.4,), 0,
+    )
+    assert page.new_shape().insert_textbox(
+        box, text, fontsize=10, fontname="helv", lineheight=0.4,
+    ) >= 0
+    doc.close()
+
+
+def test_capacity_guard_defers_missing_glyphs():
+    import fitz
+
+    font = SimpleNamespace(
+        ascender=1.0,
+        descender=-0.2,
+        has_glyph=lambda _codepoint: False,
+        text_length=lambda _text, **_kwargs: 10.0,
+    )
+    assert not _text_exceeds_box_capacity(
+        "A" * 20_000,
+        fitz.Rect(0, 0, 10, 10),
+        font,
+        "fake-font",
+        "/fake-font.ttf",
+        10,
+        (1.0,),
+        (None,),
+        0,
+    )
+
+
+def test_capacity_guard_defers_failed_font_load(monkeypatch):
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    original_metrics = fitting._metrics_font
+    native_calls = []
+
+    def metrics(fontfile, fontname):
+        if fontfile:
+            raise OSError("unreadable font")
+        return original_metrics(fontfile, fontname)
+
+    def unexpected_precheck(*_args, **_kwargs):
+        pytest.fail("substitute font metrics were used to reject native layout")
+
+    def native_layout(*_args, **_kwargs):
+        native_calls.append(True)
+        return -1
+
+    monkeypatch.setattr(fitting, "_metrics_font", metrics)
+    monkeypatch.setattr(fitting, "_text_exceeds_box_capacity", unexpected_precheck)
+    monkeypatch.setattr(fitz.Shape, "insert_textbox", native_layout)
+    assert _plan_shrink_to_fit(
+        page,
+        fitz.Rect(60, 85, 535, 250),
+        "A" * 20_000,
+        10,
+        "unreadable-font",
+        "/unreadable-font.ttf",
+    ) is None
+    assert native_calls
     doc.close()
 
 

@@ -329,17 +329,23 @@ def _plan_shrink_to_fit(
     """
     rot = page.rotation
     fitz = quiet_fitz()
+    metrics_match = True
     try:
         font = _metrics_font(fontfile, fontname)
     except Exception:  # noqa: BLE001 — 삽입기와 동일한 내장 CJK로 메트릭 폴백
         font = _metrics_font(None, "korea")
+        metrics_match = False
 
     page_limit = _page_bounds(page).y1 - _BLOCK_GAP_PT
     grown = +(max_rect if max_rect is not None else rect)
     if max_rect is None:
         grown.y1 = page_limit
-    if _text_exceeds_box_capacity(
-        text, grown, font, fontname, fontfile, base_pt, scales, lineheights, rot,
+    # max_rect은 성장 후보의 폭만 정한다. 원래 상자도 여전히 시도하므로 두
+    # 후보를 모두 덮는 낙관적 용량으로 비교해야 좁은 성장 상자 때문에 거르지 않는다.
+    capacity_box = +grown
+    capacity_box.include_rect(rect)
+    if metrics_match and _text_exceeds_box_capacity(
+        text, capacity_box, font, fontname, fontfile, base_pt, scales, lineheights, rot,
     ):
         return None
     base = +rect
@@ -514,8 +520,10 @@ def _plan_single_line(
     working.y1 = min(working.y1, vertical.y1)
     if working.y1 <= working.y0 + 0.5:
         return None
+    capacity_box = +vertical
+    capacity_box.include_rect(working)
     if _text_exceeds_box_capacity(
-        text, vertical, font, fontname, fontfile, base_pt, scales, (None,), 0,
+        text, capacity_box, font, fontname, fontfile, base_pt, scales, (None,), 0,
     ):
         return None
     avoid = avoid_rects or []

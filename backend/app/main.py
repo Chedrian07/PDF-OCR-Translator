@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .api import router
 from .config import Settings
 from .engine import build_engine
@@ -222,7 +223,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await gc_task
         worker.stop()
 
-    app = FastAPI(title="Unlimited-OCR — PDF → Markdown", lifespan=lifespan)
+    app = FastAPI(
+        title="Unlimited-OCR — PDF → Markdown", version=__version__, lifespan=lifespan,
+    )
     # 요청 본문 상한 — 라우트 진입(폼 파싱=임시 스풀 파일 기록, JSON 메모리 적재)
     # 이전에 끊는다. 경로별 표는 UploadBodyLimitMiddleware 참조.
     # 먼저 등록하므로 TrustedHost 검증이 바깥에 남는다(Host 위조는 그대로 400).

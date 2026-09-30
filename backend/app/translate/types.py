@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 from dataclasses import dataclass, field
 
@@ -76,6 +77,23 @@ def _clean(v: str | None) -> str:
     return (v or "").strip().strip("'\"").strip()
 
 
+def _env_int(env, name: str, default: int) -> int:
+    try:
+        return int(_clean(env.get(name)) or default)
+    except ValueError as e:
+        raise TranslateError(f"{name}는 정수여야 합니다") from e
+
+
+def _env_float(env, name: str, default: float) -> float:
+    try:
+        value = float(_clean(env.get(name)) or default)
+    except ValueError as e:
+        raise TranslateError(f"{name}는 유한한 숫자여야 합니다") from e
+    if not math.isfinite(value):
+        raise TranslateError(f"{name}는 유한한 숫자여야 합니다")
+    return value
+
+
 @dataclass(frozen=True)
 class TranslateConfig:
     base_url: str
@@ -132,16 +150,10 @@ class TranslateConfig:
             # 여러 잡을 합친 실제 HTTP 요청 수도 같은 상한 안에 둔다.
             concurrency=min(
                 MAX_TRANSLATE_CONCURRENCY,
-                max(
-                    1,
-                    int(
-                        _clean(e.get("TRANSLATE_CONCURRENCY"))
-                        or MAX_TRANSLATE_CONCURRENCY
-                    ),
-                ),
+                max(1, _env_int(e, "TRANSLATE_CONCURRENCY", MAX_TRANSLATE_CONCURRENCY)),
             ),
-            timeout_s=max(5.0, float(_clean(e.get("TRANSLATE_TIMEOUT_S")) or 180)),
-            max_retries=max(0, int(_clean(e.get("TRANSLATE_MAX_RETRIES")) or 3)),
+            timeout_s=max(5.0, _env_float(e, "TRANSLATE_TIMEOUT_S", 180.0)),
+            max_retries=max(0, _env_int(e, "TRANSLATE_MAX_RETRIES", 3)),
             temperature=(_clean(e.get("TRANSLATE_TEMPERATURE")) or "0").lower(),
             max_tokens_param=mt_param,
             context=(_clean(e.get("TRANSLATE_CONTEXT")) or "1") not in ("0", "false", "no"),

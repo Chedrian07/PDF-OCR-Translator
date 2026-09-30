@@ -582,6 +582,37 @@ def test_translate_concurrency_default_and_server_cap():
     assert TranslateConfig.from_env({**base, "TRANSLATE_CONCURRENCY": "0"}).concurrency == 1
 
 
+@pytest.mark.parametrize(("name", "value"), [
+    ("TRANSLATE_CONCURRENCY", "abc"),
+    ("TRANSLATE_CONCURRENCY", "1.5"),
+    ("TRANSLATE_MAX_RETRIES", "abc"),
+    ("TRANSLATE_TIMEOUT_S", "abc"),
+    ("TRANSLATE_TIMEOUT_S", "nan"),
+    ("TRANSLATE_TIMEOUT_S", "inf"),
+    ("TRANSLATE_TIMEOUT_S", "-inf"),
+])
+def test_invalid_numeric_config_reports_setting_name(name, value):
+    from app.translate.types import TranslateError
+
+    env = {"OPENAI_BASE_URL": "https://h/v1", "OPENAI_MODEL": "m", name: value}
+    with pytest.raises(TranslateError, match=name):
+        TranslateConfig.from_env(env)
+
+
+def test_numeric_config_defaults_and_clamps_are_preserved():
+    env = {"OPENAI_BASE_URL": "https://h/v1", "OPENAI_MODEL": "m"}
+    blank = TranslateConfig.from_env({
+        **env, "TRANSLATE_CONCURRENCY": "", "TRANSLATE_TIMEOUT_S": "",
+        "TRANSLATE_MAX_RETRIES": "",
+    })
+    assert (blank.concurrency, blank.timeout_s, blank.max_retries) == (8, 180.0, 3)
+    negative = TranslateConfig.from_env({
+        **env, "TRANSLATE_CONCURRENCY": "-1", "TRANSLATE_TIMEOUT_S": "-1",
+        "TRANSLATE_MAX_RETRIES": "-1",
+    })
+    assert (negative.concurrency, negative.timeout_s, negative.max_retries) == (1, 5.0, 0)
+
+
 def test_retry_after_헤더에도_백오프_상한을_적용():
     """"Retry-After: 3600" 한 줄이 워커를 한 시간 묶으면 번역이 멈춘 것처럼 보인다."""
     c = OpenAICompatClient(_cfg())

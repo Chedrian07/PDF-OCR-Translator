@@ -320,6 +320,26 @@ def test_translate_validation_errors(client, sample_pdf, monkeypatch):
     assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 503
 
 
+@pytest.mark.parametrize(("name", "value"), [
+    ("TRANSLATE_CONCURRENCY", "abc"),
+    ("TRANSLATE_MAX_RETRIES", "abc"),
+    ("TRANSLATE_TIMEOUT_S", "abc"),
+    ("TRANSLATE_TIMEOUT_S", "nan"),
+    ("TRANSLATE_TIMEOUT_S", "inf"),
+])
+def test_invalid_numeric_translation_config_returns_503(
+    client, sample_pdf, provider_env, monkeypatch, name, value,
+):
+    """설정 오타는 health와 POST 모두 번역 불가로 보고하고 워커를 만들지 않는다."""
+    jid = _done_job(client, sample_pdf)
+    monkeypatch.setenv(name, value)
+    assert client.get("/api/health").json()["translate_available"] is False
+    response = client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"})
+    assert response.status_code == 503, response.text
+    assert name in response.json()["detail"]
+    assert (jid, "ko") not in client.app.state.translate_tasks
+
+
 # ── 5. cancel → error 이벤트 canceled:true ────────────────────────────────
 def test_translate_cancel(client, sample_pdf, provider_env, monkeypatch):
     monkeypatch.setattr("app.api.run_translation", _make_fake(wait_cancel=True))

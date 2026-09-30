@@ -479,8 +479,9 @@ def _plan_single_line(
         # 1.151em/-0.286em으로 크게 보고한다. 얕은 표 행과 저자 소속 한 줄에서
         # 그 전역 메트릭을 쓰면 보이는 글자는 충분히 들어가도 통째로 보존된다.
         # 다만 Latin descender·diacritic는 이 범위를 벗어나므로 글자 종류별
-        # 보수적 실측 상한이 있는 문자열에만 줄인다. 알 수 없는 문자와 bold는
-        # 전역 bbox로 충돌을 보수적으로 판정한다.
+        # 보수적 실측 상한이 있고 전체 bbox가 들어가지 않는 문자열에만 줄인다.
+        # 높이가 넉넉하면 전역 bbox를 유지해 표의 위쪽 rule 안으로 span이
+        # 돌출하지 않게 한다. 알 수 없는 문자와 bold도 전역 bbox를 사용한다.
         visible_bounds = _noto_visible_ink_bounds(text)
         if (
             fontfile
@@ -489,6 +490,8 @@ def _plan_single_line(
             and "Noto" in font.name
             and "CJK" in font.name
             and visible_bounds is not None
+            and size * (layout_ascender - layout_descender)
+            > vertical.y1 - working.y0
         ):
             measured_ascender, measured_descender = visible_bounds
             layout_ascender = min(layout_ascender, measured_ascender)

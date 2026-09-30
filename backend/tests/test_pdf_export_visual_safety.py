@@ -220,8 +220,10 @@ def test_exported_cjk_body_lines_have_disjoint_bboxes(
         assert upper.y1 <= lower.y0 + 0.01, (upper, lower)
 
 
+@pytest.mark.parametrize("rect_height", [12.0, 40.0], ids=["shallow", "roomy"])
 def test_single_line_dry_run_reserves_actual_cjk_span_bounds(
     real_cjk_fontfile: str,
+    rect_height: float,
 ):
     """Compact Noto placement must still reserve the emitted PDF span bbox."""
     import fitz
@@ -231,7 +233,7 @@ def test_single_line_dry_run_reserves_actual_cjk_span_bounds(
     text = "한국어 한 줄 번역"
     plan = _plan_single_line(
         page,
-        fitz.Rect(60, 80, 320, 120),
+        fitz.Rect(60, 80, 320, 80 + rect_height),
         text,
         12,
         "single-line-safety-cjk",
@@ -248,6 +250,9 @@ def test_single_line_dry_run_reserves_actual_cjk_span_bounds(
     actual = _cover([fitz.Rect(span["bbox"]) for span in _span_entries(page)])
     assert plan.ink_rect.y0 == pytest.approx(actual.y0, abs=0.05)
     assert plan.ink_rect.y1 == pytest.approx(actual.y1, abs=0.05)
+    if rect_height == 40.0:
+        assert actual.y0 >= 80 - 0.01, actual
+        assert actual.y1 <= 120 + 0.01, actual
     doc.close()
 
 
@@ -737,7 +742,8 @@ def test_latin_descender_uses_conservative_noto_collision_bounds(
     )
     upper_obstacle = fitz.Rect(20, 70, 200, 79.5)
     assert _plan_single_line(
-        text="한글", **(common | {"avoid_rects": [upper_obstacle]}),
+        text="한글",
+        **(common | {"avoid_rects": [upper_obstacle], "max_rect": rect}),
     ) is None
     doc.close()
 
@@ -991,7 +997,9 @@ def test_changed_table_cell_redaction_preserves_adjacent_unchanged_value(
         page = exported[0]
         text = page.get_text().replace("\xa0", " ")
         translated_header = next(
-            span for span in _span_entries(page) if span["text"] == "학습 설정"
+            span
+            for span in _span_entries(page)
+            if span["text"].replace("\xa0", " ") == "학습 설정"
         )
 
     assert result.table_cells_replaced == 2, result.report()

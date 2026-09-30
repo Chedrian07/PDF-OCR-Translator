@@ -38,7 +38,7 @@ e2e:              ## 실서버 스모크 (기동된 백엔드 필요 — README 
 	./scripts/smoke_e2e.sh
 
 e2e-mock:         ## hermetic 브라우저 E2E — mock OpenAI + FakeEngine 백엔드를 직접 띄운다
-	cd frontend && npm i && npx playwright install chromium && npm run test:e2e-mock
+	cd frontend && npm ci && npx playwright install chromium && npm run test:e2e-mock
 
 # 동시에 두 번 돌리려면 작업 디렉터리를 갈라야 한다 — 하네스가 --work에 배타 락을
 # 걸고, 겹치면 종료코드 2로 멈춘다(포트와 달리 작업 디렉터리는 자동으로 안 갈린다):

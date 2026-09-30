@@ -212,7 +212,7 @@ jobs:
         with:
           node-version: 22
       - name: Install playwright chromium
-        run: npm i && npx playwright install --with-deps chromium
+        run: npm ci && npx playwright install --with-deps chromium
         working-directory: frontend
       - name: mock full-flow E2E
         run: npm run test:e2e-mock

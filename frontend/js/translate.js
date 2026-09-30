@@ -21,6 +21,8 @@ import { loadDocLayout, loadMarkdown, loadPreview } from './tabs.js';
 
 
 export function teardownTranslate() {
+  state.translateGen += 1;
+  state.translateRequestPending = false;
   if (state.translateEs) { try { state.translateEs.close(); } catch (_) { /* ignore */ } state.translateEs = null; }
   if (state.translatePollTimer) { clearInterval(state.translatePollTimer); state.translatePollTimer = 0; }
   state.translateSseErrors = 0;
@@ -44,21 +46,19 @@ export function resetTranslateUI() {
 
 // health의 translate_available을 버튼에 반영 — false일 때만 비활성.
 // undefined(미수신·구버전 서버)는 활성 유지(fail-open, 서버 503이 최후 방어).
-// 가용성 사유의 비활성만 dataset으로 표시해, 요청 중 일시 비활성(startTranslate)을
-// health 갱신이 잘못 풀어버리지 않게 한다.
+// health 갱신·429 해제가 요청 중 잠금을 풀지 않도록 모든 비활성 사유를 함께 적용한다.
 export function applyTranslateAvailability() {
   const btn = el.translateBtn;
   if (state.translateAvailable === false) {
-    btn.disabled = true;
     btn.title = '번역 프로바이더가 설정되지 않았습니다 (.env 설정 후 재시작)';
     btn.dataset.unavailable = '1';
   } else {
     btn.removeAttribute('title');
-    if (btn.dataset.unavailable) {
-      delete btn.dataset.unavailable;
-      btn.disabled = false;
-    }
+    delete btn.dataset.unavailable;
   }
+  btn.disabled = state.translateAvailable === false || state.translateRequestPending
+    || state.translateState === 'running' || retryLockRemaining('translateRetryAt') > 0;
+  el.readerTranslateBtn.disabled = btn.disabled;
   applyReaderTranslateCta(); // health 갱신도 리더 CTA 노출에 반영
 }
 
@@ -79,10 +79,11 @@ export function renderTranslateSummary(data) {
 
 // 사유별 집계는 report.json에만 있다 — state 조회가 이를 병합해 돌려준다.
 export async function refreshTranslateSummary(id) {
+  const gen = state.translateGen;
   let st = null;
   try { st = await apiGet(`/api/jobs/${id}/translate/state?lang=ko`); }
   catch (_) { return; } // 부가 정보 — 실패해도 직전 요약을 그대로 둔다
-  if (state.currentJobId !== id || state.translateState !== 'done') return;
+  if (state.currentJobId !== id || state.translateGen !== gen || state.translateState !== 'done') return;
   renderTranslateSummary(st);
 }
 
@@ -170,11 +171,12 @@ export function applyDownloadLangs() {
 export async function initTranslateForJob() {
   const id = state.currentJobId;
   if (!id) return;
+  const gen = state.translateGen;
   let st = null;
   try {
     st = await apiGet(`/api/jobs/${id}/translate/state?lang=ko`);
   } catch (_) { /* state 엔드포인트 불가 → 버튼 노출로 폴백 */ }
-  if (state.currentJobId !== id) return;
+  if (state.currentJobId !== id || state.translateGen !== gen) return;
   const status = (st && st.status) || 'none';
   state.translateState = status;
   const ui = translateUiStateFor(status);
@@ -194,14 +196,16 @@ export async function initTranslateForJob() {
 // [한국어 번역] / 리더 [한국어로 읽기] 클릭 → 번역 시작 (공용 경로).
 export async function startTranslate() {
   const id = state.currentJobId;
-  if (!id) return;
+  if (!id || state.displayedStatus !== 'done' || state.translateRequestPending
+      || state.translateState === 'running' || state.translateAvailable === false) return;
+  const gen = state.translateGen;
   const waiting = retryLockRemaining('translateRetryAt');
   if (waiting) { // 직전 429의 대기 시간이 남아 있다 — 요청을 보내지 않는다
     showToast(`요청이 많습니다 — ${waiting}초 후 다시 시도해 주세요.`, 'warn');
     return;
   }
-  el.translateBtn.disabled = true;
-  el.readerTranslateBtn.disabled = true; // 리더 CTA도 같은 요청 — 이중 클릭 방지
+  state.translateRequestPending = true;
+  applyTranslateAvailability();
   let res = null;
   let data = null;
   try {
@@ -213,17 +217,17 @@ export async function startTranslate() {
     const text = await res.text().catch(() => '');
     data = text ? safeParse(text) : null;
   } catch (_) {
-    if (state.currentJobId !== id) return;
-    el.translateBtn.disabled = false;
-    el.readerTranslateBtn.disabled = false;
+    if (state.currentJobId !== id || state.translateGen !== gen) return;
+    state.translateRequestPending = false;
+    applyTranslateAvailability();
     showToast('번역 요청 중 네트워크 오류가 발생했습니다.', 'error');
     return;
   }
-  if (state.currentJobId !== id) return;
+  if (state.currentJobId !== id || state.translateGen !== gen) return;
+  state.translateRequestPending = false;
 
   if (!res.ok) {
-    el.translateBtn.disabled = false;
-    el.readerTranslateBtn.disabled = false;
+    applyTranslateAvailability();
     const detail = (data && typeof data.detail === 'string') ? data.detail : null;
     if (res.status === 429) {
       // 레이트리밋/동시 번역 상한 — Retry-After만큼 안내하고 버튼을 잠근다
@@ -253,19 +257,22 @@ export function connectTranslateEvents(id) {
     es = new EventSource(`/api/jobs/${id}/translate/events?lang=ko`);
   } catch (_) { startTranslatePolling(id); return; }
   state.translateEs = es;
+  const gen = state.translateGen;
+  const isCurrent = () => state.currentJobId === id && state.translateGen === gen
+    && state.translateEs === es;
 
   es.addEventListener('progress', (e) => {
-    if (state.currentJobId !== id) return;
+    if (!isCurrent()) return;
     state.translateSseErrors = 0;
     const d = parseEventData(e);
     if (d) { state.translateState = 'running'; showTranslateProgress(d.current, d.total); }
   });
   es.addEventListener('done', (e) => {
-    if (state.currentJobId !== id) return;
+    if (!isCurrent()) return;
     onTranslateDone(id, parseEventData(e)); // counts(원문 유지·건너뜀)를 요약에 쓴다
   });
   es.addEventListener('error', (e) => {
-    if (state.currentJobId !== id) return;
+    if (!isCurrent()) return;
     const d = parseEventData(e);
     if (d) onTranslateError(id, d);        // 서버가 보낸 번역 오류(JSON)
     else handleTranslateConnError(id);     // 전송 계층 오류(데이터 없음)
@@ -281,20 +288,30 @@ export function handleTranslateConnError(id) {
 // SSE 불가/불안정 시 state를 폴링해 진행/완료/오류를 반영하는 폴백.
 export function startTranslatePolling(id) {
   teardownTranslate();
-  state.translatePollTimer = setInterval(async () => {
-    if (state.currentJobId !== id) { clearInterval(state.translatePollTimer); state.translatePollTimer = 0; return; }
+  const gen = state.translateGen;
+  let inFlight = false;
+  const timer = setInterval(async () => {
+    if (state.currentJobId !== id || state.translateGen !== gen || inFlight) return;
     let st;
+    inFlight = true;
     try { st = await apiGet(`/api/jobs/${id}/translate/state?lang=ko`); }
     catch (_) { return; }
-    if (state.currentJobId !== id) return;
+    finally { inFlight = false; }
+    if (state.currentJobId !== id || state.translateGen !== gen) return;
     const status = st && st.status;
-    if (status === 'running') { showTranslateProgress(st.current, st.total); return; }
-    clearInterval(state.translatePollTimer); state.translatePollTimer = 0;
+    if (status === 'running') {
+      state.translateState = 'running';
+      showTranslateProgress(st.current, st.total);
+      return;
+    }
+    clearInterval(timer);
+    if (state.translatePollTimer === timer) state.translatePollTimer = 0;
     if (status === 'done') onTranslateDone(id, st); // 폴백 경로의 state에도 사유별 집계가 있다
     else if (status === 'error') onTranslateError(id, { message: st.error });
     else if (status === 'canceled') onTranslateError(id, { canceled: true });
-    else showTranslateButton();
+    else { state.translateState = status || 'none'; showTranslateButton(); }
   }, 1500);
+  state.translatePollTimer = timer;
 }
 
 export function onTranslateDone(id, payload) {
@@ -324,13 +341,14 @@ export function onTranslateError(id, d) {
 export async function cancelTranslate() {
   const id = state.currentJobId;
   if (!id) return;
+  const gen = state.translateGen;
   el.translateCancel.disabled = true;
   let ok = false;
   try {
     const res = await fetch(`/api/jobs/${id}/translate/cancel?lang=ko`, { method: 'POST' });
     ok = res.ok || res.status === 404;
   } catch (_) { /* 네트워크 오류 */ }
-  if (state.currentJobId !== id) return;
+  if (state.currentJobId !== id || state.translateGen !== gen) return;
   if (!ok) {
     el.translateCancel.disabled = false;
     showToast('번역 취소 요청에 실패했습니다.', 'error');

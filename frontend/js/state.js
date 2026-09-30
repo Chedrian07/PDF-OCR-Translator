@@ -65,6 +65,8 @@ export const state = {
   currentLang: 'orig',      // 'orig' | 'ko' — 현재 결과 뷰 언어
   translateState: 'none',   // none|running|done|error|canceled
   translateSummary: null,   // 원문 유지/건너뜀 요약 (translateKeptSummary 결과, 없으면 null)
+  translateGen: 0,          // 요청/구독 교체 시 이전 비동기 응답 무효화 (A→B→A 전환 포함)
+  translateRequestPending: false, // 번역 시작 POST 응답을 기다리는 동안 재진입 차단
   translateEs: null,        // 번역 진행 EventSource
   translatePollTimer: 0,    // SSE 불가/실패 시 state 폴링 폴백
   translateSseErrors: 0,

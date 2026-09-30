@@ -5,6 +5,7 @@ API 레이어의 상태·SSE·산출물 계약을 고립해 검증하도록 app.
 translations/{lang}/state.json·result.ko.md·layout.ko.json 기록, TranslateResult 반환.
 """
 
+import asyncio
 import io
 import json
 import threading
@@ -443,8 +444,7 @@ def test_translate_스레드가_실클라이언트를_전역슬롯과_함께_주
 
 # ── 6d. 202 직후 events가 404가 아니다 (state.json 기록 전 창) ──────────────
 def test_translate_events_open_right_after_202(client, sample_pdf, provider_env, monkeypatch):
-    """POST가 202를 준 직후에는 워커가 아직 state.json을 쓰기 전일 수 있다.
-    그 창에서 404를 주면 프런트가 SSE를 포기하고 폴백도 못 한다."""
+    """워커가 시작 상태를 쓰기 전에도 접수 상태가 있어 SSE를 바로 열 수 있다."""
     started = threading.Event()
     release = threading.Event()
 
@@ -457,10 +457,11 @@ def test_translate_events_open_right_after_202(client, sample_pdf, provider_env,
     jid = _done_job(client, sample_pdf)
     assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 202
     assert started.wait(5)
-    assert not (
+    assert (
         settings_state_path := client.app.state.store.get(jid).dir
         / "translations" / "ko" / "state.json"
     ).exists(), settings_state_path
+    assert _tstate(client, jid)["status"] == "running"
 
     try:
         with client.stream(
@@ -474,6 +475,121 @@ def test_translate_events_open_right_after_202(client, sample_pdf, provider_env,
     finally:
         release.set()
         _wait_no_task(client, jid)
+
+
+@pytest.mark.parametrize("previous_status", ["done", "error", "canceled"])
+def test_translate_restart_publishes_running_before_worker_starts(
+    client, sample_pdf, provider_env, monkeypatch, previous_status,
+):
+    """재실행이 접수되면 이전 터미널 상태를 상태 폴링·SSE로 다시 노출하지 않는다."""
+    from starlette.requests import Request
+    from app.api import translate_events
+
+    jid = _done_job(client, sample_pdf)
+    job_dir = client.app.state.store.get(jid).dir
+    state_path = job_dir / "translations" / "ko" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps({
+        "lang": "ko", "status": previous_status, "current": 3, "total": 3,
+        "error": "previous failure" if previous_status == "error" else None,
+        "finished_at": "2026-07-07T00:00:02+00:00",
+    }), encoding="utf-8")
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_start(*args, **kwargs):
+        started.set()
+        assert release.wait(5)
+        return _make_fake()(*args, **kwargs)
+
+    monkeypatch.setattr("app.api.run_translation", slow_start)
+    try:
+        response = client.post(
+            f"/api/jobs/{jid}/translate", json={"lang": "ko", "force": True},
+        )
+        assert response.status_code == 202, response.text
+        assert started.wait(5)
+        state = _tstate(client, jid)
+        assert state["status"] == "running"
+        assert state["current"] == 0
+        assert state["error"] is None
+        assert state["finished_at"] is None
+        assert state["model"] == "test-model"
+
+        # TestClient는 SSE 전체를 버퍼링하므로 iterator의 초기 스냅샷만 직접 읽는다.
+        async def snapshot():
+            request = Request({"type": "http", "app": client.app})
+            stream = await translate_events(request, jid, "ko")
+            try:
+                assert await anext(stream.body_iterator) == "retry: 3000\n\n"
+                return await anext(stream.body_iterator)
+            finally:
+                await stream.body_iterator.aclose()
+
+        first_event = asyncio.run(snapshot())
+        assert first_event.startswith("event: progress\n"), first_event
+        assert json.loads(first_event.split("data: ")[1])["status"] == "running"
+    finally:
+        release.set()
+        _wait_no_task(client, jid)
+
+
+def test_translate_thread_start_failure_releases_slot_and_records_error(
+    client, sample_pdf, provider_env, monkeypatch,
+):
+    """새 스레드 시작 실패가 유령 태스크로 남아 재시도를 영구 차단하면 안 된다."""
+    jid = _done_job(client, sample_pdf)
+    real_start = threading.Thread.start
+
+    def failing_start(thread):
+        if thread.name == f"translate-{jid}-ko":
+            raise RuntimeError("can't start new thread")
+        return real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", failing_start)
+    response = client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"})
+    assert response.status_code == 503, response.text
+    assert (jid, "ko") not in client.app.state.translate_tasks
+    assert _tstate(client, jid)["status"] == "error"
+    assert "시작" in _tstate(client, jid)["error"]
+
+    monkeypatch.setattr(threading.Thread, "start", real_start)
+    monkeypatch.setattr("app.api.run_translation", _make_fake())
+    retry = client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"})
+    assert retry.status_code == 202, retry.text
+    _wait_no_task(client, jid)
+    assert _tstate(client, jid)["status"] == "done"
+
+
+def test_translate_initial_state_write_failure_does_not_start_worker(
+    client, sample_pdf, provider_env, monkeypatch,
+):
+    """접수 상태 기록 실패 시 번역 호출 없이 슬롯을 반환해 다시 실행할 수 있다."""
+    from app import api
+
+    jid = _done_job(client, sample_pdf)
+    called = threading.Event()
+    real_write = api._write_translate_state
+
+    def failing_write(*args, **kwargs):
+        raise OSError("disk full")
+
+    def fake(*args, **kwargs):
+        called.set()
+        return _make_fake()(*args, **kwargs)
+
+    monkeypatch.setattr(api, "_write_translate_state", failing_write)
+    monkeypatch.setattr(api, "run_translation", fake)
+    response = client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"})
+    assert response.status_code == 503, response.text
+    assert (jid, "ko") not in client.app.state.translate_tasks
+    assert not called.is_set()
+
+    monkeypatch.setattr(api, "_write_translate_state", real_write)
+    assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 202
+    _wait_no_task(client, jid)
+    assert called.is_set()
+    assert _tstate(client, jid)["status"] == "done"
 
 
 # ── 6e. 남용 방어: 번역 레이트리밋 / 동시 실행 상한 → 429 ───────────────────

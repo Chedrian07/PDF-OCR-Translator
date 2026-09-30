@@ -11,6 +11,7 @@ import queue
 import threading
 import time
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import anyio
@@ -44,6 +45,7 @@ from .pipeline.render import render_document_html, render_markdown_html
 # 고립시키기 위해 이 심(run_translation)을 페이크로 교체한다.
 from .translate import SUPPORTED_LANGS, TranslateConfig, TranslateError, run_translation
 from .translate.client import OpenAICompatClient
+from .translate.types import PROMPT_V
 from .llm import LlmError
 from .qa import AskRequest, get_page_context
 
@@ -1504,7 +1506,34 @@ async def translate_start(request: Request, job_id: str) -> JSONResponse:
             name=f"translate-{job_id}-{lang}", daemon=True,
         )
         st.translate_tasks[(job_id, lang)] = {"thread": thread, "cancel": cancel}
-        thread.start()
+        # 재실행의 접수와 초기 상태 게시를 같은 락으로 묶는다. 워커가 초기 상태를
+        # 쓰기 전까지 이전 done/error가 남으면 202 직후의 SSE가 즉시 종료된다.
+        initial_state = {
+            "lang": lang, "status": "running", "current": 0, "total": 0,
+            "error": None, "model": cfg.model,
+            "api_mode": cfg.api_mode if cfg.api_mode != "auto" else "",
+            "prompt_v": PROMPT_V, "context": cfg.context,
+            "temperature": cfg.temperature, "reasoning": cfg.reasoning,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": None,
+        }
+        try:
+            _write_translate_state(job, lang, initial_state)
+            thread.start()
+        except (OSError, RuntimeError) as e:
+            # 디스크/스레드 자원 부족으로 시작하지 못한 태스크는 슬롯을 점유하면
+            # 안 된다. 실패를 상태에도 남겨 재시작 중단으로 오판하지 않게 한다.
+            st.translate_tasks.pop((job_id, lang), None)
+            message = "번역 작업을 시작할 수 없습니다 — 잠시 후 다시 시도하세요"
+            logger.exception("번역 시작 실패: %s (lang=%s)", job_id, lang)
+            try:
+                _write_translate_state(job, lang, {
+                    **initial_state, "status": "error", "error": message,
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                })
+            except OSError:
+                logger.warning("번역 시작 오류 상태 기록 실패: %s", job_id, exc_info=True)
+            raise HTTPException(503, message) from e
     return JSONResponse({"job_id": job_id, "lang": lang, "status": "running"}, status_code=202)
 
 

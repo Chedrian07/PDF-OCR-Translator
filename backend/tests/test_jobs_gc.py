@@ -205,6 +205,37 @@ def test_잡_예외에도_워커가_살아남아_다음_잡을_처리한다(tmp_
         worker.join(timeout=5.0)
 
 
+def test_queued_cancellation_publishes_terminal_sse_event(tmp_path):
+    """대기열에서 취소된 잡도 연결된 SSE를 종료하고 재연결 토큰을 정리한다."""
+    store = JobStore(tmp_path / "jobs")
+    broker = EventBroker()
+    engine = FakeEngine(delay=0.0)
+    settings = Settings(engine="fake", device="cpu", data_dir=tmp_path / "data")
+    cancel_events: dict[str, threading.Event] = {}
+    worker = Worker(store, broker, engine, settings, cancel_events)
+    job = store.create("canceled.pdf", "multi", dpi=72)
+    broker.publish(job.id, "token", {"text": "previous output"})
+    subscriber = broker.subscribe(job.id)
+
+    # 시작 전에 큐와 취소를 준비해 타이밍에 의존하지 않고 dequeue 전 취소를 재현한다.
+    worker.submit(job)
+    cancel_events[job.id].set()
+    worker.stop()
+    worker.start()
+    worker.join(timeout=5.0)
+    assert not worker.is_alive()
+    assert job.status == "canceled"
+    assert not engine.loaded
+    assert cancel_events == {}
+    event, data = subscriber.get_nowait()
+    assert event == "error"
+    assert data == {"message": job.error, "canceled": True}
+    broker.unsubscribe(job.id, subscriber)
+    reconnected, replay, _truncated = broker.subscribe_with_replay(job.id)
+    assert replay == ""
+    broker.unsubscribe(job.id, reconnected)
+
+
 def test_메타_기록_실패는_잡_흐름을_깨지_않는다(tmp_path, monkeypatch, caplog):
     """save는 best-effort — FileNotFoundError(삭제 경합)는 조용히, 그 외 OSError는
     경고만 남기고 삼킨다(호출자·워커로 전파 금지)."""

@@ -518,6 +518,10 @@ class Worker(threading.Thread):
                     self.store.save(job)
                     if job.delete_requested:
                         self.store.delete_dir(job)
+                    else:
+                        self.broker.publish(
+                            job_id, "error", {"message": job.error, "canceled": True}
+                        )
                     continue
                 try:
                     if not self.engine.loaded:

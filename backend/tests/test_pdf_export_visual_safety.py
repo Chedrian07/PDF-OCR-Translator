@@ -1779,7 +1779,7 @@ def test_평탄화된_표_헤더가_원문_열_x좌표를_유지한다(
         for block in exported[0].get_text("dict").get("blocks", ()):
             for line in block.get("lines", ()):
                 for span in line.get("spans", ()):
-                    body = span.get("text", "").strip()
+                    body = span.get("text", "").replace("\xa0", " ").strip()
                     if body:
                         starts.setdefault(body, span["bbox"][0])
 
@@ -1868,7 +1868,7 @@ def test_의사코드_리스팅이_줄과_들여쓰기를_지킨_채_번역된�
         for block in exported[0].get_text("dict").get("blocks", ()):
             for line in block.get("lines", ()):
                 for span in line.get("spans", ()):
-                    body = span.get("text", "").strip()
+                    body = span.get("text", "").replace("\xa0", " ").strip()
                     if body:
                         placed.setdefault(body, (span["bbox"][0], span["origin"][1]))
 

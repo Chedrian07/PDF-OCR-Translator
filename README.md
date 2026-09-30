@@ -54,6 +54,30 @@ Markdown**을 만들어 주는 셀프호스팅 서비스입니다. 기본 엔진
 - **한국어 번역 (선택)**: 변환 결과를 OpenAI 호환 API로 한국어 번역 — §한국어 번역 참조
 - **원커맨드 배포**: `docker compose up` 하나로 끝 (Metal은 로컬 실행 — 아래 참조)
 
+## 0.1.0 릴리스 이미지
+
+[v0.1.0 릴리스](https://github.com/Chedrian07/PDF-OCR-Translator/releases/tag/v0.1.0)의
+CPU 이미지는 Linux amd64/arm64를 지원합니다. 모델 없이 PDF 내장 텍스트와
+Tesseract를 사용하는 textlayer 엔진으로 바로 시작할 수 있습니다:
+
+```bash
+docker run -d --name pdf-ocr-translator --restart unless-stopped \
+  -p 127.0.0.1:8000:8000 \
+  -e OCR_ENGINE=textlayer -e ALLOWED_HOSTS=localhost,127.0.0.1 \
+  -v pdf-ocr-translator-data:/data \
+  ghcr.io/chedrian07/pdf-ocr-translator:0.1.0-cpu
+# → http://localhost:8000
+```
+
+번역·Q&A를 활성화하려면 실행 명령에 `--env-file .env`를 추가합니다. `.env`의
+설정 예시는 아래 한국어 번역·페이지 Q&A 절을 참조하세요. CPU Unlimited-OCR을
+사용하려면 `OCR_ENGINE=unlimited`로 바꿉니다. CUDA·sidecar 배포는 아래
+소스 빌드용 Compose 프로필을 사용합니다.
+
+버전별 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 있습니다. 릴리스 워크플로는
+같은 커밋의 CI 통과를 확인하고 각 아키텍처 이미지에서 실제 PDF 업로드→OCR→
+Markdown/ZIP 다운로드를 검증한 뒤 배포합니다.
+
 ## 빠른 시작 (Docker)
 
 ```bash
@@ -134,9 +158,8 @@ Q&A·번역 엔드포인트에는 잡·클라이언트 IP 단위 슬라이딩 �
 트리거)의 비용 상한일 뿐 **인증의 대체가 아닙니다** — 여전히 누구나 문서를 열람·삭제할
 수 있습니다. 신뢰 네트워크 밖에 두려면 인증 리버스 프록시가 필요합니다.
 
-네 변수는 아직 `docker-compose.yml`의 `environment`에 스레딩돼 있지 않습니다 — 컨테이너
-배포는 위 기본값으로 동작하고, `.env`로 조정하려면 로컬(uv) 실행이거나 compose에 직접
-추가해야 합니다.
+네 변수는 `docker-compose.yml`의 모든 backend 서비스에 전달되므로 `.env`에서
+조정할 수 있습니다.
 
 ### 원격 접속 (Tailscale) — HTTPS 권장
 

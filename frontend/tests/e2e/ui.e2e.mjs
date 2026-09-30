@@ -543,13 +543,60 @@ await dctx.close();
 // 경우에만 실행한다. 실 API·과금·외부 전송 없이 브라우저의 마지막 제품 경로를 고정.
 if (VERIFY_MOCK_LLM) {
   await page.waitForSelector('#translate-btn:not([hidden])');
-  await page.click('#translate-btn');
+  await page.click('button[data-tab="reader"]');
+  await page.waitForSelector('#reader-translate-btn:not([hidden])');
+  let translatePosts = 0;
+  let markTranslateStarted;
+  let releaseTranslate;
+  const translateStarted = new Promise((resolve) => { markTranslateStarted = resolve; });
+  const translateGate = new Promise((resolve) => { releaseTranslate = resolve; });
+  const translateRoute = async (route) => {
+    if (route.request().method() !== 'POST') { await route.continue(); return; }
+    translatePosts += 1;
+    if (translatePosts === 1) {
+      markTranslateStarted();
+      await translateGate;
+    }
+    await route.continue();
+  };
+  await page.route('**/api/jobs/*/translate', translateRoute);
+  let available = false;
+  const healthRoute = (route) => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ ...health, translate_available: available }),
+  });
+  await page.route('**/api/health', healthRoute);
+  try {
+    await page.click('#translate-btn');
+    await translateStarted;
+    // 실제 health 로더로 프로바이더 false→true 전이를 재현한다. POST를 기다리는
+    // 중에도 가용성 갱신이 메인/리더 버튼 잠금을 풀면 중복 번역이 시작될 수 있다.
+    await page.evaluate(async () => { const { loadHealth } = await import('/js/health.js'); await loadHealth(); });
+    available = true;
+    await page.evaluate(async () => { const { loadHealth } = await import('/js/health.js'); await loadHealth(); });
+    const pendingControls = await page.evaluate(() => ({
+      main: document.getElementById('translate-btn').disabled,
+      reader: document.getElementById('reader-translate-btn').disabled,
+    }));
+    // 강제 pointer 클릭은 Playwright의 disabled 대기만 건너뛴다. 브라우저는 여전히
+    // disabled 버튼의 click을 억제해야 한다 — 실제 사용자 입력 경로를 그대로 탄다.
+    await page.click('#reader-translate-btn', { force: true });
+    await page.click('#translate-btn', { force: true });
+    check('mock 번역: health 갱신 중 메인·리더 버튼 잠금 + 중복 POST 차단',
+      pendingControls.main && pendingControls.reader && translatePosts === 1,
+      `${JSON.stringify(pendingControls)}, posts=${translatePosts}`);
+  } finally {
+    releaseTranslate();
+    await page.unroute('**/api/health', healthRoute);
+  }
   await page.waitForFunction(() => {
     const pdf = document.getElementById('dl-pdf');
     const html = document.getElementById('dl-doc-ko');
     const ko = document.getElementById('lang-ko');
     return pdf && !pdf.hidden && html && !html.hidden && ko && !ko.parentElement.hidden;
   }, null, { timeout: 60_000 });
+  await page.unroute('**/api/jobs/*/translate', translateRoute);
+  check('mock 번역: 번역 완료까지 시작 요청은 한 번', translatePosts === 1, `posts=${translatePosts}`);
   check('mock 번역: 완료 후 한국어 토글', await page.evaluate(() => !document.getElementById('lang-toggle').hidden));
   // 원문 그대로 남은 문단의 개수·사유를 사용자가 볼 수 있어야 한다(서버 report.json →
   // translate/state 병합). 사유별 집계가 도착하면 title에 근거가 들어온다.

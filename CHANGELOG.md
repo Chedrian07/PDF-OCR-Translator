@@ -13,6 +13,7 @@ First release of the self-hosted PDF OCR and translation reader.
 - Preserve download filenames when the user changes documents during a PDF transfer.
 - Close progress streams for jobs canceled while still queued.
 - Reserve actual Noto CJK glyph bounds to prevent collisions and keep roomy table headers inside their cells.
+- Reject text that cannot fit even at the smallest supported size before expensive native word wrapping, while preserving the original block.
 - Identify the release version in the API schema.
 - Build and smoke-test CPU Docker images for Linux amd64 and arm64 before publishing to GHCR. Publishing requires successful CI on the exact release commit.
 

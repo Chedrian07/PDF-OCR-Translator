@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import re
+import math
+from collections import Counter
 from dataclasses import replace
 from html import escape
 from pathlib import Path
@@ -256,6 +258,63 @@ def _top_cleared_rect(rect, limit_y1: float, avoid) -> object | None:
     return out
 
 
+def _text_exceeds_box_capacity(
+    text: str,
+    box,
+    font,
+    fontname: str,
+    fontfile: str | None,
+    base_pt: float,
+    scales: tuple[float, ...],
+    lineheights: tuple[float | None, ...],
+    rotation: int,
+) -> bool:
+    """가장 낙관적인 조판 용량도 넘는 경우만 native 줄바꿈 전에 거른다.
+
+    공백/명시 줄바꿈의 폭, 첫 행 ascender, 마지막 descender와 줄바꿈 손실은
+    모두 무시한다. 가장 작은 글자·행간에서 한 행을 더 허용한 전체 폭조차
+    부족한 문자열은 어떤 실제 textbox 후보에도 들어갈 수 없다. 불확실한
+    글리프나 폰트 메트릭은 거르지 않고 기존 dry-run으로 넘긴다.
+    """
+    try:
+        size = min(max(_MIN_FONT_PT, base_pt * scale) for scale in scales)
+        default_height = float(font.ascender) - float(font.descender)
+        if not math.isfinite(default_height) or default_height <= 0:
+            return False
+        default_height = default_height if default_height > 1.0 else 1.2
+        lineheight = min(float(value or default_height) for value in lineheights)
+        width, height = float(box.width), float(box.height)
+        if rotation % 180:
+            width, height = height, width
+        advance = size * lineheight
+        if not all(math.isfinite(value) and value > 0 for value in (size, width, height, advance)):
+            return False
+        # PyMuPDF는 파일 폰트의 개별 advance를 더하고 내장 CJK는 전각을 쓴다.
+        # 문자열 전체를 매번 재측정하지 않고 고유 문자별 폭을 한 번만 읽는다.
+        counts = Counter(char for char in text if not char.isspace())
+        required_width = 0.0
+        fitz = quiet_fitz()
+        for char, count in counts.items():
+            if not font.has_glyph(ord(char)):
+                return False
+            glyph_width = (
+                float(font.text_length(char, fontsize=size))
+                if fontfile
+                else float(fitz.get_text_length(char, fontname=fontname, fontsize=size))
+            )
+            if not math.isfinite(glyph_width) or glyph_width < 0:
+                return False
+            # 단일 글리프가 상자보다 넓은 특이 메트릭은 native 삽입기에게 맡긴다.
+            if glyph_width > width:
+                return False
+            required_width += glyph_width * count
+        optimistic_lines = math.floor(height / advance) + 1
+        capacity = (width + 1.0) * optimistic_lines
+        return math.isfinite(required_width) and required_width > capacity + 1.0
+    except Exception:  # noqa: BLE001 — 성능 가드는 메트릭 불확실 시 fail-open
+        return False
+
+
 def _plan_shrink_to_fit(
     page, rect, text: str, base_pt: float, fontname: str, fontfile: str | None,
     *, max_rect=None, align: int = 0, bold: bool = False,
@@ -279,6 +338,10 @@ def _plan_shrink_to_fit(
     grown = +(max_rect if max_rect is not None else rect)
     if max_rect is None:
         grown.y1 = page_limit
+    if _text_exceeds_box_capacity(
+        text, grown, font, fontname, fontfile, base_pt, scales, lineheights, rot,
+    ):
+        return None
     base = +rect
     base.y1 = min(base.y1, grown.y1)
     if base.y1 <= base.y0 + 0.5:
@@ -450,6 +513,10 @@ def _plan_single_line(
     working = +rect
     working.y1 = min(working.y1, vertical.y1)
     if working.y1 <= working.y0 + 0.5:
+        return None
+    if _text_exceeds_box_capacity(
+        text, vertical, font, fontname, fontfile, base_pt, scales, (None,), 0,
+    ):
         return None
     avoid = avoid_rects or []
     for scale in scales:

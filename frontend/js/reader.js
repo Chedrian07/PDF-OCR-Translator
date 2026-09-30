@@ -1641,6 +1641,9 @@ export async function downloadPdfWithReport(ev) {
   if (state.pdfDownloadBusy || anchor.classList.contains('disabled')) return;
   const url = anchor.getAttribute('href') || el.dlPdf.getAttribute('href');
   if (!url) return;
+  // 잡 전환은 같은 버튼의 href/download를 바꾼다. 전송이 끝날 때도 처음 요청한
+  // 문서 이름을 쓰도록 URL과 함께 파일명도 요청 시작 시점에 고정한다.
+  const downloadName = anchor.getAttribute('download') || el.dlPdf.getAttribute('download') || 'document.ko.pdf';
   state.pdfDownloadBusy = true;
   setPdfBusy(anchor, true);
   try {
@@ -1667,7 +1670,7 @@ export async function downloadPdfWithReport(ev) {
     const objectUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = objectUrl;
-    a.download = anchor.getAttribute('download') || el.dlPdf.getAttribute('download') || 'document.ko.pdf';
+    a.download = downloadName;
     a.hidden = true;
     document.body.appendChild(a);
     a.click();

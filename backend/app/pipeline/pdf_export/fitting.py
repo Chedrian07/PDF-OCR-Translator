@@ -499,11 +499,16 @@ def _plan_single_line(
         # 글리프가 실제로 쓰지 않는 하단까지 포함하므로 그 안전 여백만 허용한다.
         if glyph_bottom > vertical.y1:
             continue
+        # 실측 잉크는 얕은 OCR 상자 안의 baseline 계산에만 사용한다. 실제 PDF
+        # span은 여전히 폰트의 전역 ascender/descender로 추출되므로 같은 범위를
+        # 예약해야 다음 블록이 위쪽 glyph bbox 안으로 끌려 들어오지 않는다.
+        # Noto에서 작은 실측 상자를 예약하면 flow의 3pt 간격보다 0.291em 위로
+        # 돌출하는 다음 행의 bbox가 앞 단락과 겹칠 수 있다.
         ink = fitz.Rect(
             x,
-            baseline - size * layout_ascender,
+            baseline - size * float(font.ascender),
             x + width,
-            glyph_bottom,
+            baseline - size * float(font.descender),
         )
         if bold:
             ink += (-0.5, -0.5, 0.5, 0.5)

@@ -220,6 +220,37 @@ def test_exported_cjk_body_lines_have_disjoint_bboxes(
         assert upper.y1 <= lower.y0 + 0.01, (upper, lower)
 
 
+def test_single_line_dry_run_reserves_actual_cjk_span_bounds(
+    real_cjk_fontfile: str,
+):
+    """Compact Noto placement must still reserve the emitted PDF span bbox."""
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    text = "한국어 한 줄 번역"
+    plan = _plan_single_line(
+        page,
+        fitz.Rect(60, 80, 320, 120),
+        text,
+        12,
+        "single-line-safety-cjk",
+        real_cjk_fontfile,
+    )
+    assert plan is not None and plan.origin is not None
+    page.insert_text(
+        plan.origin,
+        text,
+        fontsize=plan.fontsize,
+        fontname="single-line-safety-cjk",
+        fontfile=real_cjk_fontfile,
+    )
+    actual = _cover([fitz.Rect(span["bbox"]) for span in _span_entries(page)])
+    assert plan.ink_rect.y0 == pytest.approx(actual.y0, abs=0.05)
+    assert plan.ink_rect.y1 == pytest.approx(actual.y1, abs=0.05)
+    doc.close()
+
+
 @pytest.mark.parametrize("lower_y0", [100.0, 110.0], ids=["overlap", "touch"])
 def test_overlapping_or_touching_layout_blocks_export_without_text_collision(
     tmp_path: Path,
@@ -698,9 +729,16 @@ def test_latin_descender_uses_conservative_noto_collision_bounds(
     assert _plan_single_line(text="Agyp", **common) is None
     assert _plan_single_line(text="(한글), Q", **common) is None
     assert _plan_single_line(text="Ắ", **common) is None
-    hangul = _plan_single_line(text="한글", **common)
+    assert _plan_single_line(text="한글", **common) is None
+    hangul = _plan_single_line(text="한글", **(common | {"avoid_rects": []}))
     assert hangul is not None
-    assert hangul.ink_rect.y1 <= obstacle.y0
+    assert hangul.ink_rect.y1 == pytest.approx(
+        hangul.origin[1] - common["base_pt"] * FakeNotoFont.descender,
+    )
+    upper_obstacle = fitz.Rect(20, 70, 200, 79.5)
+    assert _plan_single_line(
+        text="한글", **(common | {"avoid_rects": [upper_obstacle]}),
+    ) is None
     doc.close()
 
 

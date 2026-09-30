@@ -78,8 +78,15 @@ else:
     print("  경고: 마크다운에 이미지 참조 없음 (모델이 figure를 감지하지 못함)")
 body = json.load(urllib.request.urlopen(f"{base}/api/jobs/{jid}"))
 res = body["result"]
-assert res["pages"] and res["layouts"], "pages/layout 산출물 누락"
-print(f"  페이지 {len(res['pages'])}개 · 레이아웃 {len(res['layouts'])}개 · figure {len(res['images'])}개")
+assert res["pages"], "페이지 산출물 누락"
+# textlayer는 레이아웃 PNG 대신 layout.json 좌표를 제공한다. capability와
+# 실제 alignment 응답을 검증해 정상 엔진을 PNG 유무로 실패시키지 않는다.
+health = json.load(urllib.request.urlopen(f"{base}/api/health"))
+if health.get("capabilities", {}).get("layout") == "full":
+    assert res.get("has_layout"), "레이아웃 좌표 산출물 누락"
+    alignment = json.load(urllib.request.urlopen(f"{base}/api/jobs/{jid}/alignment?page=1"))
+    assert alignment.get("blocks"), "첫 페이지 레이아웃 블록 누락"
+print(f"  페이지 {len(res['pages'])}개 · 레이아웃 좌표 {res.get('has_layout', False)} · figure {len(res['images'])}개")
 PY
 
 echo "── E2E 성공 ✔  (결과: $OUT_DIR)"

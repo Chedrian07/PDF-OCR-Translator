@@ -570,7 +570,7 @@ def test_equation_covering_most_of_the_page_is_not_trusted(tmp_path):
     from app.pipeline.fidelity import _equation_rects
 
     doc = fitz.open()
-    page = doc.new_page(width=595, height=842)
+    doc.new_page(width=595, height=842)
     path = tmp_path / "big.pdf"
     doc.save(path)
     doc.close()

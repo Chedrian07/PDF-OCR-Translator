@@ -1,4 +1,4 @@
-import { ICON, THEME_KEY } from './constants.js';
+import { ICON, THEME_KEY, katexOptions } from './constants.js';
 import { RETRY_AFTER_FALLBACK_S, RETRY_AFTER_MAX_S } from './core.js';
 import { el, state } from './state.js';
 
@@ -127,10 +127,7 @@ export function typesetMath(root) {
     if (elm.dataset.mathDone) return;
     const tex = elm.textContent;
     try {
-      window.katex.render(tex, elm, {
-        displayMode: elm.classList.contains('math-display'),
-        throwOnError: false,
-      });
+      window.katex.render(tex, elm, katexOptions(elm.classList.contains('math-display')));
       elm.dataset.mathDone = '1';
     } catch (_) { /* 렌더 불가 tex는 원문 유지 */ }
   });

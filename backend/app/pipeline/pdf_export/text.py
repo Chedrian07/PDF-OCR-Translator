@@ -328,7 +328,8 @@ def strip_markdown(content: str, source: str | None = None) -> str:
     원문 글머리표 글리프는 블록 소유로 리댁션되므로, 원문이 목록인데 번역문의
     '- '까지 지우면 목록이 글머리표 없는 평문단이 된다 — 그런 줄은 '• '로 바꾼다.
     원문 줄이 `>`로 시작하면(예: '> 0.5 임계값') 인용 표기가 아니라 내용이다.
-    원문에 같은 강조 표기(`*`, `__`)가 있으면 그 표기는 글자 그대로라 보존한다.
+    원문에 같은 길이의 강조 표기(`*`, `**`, `__`)가 있으면 그 표기는 글자 그대로라
+    보존한다.
     """
     text = _MD_HEADING_RE.sub("", content)
     if source is None or not _SOURCE_QUOTE_RE.search(source):
@@ -345,15 +346,21 @@ def strip_markdown(content: str, source: str | None = None) -> str:
         return f"{_CODE_OPEN}{len(spans) - 1}{_CODE_CLOSE}"
 
     text = _MD_CODESPAN_RE.sub(_stash, text)
-    if source is None or "*" not in source:
-        text = _MD_STAR_EMPHASIS_RE.sub(lambda m: m.group(2), text)
-    if source is None or "__" not in source:
-        text = _MD_UNDERSCORE_EMPHASIS_RE.sub(
-            lambda m: m.group(0)
-            if _ASCII_IDENTIFIER_RE.fullmatch(m.group(2))
-            else m.group(2),
-            text,
-        )
+    # 원문에 같은 길이의 표기가 있으면 그 표기는 글자 그대로다(각주 '*', `__x__`).
+    # 길이별로 따져 원문의 '*' 하나 때문에 LLM의 `**굵게**`까지 남기지는 않는다.
+    source_stars = {len(run) for run in re.findall(r"\*+", source or "")}
+    source_underscores = {len(run) for run in re.findall(r"_{2,}", source or "")}
+    text = _MD_STAR_EMPHASIS_RE.sub(
+        lambda m: m.group(0) if len(m.group(1)) in source_stars else m.group(2),
+        text,
+    )
+    text = _MD_UNDERSCORE_EMPHASIS_RE.sub(
+        lambda m: m.group(0)
+        if len(m.group(1)) in source_underscores
+        or _ASCII_IDENTIFIER_RE.fullmatch(m.group(2))
+        else m.group(2),
+        text,
+    )
     return _CODE_SLOT_RE.sub(lambda m: spans[int(m.group(1))], text)
 
 

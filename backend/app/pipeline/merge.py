@@ -422,6 +422,10 @@ class IncrementalMerger:
         self.pages_md: list[str] = []
         # 렌더 단계의 경고(흰 페이지 대체 등)를 잡 경고의 첫 항목으로 승계한다
         self.warnings: list[str] = _render_warnings(job_dir)
+        # 잡 참고(정보성 메모) — 내용·품질에는 문제가 없는 처리 경위(페이지 단위 엔진 안내,
+        # 페이지별 재처리로 복구됨, 충실도 재처리 채택·측정 한계 등). warnings(실제 품질
+        # 저하)와 분리해야 quality.state가 복구에 성공한 잡까지 'degraded'로 보이지 않는다.
+        self.notices: list[str] = []
         # 글로벌 이미지명 → figure bbox 메타 (벤더 P13의 boxes.json — 렌더 폭 계산용)
         self.figure_boxes: dict[str, dict] = {}
         # 레이아웃 뷰용 페이지 블록 (벤더 P14의 raw_pages.json → layout.json)

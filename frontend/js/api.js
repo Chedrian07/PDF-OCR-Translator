@@ -1,4 +1,39 @@
+import { BUSY_RETRY_MAX, busyRetryDelay } from './core.js';
 import { safeParse } from './ui.js';
+
+// 바쁨 재시도의 대기 함수 — 테스트가 실제 시간을 기다리지 않도록 바꿔 끼울 수 있다.
+export const busyRetryClock = {
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+// 파생 산출물(/layout·/html·/markdown 등) 텍스트 GET. 503(빌드·예열 중)이면
+// Retry-After를 지켜 BUSY_RETRY_MAX회까지 다시 묻고, 기다릴 때마다
+// onWait(초, 시도 번호, 상한)으로 진행을 알린다. isCurrent()가 거짓이 되면(잡·언어
+// 전환) 즉시 포기한다. 반환 {status, text}: status 0 = 네트워크 오류, text는 2xx일
+// 때만 문자열이다. 실패의 의미 판정은 호출부가 langFetchVerdict로 한다.
+export async function fetchTextWithBusyRetry(url, options = {}) {
+  const { accept = '*/*', onWait, isCurrent, maxAttempts = BUSY_RETRY_MAX } = options;
+  for (let attempt = 0; ; attempt += 1) {
+    let res;
+    try {
+      res = await fetch(url, { headers: { Accept: accept } });
+    } catch (_) {
+      return { status: 0, text: null };
+    }
+    if (res.ok) {
+      try {
+        return { status: res.status, text: await res.text() };
+      } catch (_) {
+        return { status: 0, text: null }; // 본문 전송 중 끊김 — 네트워크 오류와 같다
+      }
+    }
+    const wait = busyRetryDelay(res.status, res.headers.get('Retry-After'), attempt, maxAttempts);
+    if (!wait || (isCurrent && !isCurrent())) return { status: res.status, text: null };
+    if (onWait) onWait(wait, attempt + 1, maxAttempts);
+    await busyRetryClock.sleep(wait * 1000);
+    if (isCurrent && !isCurrent()) return { status: res.status, text: null };
+  }
+}
 
 export async function apiGet(path) {
   const res = await fetch(path, { headers: { Accept: 'application/json' } });

@@ -34,6 +34,15 @@ class RepetitiveOutputError(EngineError):
     """모델 생성이 반복에 빠지거나 페이지별 출력 상한을 넘어 조기 중단됨."""
 
 
+class OutputLimitError(RepetitiveOutputError):
+    """생성이 MAX_LENGTH 같은 총 길이 상한에 닿아 출력이 잘림.
+
+    반복이 아니어도 잘린 출력은 마지막 페이지(들)의 내용이 조용히 빠진 상태다.
+    runner는 다른 불안전 생성(RepetitiveOutputError)과 똑같이 취급해 그 출력을
+    채택하지 않고 페이지 단위로 복구해야 한다 — 그래서 하위 클래스로 둔다.
+    """
+
+
 class JobCanceled(Exception):
     """사용자 취소로 중단됨."""
 

@@ -2,6 +2,7 @@ from .base import (  # noqa: F401
     EngineError,
     JobCanceled,
     OCREngine,
+    OutputLimitError,
     RepetitiveOutputError,
     StreamSink,
 )

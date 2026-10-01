@@ -595,6 +595,7 @@ class Worker(threading.Thread):
         engine: "OCREngine",
         settings: "Settings",
         cancel_events: dict[str, threading.Event],
+        load_state: dict | None = None,
     ) -> None:
         super().__init__(name="ocr-worker", daemon=True)
         self.store = store
@@ -602,6 +603,10 @@ class Worker(threading.Thread):
         self.engine = engine
         self.settings = settings
         self.cancel_events = cancel_events
+        # /api/health의 model_load_error 출처(앱과 공유하는 dict). 예전에는 프리로드
+        # 스레드만 기록해, PRELOAD_MODEL=0이거나 워커의 재시도 로드가 실패해도 health는
+        # 'model_loaded:false, error:null'(아직 로딩 전)로 보였다 — 워커도 기록한다.
+        self.load_state = load_state
         self._queue: queue.Queue = queue.Queue()
 
     def submit(self, job: Job) -> None:
@@ -657,6 +662,8 @@ class Worker(threading.Thread):
 
                         _on_wait("모델 로딩 대기 중…")
                         self.engine.wait_until_ready(cancel, on_wait=_on_wait)
+                        if self.load_state is not None:
+                            self.load_state["error"] = None  # 재시도 성공 — 옛 오류는 무효
                 except JobCanceled:
                     # 대기 중 사용자가 취소 — 오류가 아니라 취소로 마감
                     job.status = "canceled"
@@ -671,6 +678,8 @@ class Worker(threading.Thread):
                     continue
                 except Exception as e:  # noqa: BLE001 — 로드 실패를 잡 오류로 변환
                     logger.exception("엔진 로드 실패")
+                    if self.load_state is not None:
+                        self.load_state["error"] = str(e)[:500]
                     job.status = "error"
                     job.error = f"모델 로드 실패: {e}"[:2000]
                     self.store.save(job)

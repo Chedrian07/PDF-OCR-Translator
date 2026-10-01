@@ -130,6 +130,9 @@ def test_forged_forwarded_for_from_a_direct_client_is_ignored(monkeypatch, caplo
 
     monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
     monkeypatch.delenv("TRUSTED_PROXY_IPS", raising=False)       # 기본 = 루프백만
+    # 경고는 프로세스당 한 번이다 — 앞서 돈 테스트(예: 아래 CIDR 테스트의 127.0.0.1 피어)가
+    # 이미 남겼으면 여기서 다시 나오지 않아 실행 순서에 따라 실패했다. 메모를 비우고 본다.
+    monkeypatch.setattr(api_mod, "_trusted_proxy_warned", set())
     with caplog.at_level(logging.WARNING, logger="app.api"):
         keys = {api_mod._client_key(_req("192.168.1.66", f"10.9.9.{i}")) for i in range(5)}
     assert keys == {"192.168.1.66"}                              # 위조 무시 → 피어 IP 한 버킷

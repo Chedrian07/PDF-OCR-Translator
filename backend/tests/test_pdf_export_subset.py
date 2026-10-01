@@ -11,6 +11,10 @@
 
 import json
 
+# fontTools는 pyproject의 선언 의존성이다. importorskip로 두면 venv가 lock과 어긋날 때
+# 이 모듈이 'skipped 1'로 통째로 사라져 서브셋 회귀를 못 잡으므로(로컬 venv에서 실제로
+# 그랬다) 그냥 임포트한다 — 없으면 수집 단계에서 실패한다.
+import fontTools  # noqa: F401
 import pytest
 
 from app.pipeline.pdf_export import build_translated_pdf
@@ -22,8 +26,6 @@ from app.pipeline.pdf_export.subset import (
 )
 from app.pipeline.pdf_export.fonts import _resolve_font
 from app.pipeline.pdf import quiet_fitz
-
-pytest.importorskip("fontTools", reason="fontTools 없으면 전체 폰트 임베드로 폴백한다")
 
 KO_TEXT = "한국어 번역 텍스트 블록입니다"
 # 서브셋이 실제로 일어나려면 후보 폰트가 _SUBSET_MIN_BYTES(2MB)를 넘어야 한다.

@@ -1361,6 +1361,71 @@ class DeepseekV2FlashAttention2(DeepseekV2Attention):
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# [vendor patch P20] 링 KV 슬롯 상태 — 캐시 객체(past_kv)에 두 표현 중 **정확히 하나**만 둔다.
+#  · 기본(eager — CPU/MPS 전 구간, CUDA eager): ``past_kv._ring_pos`` {layer: int}
+#    + 슬라이스 ``copy_``. 슬롯 계산이 호스트 int라 커널이 없다.
+#  · CUDA Graph 모드: ``past_kv._ring_pos_t`` {layer: 0-dim int64 디바이스 텐서}
+#    + ``index_copy_``·``add_().remainder_()`` — 캡처 안에서 슬롯 인덱싱·갱신이 재생돼야
+#    한다(파이썬 int 갱신은 캡처에 기록되지 않아 리플레이가 같은 슬롯만 덮어씀).
+#    app/engine/fast_decode.py 그래프 경로가 캡처 직전 ring_slots_to_tensor로 들어가고,
+#    실패 폴백(eager 재개) 직전 ring_slots_to_int로 되돌린다.
+# 두 경로의 저장 값은 동일하다(같은 슬롯에 같은 K/V). 분리 이유는 MPS 실측(M4 Max,
+# torch 2.10): index_copy_가 KV 길이에 비례하는 비용(KV 2317에서 663µs/호출, 토큰당
+# 24회 = 15.9ms)이라 기본 8쪽 청크 디코드가 34 tok/s로 떨어졌다. 슬라이스 copy_는 ~6µs.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _layer_keys(cache, layer_idx):
+    """레이어의 K 캐시 텐서 (구/신 DynamicCache 호환 — forward의 _get_kcache와 동일)."""
+    if hasattr(cache, "key_cache"):
+        return cache.key_cache[layer_idx]
+    return cache.layers[layer_idx].keys
+
+
+def _ring_tensor_mode(past_kv):
+    return bool(getattr(past_kv, "_ring_tensor_mode", False))
+
+
+def _ring_init_slot(past_kv, layer_idx, device):
+    """링 정상상태 진입(또는 방어적 초기화) — 현재 모드의 표현으로 슬롯 0을 기록."""
+    if _ring_tensor_mode(past_kv):
+        if not hasattr(past_kv, "_ring_pos_t"):
+            past_kv._ring_pos_t = {}
+        past_kv._ring_pos_t[layer_idx] = torch.zeros((), dtype=torch.long, device=device)
+    else:
+        if not hasattr(past_kv, "_ring_pos"):
+            past_kv._ring_pos = {}
+        past_kv._ring_pos[layer_idx] = 0
+
+
+def ring_slots_to_tensor(past_kv):
+    """[vendor patch P20] int 슬롯 → 0-dim int64 디바이스 텐서 (CUDA Graph 캡처 직전 1회).
+
+    int 표현은 지운다 — 이후 정상상태 스텝은 텐서 경로(index_copy_)만 탄다."""
+    ints = getattr(past_kv, "_ring_pos", None) or {}
+    past_kv._ring_pos_t = {
+        layer_idx: torch.tensor(
+            int(pos), dtype=torch.long, device=_layer_keys(past_kv, layer_idx).device
+        )
+        for layer_idx, pos in ints.items()
+    }
+    if hasattr(past_kv, "_ring_pos"):
+        del past_kv._ring_pos
+    past_kv._ring_tensor_mode = True
+
+
+def ring_slots_to_int(past_kv):
+    """[vendor patch P20] 텐서 슬롯 → int (그래프 경로 실패 후 eager 재개 직전).
+
+    레이어당 스칼라 D2H 1회 — 호출자는 진행 중인 커널을 먼저 배수해야 한다."""
+    tensors = getattr(past_kv, "_ring_pos_t", None) or {}
+    past_kv._ring_pos = {layer_idx: int(t.item()) for layer_idx, t in tensors.items()}
+    if hasattr(past_kv, "_ring_pos_t"):
+        del past_kv._ring_pos_t
+    past_kv._ring_tensor_mode = False
+
+
 class SlidingWindowLlamaAttention(LlamaAttention):
     """LlamaAttention with sliding window KV cache using a ring buffer during decode."""
 
@@ -1504,27 +1569,14 @@ class SlidingWindowLlamaAttention(LlamaAttention):
             result = _attn_forward()
             new_len = _get_kcache(past_kv, self.layer_idx).shape[-2]
             if new_len >= prefill_len + W:
-                # [vendor patch P20] 링 위치를 디바이스 상주 0-dim int64 텐서로 유지 —
-                # CUDA Graph 캡처(app/engine/fast_decode.py)가 캡처 안에서 슬롯 인덱싱·
-                # 갱신을 재생할 수 있어야 하기 때문(파이썬 int 갱신은 캡처 불가).
-                # 파이썬 int 상태(_ring_pos dict)는 폐기하고 텐서(_ring_pos_t)로
-                # 단일화한다(이중 상태는 버그 온상). 저장 값·수치는 슬라이스 대입과
-                # 완전 동일 — CPU/MPS/CUDA 전 백엔드 공통 적용, 출력 불변.
-                if not hasattr(past_kv, '_ring_pos_t'):
-                    past_kv._ring_pos_t = {}
-                past_kv._ring_pos_t[self.layer_idx] = torch.zeros(
-                    (), dtype=torch.long, device=_get_kcache(past_kv, self.layer_idx).device
-                )
+                # [vendor patch P20] 링 정상상태 진입 — 현재 모드(기본 int, CUDA Graph
+                # 모드면 텐서)의 표현으로 슬롯 0을 기록한다 (위 모듈 주석 참조).
+                _ring_init_slot(past_kv, self.layer_idx, _get_kcache(past_kv, self.layer_idx).device)
             return result
 
         # Steady state: ring in-place overwrite
-        # [vendor patch P20] _ring_pos(int dict) → _ring_pos_t(0-dim int64 텐서 dict).
         kcache = _get_kcache(past_kv, self.layer_idx)
         vcache = _get_vcache(past_kv, self.layer_idx)
-        if not hasattr(past_kv, '_ring_pos_t') or self.layer_idx not in past_kv._ring_pos_t:
-            past_kv._ring_pos_t = getattr(past_kv, '_ring_pos_t', {}) or {}
-            past_kv._ring_pos_t[self.layer_idx] = torch.zeros((), dtype=torch.long, device=kcache.device)
-        ring_pos_t = past_kv._ring_pos_t[self.layer_idx]
 
         # Compute new K, V and apply RoPE, then overwrite ring slots
         query_states = self.q_proj(hidden_states).view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
@@ -1533,15 +1585,32 @@ class SlidingWindowLlamaAttention(LlamaAttention):
         cos, sin = self._rope_cached(past_kv, value_states, position_ids)
         query_states, key_states = _llama_apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        # [vendor patch P20] 슬롯 쓰기: 슬라이스 대입 → index_copy_(저장 값 동일, 그래프
-        # 재생 가능). 슬롯 갱신도 텐서 in-place(add_/remainder_ ≡ +1 % W) — 캡처 안에서
-        # 리플레이된다. abs_slot = prefill_len + ring_pos_t (링 영역은 prefill 뒤 W칸).
-        # q_len>1(스테디 상태에 다중 토큰 조각이 오는 경우)에도 t 루프가 텐서 슬롯으로 동작.
-        for t in range(q_len):
-            abs_slot = (ring_pos_t + prefill_len).view(1)
-            kcache.index_copy_(2, abs_slot, key_states[:, :, t:t + 1, :])
-            vcache.index_copy_(2, abs_slot, value_states[:, :, t:t + 1, :])
-            ring_pos_t.add_(1).remainder_(W)
+        # 슬롯 쓰기 — abs_slot = prefill_len + ring_pos (링 영역은 prefill 뒤 W칸).
+        # q_len>1(정상상태에 다중 토큰 조각이 오는 경우)에도 t 루프가 슬롯을 차례로 전진한다.
+        if _ring_tensor_mode(past_kv):
+            # [vendor patch P20] CUDA Graph 모드: 텐서 슬롯 + index_copy_(저장 값은 슬라이스
+            # 대입과 동일). 슬롯 갱신도 텐서 in-place(add_/remainder_ ≡ +1 % W)라 캡처 안에서
+            # 리플레이된다.
+            if self.layer_idx not in getattr(past_kv, '_ring_pos_t', {}):
+                _ring_init_slot(past_kv, self.layer_idx, kcache.device)
+            ring_pos_t = past_kv._ring_pos_t[self.layer_idx]
+            for t in range(q_len):
+                abs_slot = (ring_pos_t + prefill_len).view(1)
+                kcache.index_copy_(2, abs_slot, key_states[:, :, t:t + 1, :])
+                vcache.index_copy_(2, abs_slot, value_states[:, :, t:t + 1, :])
+                ring_pos_t.add_(1).remainder_(W)
+        else:
+            # [vendor patch P20] 기본(eager): 호스트 int 슬롯 + 슬라이스 copy_ — KV 길이와
+            # 무관한 상수 비용(MPS 실측 ~6µs/호출, index_copy_는 KV 2317에서 663µs).
+            if self.layer_idx not in getattr(past_kv, '_ring_pos', {}):
+                _ring_init_slot(past_kv, self.layer_idx, kcache.device)
+            pos = past_kv._ring_pos[self.layer_idx]
+            for t in range(q_len):
+                slot = prefill_len + pos
+                kcache[:, :, slot:slot + 1, :].copy_(key_states[:, :, t:t + 1, :])
+                vcache[:, :, slot:slot + 1, :].copy_(value_states[:, :, t:t + 1, :])
+                pos = (pos + 1) % W
+            past_kv._ring_pos[self.layer_idx] = pos
 
         # Attention over full cache (no causal mask needed for decode q_len=1)
         k = _llama_repeat_kv(kcache, num_kv_groups)

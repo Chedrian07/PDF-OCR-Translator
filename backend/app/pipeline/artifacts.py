@@ -6,11 +6,15 @@
 모아 무효화 전략과 생성 전략이 반드시 같은 문자열을 보게 한다.
 
 모든 함수는 `job_dir`(잡 루트)를 받아 Path를 돌려주는 순수 함수다. 파일 존재
-여부는 확인하지 않는다.
+여부는 확인하지 않는다. 예외는 `has_usable_layout` 하나다 — "이 layout을 좌표
+내보내기에 쓸 수 있는가"는 파일 이름이 아니라 **내용**으로만 판정되므로, 그 판정도
+이름과 같은 곳에 둬서 생산자(merge)와 소비자(API·번역)가 같은 기준을 보게 한다.
 """
 
 from __future__ import annotations
 
+import functools
+import json
 import uuid
 from pathlib import Path
 
@@ -27,9 +31,11 @@ __all__ = [
     "facsimile_staging",
     "facsimile_staging_glob",
     "figure_boxes",
+    "has_usable_layout",
     "images_dir",
     "invalidate_language_artifacts",
     "layout",
+    "layout_has_text_blocks",
     "layout_tmp",
     "markdown",
     "meta",
@@ -71,6 +77,56 @@ def layout_tmp(job_dir: Path) -> Path:
     """layout 백필용 요청별 고유 tmp — 동시 백필이 같은 tmp에 겹쳐 쓰는 레이스 차단.
     (병합 워커의 .layout.json.tmp와도 이름이 겹치지 않는다.)"""
     return job_dir / f".layout.{uuid.uuid4().hex}.tmp"
+
+
+# 본문 텍스트를 싣지 않는 그림 계열 블록 타입 (fidelity._FIGURE_TYPES와 같은 어휘).
+_FIGURE_BLOCK_TYPES = frozenset({"image", "chart", "figure", "diagram"})
+
+
+def layout_has_text_blocks(pages) -> bool:
+    """layout 페이지 목록(`[{page, blocks}]`)에 그림이 아닌 블록이 하나라도 있는가.
+
+    좌표 layout의 존재 이유는 텍스트 블록이다 — facsimile HTML·번역 PDF·한국어
+    레이아웃은 전부 텍스트 블록의 좌표에 번역을 얹는다. image 블록만 있거나
+    blocks가 전부 빈 layout(figure_only 엔진인 OvisOCR2의 옛 잡, 전면 스캔을
+    Tesseract로 읽은 textlayer 잡)은 그 소비자들에게 '원문 래스터만 있는 문서'가
+    되므로, '레이아웃 없음'과 똑같이 취급해야 텍스트가 사라지지 않는다.
+    """
+    for page in pages or []:
+        if not isinstance(page, dict):
+            continue
+        for block in page.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            if str(block.get("type") or "").strip().lower() not in _FIGURE_BLOCK_TYPES:
+                return True
+    return False
+
+
+@functools.lru_cache(maxsize=64)
+def _usable_layout_file(path: str, mtime_ns: int, size: int) -> bool:
+    """(경로, mtime, 크기)별 판정 캐시 — 요청마다 layout 전체를 재파싱하지 않는다."""
+    try:
+        pages = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(pages, list) and layout_has_text_blocks(pages)
+
+
+def has_usable_layout(job_dir: Path, lang: str | None = None) -> bool:
+    """layout(.lang).json이 있고, 좌표 내보내기에 쓸 텍스트 블록을 담고 있는가.
+
+    파일 존재(`layout(...).is_file()`)만 보면 figure_only 엔진의 옛 잡(image 블록만)이
+    has_layout으로 보여 document.html이 OCR 텍스트 없는 facsimile이 되고,
+    /pdf?lang=ko가 409 대신 번역되지 않은 원문을 낸다. 새 잡은 생산 단계(merge)가
+    애초에 그런 layout.json을 쓰지 않지만, 디스크에 남은 옛 잡은 이 판정으로 거른다.
+    """
+    path = layout(job_dir, lang)
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    return _usable_layout_file(str(path), st.st_mtime_ns, st.st_size)
 
 
 # ── 페이지 이미지·그림 ────────────────────────────────────────────────────

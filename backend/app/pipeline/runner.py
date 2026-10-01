@@ -307,10 +307,10 @@ def chunk_length_budget_note(settings: "Settings", engine: OCREngine) -> str | N
     처리한다(시간만 더 든다). 그래서 설정 안내로 한 번만 알린다. MAX_LENGTH를 쓰는
     생성 엔진(unlimited: torch·MLX)이 토큰을 스트리밍하는 multi 청크에만 해당한다 —
     아니면 None."""
+    if engine.name != "unlimited":
+        return None  # 능력 조회 전에 거른다(textlayer는 Tesseract 버전을 프로세스로 묻는다)
     caps = engine.capabilities()
-    if engine.name != "unlimited" or not caps.supports_multi_page:
-        return None
-    if caps.stream_granularity != "token":
+    if not caps.supports_multi_page or caps.stream_granularity != "token":
         return None
     pages = max(1, caps.preferred_chunk_size or settings.pages_per_chunk)
     page_tokens = settings.max_page_output_tokens or 0

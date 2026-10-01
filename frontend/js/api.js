@@ -35,8 +35,16 @@ export async function fetchTextWithBusyRetry(url, options = {}) {
   }
 }
 
-export async function apiGet(path) {
-  const res = await fetch(path, { headers: { Accept: 'application/json' } });
+// 주기 폴링(목록·상세·health·번역 상태)은 한 번에 한 요청만 보낸다 — 그래서 응답이 영영
+// 오지 않는 요청 하나가 폴링 전체를 멈추지 않도록 options.timeoutMs로 끊는다(초과 시
+// AbortError로 실패 → 호출부의 일시 실패 처리).
+export const POLL_TIMEOUT_MS = 20000;
+
+export async function apiGet(path, options = {}) {
+  const timeoutMs = Number(options.timeoutMs) || 0;
+  const signal = timeoutMs > 0 && typeof AbortSignal !== 'undefined' && AbortSignal.timeout
+    ? AbortSignal.timeout(timeoutMs) : undefined;
+  const res = await fetch(path, { headers: { Accept: 'application/json' }, signal });
   const text = await res.text().catch(() => '');
   const data = text ? safeParse(text) : null;
   if (!res.ok) {

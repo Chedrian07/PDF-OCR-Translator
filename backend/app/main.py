@@ -24,6 +24,7 @@ from .config import Settings
 from .engine import build_engine
 from .jobs import EventBroker, JobStore, Worker
 from .llm import build_router
+from .owner_lock import JobsDirLock, acquire_jobs_dir_lock
 
 # 스레드 이름을 포맷에 포함한다 — 번역은 잡별 데몬 스레드로 **병렬** 실행되고
 # (api.py: name=f"translate-{job_id}-{lang}") OCR 워커·sidecar 요청 스레드도 함께
@@ -176,7 +177,18 @@ class UploadBodyLimitMiddleware:
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     settings.jobs_dir.mkdir(parents=True, exist_ok=True)
+    # load_existing()이 디스크 상태(running→error, work/ 삭제)를 바꾸기 **전에** 잡
+    # 디렉터리의 단일 소유권을 잡는다 — 살아 있는 다른 백엔드가 쥐고 있으면 여기서
+    # 기동을 거부한다. 앱 수명 동안 쥐고 lifespan 종료 시 놓는다(owner_lock.py).
+    owner_lock = acquire_jobs_dir_lock(settings.jobs_dir)
+    try:
+        return _assemble_app(settings, owner_lock)
+    except BaseException:
+        owner_lock.release()  # 조립 실패(잘못된 OCR_DEVICE 등)에 락만 남지 않게
+        raise
 
+
+def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
     store = JobStore(settings.jobs_dir)
     store.load_existing()
     broker = EventBroker()
@@ -215,17 +227,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        worker.start()
-        if settings.preload_model and not engine.loaded:
-            threading.Thread(target=_preload, name="model-preload", daemon=True).start()
-        # JOB_TTL_DAYS>0일 때만 기동 — 기본 0 = 사용자 데이터 자동 삭제 비활성(opt-in)
-        gc_task = asyncio.create_task(_gc_loop(_app)) if settings.job_ttl_days > 0 else None
-        yield
-        if gc_task is not None:
-            gc_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await gc_task
-        worker.stop()
+        try:
+            worker.start()
+            if settings.preload_model and not engine.loaded:
+                threading.Thread(target=_preload, name="model-preload", daemon=True).start()
+            # JOB_TTL_DAYS>0일 때만 기동 — 기본 0 = 사용자 데이터 자동 삭제 비활성(opt-in)
+            gc_task = asyncio.create_task(_gc_loop(_app)) if settings.job_ttl_days > 0 else None
+            yield
+            if gc_task is not None:
+                gc_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await gc_task
+            worker.stop()
+        finally:
+            # 닫힌 앱은 잡 디렉터리 소유권을 바로 놓는다 — 같은 DATA_DIR로 다음 앱
+            # (재시작·테스트의 재생성)이 뜰 수 있게. 예외로 끝난 수명도 마찬가지다.
+            owner_lock.release()
 
     app = FastAPI(
         title="Unlimited-OCR — PDF → Markdown", version=__version__, lifespan=lifespan,
@@ -250,6 +267,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ",".join(settings.allowed_hosts),
         )
     app.state.settings = settings
+    app.state.owner_lock = owner_lock
     app.state.store = store
     app.state.broker = broker
     app.state.engine = engine

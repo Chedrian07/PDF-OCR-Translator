@@ -469,3 +469,90 @@ def test_짧은_유닛의_정상_번역은_통과한다(src, out):
     from app.translate.masking import untranslated_reason
 
     assert untranslated_reason(src, out, mask(src)[1]) == ""
+
+
+# ── unmask 단일 패스·닫는 태그 (translate-llm-9, translate-llm-10) ──────────────
+
+@pytest.mark.parametrize("src", [
+    "Loop `for (i=0; i<k1; i++)` until done.",              # 코드 안의 <k1
+    "for (i=0; i<k1; i++) we loop `for (i=0; i<k1; i++)` here.",   # 산문에도 <k1
+    "The bound $0<t1$ holds for all inputs.",
+    "Inline \\( u<u2 \\) appears here.",
+    "The value 0<t1 stays in plain prose.",                   # 마스킹 안 된 산문
+    "If i<k1 and k1>0 then $x$ wins.",
+])
+def test_원문에_플레이스홀더_비슷한_문자열이_있어도_완벽한_번역은_통과(src):
+    """종전 unmask는 복원된 텍스트를 다시 훑어 영구 placeholder-mismatch였다."""
+    masked, mapping = mask(src)
+    restored, missing, dup = unmask(masked, mapping, masked)
+    assert restored == src and missing == [] and dup == []
+
+
+def test_원문_코드의_c2_문자열이_빠진_인용을_가리지_않는다():
+    masked, mapping = mask("uses `x<c2>y` in [1] here")
+    dropped = masked.replace('<c2 v="[1]"/>', "")
+    restored, missing, dup = unmask(dropped, mapping, masked)
+    assert missing == ["c2"]                       # 종전: missing=[] dup=[] — 인용 조용히 소실
+    assert restored == "uses `x<c2>y` in  here"    # 코드는 변조되지 않는다
+
+
+def test_모델이_만든_쌍_태그는_빈쌍은_접고_내용이_든_쌍은_dup():
+    masked, mapping = mask("As shown in Figure 2, the loss $L$ is low.")
+    restored, missing, dup = unmask(
+        '<f1 v="Figure 2">그림 2</f1>에서 보듯이, 손실 <m2 v="L"></m2>은 낮다.', mapping, masked,
+    )
+    assert "</f1>" in dup and missing == []        # 내용이 든 쌍 → repair로
+    assert "</m2>" not in restored                 # 빈 쌍은 자기 닫힘으로 접힘
+    restored2, missing2, dup2 = unmask(
+        "<f1 v='Figure 2'/>에서, 손실 <m2 v=L/>은 낮다.", mapping, masked,
+    )
+    assert restored2 == "Figure 2에서, 손실 $L$은 낮다." and not missing2 and not dup2
+
+
+# ── HTML 태그 마스킹 범위 (translate-llm-14) ────────────────────────────────
+
+@pytest.mark.parametrize("text", [
+    "If x<y then the algorithm stops early. Otherwise we update the mapping f: A -> B.",
+    "The ordering a<b holds for every pair, and by symmetry observe that c>d, as required.",
+])
+def test_부등호_사이_산문은_태그로_삼키지_않는다(text):
+    masked, mapping = mask(text)
+    assert not any(k.startswith("t") for k in mapping)
+    assert "algorithm" in masked or "symmetry" in masked
+
+
+@pytest.mark.parametrize(("text", "tags"), [
+    ('<table border="1"><tr><td colspan=2>A</td></tr></table>',
+     ['<table border="1">', "<tr>", "<td colspan=2>", "</td>", "</tr>", "</table>"]),
+    ("Bold <b>text</b> and <br/> tag.", ["<b>", "</b>", "<br/>"]),
+    ('A <span style="color: red">red</span> word.', ['<span style="color: red">', "</span>"]),
+    ("Tokens <s> and <unk> and <think> stay.", ["<s>", "<unk>", "<think>"]),
+])
+def test_진짜_태그는_계속_보호한다(text, tags):
+    _masked, mapping = mask(text)
+    assert [v for k, v in mapping.items() if k.startswith("t")] == tags
+
+
+# ── 거부문 오탐 — MT·NLP 논문 (translate-llm-8) ─────────────────────────────
+
+@pytest.mark.parametrize(("src", "out"), [
+    ("Some idioms cannot be translated literally, so we paraphrase them.",
+     "일부 관용구는 문자 그대로 번역할 수 없으므로 의역하였다."),
+    ("Translation of these rare named entities is not possible without context.",
+     "문맥 없이는 이러한 희귀 개체명의 번역이 불가능하다."),
+    ("Such puns are impossible to translate into other languages.",
+     "이러한 말장난은 다른 언어로 번역할 수 없다."),
+])
+def test_번역_불가능성을_다루는_정상_번역은_거부문이_아니다(src, out):
+    from app.translate.masking import untranslated_reason
+
+    assert untranslated_reason(src, out, mask(src)[1]) == ""
+
+
+def test_번역을_다루는_원문이어도_사과_거부문은_잡는다():
+    from app.translate.masking import untranslated_reason
+
+    src = "Some idioms cannot be translated literally, so we paraphrase them."
+    assert untranslated_reason(src, "죄송합니다, 번역할 수 없습니다.", {}) == "refusal"
+    plain = "The accuracy improved on the benchmark dataset that we evaluated."
+    assert untranslated_reason(plain, "이 텍스트는 번역할 수 없습니다.", {}) == "refusal"

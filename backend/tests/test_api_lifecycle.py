@@ -488,3 +488,28 @@ def test_readers_keep_using_the_jobs_separator_after_the_setting_changes(
         assert job.page_separator == original
     finally:
         settings.page_separator = original
+
+
+def test_translate_start_resource_failure_is_a_retryable_503(client, sample_pdf, translate_env):
+    """503 + Retry-After = 잠시 뒤 재시도(프런트 계약). 스레드 자원 부족은 일시적이다 —
+    Retry-After 없는 503(프로바이더 미구성)과 구분돼야 한다."""
+    import threading
+
+    jid = _upload(client, sample_pdf)
+    assert wait_done(client, jid)["status"] == "done"
+    real_start = threading.Thread.start
+
+    def _no_thread(thread):
+        if thread.name == f"translate-{jid}-ko":
+            raise RuntimeError("can't start new thread")
+        return real_start(thread)
+
+    translate_env.setattr(threading.Thread, "start", _no_thread)
+    busy = client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"})
+    assert busy.status_code == 503 and busy.headers["Retry-After"] == "5"
+
+    translate_env.delenv("OPENAI_BASE_URL")
+    translate_env.delenv("OPENAI_MODEL")
+    unconfigured = client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko", "force": True})
+    assert unconfigured.status_code == 503
+    assert "retry-after" not in unconfigured.headers

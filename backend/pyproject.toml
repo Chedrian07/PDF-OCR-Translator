@@ -12,6 +12,9 @@ dependencies = [
     "markdown-it-py>=3.0",
     # ── LLM 프로바이더 (app/llm — OpenAI/Ollama 비동기 클라이언트) ──
     "httpx>=0.27",
+    # ── 설정 — 로컬 실행의 .env 파서(app/config.py). 인라인 주석·따옴표·export를
+    #    compose와 같은 규칙으로 읽는다(uvicorn[standard]에 기대지 않고 직접 명시) ──
+    "python-dotenv>=1.2.2",
     # ── 모델 (baidu/Unlimited-OCR README 고정 버전) ──
     "transformers==4.57.1",
     "pillow==12.1.1",

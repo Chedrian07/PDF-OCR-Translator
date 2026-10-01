@@ -681,10 +681,17 @@ def _rich_prefix_css(
     fontsize: float,
     align: int,
     lineheight: float,
+    archive: object | None = None,
 ) -> tuple[str, object]:
+    """scratch 조판용 CSS와 폰트 Archive. `archive`를 주면 그대로 재사용한다.
+
+    Archive는 폰트 파일을 통째로 읽는다(서브셋이 없으면 시행마다 26MB). 한 블록의
+    시행(크기 × 상자 × 행간)은 모두 같은 폰트를 쓰므로 호출부가 한 번만 만든다.
+    """
     fitz = quiet_fitz()
     font_path = Path(fontfile)
-    archive = fitz.Archive(str(font_path), font_path.name)
+    if archive is None:
+        archive = fitz.Archive(str(font_path), font_path.name)
     text_align = {1: "center", 2: "right", 3: "justify"}.get(align, "left")
     css = (
         f"@font-face {{font-family:uocr-rich;src:url('{font_path.name}');}}"
@@ -801,6 +808,7 @@ def _plan_rich_prefix(
         candidates.append((grown, True))
     avoid = avoid_rects or []
     orphan_fallback: _TextFitPlan | None = None
+    archive = None
     for scale in scales:
         size = max(_MIN_FONT_PT, base_pt * scale)
         for candidate, expanded in candidates:
@@ -813,7 +821,7 @@ def _plan_rich_prefix(
                         height=page.mediabox.height,
                     )
                     css, archive = _rich_prefix_css(
-                        fontfile, size, align, lineheight,
+                        fontfile, size, align, lineheight, archive,
                     )
                     spare, actual_scale = scratch_page.insert_htmlbox(
                         candidate,
@@ -824,9 +832,11 @@ def _plan_rich_prefix(
                     )
                     if spare < 0 or actual_scale < 0.999:
                         continue
+                    # 같은 scratch 페이지를 줄 상자와 run 복원에 함께 쓴다(추출 1회).
+                    scratch_blocks = scratch_page.get_text("dict").get("blocks", [])
                     scratch_lines = [
                         line
-                        for block in scratch_page.get_text("dict").get("blocks", [])
+                        for block in scratch_blocks
                         for line in block.get("lines", [])
                         if line.get("bbox")
                     ]
@@ -840,7 +850,7 @@ def _plan_rich_prefix(
                             str(span.get("text") or ""),
                             bool(int(span.get("color") or 0)),
                         )
-                        for block in scratch_page.get_text("dict").get("blocks", [])
+                        for block in scratch_blocks
                         for line in block.get("lines", [])
                         for span in line.get("spans", [])
                         if str(span.get("text") or "")

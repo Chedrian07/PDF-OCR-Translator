@@ -191,6 +191,9 @@ _SANITIZE_SUBS: tuple[tuple[str, str], ...] = (
 )
 
 
+_LEADING_SOURCE_HEADER_RE = re.compile(r"\A\s*\[번역할 원문\][ \t]*\n")
+
+
 def sanitize_translation(raw: str) -> tuple[str, int]:
     """모델 발명 수식 딜리미터·리터럴 <PAGE>를 제거. (정리문, 치환 건수) 반환.
 
@@ -199,8 +202,14 @@ def sanitize_translation(raw: str) -> tuple[str, int]:
     치환은 전체에 적용하되 **카운트는 플레이스홀더 태그 밖만** 센다 — v 속성의
     수식 미리보기(v="\\( E=mc…")까지 세면 리포트가 실측(25p 784건)처럼 부풀려진다.
     """
-    outside = _PLACEHOLDER_RE.sub("", raw)  # 카운트 전용 — 태그(속성 포함) 제거본
     count = 0
+    # 소형 로컬 모델(실측 Qwen3.5-0.8B)이 프롬프트의 마지막 헤더 '[번역할 원문]' 한 줄을
+    # 출력 맨 앞에 붙이고 그 뒤에 정상 번역을 낸다 — 그 한 줄만 걷어낸다. 다른 스캐폴딩
+    # (용어집·직전 문맥 섹션 echo)이나 본문 중간의 헤더는 그대로 두어 게이트가 거부한다.
+    stripped = _LEADING_SOURCE_HEADER_RE.sub("", raw, count=1)
+    if stripped != raw:
+        raw, count = stripped, 1
+    outside = _PLACEHOLDER_RE.sub("", raw)  # 카운트 전용 — 태그(속성 포함) 제거본
     out = raw
     for needle, repl in _SANITIZE_SUBS:
         if needle in out:

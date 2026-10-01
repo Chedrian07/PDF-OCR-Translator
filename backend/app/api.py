@@ -305,7 +305,10 @@ _TRANSLATE_REASON_KEYS = ("skip_reasons", "kept_reasons", "reference_rule")
 
 def _write_translate_state(job, lang: str, state: dict) -> None:
     d = _translate_dir(job, lang)
-    d.mkdir(parents=True, exist_ok=True)
+    # parents=False — 삭제(DELETE·GC)와 겹쳐도 잡 디렉터리를 되살려 state.json만 든
+    # 고아를 만들지 않는다. 잡 디렉터리가 없으면 FileNotFoundError(OSError)다.
+    d.parent.mkdir(exist_ok=True)
+    d.mkdir(exist_ok=True)
     tmp = artifacts.translate_state_tmp(job.dir, lang)
     tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, artifacts.translate_state(job.dir, lang))
@@ -1419,7 +1422,11 @@ def job_pdf(
     except PdfExportBusyError as e:
         raise _busy_as_503(e) from e
     except PdfExportError as e:
-        raise HTTPException(500, str(e))
+        # 내보내기 불가(입력 누락·손상·레이아웃 불일치·삭제된 잡)는 서버 결함이 아니라
+        # 잡 상태 문제다 — /page와 같은 409로 알린다(프런트 계약: 200|400|404|409,
+        # 재시도 대상은 503 + Retry-After뿐). 500이면 프록시가 본문을 가로채 사용자가
+        # 원인 문구를 잃는다.
+        raise HTTPException(409, str(e)) from e
     # 헤더는 숫자만 사용해 비ASCII 경고문·원문이 HTTP 메타데이터로 새지 않게 한다.
     specialist = report.get("specialist_kept")
     if not isinstance(specialist, dict):

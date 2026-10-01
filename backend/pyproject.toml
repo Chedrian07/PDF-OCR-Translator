@@ -16,12 +16,22 @@ dependencies = [
     #    compose와 같은 규칙으로 읽는다(uvicorn[standard]에 기대지 않고 직접 명시) ──
     "python-dotenv>=1.2.2",
     # ── 모델 (baidu/Unlimited-OCR README 고정 버전) ──
+    # transformers: 벤더 모델 코드(app/vendor/unlimited_ocr)가 4.57.1 API에 묶여 고정한다.
+    #   4.57.x는 보안 백포트가 끝난 라인이라 pip-audit 권고(CVE-2026-80047·CVE-2026-4372
+    #   등)가 남는다. 수용 근거: 모두 원격 저장소의 config·코드를 믿는 경로인데 리비전을
+    #   SHA로 고정(MODEL_REVISION)하고 trust_remote_code·custom_generate·Trainer·
+    #   save_pretrained를 쓰지 않는다. MODEL_ID를 바꿀 땐 신뢰 저장소의 SHA만 쓴다.
     "transformers==4.57.1",
-    "pillow==12.1.1",
     "einops==0.8.2",
     "addict==2.4.0",
     "easydict==1.13",
-    "pymupdf==1.27.2.2",
+    # ── 보안 고정 — 모델 수치와 무관한 I/O 라이브러리라 README 고정에서 이탈한다 ──
+    # pymupdf: 동봉 MuPDF 1.28.0 미만은 CVE-2026-3308(이미지 stride 정수 오버플로 →
+    #   힙 OOB 쓰기, 수정 커밋 a26f0142)이 남는다. 1.27.2.x도 MuPDF 1.27.2라 미수정이고
+    #   패키지 스캐너는 동봉 MuPDF를 못 본다 — tests/test_dependency_floor.py가 지킨다.
+    # pillow: 12.3.0 미만은 crop/paste 좌표 오버플로 OOB 쓰기 등 HIGH 권고가 남는다.
+    "pillow==12.3.0",
+    "pymupdf==1.28.2",
     # 내보내기 PDF에 임베드하는 CJK 폰트 서브셋 — 없으면 전체 폰트를
     # 임베드하는 예전 동작으로 조용히 폴백한다(pdf_export/subset.py).
     "fonttools>=4.53",
@@ -35,6 +45,10 @@ dependencies = [
 
 # torch는 디바이스 백엔드별 인덱스가 달라 extra로 분리 (docker build ARG로 선택)
 # metal: macOS arm64 전용 — PyPI 기본 휠에 MPS 지원이 내장되어 있어 별도 인덱스 불필요
+# torch==2.10.0 고정: 벤더 패치(PROVENANCE.md P11·P12·P16)가 2.10.0 동작에 맞춰 검증됐다.
+#   잔여 pip-audit 권고 CVE-2025-3000(torch.jit.script)·CVE-2026-4538(pt2 로딩)은 로컬
+#   신뢰 코드 경로다 — 가중치는 safetensors로만 읽고(.pt/.pt2 로딩 없음), jit.script는
+#   벤더 quick_gelu 정의에만 쓰여 업로드 입력이 닿지 않는다.
 [project.optional-dependencies]
 cpu = ["torch==2.10.0", "torchvision==0.25.0"]
 cu129 = ["torch==2.10.0", "torchvision==0.25.0"]

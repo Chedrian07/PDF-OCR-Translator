@@ -25,7 +25,7 @@ from .constants import (
     _SHRINK_STEPS,
     _SINGLE_LINE_SCALES,
 )
-from .fonts import _metrics_font
+from .fonts import _metrics_font, _portable_text_for_font
 from .geometry import (
     _ink_collides,
     _page_bounds,
@@ -35,6 +35,7 @@ from .geometry import (
 )
 from .models import _FlowCandidate, _LineSegment, _Replacement, _SourceSpan, _TextFitPlan
 from .spans import _span_redaction_band
+from .text import _TULU_MICROFIX
 
 _TEXT_ORIGIN_RE = re.compile(
     r"1 0 0 1 ([-+0-9.]+) ([-+0-9.]+) Tm"
@@ -213,11 +214,13 @@ def _preserved_reference_microfixes(
             union = +first.rect
             union.include_rect(slash.rect)
             union.include_rect(tail.rect)
+            # serif 폰트에 'ü'가 없으면(AppleMyungjo) 그대로 찍을 때 'T□lu'와 U+0000이
+            # 생긴다. 다른 번역 텍스트와 같은 이식성 보정을 거쳐 'Tulu 3:'로 낮춘다.
             plan = _microfix_plan(
                 fitz,
                 union,
                 first.origin,
-                "Tülu 3:",
+                _portable_text_for_font(_TULU_MICROFIX, fontfile),
                 max(_MIN_FONT_PT, median((first.size, slash.size, tail.size))),
                 fontname,
                 fontfile,

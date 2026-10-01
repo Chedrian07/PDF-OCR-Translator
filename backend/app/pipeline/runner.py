@@ -35,8 +35,9 @@ _TOKEN_FLUSH_CHARS = 256
 _TOKEN_FLUSH_SECS = 0.1
 _PAGE_MARKER = "<PAGE>"
 # 잡 단위 경고 상한 — 엔진 경고는 청크(기본 1페이지)마다 나올 수 있어 상한이 없으면
-# meta.json이 비대해지고 5초 주기 GET /api/jobs 응답까지 부풀린다.
+# meta.json이 비대해지고 5초 주기 GET /api/jobs 응답까지 부풀린다. 참고(notices)도 같다.
 _MAX_JOB_WARNINGS = 200
+_MAX_JOB_NOTICES = 200
 # 충실도 재처리 채택에 요구하는 최소 개선폭. 0.01 수준의 요동으로 페이지를
 # 갈아끼우면 라이브 뷰만 흔들리고 얻는 것이 없다. 실측 회수 사례는 전부
 # 0.45→0.97처럼 큰 폭이라 0.05는 넉넉히 통과한다.
@@ -490,7 +491,7 @@ def execute_job(
         chunk_size = max(1, chunk_size)
         # MAX_LENGTH와 청크 최악 예산의 조합은 설정의 성질이라 잡마다 알리지 않는다 — 기동 시
         # 1회 안내(chunk_length_budget_note)로 충분하다. 실제로 잘린 청크는 아래 페이지별
-        # 복구가 그 잡의 메시지로 남긴다.
+        # 복구가 그 잡의 참고(notices)로 남긴다.
         chunks = _chunked(pages, chunk_size)
         job.progress.update(total_pages=total, total_chunks=len(chunks), current_page=0)
         store.save(job)
@@ -504,11 +505,13 @@ def execute_job(
         # 문서 단위 게이트 통계 — 회로 차단(_GATE_BREAKER_ATTEMPTS) 판단용
         gate_state = {"tried": 0, "accepted": 0, "tripped": False}
         engine.drain_warnings()  # 이전 잡의 잔여 경고 폐기 (엔진은 잡 간 공유된다)
+        engine.drain_notices()
         if job.mode != "per_page" and not caps.supports_multi_page:
             # 페이지 단위 모델 안내 — 한 번만 기록 (multi를 선택해도 정상 처리되지만
             # 내부적으로는 페이지별 추론이며 오류도 페이지 단위로 격리된다 — 여러 쪽
-            # 청크가 실패하면 청크 재시도 없이 페이지별 처리로 내린다)
-            merger.warnings.append(
+            # 청크가 실패하면 청크 재시도 없이 페이지별 처리로 내린다). 결과 품질과 무관한
+            # 처리 방식 안내라 참고(notices)다 — 경고면 이 엔진의 모든 잡이 'degraded'가 된다.
+            merger.notices.append(
                 f"{engine.name} 엔진은 페이지 단위 모델이라 문서를 페이지별로 처리했습니다"
                 " (결과는 동일하게 하나의 Markdown으로 병합됨)"
             )
@@ -768,6 +771,8 @@ def execute_job(
                     shutil.rmtree(page_dir, ignore_errors=True)
                     accepted = False
                     note = ""
+                    # 결과가 품질 문제가 아닌가(채택·측정 한계) — 참고로, 아니면 경고로 남긴다
+                    informational = False
                     try:
                         sink.set_chunk(pno, expect_markers=False)
                         page_md = engine.run_single(
@@ -795,6 +800,7 @@ def execute_job(
                                 ChunkResult(page_dir, pno, 1, page_md, single=True),
                             )
                             accepted = True
+                            informational = True  # 열화를 고쳤다 — 남은 품질 문제가 없다
                             gate_state["accepted"] += 1
                             note = (
                                 f"충실도 {before.score:.2f} → {after.score:.2f}로 "
@@ -807,8 +813,9 @@ def execute_job(
                             and not _lost(pno)
                         ):
                             # 단독 추론이 같은 전사를 다시 냈다 — 페이지가 아니라 지표의
-                            # 한계다(수식·목차 표기 차이 등). 품질 문제로 읽히지 않게.
+                            # 한계다(수식·목차 표기 차이 등). 품질 문제로 읽히지 않게 참고로.
                             # (통째로 유실된 페이지가 또 비면 그건 진짜 실패다)
+                            informational = True
                             note = (
                                 f"충실도 {before.score:.2f} → {after.score:.2f} — 측정 "
                                 "한계로 판단해 원래 결과 유지"
@@ -827,7 +834,8 @@ def execute_job(
                         shutil.rmtree(page_dir, ignore_errors=True)
                         sink.rewind_to(pno, "재처리 결과 미채택")
                         sink.emit_page(pno, _relive_text(pno))
-                    merger.warnings.append(f"{pno}페이지: {note}")
+                    target = merger.notices if informational else merger.warnings
+                    target.append(f"{pno}페이지: {note}")
                     logger.info("%d페이지 충실도 게이트: %s", pno, note)
                     if (
                         not gate_state["tripped"]
@@ -835,7 +843,9 @@ def execute_job(
                         and gate_state["tried"] >= _GATE_BREAKER_ATTEMPTS
                     ):
                         gate_state["tripped"] = True
-                        merger.warnings.append(
+                        # 지표가 이 문서를 재지 못한다는 판단 — 페이지 품질 문제가 아니다.
+                        # (재처리 뒤에도 개선되지 않은 페이지는 위에서 각각 경고로 남았다)
+                        merger.notices.append(
                             f"충실도 게이트: 단독 재처리 {gate_state['tried']}회가 모두 "
                             "개선되지 않아 이 문서에서는 부분 열화 페이지 재처리를 멈춥니다 "
                             "(측정 한계로 판단 — 통째로 유실된 페이지만 계속 재처리)"
@@ -881,7 +891,10 @@ def execute_job(
                 else:
                     head = f"청크 변환 실패로 페이지별 재처리 ({chunk_error.__class__.__name__})"
                 logger.warning("%s: %s — %s", span, head, str(chunk_error)[:200])
-                merger.warnings.append(f"{span}: {head} ({str(chunk_error)[:200]})")
+                # 재처리 경위는 참고다 — 페이지별 single이 성공하면 내용·품질 손실이 없다.
+                # 그래도 살리지 못한 페이지는 아래에서 페이지마다 경고(텍스트 레이어 복구·
+                # 플레이스홀더)로 따로 남는다.
+                merger.notices.append(f"{span}: {head} ({str(chunk_error)[:200]})")
 
                 if keep:
                     # 잘린 페이지·시작 못 한 페이지의 산출물만 지우고 앞 페이지는 병합한다.
@@ -1008,6 +1021,11 @@ def execute_job(
                     logger.warning("잡 %s: 경고 상한 도달 — 이후 경고는 로그에만 남습니다", job.id)
                 else:
                     logger.warning("잡 %s 경고(생략됨): %s: %s", job.id, span, warning)
+            for notice in engine.drain_notices():
+                if len(merger.notices) < _MAX_JOB_NOTICES:
+                    merger.notices.append(f"{span}: {notice}")
+                else:
+                    logger.info("잡 %s 참고(생략됨): %s: %s", job.id, span, notice)
             if md is not None and cancel.is_set():
                 # 엔진은 취소돼도 그때까지의 부분 출력을 정상 반환한다. 그 부분까지만
                 # 병합하고 곧바로 끝낸다 — 모자란 마커를 채우면(finish_chunk) 진행률이
@@ -1058,6 +1076,7 @@ def execute_job(
         broker.publish_progress(job)
         merger.finalize()
         job.warnings = merger.warnings
+        job.notices = merger.notices
         job.status = "done"
         job.error = None
         store.save(job)
@@ -1080,6 +1099,7 @@ def execute_job(
         # 사용자는 정상 변환된 부분과 구분할 수 없다.
         if merger is not None:
             job.warnings = merger.warnings
+            job.notices = merger.notices
         store.save(job)
         broker.publish(job.id, "error", {"message": job.error, "canceled": True})
         logger.info("잡 취소: %s", job.id)
@@ -1090,6 +1110,7 @@ def execute_job(
         job.error = str(e)[:2000] or e.__class__.__name__
         if merger is not None:
             job.warnings = merger.warnings
+            job.notices = merger.notices
         store.save(job)
         broker.publish(job.id, "error", {"message": job.error})
     finally:

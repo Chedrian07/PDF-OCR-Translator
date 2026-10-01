@@ -1812,3 +1812,37 @@ def test_이전_실행이_캐시한_루프_출력은_재검증에서_걸러진�
     assert again.unit_calls == 1 and res.cached == 1 and res.translated == 1
     assert report["cache_rejected"] == 1 and report["cache_reused"] == 1
     assert "만만만" not in out and out == ko_expected(md)
+
+
+# ── 분할 결합 출력 속의 캔드 응답 (verify_e2e 25쪽 실측) ───────────────────────
+
+class _CannedEverywhere(EchoClient):
+    def __init__(self, canned):
+        super().__init__()
+        self.canned = canned
+
+    def complete(self, system, user, *, max_tokens):
+        self.calls += 1
+        return "[]" if _marker(user) is None else self.canned
+
+
+def test_분할_반쪽이_축퇴_출력이면_결합_출력도_원문_유지(tmp_path, cfg):
+    """반쪽마다 같은 캔드 응답 → 결합 문자열은 다른 유닛 출력과 달라 스윕을 빠져나갔다."""
+    canned = "요약된 내용"
+    split_src = "The estimator is unbiased. Its variance shrinks with d."
+    md = "\n\n".join(["Introduction", "Related Work", "Conclusion", split_src]) + "\n"
+    res, report, out = _run_md(tmp_path, cfg, md, _CannedEverywhere(canned))
+    assert canned not in out
+    assert "md:0:3" in res.kept_original and report["split"] == 1
+    assert report["kept_reasons"]["degenerate-output"] == 4
+    cache = json.loads((tmp_path / "translations/ko/units.json").read_text(encoding="utf-8"))
+    assert not any(canned in v for v in cache.values())
+
+
+def test_분할_결합_출력도_유닛_전체_기준_게이트를_통과해야_한다(tmp_path, cfg):
+    """반쪽 기준으로는 통과해도 이은 결과가 원문 전체에 비해 지나치게 짧으면 버린다."""
+    canned = "요약된 내용"
+    src = "The estimator stays unbiased for every input. Its variance shrinks with the dimension d."
+    res, report, out = _run_md(tmp_path, cfg, src + "\n", _CannedEverywhere(canned))
+    assert res.kept_original == ["md:0:0"] and report["split"] == 0
+    assert canned not in out and src in out

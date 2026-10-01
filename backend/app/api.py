@@ -572,6 +572,22 @@ def _note_worker_liveness(st, alive: bool) -> None:
         logger.info("OCR 워커 스레드가 다시 살아났습니다")
 
 
+def _utc_iso(timestamp: float | None) -> str | None:
+    if timestamp is None:
+        return None
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds")
+
+
+def _worker_progress(worker) -> tuple[str | None, float | None]:
+    snapshot = getattr(worker, "progress_snapshot", None)
+    if not callable(snapshot):
+        return None, None
+    try:
+        return snapshot()
+    except Exception:  # noqa: BLE001 — health가 500으로 죽지 않게
+        return None, None
+
+
 @router.get("/health")
 def health(request: Request) -> dict:
     st = _state(request)
@@ -585,6 +601,7 @@ def health(request: Request) -> dict:
         provider = {"status": "error", "error": str(e)[:300]}
     worker_alive = st.worker.is_alive()
     _note_worker_liveness(st, worker_alive)
+    worker_job, last_progress = _worker_progress(st.worker)
     return {
         "status": "ok",
         "engine": engine.name,
@@ -598,6 +615,15 @@ def health(request: Request) -> dict:
         "native_ops": native_ops.HAVE_NATIVE,
         # 워커 스레드 생존 여부 — 죽으면 잡이 영원히 queued로 남으므로 운영 가시성 필수
         "worker_alive": worker_alive,
+        # 워커가 살아 있어도 진행하지 않는 상태(웨지)를 보이게 — 실행 중 잡과 그 잡의 마지막
+        # 진행(페이지·토큰·대기 알림) 시각·경과 초. 잡이 있는데 경과가 계속 늘면 멈춘 것이다.
+        "worker_job_id": worker_job,
+        "worker_last_progress_at": _utc_iso(last_progress),
+        "worker_progress_age_s": (
+            None if last_progress is None else round(max(0.0, time.time() - last_progress), 1)
+        ),
+        # PyMuPDF 격리 워커 풀(모드·풀별 워커 수·작업·시간 상한 초과·비정상 종료 횟수)
+        "pdf_workers": pdf_worker.pool_stats(),
         "max_upload_mb": st.settings.max_upload_mb,
         "translate_available": _translate_available(),
         # ── 신규 필드 (추가만 — 기존 필드 의미 불변) ──

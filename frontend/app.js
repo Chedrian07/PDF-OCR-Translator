@@ -37,7 +37,8 @@ import { teardownConnections } from './js/sse.js';
 import { cancelTranslate, setLang, startTranslate } from './js/translate.js';
 import { submitQaQuestion, updateQaProviderControls } from './js/qa.js';
 import {
-  applyReaderZoom, cancelReaderJump, captureReaderSelection, downloadPdfWithReport,
+  applyReaderZoom, cancelReaderJump, captureReaderSelection, copyReaderNotes,
+  downloadPdfWithReport, exportReaderNotes,
   highlightReaderSelection, onReaderPaneScroll, onReaderRailScroll, onReaderStackError,
   onReaderStackLoad, openReaderQa, previewReaderBlock, readerIsActive, readerTotal,
   readerViewportFocus, readerZoomBy, remeasureReaderWithAnchor, renderReaderPage,
@@ -223,6 +224,9 @@ function init() {
   });
   el.readerHighlight.addEventListener('click', highlightReaderSelection);
   el.readerCite.addEventListener('click', saveReaderCitation);
+  // 저장한 인용·하이라이트 — Markdown 복사/파일 내보내기
+  el.readerNotesCopy.addEventListener('click', copyReaderNotes);
+  el.readerNotesExport.addEventListener('click', exportReaderNotes);
   el.readerTranslateBtn.addEventListener('click', startTranslate); // 기존 번역 시작 경로에 위임
   el.readerContent.addEventListener('mouseup', captureReaderSelection);
   el.readerContent.addEventListener('keyup', captureReaderSelection);

@@ -4,17 +4,17 @@ import {
   READER_ZOOM_MIN, katexOptions, readerPosKey,
 } from './constants.js';
 import {
-  alignmentBatchPlan, alignmentFailureIsPermanent, blockAtFraction, clampReaderPage,
-  extractDocPages, livePageImageUrl, normalizeAlignmentPayload, overlayInKeepWindow,
-  pdfExportState, pdfProgressLabel, pdfReportMessage, pdfRetryDelay,
-  railAnchorFrom, railAnchorTarget, readerFocusAt,
+  PDF_RETRY_MAX, alignmentBatchPlan, alignmentFailureIsPermanent, blockAtFraction,
+  busyWaitMessage, clampReaderPage, extractDocPages, langFetchVerdict, livePageImageUrl,
+  normalizeAlignmentPayload, overlayInKeepWindow, pdfExportState, pdfProgressLabel,
+  pdfReportMessage, pdfRetryDelay, railAnchorFrom, railAnchorTarget, readerFocusAt,
   readerHydrationWindow, readerImageUrl, readerRailBandAt, splitInlineMath,
   translatedHtmlExportState, withLangUrl,
 } from './core.js';
 import { el, state } from './state.js';
 import { h, localGet, localSet, nowMs, setDownload, showToast, typesetMath } from './ui.js';
-import { apiGet } from './api.js';
-import { revertToOriginal } from './translate.js';
+import { apiGet, fetchTextWithBusyRetry } from './api.js';
+import { revertToOriginal, setLang } from './translate.js';
 import { prefillQaPageFromReader } from './qa.js';
 import {
   applyViewerPanelState, closeViewer, loadViewerManifest, renderViewerThumbnails,
@@ -166,6 +166,10 @@ export function resetReaderDocumentState() {
 
 // 리더 탭 활성화/언어 전환 진입점 — (잡, 언어)별 최초 1회만 /html을 가져와
 // 페이지 섹션으로 분해해 캐시한다. 캐시가 있으면 즉시 문서를 그린다.
+// 진행 중인 /html 로드는 (잡, 언어, 잡 열기 세대)별 1건이다 — 탭 재활성화·뷰어
+// 열기가 바쁨(503) 재시도 대기 중에 다시 불러도 요청과 스피너를 겹치지 않는다.
+const readerHtmlLoads = new Map();
+
 export async function loadReader() {
   const id = state.currentJobId;
   if (!id) return;
@@ -179,35 +183,94 @@ export async function loadReader() {
     renderReaderDocument();
     return;
   }
+  const key = `${id}|${lang}|${state.openGen}`;
+  const pending = readerHtmlLoads.get(key);
+  if (pending) {
+    // 다른 언어를 다녀오는 사이 레일이 그 언어로 그려졌을 수 있다 — 대기 표시를 되살린다.
+    if (!el.readerContent.querySelector('.reader-loading')) {
+      showReaderLoading('논문 본문과 페이지 구조를 불러오는 중…');
+    }
+    return pending;
+  }
+  const load = loadReaderHtml(id, lang, state.openGen).finally(() => {
+    readerHtmlLoads.delete(key);
+  });
+  readerHtmlLoads.set(key, load);
+  return load;
+}
+
+// 레일 DOM을 비울 때는 레일 서명도 함께 무효화한다. 서명이 남아 있으면 같은 (잡, 언어)
+// 캐시로 돌아왔을 때 buildReaderRailStack이 "이미 있다"고 판단해, 떼어진 섹션에만
+// 그리고 화면의 레일은 빈 채로 남는다(한국어 로드 실패 → 원문 보기 경로).
+function clearReaderRail() {
+  el.readerContent.textContent = '';
+  state.readerRailKey = '';
+  state.readerRailEls = new Map();
+  state.readerCardEls = new Map();
+  state.readerRailTabPage = 0;
+  state.readerRailIndexDirty = true;
+}
+
+function showReaderLoading(text) {
   el.viewerRoot.setAttribute('aria-busy', 'true');
   el.readerPageInput.disabled = true;
-  el.readerContent.innerHTML = '';
+  clearReaderRail();
   el.readerContent.appendChild(h('div', { class: 'reader-loading', role: 'status' },
     h('span', { class: 'spinner', 'aria-hidden': 'true' }),
-    h('p', { text: '논문 본문과 페이지 구조를 불러오는 중…' }),
+    h('p', { text }),
   ));
-  let html = null;
-  try {
-    const res = await fetch(withLangUrl(`/api/jobs/${id}/html`, lang), { headers: { Accept: 'text/html' } });
-    if (res.ok) html = await res.text();
-  } catch (_) { /* 아래 공통 실패 처리 */ }
-  if (state.currentJobId !== id || state.currentLang !== lang) return; // 잡/언어 전환 → 최신 로더에 위임
+}
+
+// 일시 실패 — 언어 선택은 유지한다(번역본은 멀쩡할 수 있다). 다시 시도와, 한국어면
+// 원문으로 읽기를 함께 준다.
+function showReaderLoadError(ko) {
+  clearReaderRail();
+  const retry = h('button', { class: 'btn btn-small', type: 'button', text: '다시 시도' });
+  retry.addEventListener('click', () => loadReader());
+  const box = h('div', { class: 'reader-load-error', role: 'alert' },
+    h('strong', { text: ko ? '한국어 본문을 불러오지 못했습니다.' : '본문을 불러오지 못했습니다.' }),
+    h('p', {
+      text: ko
+        ? '서버가 잠시 응답하지 못했습니다 — 다시 시도하거나 원문으로 읽으세요.'
+        : '네트워크 연결과 작업 상태를 확인한 뒤 다시 시도해 주세요.',
+    }),
+    retry,
+  );
+  if (ko) {
+    const original = h('button', { class: 'btn btn-small btn-ghost', type: 'button', text: '원문 보기' });
+    original.addEventListener('click', () => setLang('orig'));
+    box.appendChild(original);
+  }
+  el.readerContent.appendChild(box);
+}
+
+async function loadReaderHtml(id, lang, gen) {
+  const ko = lang === 'ko';
+  const isCurrent = () => state.currentJobId === id && state.currentLang === lang
+    && state.openGen === gen;
+  showReaderLoading('논문 본문과 페이지 구조를 불러오는 중…');
+  const r = await fetchTextWithBusyRetry(withLangUrl(`/api/jobs/${id}/html`, lang), {
+    accept: 'text/html',
+    isCurrent,
+    onWait: (seconds, attempt, max) => {
+      if (isCurrent()) showReaderLoading(busyWaitMessage(ko ? '한국어 본문' : '본문', seconds, attempt, max));
+    },
+  });
+  if (!isCurrent()) return; // 잡/언어 전환 → 최신 로더에 위임
   el.viewerRoot.removeAttribute('aria-busy');
   el.readerPageInput.disabled = false;
-  if (html == null) {
-    // 한국어 뷰에서 번역본을 못 받으면 조용히 원문으로 폴백 (다른 탭과 동일 규칙).
-    if (lang === 'ko' && revertToOriginal('한국어 본문을 불러오지 못해 원문을 표시합니다.')) { loadReader(); return; }
-    el.readerContent.innerHTML = '';
-    const retry = h('button', { class: 'btn btn-small', type: 'button', text: '다시 시도' });
-    retry.addEventListener('click', loadReader);
-    el.readerContent.appendChild(h('div', { class: 'reader-load-error', role: 'alert' },
-      h('strong', { text: '본문을 불러오지 못했습니다.' }),
-      h('p', { text: '네트워크 연결과 작업 상태를 확인한 뒤 다시 시도해 주세요.' }),
-      retry,
-    ));
+  if (r.text == null) {
+    // 번역본이 "없다"(404/409)는 확정 답일 때만 원문으로 폴백한다(다른 탭과 같은 규칙).
+    // 바쁨 소진·네트워크·5xx는 일시 장애 — 전역 언어를 뒤집지 않는다(frontend-9).
+    if (langFetchVerdict(r.status) === 'missing' && ko
+        && revertToOriginal('한국어 번역본이 없어 원문을 표시합니다.')) {
+      loadReader();
+      return;
+    }
+    showReaderLoadError(ko);
     return;
   }
-  state.readerPages[lang === 'ko' ? 'ko' : 'orig'] = extractDocPages(html);
+  state.readerPages[ko ? 'ko' : 'orig'] = extractDocPages(r.text);
   renderReaderDocument();
   loadViewerManifest(); // 총 페이지 확정 — 스택 길이를 뒤늦게라도 맞춘다
 }
@@ -442,7 +505,11 @@ export async function loadReaderOutline(id, lang) {
   try {
     const data = await apiGet(withLangUrl(`/api/jobs/${id}/outline`, lang));
     if (data && Array.isArray(data.items)) items = data.items;
-  } catch (_) { /* 레이아웃 없는 잡은 빈 개요로 정상 폴백 */ }
+  } catch (e) {
+    // 레이아웃 없는 잡(404)은 빈 개요로 확정한다. 일시 실패(503·네트워크)는 캐시하지
+    // 않는다 — 빈 개요가 세션 내내 굳지 않고 다음 리더 진입에서 다시 묻는다.
+    if (!e || !Number.isInteger(e.status) || langFetchVerdict(e.status) !== 'missing') return;
+  }
   if (state.currentJobId !== id || state.currentLang !== lang) return;
   state.readerOutline[key] = items;
   renderReaderOutline();
@@ -1649,7 +1716,7 @@ export async function downloadPdfWithReport(ev) {
       res = await fetch(url, { headers: { Accept: 'application/pdf' } });
       const wait = pdfRetryDelay(res.status, res.headers.get('Retry-After'), attempt);
       if (!wait) break;
-      setPdfBusy(anchor, true, `대기 중… ${wait}초 후 재시도`);
+      setPdfBusy(anchor, true, `대기 중… ${wait}초 후 재시도 (${attempt + 1}/${PDF_RETRY_MAX})`);
       await new Promise((done) => setTimeout(done, wait * 1000));
       setPdfBusy(anchor, true);
     }

@@ -244,6 +244,15 @@ def test_job_recovers_a_badly_truncated_page_from_the_text_layer(tmp_path, stub,
     assert "PDF 내장 텍스트 레이어에서 복구" in page2 and SENTENCES[-1] in page2
     assert any("2페이지" in w and "텍스트 레이어로 복구" in w for w in body["warnings"]), body
     assert not any(SIDECAR_WARNING in w for w in body["warnings"]), body["warnings"]
+    # 원인은 sidecar의 출력 상한(limit_label)으로 적는다 — sidecar에는 효과가 없는
+    # MAX_LENGTH를 가리키지 않는다(multi는 청크 재처리 참고, per_page는 복구 경고)
+    recovered = [w for w in body["warnings"] if "텍스트 레이어로 복구" in w]
+    assert all("sidecar 출력 토큰 상한 도달(출력 잘림)" in w for w in recovered), recovered
+    if mode == "multi":
+        assert any(
+            "sidecar 출력 토큰 상한 도달로 출력이 잘려 페이지별 재처리" in n for n in body["notices"]
+        ), body["notices"]
+    assert not any("MAX_LENGTH" in m for m in body["warnings"] + body["notices"]), body
     assert len(stub.requests_seen) == 2  # 같은 페이지를 GPU에서 다시 돌리지 않았다
 
 

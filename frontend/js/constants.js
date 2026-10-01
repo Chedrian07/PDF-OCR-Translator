@@ -35,6 +35,28 @@ export const ICON = {
   read: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h6a3 3 0 0 1 3 3v11a2.5 2.5 0 0 0-2.5-2.5H3z"/><path d="M21 5h-6a3 3 0 0 0-3 3v11a2.5 2.5 0 0 1 2.5-2.5H21z"/></svg>',
 };
 
+// KaTeX 렌더 옵션 — 앱의 모든 katex.render 호출부(ui.js typesetMath, reader.js
+// mathTextNodes)가 이 함수 하나로 옵션을 만든다. 수식 TeX는 업로드 PDF(OCR·텍스트
+// 레이어)에서 오는 신뢰할 수 없는 입력이다.
+//  · maxSize: \rule{2000em}{2000em}·\hspace{-300em} 같은 사용자 지정 크기를 묶는다
+//    (기본값 Infinity — 수만 px 박스나 화면 밖 오프셋이 생긴다).
+//  · maxExpand: 매크로 확장 상한(KaTeX 기본 1000)을 명시해 무한 매크로 루프를 막는다.
+//  · trust·strict도 명시한다 — 오염된 Object.prototype이 기본값을 덮어 \href 등이
+//    살아나는 경로(GHSA-238p-pmpm-9mq7)를 버전과 무관하게 끊는다. strict 'ignore'는
+//    유니코드 수식마다 쌓이던 콘솔 경고도 없앤다.
+export const KATEX_MAX_SIZE_EM = 10;
+export const KATEX_MAX_EXPAND = 1000;
+export function katexOptions(displayMode) {
+  return {
+    displayMode: !!displayMode,
+    throwOnError: false,
+    maxSize: KATEX_MAX_SIZE_EM,
+    maxExpand: KATEX_MAX_EXPAND,
+    strict: 'ignore',
+    trust: false,
+  };
+}
+
 export const STREAM_PANE_MAX_NODES = 3000;  // 원시 pane DOM 상한 (장시간 OCR 메모리 방어)
 export const STREAM_PANE_TRIM_SLACK = 600;  // 한 번에 덜어내는 여유분 — 매 프레임 삭제 방지
 

@@ -480,3 +480,38 @@ def test_boxes_json_is_rewritten_when_the_last_figure_disappears(tmp_path):
     merger.figure_boxes.clear()
     merger._write_boxes()
     assert _json.loads((merger.images_dir / "boxes.json").read_text()) == {}
+
+
+def test_quiet_add_chunk_places_pages_without_marker_warnings(tmp_path):
+    """취소로 끊긴 부분 출력은 마커가 모자란 게 당연하다 — 배치·보정은 그대로 하되
+    '모델이 페이지를 놓쳤다'로 읽히는 경고는 남기지 않는다."""
+    m = IncrementalMerger(tmp_path, SEP)
+    c = _mk_multi_chunk(tmp_path, "chunk_00", 3)
+    m.add_chunk(ChunkResult(c, 1, 3, "<PAGE>\nonly one page"), warn=False)
+    assert m.pages_md == ["only one page", "", ""]
+    assert m.warnings == []
+
+
+def test_keep_leading_pages_drops_truncated_and_unstarted_artifacts(tmp_path):
+    from app.pipeline.merge import keep_leading_pages
+
+    c = _mk_multi_chunk(tmp_path, "chunk_00", 4, images_per_page=2)
+    (c / "raw_pages.json").write_text(
+        json.dumps({"pages": ["r0", "r1", "r2-truncated"]}), encoding="utf-8"
+    )
+    keep_leading_pages(c, 2)
+
+    assert sorted(f.name for f in (c / "images").iterdir()) == [
+        "page_0_0.jpg", "page_0_1.jpg", "page_1_0.jpg", "page_1_1.jpg",
+    ]
+    assert sorted(f.name for f in c.glob("result_with_boxes_*.jpg")) == [
+        "result_with_boxes_0.jpg", "result_with_boxes_1.jpg",
+    ]
+    assert json.loads((c / "raw_pages.json").read_text(encoding="utf-8")) == {
+        "pages": ["r0", "r1"]
+    }
+    # 원출력이 보존 페이지 수보다 짧으면 빈 원출력으로 채워 개수를 맞춘다
+    keep_leading_pages(c, 3)
+    assert json.loads((c / "raw_pages.json").read_text(encoding="utf-8"))["pages"] == [
+        "r0", "r1", "",
+    ]

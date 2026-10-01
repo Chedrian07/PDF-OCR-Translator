@@ -330,3 +330,30 @@ def test_orphan_worker_temp_dirs_are_swept_once(monkeypatch, tmp_path):
     pdf_worker._sweep_orphan_scratch()
     assert not orphan.exists()  # 주인이 없는(이전 서버가 SIGKILL로 남긴) 디렉터리
     assert alive.exists()  # 살아 있는 프로세스의 것은 건드리지 않는다
+
+
+def test_workers_do_not_rerun_the_parents_main_script(tmp_path):
+    """spawn은 기본적으로 자식에서 부모의 메인 스크립트를 다시 실행한다 — uvicorn 콘솔 스크립트면
+    워커마다 uvicorn·click·watchfiles·anyio를 싣고, 가드 없는 스크립트면 자식이 부팅 중 다시
+    워커를 띄우려다 죽는다. 워커는 메인 모듈을 건드리지 않아야 한다."""
+    import subprocess
+
+    backend = Path(__file__).resolve().parents[1]
+    marker = tmp_path / "main-runs.txt"
+    script = tmp_path / "no_guard.py"
+    script.write_text(
+        "import os, sys\n"
+        f"sys.path.insert(0, {str(backend)!r})\n"
+        f"open({str(marker)!r}, 'a').write(f'{{os.getpid()}}\\n')\n"
+        "from app.pipeline import pdf_worker\n"
+        "print(pdf_worker.run('os:getpid', timeout=30) != os.getpid())\n"
+        "pdf_worker.shutdown_pools()\n",
+        encoding="utf-8",
+    )
+    env = {**os.environ, "PDF_WORKER_MODE": "process"}
+    result = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.strip() == "True"
+    assert len(marker.read_text().split()) == 1  # 메인 스크립트는 부모에서 한 번만 돌았다

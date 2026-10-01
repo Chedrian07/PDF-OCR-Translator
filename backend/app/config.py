@@ -7,6 +7,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dotenv import dotenv_values
+
 from .llm.validate import local_url, openai_url
 
 logger = logging.getLogger(__name__)
@@ -15,42 +17,64 @@ _DEFAULT_REVISION = "ee63731b6461c8afcdcc7b15352e7d2ffecc2ead"
 _DEFAULT_ALLOWED_HOSTS = "localhost,127.0.0.1"
 
 
+def _find_dotenv() -> Path | None:
+    """자동 탐색 — 실행 cwd → 저장소 루트 순서로 처음 찾은 .env 하나.
+
+    서로 다른 비밀 파일을 합치지 않도록 하나만 읽는다. 저장소 밖(상위 디렉터리)은
+    보지 않는다 — 예전 final/ 워크스페이스 배치의 잔재(parents[3])가 레포 .env가
+    없을 때 무관한 프로젝트의 키·엔드포인트를 조용히 채택해, 문서 원문이 엉뚱한
+    API로 나갈 수 있었다.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    for base in dict.fromkeys((Path.cwd(), repo_root)):
+        cand = base / ".env"
+        if cand.is_file():
+            return cand
+    return None
+
+
 def load_dotenv_file(path: Path | None = None) -> None:
-    """워크스페이스/정본 루트 .env를 주입 — **이미 설정된 키는 건드리지 않는다**.
+    """로컬 실행용 .env 주입 — **이미 설정된 키는 건드리지 않는다**.
 
     docker-compose는 .env를 읽어 environment로 넘기지만(그 값이 우선 유지됨),
     로컬 실행(macOS Metal 등)은 아무도 .env를 읽지 않아 번역 프로바이더가
     503("프로바이더 미설정")으로 떨어졌다 — CPU/CUDA/Metal 범용성 결함 수정.
-    파서는 KEY=VALUE 한 줄 형식만 지원하고 주석(#)·빈 줄을 건너뛰며,
-    compose와 동일하게 값 양끝 따옴표를 벗긴다.
 
-    `DISABLE_DOTENV`가 참 값(1/true/yes/on)이면 **자동 탐색**(path 미지정)을 끈다 —
-    테스트·E2E 하네스가 개발자의 실제 .env(실키)를 프로세스 환경에 주입하지 않게
-    하는 스위치다. path를 명시한 호출은 이 스위치와 무관하게 그 파일을 읽는다.
+    파싱은 python-dotenv(dotenv_values)에 맡긴다 — docker compose와 같은 규칙이다
+    (compose v5로 대조 확인). 따옴표 없는 값은 '공백+#'부터 인라인 주석, 따옴표
+    값은 짝이 맞는 따옴표까지(안쪽 '#' 보존, 큰따옴표 안은 \\n 등 이스케이프 해석),
+    `export ` 접두사, CRLF, BOM을 처리한다. 예전 자체 파서는 주석까지 값에 넣어
+    .env.example 줄의 '#'만 지우면 OCR_FAST_DECODE=1이 False로 뒤집히고
+    OCR_DEVICE=metal이 기동에 실패했다. 이름만 있고 '='가 없는 줄은 건너뛴다.
+    ⚠ `KEY=   # 설명`처럼 값 없이 주석만 두면 compose와 똑같이 주석이 값이 된다 —
+    그래서 .env.example은 설명을 별도 줄에 둔다.
+
+    자동 탐색(path 미지정)은 실행 cwd와 저장소 루트만 본다(_find_dotenv). 실제로
+    읽은 경로는 INFO로 남긴다(값은 절대 남기지 않는다). `DISABLE_DOTENV`가 참 값
+    (1/true/yes/on)이면 자동 탐색을 끈다 — 테스트·E2E 하네스가 개발자의 실제
+    .env(실키)를 프로세스 환경에 주입하지 않게 하는 스위치다. path를 명시한
+    호출은 이 스위치와 무관하게 그 파일을 읽는다.
     """
     if path is None:
         if _env_bool("DISABLE_DOTENV", False):
             return
-        config_path = Path(__file__).resolve()
-        # 실행 cwd → 정본 final/ → 융합 워크스페이스 루트 순서. 사용자가 비밀을
-        # 프로젝트 루트에 둘 수도 있고 final/.env에 둘 수도 있으므로 둘 다 지원하되,
-        # 먼저 찾은 파일 하나만 읽어 서로 다른 비밀 파일을 합치지 않는다.
-        bases = (Path.cwd(), config_path.parents[2], config_path.parents[3])
-        for base in dict.fromkeys(bases):
-            cand = base / ".env"
-            if cand.is_file():
-                path = cand
-                break
+        path = _find_dotenv()
     if path is None or not path.is_file():
         return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+    # utf-8-sig: 편집기가 붙인 BOM이 첫 키 이름에 섞이지 않게 한다
+    values = dotenv_values(path, encoding="utf-8-sig")
+    applied = kept = 0
+    for key, value in values.items():
+        if value is None:
             continue
-        k, v = line.split("=", 1)
-        k, v = k.strip(), v.strip().strip("'\"")
-        if k:
-            os.environ.setdefault(k, v)
+        if key in os.environ:
+            kept += 1  # 실제 환경변수(compose·셸 주입)가 이긴다
+            continue
+        os.environ[key] = value
+        applied += 1
+    logger.info(
+        ".env 로드: %s (새로 적용 %d개, 이미 설정돼 유지 %d개)", path, applied, kept,
+    )
 
 
 def _env_bool(name: str, default: bool) -> bool:

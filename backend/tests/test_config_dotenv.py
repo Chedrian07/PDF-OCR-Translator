@@ -159,6 +159,44 @@ def test_dotenv_로드_경로는_INFO로_남기고_값은_남기지_않는다(tm
     assert "sk-should-never-be-logged" not in text
 
 
+# ── PAGE_SEPARATOR 이스케이프 해석 (감사 api-jobs-12) ──
+
+def test_PAGE_SEPARATOR는_한글과_이스케이프를_함께_보존한다(monkeypatch):
+    """unicode_escape가 UTF-8 바이트를 Latin-1로 읽어 한글·전각 대시 구분자가
+    result.md의 모든 페이지 경계에서 'â\\x80\\x94 í\\x8e\\x98…'로 깨졌다."""
+    monkeypatch.setenv("PAGE_SEPARATOR", r"\n\n— 페이지 —\n\n")
+
+    assert Settings.from_env().page_separator == "\n\n— 페이지 —\n\n"
+
+
+def test_PAGE_SEPARATOR_기본값과_이미_풀린_개행은_그대로다(monkeypatch):
+    monkeypatch.delenv("PAGE_SEPARATOR", raising=False)
+    assert Settings.from_env().page_separator == "\n\n---\n\n"
+
+    monkeypatch.setenv("PAGE_SEPARATOR", "\n\n===\n\n")  # compose·셸이 넘긴 실제 개행
+    assert Settings.from_env().page_separator == "\n\n===\n\n"
+
+    monkeypatch.setenv("PAGE_SEPARATOR", r"\t|é|\\")  # 기존 ASCII 이스케이프·Latin-1 문자
+    assert Settings.from_env().page_separator == "\t|é|\\"
+
+
+def test_PAGE_SEPARATOR_큰따옴표_dotenv_값도_한글이_보존된다(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text('PAGE_SEPARATOR="\\n\\n— 페이지 —\\n\\n"\n', encoding="utf-8")
+    monkeypatch.delenv("PAGE_SEPARATOR", raising=False)
+
+    load_dotenv_file(env)  # 큰따옴표 안 \n은 dotenv가 먼저 개행으로 푼다(compose와 같음)
+
+    assert Settings.from_env().page_separator == "\n\n— 페이지 —\n\n"
+
+
+def test_PAGE_SEPARATOR_깨진_이스케이프는_변수명과_함께_실패한다(monkeypatch):
+    monkeypatch.setenv("PAGE_SEPARATOR", "끝이 백슬래시\\")
+
+    with pytest.raises(ValueError, match="PAGE_SEPARATOR"):
+        Settings.from_env()
+
+
 def test_QA키는_번역키를_폴백하지_않는다(monkeypatch):
     """LLM_OPENAI_API_KEY 미설정 시 llm_openai_api_key는 빈 문자열이어야 한다 —
     번역용 OPENAI_API_KEY는 임의 게이트웨이 키일 수 있고, Q&A는 항상

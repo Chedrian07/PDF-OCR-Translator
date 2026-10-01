@@ -372,3 +372,23 @@ def test_dev_leaves_the_device_to_auto_and_dotenv_while_dev_metal_pins_mps():
     """make dev가 OCR_DEVICE를 박으면 .env의 OCR_DEVICE가 무시된다(.env는 기존 env를 안 덮는다)."""
     assert "OCR_DEVICE" not in _make_recipe("dev")
     assert "OCR_DEVICE=metal uv run uvicorn app.main:app" in _make_recipe("dev-metal")
+
+
+@pytest.mark.parametrize(
+    "plat,machine,engine,warns",
+    [("darwin", "arm64", "unlimited", True), ("linux", "x86_64", "unlimited", False),
+     ("darwin", "arm64", "fake", False)],
+)
+def test_explicit_cpu_on_apple_silicon_warns_at_startup(monkeypatch, caplog, plat, machine, engine, warns):
+    """감사 api-jobs-5 — 명시 cpu는 존중하되 Apple Silicon이면 CPU fp32가 느리다고 알린다."""
+    import logging
+    import sys
+
+    from app.engine import registry
+
+    monkeypatch.setattr(sys, "platform", plat)
+    monkeypatch.setattr(registry.platform, "machine", lambda: machine)
+    with caplog.at_level(logging.WARNING, logger="app.engine.registry"):
+        eng = build_engine(Settings(engine=engine, device="cpu", preload_model=False))
+    assert eng.device == "cpu"
+    assert ("OCR_DEVICE=cpu" in caplog.text) is warns

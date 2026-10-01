@@ -1126,6 +1126,15 @@ button.chip { appearance: none; font-family: inherit; cursor: pointer; }
   text-align: center;
 }
 .markdown-body .katex { font-size: 1.06em; }
+/* 문서 속 외부 이미지 자리 — 불러오지 않았음을 알린다(열람 추적·LAN 요청 차단) */
+.blocked-image {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-subtle);
+  font-size: 0.85em;
+}
 .live-preview.markdown-body > .math-display { text-align: center; }
 
 /* ── 문서 페이지 섹션 + 타이포 (A3 — /html 최종 렌더 전용) ───────────── */

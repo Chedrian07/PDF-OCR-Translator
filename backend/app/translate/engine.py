@@ -953,12 +953,17 @@ class _TranslationRun:
         return None
 
     def _layout_mapping(self) -> tuple[list, dict[str, str]]:
-        """layout.{lang}.json 페이지와 md 줄 → layout 번역 줄 매핑."""
+        """layout.{lang}.json 페이지와 md 줄 → layout 번역 줄 매핑.
+
+        results에는 원문 유지(kept) 유닛도 원문 그대로 들어 있다 — 그 블록은 번역 실패라
+        매핑 재료에서 뺀다(md 쪽이 자기 번역으로 회복할 기회를 남긴다).
+        """
         lay_trans = {u.id: self.results[u.id] for u in self.lay_units if u.id in self.results}
         preserved = getattr(self, "preserved_layout", None) or {}
         new_pages = apply_layout(self.layout_pages, lay_trans, preserved)
-        mapping = layout_line_map(self.layout_pages, new_pages, set(lay_trans) | set(preserved))
-        return new_pages, mapping
+        kept = set(self.kept_original)
+        final = {uid for uid in lay_trans if uid not in kept} | set(preserved)
+        return new_pages, layout_line_map(self.layout_pages, new_pages, final)
 
     def _md_translations(self, mapping: dict[str, str]) -> dict[str, str]:
         """md 유닛별 최종 번역 — 유닛 단위 reconcile (translate-llm-1).

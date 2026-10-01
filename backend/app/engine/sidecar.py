@@ -8,10 +8,18 @@
 
 단일 GPU 원칙: 이 엔진은 다른 GPU 모델로의 자동 fallback을 하지 않는다.
 provider 실패는 명확한 오류로 표면화되고 전환은 사용자가 profile로 결정한다.
+
+출력 토큰 상한에서 끊긴 페이지(`page.truncated`, Ovis finish_reason=length)는 원본 PDF
+텍스트 레이어와 대조해, 잘림으로 잃은 것이 크면 `OutputLimitError`로 넘겨 runner의
+기존 복구(텍스트 레이어 폴백)를 태우고, 아니면(스캔 문서·대조 불가·충실도 충분) 잘린
+출력을 경고와 함께 그대로 쓴다 — 텍스트 레이어가 없는 페이지를 플레이스홀더로 만들지
+않기 위해서다(`_truncation_verdict`).
 """
 
 from __future__ import annotations
 
+import logging
+import re
 import threading
 import time
 import uuid
@@ -28,10 +36,20 @@ from ..sidecar.client import (
 )
 from ..sidecar.materializer import ChunkMaterializer
 from ..sidecar.protocol import FIGURE_PLACEHOLDER_RE, PageResult, sanitize_page
-from .base import EngineCapabilities, EngineError, JobCanceled, OCREngine, StreamSink
+from .base import (
+    EngineCapabilities,
+    EngineError,
+    JobCanceled,
+    OCREngine,
+    OutputLimitError,
+    StreamSink,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..config import Settings
+    from ..pipeline.fidelity import PageFidelity
+
+logger = logging.getLogger(__name__)
 
 # health 프로브 캐시 TTL — 성공·실패 **둘 다** 캐시한다. 실패를 캐시하지 않으면
 # /api/health 폴링(프런트 10초 주기)마다 죽은 sidecar로 연결을 시도해 요청 스레드가
@@ -40,6 +58,8 @@ _HEALTH_CACHE_TTL_S = 5.0
 _MAX_JOB_WARNINGS = 40
 _MODEL_WAIT_POLL_S = 3.0   # wait_until_ready 폴링 간격
 _CANCEL_POLL_S = 0.1       # _AnyCancel.wait의 폴링 슬라이스
+# runner의 렌더 규약 — {job.dir}/pages/page_%04d.png (1-based 전역 페이지 번호)
+_PAGE_IMAGE_RE = re.compile(r"^page_(\d+)\.png$")
 
 # 대기 중 진행 문구(잡 진행 note·잡 경고) — 같은 상태에서는 문구가 바뀌지 않아야 경고가
 # 시도마다 쌓이지 않는다. 시도 횟수·남은 시간 같은 세부는 예외 메시지와 health에 싣는다.
@@ -59,6 +79,20 @@ class SidecarNotReadyError(EngineError):
         super().__init__(message)
         self.note = note
 
+
+class SidecarOutputTruncated(OutputLimitError):
+    """sidecar가 출력 토큰 상한에서 끊긴 페이지를 보고했고, 잃은 것이 커서 다른 원천으로
+    복구해야 한다(`OutputLimitError`라 runner의 잘림 복구 경로를 그대로 탄다).
+
+    partial_output은 이 호출의 반환 형식 그대로다(run_multi면 `<PAGE>` 구분 — 끝까지 받은
+    앞 페이지 + 잘린 페이지, 산출물은 out_dir). OutputLimitError 생성자가 partial_output을
+    받기 전후 모두 동작하도록 속성으로 붙인다."""
+
+    # 그리디(temperature 0)·같은 이미지·같은 상한이라 같은 페이지를 다시 보내도 같은 곳에서
+    # 잘린다 — runner가 같은 페이지를 다시 돌리지 않게 알린다.
+    retry_same_page = False
+    # runner 경고 문구용 상한 이름 (MAX_LENGTH가 아니라 sidecar의 페이지당 출력 상한이다)
+    limit_label = "sidecar 출력 토큰 상한"
 
 
 class _AnyCancel:
@@ -128,6 +162,38 @@ def _retry_summary(retry: dict) -> str:
         text += f" — 마지막 오류: {error}"
     return text
 
+
+def _truncated_page_fidelity(
+    image_path: Path, page: PageResult, text_bboxes: bool, should_cancel,
+) -> "PageFidelity | None":
+    """잘린 페이지 출력을 원본 PDF 텍스트 레이어와 대조한다 — 충실도 게이트와 같은 잣대.
+
+    원본은 runner의 잡 디렉터리 규약({job.dir}/pages/page_%04d.png ↔ {job.dir}/source.pdf,
+    textlayer 엔진과 같은 가정)으로 찾는다. 규약 밖 경로면 None(판정 불가).
+    텍스트 bbox가 없는 엔진(figure_only)은 페이지 markdown을 본문 블록 하나로 보고,
+    그림 블록은 bbox째 넘겨 그림 안 글자를 정답에서 뺀다.
+    """
+    m = _PAGE_IMAGE_RE.match(image_path.name)
+    source = image_path.parent.parent / "source.pdf"
+    if m is None or not source.is_file():
+        return None
+    from ..pipeline.fidelity import evaluate_layout_pages
+
+    blocks: list[dict] = []
+    for b in page.blocks:
+        if b.type != "image" and not text_bboxes:
+            continue
+        block: dict = {"type": b.type, "content": b.content}
+        if b.bbox is not None:
+            block["bbox"] = list(b.bbox)
+        blocks.append(block)
+    if not text_bboxes:
+        blocks.append({"type": "text", "content": FIGURE_PLACEHOLDER_RE.sub(" ", page.markdown)})
+    return evaluate_layout_pages(
+        source, [{"page": int(m.group(1)), "blocks": blocks}], should_cancel
+    )[0]
+
+
 @dataclass(frozen=True)
 class SidecarSpec:
     default_model_id: str
@@ -177,6 +243,10 @@ class SidecarEngine(OCREngine):
         # 장애 복귀 대기의 공유 데드라인 — 페이지마다 OCR_SIDECAR_MODEL_WAIT_S씩 따로
         # 기다리지 않게 첫 대기 시작 시각을 기준으로 엔진 인스턴스에서 공유한다.
         self._outage_deadline: float | None = None
+        # run_multi가 잘림(SidecarOutputTruncated)으로 넘긴 페이지 → 사유. runner는 곧바로
+        # 그 페이지를 run_single로 다시 부르는데, 같은 요청은 같은 곳에서 다시 잘리므로
+        # sidecar에 보내지 않고 같은 예외로 답한다(1회용 — 다음 run_multi·잡 전환에서 비움).
+        self._truncated_replay: dict[Path, str] = {}
 
     # ── 상태/메타 ──────────────────────────────────────────────
 
@@ -452,7 +522,10 @@ class SidecarEngine(OCREngine):
 
     def _parse_one(
         self, image_path: Path, local_page: int, cancel
-    ) -> PageResult:
+    ) -> tuple[PageResult, list[str]]:
+        """페이지 1장 파싱 → (정화된 페이지, 정화 경고). 경고 승격은 소비 쪽 몫이다 —
+        복구 경로로 넘기는 페이지(잘림)나 앞 페이지 실패로 버려지는 형제 결과의 경고가
+        잡 경고에 남지 않게."""
         request_id = f"{uuid.uuid4().hex[:12]}-p{local_page}"
         try:
             resp = self._client.parse_page(
@@ -481,17 +554,59 @@ class SidecarEngine(OCREngine):
                 cancel=cancel,
             )
         self._refresh_degraded_health()
-        page, warnings = sanitize_page(resp.page)
-        # 정화로 버려진 블록·절단은 사용자에게 알린다 (조용한 내용 손실 방지).
-        # sidecar가 스스로 보고한 경고(해상도 강등 등)도 함께 승격한다.
-        # 페이지 번호는 붙이지 않는다 — local_page는 청크 내 인덱스라 기본 설정
-        # (청크=1페이지)에서는 항상 0이다. 전역 페이지 범위는 runner가 붙인다.
-        for w in warnings:
+        return sanitize_page(resp.page)
+
+    def _note_page_warnings(self, page: PageResult, sanitize_warnings: list[str]) -> None:
+        """정화로 버려진 블록·절단은 사용자에게 알린다 (조용한 내용 손실 방지).
+
+        sidecar가 스스로 보고한 경고(해상도 강등·출력 상한 도달 등)도 함께 승격한다.
+        페이지 번호는 붙이지 않는다 — local_page는 청크 내 인덱스라 기본 설정
+        (청크=1페이지)에서는 항상 0이다. 전역 페이지 범위는 runner가 붙인다."""
+        for w in sanitize_warnings:
             self._note(w)
         for w in page.warnings:
-            if w not in warnings:
+            if w not in sanitize_warnings:
                 self._note(w)
-        return page
+
+    def _truncation_verdict(
+        self, image_path: Path, page: PageResult, cancel
+    ) -> SidecarOutputTruncated | str:
+        """출력 상한에서 끊긴 페이지의 처리 — 복구로 넘길 예외, 또는 그대로 쓸 때의 안내 문구.
+
+        runner의 잘림 복구는 텍스트 레이어로 그 페이지를 대신하고, 텍스트 레이어가 없으면
+        플레이스홀더를 넣는다. 그래서 텍스트 레이어가 **믿을 만하고**(충실도 판정 가능)
+        잘린 출력의 충실도가 OCR_FIDELITY_THRESHOLD 미만일 때만 넘긴다. 스캔 문서·판정
+        불가·충실도 충분(끝부분만 조금 잘림)이면 잘린 출력을 경고와 함께 그대로 쓴다 —
+        표·수식·그림 구조가 살아 있는 출력을 평문 텍스트 레이어나 빈 페이지로 바꾸지 않는다.
+        """
+        threshold = self._settings.ocr_fidelity_threshold
+        if threshold > 0:
+            try:
+                fid = _truncated_page_fidelity(
+                    image_path, page, self._spec.layout_capability == "full", cancel.is_set,
+                )
+            except JobCanceled:
+                raise
+            except Exception as e:  # noqa: BLE001 — 판정 실패는 '유지'로 흡수한다
+                logger.warning(
+                    "잘린 페이지 충실도 판정 실패 (%s: %s) — 잘린 출력을 유지",
+                    e.__class__.__name__, str(e)[:200],
+                )
+                fid = None
+            if fid is not None and fid.score is not None and fid.score < threshold:
+                return SidecarOutputTruncated(
+                    "sidecar 출력이 페이지당 출력 토큰 상한에서 잘림 — PDF 텍스트 레이어 대조 "
+                    f"충실도 {fid.score:.2f} < {threshold:.2f}"
+                )
+            if fid is not None and fid.score is not None:
+                why = f"PDF 텍스트 레이어 대조 충실도가 {fid.score:.2f}로 기준({threshold:.2f}) 이상이라"
+            elif fid is not None and fid.truth_chars and fid.reason:
+                why = f"텍스트 레이어로 판정할 수 없어({fid.reason})"
+            else:
+                why = "대조할 PDF 텍스트 레이어가 없어"
+        else:
+            why = "충실도 판정이 꺼져 있어(OCR_FIDELITY_THRESHOLD≤0)"
+        return f"출력 토큰 상한에서 잘린 페이지 — {why} 잘린 출력을 그대로 씁니다"
 
     def _begin_job(self, image_paths: list[Path]) -> None:
         """잡이 바뀌면 잡 단위 상태(이상 신고 1회·성공 뒤 재확인·장애 대기)를 푼다.
@@ -506,6 +621,7 @@ class SidecarEngine(OCREngine):
             self._degraded_noted = False
             self._degraded_refreshed = False
             self._outage_deadline = None
+            self._truncated_replay.clear()
 
     def _refresh_degraded_health(self) -> None:
         """parse가 성공했는데 캐시가 이상 신고를 들고 있으면 잡당 한 번 다시 확인한다.
@@ -541,6 +657,14 @@ class SidecarEngine(OCREngine):
         single: bool,
     ) -> str:
         self._begin_job(image_paths)
+        if single:
+            replay = self._truncated_replay.pop(image_paths[0], None)
+            if replay is not None:
+                # 방금 run_multi가 잘림으로 넘긴 페이지를 runner가 페이지 단위로 다시 부른 것 —
+                # 같은 요청은 같은 곳에서 다시 잘린다. GPU에 다시 보내지 않고 같은 판정을 낸다.
+                raise SidecarOutputTruncated(replay)
+        else:
+            self._truncated_replay.clear()  # 새 청크 — 이전 청크의 1회용 표식은 무효
         self._ensure_ready(cancel)
         out_dir.mkdir(parents=True, exist_ok=True)
         # 텍스트 bbox가 없는 엔진(figure_only)은 raw_pages.json을 쓰지 않는다 — 쓰면
@@ -557,28 +681,43 @@ class SidecarEngine(OCREngine):
         else:
             pages = self._iter_concurrent(image_paths, cancel, concurrency)
 
-        for local_page, page in pages:
-            # 취소 이후 도착한 결과는 병합하지 않는다 (여기 도달 전에 JobCanceled 전파)
-            # 라이브 뷰용 스트림은 **그라운딩 토큰 표현**으로 발행한다(처리된 md와 별개):
-            # figure는 <|det|>image [bbox]<|/det|>로 내보내 왼쪽 원본+레이아웃 패널의
-            # 실시간 박스 오버레이가 그려지게 하고, 텍스트는 마크다운 그대로 흘려
-            # RAW/미리보기 패널이 채워지게 한다 (Unlimited의 라이브 경험과 동일).
-            live = _live_stream_text(page)
-            if single:
-                sink.on_text(live)
-            else:
-                sink.on_text("<PAGE>\n")
-                sink.on_text(live + "\n")
-            # 이 페이지 토큰을 즉시 flush한다 — 동시성>1의 다중 페이지 청크에서 다음
-            # 페이지의 <PAGE>가 유발하는 progress(current_page+1)보다 **먼저** 와이어에
-            # 실리게 해, 라이브 박스가 다음 페이지로 오귀속되는 것을 막는다.
-            # (StreamSink는 flush를 요구하지 않으므로 있는 경우에만 호출)
-            flush = getattr(sink, "flush", None)
-            if callable(flush):
-                flush()
-            # 반환/병합용은 처리된 마크다운(![](images/…))을 그대로 유지한다
-            md = mat.add_page(page, image_paths[local_page], local_page)
-            parts.append(md)
+        try:
+            for local_page, (page, sanitize_warnings) in pages:
+                image_path = image_paths[local_page]
+                verdict = (
+                    self._truncation_verdict(image_path, page, cancel) if page.truncated else None
+                )
+                if isinstance(verdict, SidecarOutputTruncated):
+                    self._hand_over_truncated(verdict, mat, parts, page, image_path,
+                                              local_page, single)
+                self._note_page_warnings(page, sanitize_warnings)
+                if verdict is not None:
+                    self._note(verdict)  # 잘린 출력을 그대로 쓰는 이유
+                # 취소 이후 도착한 결과는 병합하지 않는다 (여기 도달 전에 JobCanceled 전파)
+                # 라이브 뷰용 스트림은 **그라운딩 토큰 표현**으로 발행한다(처리된 md와 별개):
+                # figure는 <|det|>image [bbox]<|/det|>로 내보내 왼쪽 원본+레이아웃 패널의
+                # 실시간 박스 오버레이가 그려지게 하고, 텍스트는 마크다운 그대로 흘려
+                # RAW/미리보기 패널이 채워지게 한다 (Unlimited의 라이브 경험과 동일).
+                live = _live_stream_text(page)
+                if single:
+                    sink.on_text(live)
+                else:
+                    sink.on_text("<PAGE>\n")
+                    sink.on_text(live + "\n")
+                # 이 페이지 토큰을 즉시 flush한다 — 동시성>1의 다중 페이지 청크에서 다음
+                # 페이지의 <PAGE>가 유발하는 progress(current_page+1)보다 **먼저** 와이어에
+                # 실리게 해, 라이브 박스가 다음 페이지로 오귀속되는 것을 막는다.
+                # (StreamSink는 flush를 요구하지 않으므로 있는 경우에만 호출)
+                flush = getattr(sink, "flush", None)
+                if callable(flush):
+                    flush()
+                # 반환/병합용은 처리된 마크다운(![](images/…))을 그대로 유지한다
+                md = mat.add_page(page, image_path, local_page)
+                parts.append(md)
+        finally:
+            # 소비가 예외로 끊겨도 동시 요청 생성기의 정리(형제 요청 중단·executor 종료)를
+            # 지금 돌린다 — 생성기가 yield에 멈춘 채면 그 정리는 GC 때까지 미뤄진다.
+            pages.close()
         for w in mat.warnings:
             self._note(w)
         mat.finalize()
@@ -586,7 +725,38 @@ class SidecarEngine(OCREngine):
             return parts[0] if parts else ""
         return "<PAGE>\n" + "\n<PAGE>\n".join(parts)
 
+    def _hand_over_truncated(
+        self,
+        error: SidecarOutputTruncated,
+        mat: ChunkMaterializer,
+        parts: list[str],
+        page: PageResult,
+        image_path: Path,
+        local_page: int,
+        single: bool,
+    ) -> None:
+        """잘린 페이지를 runner의 잘림 복구로 넘긴다 — 산출물을 확정하고 예외를 올린다.
+
+        앞 페이지들과 잘린 페이지까지 materialize·finalize해 partial_output을 이 호출의
+        반환 형식 그대로 만든다(run_multi면 runner가 끝까지 받은 앞 페이지를 살리고 잘린
+        페이지부터 다시 처리한다). 버리는 페이지의 경고는 올리지 않는다 — 그 자리는
+        runner가 텍스트 레이어로 채우고 사유를 남긴다. 라이브 스트림에도 내보내지 않는다.
+        """
+        before = len(mat.warnings)
+        md = mat.add_page(page, image_path, local_page)
+        del mat.warnings[before:]
+        for w in mat.warnings:
+            self._note(w)
+        mat.finalize()
+        if single:
+            error.partial_output = md
+        else:
+            error.partial_output = "<PAGE>\n" + "\n<PAGE>\n".join([*parts, md])
+            self._truncated_replay[image_path] = str(error)
+        raise error
+
     def _iter_serial(self, image_paths: list[Path], cancel: threading.Event):
+        """(local_page, (정화된 페이지, 정화 경고))를 순서대로 낸다."""
         for local_page, path in enumerate(image_paths):
             if cancel.is_set():
                 raise JobCanceled()

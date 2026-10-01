@@ -153,6 +153,14 @@ class TranslateAPIError(TranslateError):
     """업스트림 API 오류 (상태코드·본문 요약 포함)."""
 
 
+class TranslateCancelled(TranslateAPIError):
+    """사용자 취소·내부 abort로 요청을 보내지 않았거나 진행 중 응답을 버렸다.
+
+    실패가 아니다 — 용어집처럼 실패를 삼키는 단계도 이 예외만은 그대로 올려야 한다
+    (삼키면 취소된 실행이 시드 용어집을 영구 저장했다, translate-llm-6).
+    """
+
+
 class TranslateUnitRejected(TranslateAPIError):
     """재시도해도 같은 결과인 4xx 거부 (400·413·422 등 — 429/408 제외).
 

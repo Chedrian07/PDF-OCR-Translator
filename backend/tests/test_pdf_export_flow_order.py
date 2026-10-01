@@ -109,3 +109,70 @@ def test_translation_never_overprints_a_kept_full_width_source_line(tmp_path, ke
     assert "KEEPLINE: this full width line must stay readable okay ok" in text, text
     overlapping = [line for line in korean if (line & keep).get_area() > 0.5]
     assert not overlapping, (keep, overlapping)
+
+
+@pytest.mark.parametrize("kept_kind", ["unowned", "unchanged"])
+def test_compact_reflow_keeps_reading_order_around_kept_content(tmp_path, kept_kind):
+    """앞 문단이 위로 당겨져도 뒤 문단은 사이에 있던 보존 줄을 건너뛰어 올라가지 않는다."""
+    job_dir = _job_with_kept_middle(tmp_path, kept_kind, KEEP_LINE)
+    result = build_translated_pdf(job_dir, "ko")
+    assert result.replaced == 2, result.report()
+    with fitz.open(result.path) as exported:
+        page = exported[0]
+        keep = _line_rect(page, "KEEPLINE")
+        a_first = _line_rect(page, "짧은 문단 A")
+        b_first = _line_rect(page, "문단 B의")
+
+    assert a_first.y0 < keep.y0, (a_first, keep)
+    assert b_first.y0 >= keep.y1, (b_first, keep)
+
+
+def test_equation_explanation_stays_after_its_equation(tmp_path):
+    """'where x is…' 설명 문단이 그 위의 수식보다 먼저 놓이던 재배치 회귀."""
+    job_dir = tmp_path / "flow-equation"
+    job_dir.mkdir()
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    y = 200.0
+    for line in A_LINES:
+        page.insert_text((X0, y), line, fontsize=10, fontname="tiro")
+        y += LEADING
+    a_rect = fitz.Rect(X0, 190, X1, y - LEADING + 4)
+    # 단 폭의 1/3짜리 가운데 수식 — 전폭 예외와 무관하게 장애물로 남는다.
+    page.insert_text((150, y), "y = f(x) + b", fontsize=10, fontname="tiro")
+    eq_rect = fitz.Rect(148, y - 10, 222, y + 4)
+    y += LEADING
+    b_top = y - 10
+    explanation = ["where x is the input and y is the output of", "the model under consideration in this work."]
+    for line in explanation:
+        page.insert_text((X0, y), line, fontsize=10, fontname="tiro")
+        y += LEADING
+    b_rect = fitz.Rect(X0, b_top, X1, y - LEADING + 4)
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+
+    original = [{"page": 1, "width": PAGE_W, "height": PAGE_H, "blocks": [
+        {"type": "text", "bbox": _bbox(*a_rect), "content": "\n".join(A_LINES),
+         "fs": 10 / PAGE_W * 100},
+        {"type": "equation", "bbox": _bbox(*eq_rect), "content": r"\[ y = f(x) + b \]"},
+        {"type": "text", "bbox": _bbox(*b_rect), "content": "\n".join(explanation),
+         "fs": 10 / PAGE_W * 100},
+    ]}]
+    translated = json.loads(json.dumps(original))
+    translated[0]["blocks"][0]["content"] = A_KO
+    translated[0]["blocks"][2]["content"] = "여기서 x는 입력, y는 모델의 출력이다."
+    (job_dir / "layout.json").write_text(json.dumps(original), encoding="utf-8")
+    (job_dir / "layout.ko.json").write_text(
+        json.dumps(translated, ensure_ascii=False), encoding="utf-8",
+    )
+
+    result = build_translated_pdf(job_dir, "ko")
+    assert result.replaced == 2, result.report()
+    with fitz.open(result.path) as exported:
+        page = exported[0]
+        equation = _line_rect(page, "y = f(x) + b")
+        explanation_ko = _line_rect(page, "여기서 x는")
+        korean = _korean_lines(page)
+
+    assert explanation_ko.y0 >= equation.y1, (explanation_ko, equation)
+    assert not [line for line in korean if (line & equation).get_area() > 0.5]

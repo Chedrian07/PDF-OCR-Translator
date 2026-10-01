@@ -232,7 +232,10 @@ def _is_trusted_proxy(host: str) -> bool:
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
-        return False  # 'unknown'·유닉스 소켓 등 — 프록시로 볼 근거가 없다
+        # IP가 아닌 피어 = 로컬 전송(유닉스 소켓 — uvicorn --uds는 client가 없다)이나
+        # 프로세스 내 하네스다. 원격 네트워크 클라이언트는 언제나 IP로 보이므로, 이
+        # 피어를 믿어도 LAN에서 헤더를 위조할 길은 열리지 않는다(소켓 앞 프록시는 정상).
+        return True
     if address.version == 6 and address.ipv4_mapped is not None:
         address = address.ipv4_mapped  # 듀얼 스택 소켓의 ::ffff:127.0.0.1
     networks = _trusted_proxy_networks(os.environ.get(_TRUSTED_PROXY_IPS_ENV) or "")

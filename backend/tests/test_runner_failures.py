@@ -523,10 +523,10 @@ class OutputLimitEngine(FakeEngine):
         full = super().run_multi(image_paths[: self.complete_pages + 1], out_dir, sink, cancel)
         pages = split_pages(full)
         pages[-1] = pages[-1][: len(pages[-1]) // 3]  # 마지막 페이지는 중간에서 잘렸다
-        error = OutputLimitError("생성이 총 길이 상한(MAX_LENGTH=32768)에 도달해 출력이 잘림")
-        if self.attach_partial:
-            error.partial_output = "<PAGE>\n" + "\n<PAGE>\n".join(pages)
-        raise error
+        partial = "<PAGE>\n" + "\n<PAGE>\n".join(pages) if self.attach_partial else None
+        raise OutputLimitError(
+            "생성이 총 길이 상한(MAX_LENGTH=32768)에 도달해 출력이 잘림", partial_output=partial,
+        )
 
     def run_single(self, image_path, out_dir, sink, cancel):
         page = int(Path(image_path).stem.rsplit("_", 1)[-1])
@@ -777,3 +777,25 @@ def test_no_same_page_retry_also_applies_to_per_page_fallbacks(tmp_path):
 
     assert job.status == "done"
     assert engine.single_calls == {1: 1, 2: 1}     # 실패 페이지도 한 번만
+
+
+def test_retry_and_rerun_policies_are_declared_on_the_base_contracts(tmp_path):
+    """덕 타이핑이던 runner 계약을 base.py가 선언한다 — EngineError.retry_same_page(기본
+    True), OCREngine.deterministic_rerun(기본 False). 선언된 속성만으로 정책이 바뀐다."""
+    from app.engine.base import EngineError, OCREngine
+    from app.engine.textlayer import TextLayerEngine
+
+    assert EngineError("x").retry_same_page is True
+    assert OCREngine.deterministic_rerun is False
+    assert FakeEngine.deterministic_rerun is False
+    assert TextLayerEngine.deterministic_rerun is True
+
+    class _TimeoutLike(EngineError):
+        retry_same_page = False
+
+    engine = PageUnitEngine(bad_pages={1}, exc=_TimeoutLike, chunk=1)
+    job = _run_job(tmp_path, engine, pages=2, pages_per_chunk=8)
+
+    assert job.status == "done"
+    assert engine.multi_calls == 2                 # 1쪽(실패, 재시도 없음) + 2쪽
+    assert engine.single_calls == {}

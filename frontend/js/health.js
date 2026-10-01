@@ -4,7 +4,7 @@ import {
 } from './core.js';
 import { el, state } from './state.js';
 import { h } from './ui.js';
-import { apiGet } from './api.js';
+import { POLL_TIMEOUT_MS, apiGet } from './api.js';
 import { applyTranslateAvailability } from './translate.js';
 
 /* ============================ Health ============================ */
@@ -25,7 +25,7 @@ export async function loadHealth() {
   state.healthInFlight = true;
   let data;
   try {
-    data = await apiGet('/api/health');
+    data = await apiGet('/api/health', { timeoutMs: POLL_TIMEOUT_MS });
   } catch (_) {
     renderHealthError();
     scheduleHealth(HEALTH_POLL_FAST_MS);

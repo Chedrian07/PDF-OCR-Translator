@@ -56,6 +56,11 @@ class FakeNode {
       const kids = [...child.childNodes];
       child.childNodes = [];
       for (const k of kids) k.parentNode = null;
+      // <template>로 파싱한 HTML 문자열(가짜 DOM은 파싱하지 않는다)도 함께 옮긴다.
+      if (child._html !== undefined) {
+        this._html = (this._html || '') + child._html;
+        child._html = undefined;
+      }
       return kids;
     }
     if (child.parentNode) child.parentNode.removeChild(child);
@@ -306,6 +311,7 @@ class FakeElement extends FakeNode {
   set innerHTML(value) {
     this._clearChildren();
     this._html = String(value);
+    if (this.tagName === 'TEMPLATE') this.content._html = this._html;
   }
   setAttribute(name, value) {
     const v = String(value);

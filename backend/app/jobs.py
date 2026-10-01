@@ -122,6 +122,23 @@ class Job:
     # 여전히 queued라, '아직 아무도 맡지 않은 대기 잡'만 API가 즉시 취소할 수 있도록
     # 상태와 별도로 둔다 — JobStore.claim/try_cancel_queued가 같은 락에서 판정한다.
     claimed: bool = False
+    # 실행 시작·종료 시각(UTC ISO 초 단위) — mark_running/mark_finished가 찍고 meta에
+    # 남는다. created_at만으로는 대기·처리 시간을 알 수 없었다(벤치마크·운영 관측).
+    # None = 아직 아님/알 수 없음: 대기 중 취소된 잡은 started_at이 없고, 서버 재시작으로
+    # 중단된 잡은 실제로 멈춘 시각을 몰라 finished_at을 비워 둔다. 구버전 meta에도 없다.
+    started_at: str | None = None
+    finished_at: str | None = None
+
+    def mark_running(self) -> None:
+        """실행 시작 — 상태와 시작 시각을 함께 바꾼다(저장은 호출자 몫)."""
+        self.status = "running"
+        self.started_at = _now_iso()
+
+    def mark_finished(self, status: str, error: str | None = None) -> None:
+        """터미널 상태(done|error|canceled)로 마감 — 상태·오류·종료 시각을 함께 바꾼다."""
+        self.status = status
+        self.error = error
+        self.finished_at = _now_iso()
 
     def _result_block(self, *, include_files: bool = True) -> dict | None:
         if self.status != "done":
@@ -180,6 +197,8 @@ class Job:
             "model_id": self.model_id,
             "model_revision": self.model_revision,
             "provider": self.provider,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
         }
         # 선택 필드 — queued 잡에만 존재(계약). running/터미널 잡은 필드 자체가 없다.
         if queue_position is not None:
@@ -204,6 +223,8 @@ class Job:
             "provider": self.provider,
             "submitted": self.submitted,
             "page_separator": self.page_separator,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
         }
 
 
@@ -321,8 +342,7 @@ class JobStore:
         with self._lock:
             if job.status != "queued" or job.claimed:
                 return False
-            job.status = "canceled"
-            job.error = message
+            job.mark_finished("canceled", message)
         self.save(job)
         return True
 
@@ -453,6 +473,7 @@ class JobStore:
                     model_revision=m.get("model_revision"), provider=m.get("provider"),
                     submitted=bool(m.get("submitted")),
                     page_separator=m.get("page_separator"),
+                    started_at=m.get("started_at"), finished_at=m.get("finished_at"),
                 )
                 if job.page_separator is None and default_page_separator is not None:
                     job.page_separator = default_page_separator
@@ -464,6 +485,9 @@ class JobStore:
                     continue
                 changed = job.status in ("queued", "running")
                 if changed:
+                    # mark_finished를 쓰지 않는다 — 실제로 멈춘 시각(프로세스가 죽은 때)을
+                    # 모르니 finished_at은 비워 둔다(재시작 시각을 적으면 처리 시간이 서버가
+                    # 내려가 있던 시간만큼 부풀려 보인다).
                     job.status = "error"
                     job.error = "서버 재시작으로 중단되었습니다"
                 with self._lock:
@@ -751,8 +775,7 @@ class Worker(threading.Thread):
                     continue
                 cancel = self.cancel_events.setdefault(job_id, threading.Event())
                 if job.delete_requested or cancel.is_set():
-                    job.status = "canceled"
-                    job.error = "사용자에 의해 취소되었습니다"
+                    job.mark_finished("canceled", "사용자에 의해 취소되었습니다")
                     self.store.save(job)
                     if job.delete_requested:
                         self.store.delete_dir(job)
@@ -778,8 +801,7 @@ class Worker(threading.Thread):
                             self.load_state["error"] = None  # 재시도 성공 — 옛 오류는 무효
                 except JobCanceled:
                     # 대기 중 사용자가 취소 — 오류가 아니라 취소로 마감
-                    job.status = "canceled"
-                    job.error = "사용자에 의해 취소되었습니다"
+                    job.mark_finished("canceled", "사용자에 의해 취소되었습니다")
                     self.store.save(job)
                     if job.delete_requested:
                         self.store.delete_dir(job)
@@ -792,8 +814,7 @@ class Worker(threading.Thread):
                     logger.exception("엔진 로드 실패")
                     if self.load_state is not None:
                         self.load_state["error"] = str(e)[:500]
-                    job.status = "error"
-                    job.error = f"모델 로드 실패: {e}"[:2000]
+                    job.mark_finished("error", f"모델 로드 실패: {e}"[:2000])
                     self.store.save(job)
                     self.broker.publish(job_id, "error", {"message": job.error})
                     continue
@@ -807,8 +828,7 @@ class Worker(threading.Thread):
                 # 사용자가 치울 수 없다 — 터미널(error)로 마감한다.
                 stuck = self.store.get(job_id)
                 if stuck is not None and stuck.status in ("queued", "running"):
-                    stuck.status = "error"
-                    stuck.error = "잡 처리 중 내부 오류가 발생했습니다"
+                    stuck.mark_finished("error", "잡 처리 중 내부 오류가 발생했습니다")
                     self.store.save(stuck)
                     self.broker.publish(job_id, "error", {"message": stuck.error})
             finally:

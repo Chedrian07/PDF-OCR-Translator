@@ -378,3 +378,49 @@ def test_restart_sweeps_orphan_job_dirs_without_meta(tmp_path):
     assert not orphan.exists()
     assert foreign.is_dir()
     assert revived.get(kept.id) is not None and kept.dir.is_dir()
+
+
+# ── 재시작 시 대기 잡 복원 (pipeline-ocr-11·concurrency-12) ─────────────────────
+
+
+def test_restart_keeps_submitted_queued_jobs_and_errors_the_rest(tmp_path):
+    """시작도 안 한 대기 잡까지 '서버 재시작으로 중단' 오류가 돼 다시 올려야 했다.
+    업로드·검증을 마치고 제출된 잡만 대기 상태로 돌려주고(생성 순서), 업로드 도중 죽은
+    잡(제출 표식 없음)·원본이 사라진 잡·실행 중이던 잡은 예전처럼 오류로 마감한다."""
+    store = JobStore(tmp_path / "jobs")
+    pdf = make_pdf_bytes(pages=1, with_image=False)
+
+    def _queued(name: str, created_at: str, *, submit: bool, source: bytes | None):
+        job = store.create(name, "multi", dpi=72)
+        job.created_at = created_at
+        if source is not None:
+            (job.dir / "source.pdf").write_bytes(source)
+        if submit:
+            store.mark_submitted(job)
+        store.save(job)
+        return job
+
+    second = _queued("b.pdf", "2026-10-01T00:00:02+00:00", submit=True, source=pdf)
+    first = _queued("a.pdf", "2026-10-01T00:00:01+00:00", submit=True, source=pdf)
+    uploading = _queued("c.pdf", "2026-10-01T00:00:03+00:00", submit=False, source=b"%PDF-1.4")
+    vanished = _queued("d.pdf", "2026-10-01T00:00:04+00:00", submit=True, source=None)
+    running = _make_job(store, "running")
+
+    revived = JobStore(store.jobs_dir)
+    restored = revived.load_existing()
+    assert [job.id for job in restored] == [first.id, second.id]   # 생성 순서
+    for job in (first, second):
+        restored_job = revived.get(job.id)
+        assert restored_job.status == "queued" and restored_job.submitted
+    for job in (uploading, vanished, running):
+        assert revived.get(job.id).status == "error"
+        assert revived.get(job.id).error == "서버 재시작으로 중단되었습니다"
+
+
+def test_submit_survives_a_failed_submitted_marker_write(tmp_path):
+    """제출 표식 기록 실패가 제출 자체를 막으면 업로드가 유령 queued 잡이 된다."""
+    store = _SaveFailingStore(tmp_path / "jobs")
+    job = store.create("doc.pdf", "multi", dpi=72)
+    store.fail_ids.add(job.id)
+    store.mark_submitted(job)                          # 예외가 새지 않는다
+    assert job.submitted and job.submit_seq == 1

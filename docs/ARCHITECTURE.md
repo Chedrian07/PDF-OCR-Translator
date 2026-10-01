@@ -508,6 +508,16 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 
 모든 경로는 `/api` 프리픽스. 프론트엔드는 같은 오리진에서 서빙되므로 CORS 불필요.
 
+**상태코드 계약 (재시도 여부)** — 클라이언트(프런트 `core.langFetchVerdict` 등)는 이 구분에
+기대어 동작한다:
+
+| 응답 | 뜻 | 클라이언트 |
+|---|---|---|
+| **503 + `Retry-After`** | 일시적 과부하 — 빌드 대기열 초과·예열 대기 초과, SSE 구독 상한, 번역 시작의 자원 부족, 업로드 검증 워커 포화 | 기다렸다 다시 시도 (프런트는 1–60초로 묶어 최대 4번) |
+| **503 (Retry-After 없음)** | 설정 문제 — 번역·Q&A 프로바이더 미설정 등 | 재시도 무의미 |
+| **404 / 409** | 없음 / 지금 상태로는 불가 — 번역본 없음, 좌표 레이아웃 없음, 미완료 잡, 내보내기 불가(입력 손상·빌드 시간 상한 초과) | 대체 경로(원문 보기·HTML 내보내기) |
+| **429 + `Retry-After`** | 레이트리밋·동시 상한 (아래) | 남은 시간 뒤 |
+
 ### 남용 방어 — 429 + Retry-After (QA·translate)
 
 이 서비스는 인증이 없고 compose 기본 바인딩이 `0.0.0.0`이다(§8·§14). 같은 네트워크의
@@ -527,20 +537,40 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   정수가 아닌 값은 500 대신 기본값으로 강등하고 경고 로그만 남긴다.
 - 가드는 앱 상태에 지연 생성되고 상한은 프로세스 단위다(외부 저장소·인증 없음).
   기본값은 1인 로컬 사용을 방해하지 않는 수준으로 잡혀 있다.
+- 한 요청의 키들(잡·IP)은 **원자적으로** 판정한다(`hit_many`) — 어느 키든 넘치면 아무
+  것도 기록하지 않고 가장 긴 `Retry-After`를 돌려준다. 예전에는 IP 한도로 거절된 요청도 잡
+  버킷을 소모해, 한 클라이언트가 모든 잡의 번역·Q&A를 잠글 수 있었다.
+- 클라이언트 IP: `TRUSTED_PROXY_HOPS>0`이어도 `X-Forwarded-For`는 직접 연결 피어가
+  `TRUSTED_PROXY_IPS`(IP·CIDR, 비우면 루프백 `127.0.0.0/8`·`::1`)에 있을 때만 믿는다. IP가
+  아닌 피어(유닉스 소켓·프로세스 내 하네스)는 로컬 전송이라 믿는다. 목록 밖 피어는 헤더를
+  위조로 보고 피어 IP로 레이트리밋한다(한 번 경고 로그).
+- 같은 가드가 **`POST /render-preview`**도 묶는다: 크기 가중 비용(16 KiB당 1단위, 잡·IP
+  키마다 분당 600단위)과 동시 렌더 4건. 넘으면 429 + `Retry-After`(동시 상한은 1초).
 
 ### GET /api/health
 ```json
 {
   "status": "ok",
   "engine": "unlimited",            // unlimited | fake | textlayer | ovisocr2 | paddleocr_vl
-  "device": "cuda",                 // cpu | cuda | metal
-  "dtype": "bfloat16",
+  "device": "cuda",                 // cpu | cuda | metal | mlx — auto를 푼 실제 디바이스
+  "dtype": "bfloat16",              // MLX 8비트면 "bfloat16+q8"
   "model_id": "baidu/Unlimited-OCR",
   "model_loaded": true,             // false면 첫 잡에서 로딩
   "model_load_error": null,         // model_loaded=false일 때만 마지막 로드 실패 사유
-  "gpu_name": "NVIDIA GeForce RTX 5070 Ti",  // cpu면 null
+                                    //  (프리로드든 워커의 잡 시작 로드든 — 재시도 성공 시 지움)
+  "gpu_name": "NVIDIA GeForce RTX 5070 Ti",  // cpu면 null, Apple GPU는 칩 이름("Apple M4 Max")
   "native_ops": true,               // C++ 모듈 사용 여부
   "worker_alive": true,             // OCR 워커 스레드 생존 여부 — false면 잡이 영원히 queued
+  "worker_job_id": "j_…",           // 워커가 실행 중인 잡 (없으면 null)
+  "worker_last_progress_at": "2026-10-02T03:00:00+00:00",  // 그 잡의 마지막 진행(시작·끝·
+                                    //  진행·토큰·대기 알림) UTC 시각
+  "worker_progress_age_s": 1.2,     // 그로부터 지난 초 — 잡이 있는데 계속 늘면 멈춘 것
+  "pdf_workers": {                  // PyMuPDF 격리 워커 풀 (§18)
+    "mode": "process",              // process | inline(테스트·디버그)
+    "pools": {"ocr": {"size": 1, "workers": 1, "in_use": 0, "tasks": 81, "timeouts": 0,
+                      "crashes": 0, "canceled": 0, "spawned": 1, "recycled": 0,
+                      "rejected_busy": 0}}   // export·probe도 같은 모양 (처음 쓴 풀만)
+  },
   "max_upload_mb": 100,             // 업로드 상한 (MAX_UPLOAD_MB 그대로)
   "translate_available": true,      // 번역 프로바이더 설정 여부 — false면 POST /translate가 503
   "qa_available": true,             // 기본 LLM 공급자의 **실제 구성 여부** (상수 아님 — §17)
@@ -556,10 +586,13 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
     "layout": "full",               // full | figure_only | none — 레이아웃 탭 안내
     "figures": true
   },
-  "provider_health": null           // sidecar 엔진만: {status, runtime, version,
-                                    //  model_loaded, gpu_total_mb, gpu_free_mb}
+  "provider_health": null,          // sidecar 엔진만: {status, runtime, version,
+                                    //  model_loaded, gpu_total_mb, gpu_free_mb,
+                                    //  load_retry, restarting} (OCR_ENGINE_PROTOCOL.md)
                                     //  sidecar가 죽어도 health 자체는 200 —
                                     //  {status:"unreachable", error:"…"}로 구분
+  "config_warnings": []             // .env에 있지만 이 앱이 읽지 않는 키의 짧은 안내
+                                    //  (키 이름·오타 후보만, 값 없음 — §7). 기본 빈 목록
 }
 ```
 
@@ -567,24 +600,35 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 - `multipart/form-data`: `file`(필수, PDF), `mode`(`multi`|`per_page`, 기본 `multi`),
   `dpi`(72–400, 기본 200). 페이지 상한은 서버의 `MAX_PAGES`로 일괄 적용한다.
 - 202 → `{"job_id": "j_1a2b3c4d5e6f", "status": "queued"}`
-- 400(비PDF/손상), 413(MAX_UPLOAD_MB 초과)
+- 400(비PDF/손상/복잡도 게이트 초과), 413(MAX_UPLOAD_MB 초과),
+  **503 + `Retry-After: 5`**(업로드 검증 워커가 모두 다른 업로드를 검사 중 — 파일 문제가 아니다)
+- 검증(`probe_pdf`)은 probe 워커 프로세스에서 `PDF_PAGE_TIMEOUT_S` 안에 돈다: 페이지 수
+  (`MAX_PAGES`)·한 변 길이와 **업로드 복잡도 게이트**(렌더 없이 페이지별 압축 해제 콘텐츠
+  바이트·펼친 XObject 호출 수를 센다 — §18). 상한 초과·검증 시간 초과·워커 비정상 종료는
+  사유를 담은 400이다(`PDF 검증이 시간 상한(…)을 넘었습니다` 등). 손상 PDF는 고정 문구
+  `PDF를 열 수 없습니다 — 손상되었거나 지원하지 않는 형식입니다`이고 서버 경로를 싣지 않는다
+  (원래 MuPDF 오류는 서버 로그에만).
 - **본문 상한은 라우트 진입 전(ASGI)에서 끊는다** — `UploadBodyLimitMiddleware`가
   본문을 가질 수 있는 메서드(POST/PUT/PATCH)를 (경로 패턴 → 상한) 표로 판정한다:
   `/api/jobs` = `MAX_UPLOAD_MB` + 64KiB(멀티파트 봉투 여유),
-  `/api/jobs/{id}/render-preview` = 2MB(라우트 내부 상한과 동일 값),
+  `/api/jobs/{id}/render-preview` = 256KiB(라우트 내부 상한과 동일 값),
   **그 외 = 64KiB 기본**. 표에 없는 새 POST 라우트도 기본 상한으로 자동 보호된다 —
   예전처럼 `/api/jobs`만 검사하면 `POST /jobs/{id}/qa`가 잡 존재 확인 이전에 무제한
   본문을 메모리에 적재한다(실측 uvicorn: 80MB 본문 1건에 RSS +422MB·동시 4건 +1.4GB,
   422 응답이 80MB 원문 반향 → 상한 적용 후 RSS +0MB·62바이트 413).
 
-### GET /api/jobs — 잡 목록 (최신순, 최대 50)
+### GET /api/jobs?limit=50&before=<job_id> — 잡 목록 (최신순)
 ```json
-{"jobs": [ { …GET /api/jobs/{id}와 동일 키… } ]}
+{"jobs": [ { …GET /api/jobs/{id}와 동일 키… } ], "has_more": true, "total": 132}
 ```
+- 선택 쿼리: `limit`(1–500, 기본 50), `before`=<잡 ID>(그 잡 다음부터 — '더 보기' 커서).
+  기본 응답은 예전과 같은 최신 50건이고 `has_more`(뒤에 더 있는가)·`total`(전체 잡 수)이
+  덧붙는다. 범위 밖 `limit`, 없는 커서 잡(삭제됨)은 422 — 프런트는 처음부터 다시 받는다.
 - **주의**: 목록은 `include_files=False`로 직렬화한다 — `result`의
   `images`/`layouts`/`pages` 배열은 **항상 빈 배열**이다(키는 유지). 폴링마다
   잡×디렉터리를 전수 스캔하던 비용을 없앤 것으로, 실제 파일 URL이 필요하면
-  단건 `GET /api/jobs/{id}`를 쓴다.
+  단건 `GET /api/jobs/{id}`를 쓴다. `has_layout`은 잡마다 layout 사용 가능 판정을 하지만
+  파일 버전(mtime·크기)별 캐시라 폴링마다 다시 파싱하지 않는다.
 
 ### GET /api/jobs/{id} — 상태
 ```json
@@ -602,7 +646,10 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
     "chunk": 1, "total_chunks": 2
   },
   "error": null,
-  "warnings": [],                   // 실패 격리·품질 경고 누적 (§4)
+  "warnings": [],                   // 실제 품질 저하 (§4 잡 메시지)
+  "notices": [],                    // 정보성 처리 경위 (옛 meta는 문구로 갈라 읽는다)
+  "started_at": "2026-07-06T10:00:03+00:00",   // 실행 시작 (대기 중 취소·옛 잡은 null)
+  "finished_at": null,              // 종료 (실행 중·재시작으로 중단·옛 잡은 null)
   // ── 엔진/모델 메타 (추가 필드 — 실행 시작 시 확정, 구버전 잡은 null) ──
   "engine": "unlimited",
   "model_id": "baidu/Unlimited-OCR",
@@ -616,7 +663,8 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
     "images": ["/api/jobs/{id}/files/images/p0001_0.jpg"],
     "layouts": ["/api/jobs/{id}/files/layout/page_0001.jpg"],
     "pages": ["/api/jobs/{id}/files/pages/page_0001.png"],
-    "has_layout": true              // layout.json 유무 — false면 /layout·/pdf가 404/409
+    "has_layout": true              // 텍스트 블록이 있는 layout인가(has_usable_layout) —
+                                    //  false면 /layout·/alignment·/outline·/viewer/pages 404, /pdf 409
   }
 }
 ```
@@ -627,6 +675,14 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 ### GET /api/jobs/{id}/events — SSE
 - `Content-Type: text/event-stream`, `retry: 3000`, 15초마다 `: ping` 주석
 - 접속 시 현재 상태 스냅샷(progress) 1회 즉시 발행, 종료 잡이면 done/error 즉시 발행
+- **구독자 상한**: 채널(잡·번역)당 8개, 프로세스 전체 64개(`jobs.EventBroker`). 넘으면 스트림을
+  열기 전에 **503 + `Retry-After: 5`**(`/translate/events`도 같다). 검사 뒤 경합으로 넘친
+  연결은 재시도 안내만 보내고 닫는다. 예전에는 상한이 없어 연결 수에 비례해 OCR 워커의
+  publish가 느려지고 큐 메모리가 늘었다.
+- **서버 종료**: lifespan이 SIGINT/SIGTERM을 잡아 `ShutdownSignal`을 세우면 두 SSE 루프가
+  다음 폴(≤1초)에 끝난다 — 실측: 열린 SSE가 있는 실행 중 잡에서 SIGTERM 후 0.75초에 종료
+  (예전 13.8초, `docker stop`은 매번 SIGKILL). uvicorn도 `--timeout-graceful-shutdown 5`로 뜬다.
+- 잡 디렉터리가 사라지면(삭제) 루프가 끝난다.
 - 이벤트:
   - `event: progress` `data: {"phase":"ocr","current_page":3,"total_pages":12,"chunk":1,"total_chunks":2,"status":"running"}`
     — `current_page`의 의미는 phase에 따라 다름: `loading`=sidecar 모델 준비 대기
@@ -679,7 +735,12 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
     재연결 히스토리도 같은 지점까지 잘리므로 replay가 폐기분을 다시 싣지 않는다.
     클라이언트가 그 마커를 받은 적이 없으면(늦은 접속) 원문을 자르지 않고 안내만 남긴다.
   - `event: done`     `data: {"markdown_url":"...","archive_url":"..."}`
-  - `event: error`    `data: {"message":"..."}`  (취소 시 `"canceled": true` 포함)
+  - `event: error`    `data: {"message":"..."}`  (취소 시 `"canceled": true` 포함 — 대기 중 잡의
+    취소는 POST /cancel 응답과 함께 즉시 발행된다). **삭제**는 실행 중·대기 중 모두
+    `{"message":"삭제된 작업입니다","canceled":true,"deleted":true}`로 끝난다 — 프런트는
+    `deleted:true`를 보면 그 잡의 화면·뷰어·구독을 닫고 목록 줄·읽던 위치·노트를 지운다.
+    삭제 요청과 거의 동시에 잡이 done/error로 끝나면 구독자는 그 종료 이벤트를 받는다
+    (프런트는 다음 전체 목록 폴에서 사라진 잡을 닫는다).
 
 ### GET /api/jobs/{id}/markdown
 - `text/markdown; charset=utf-8`. 실행 중이면 완료된 청크까지의 부분 결과 + `X-Partial: true`
@@ -694,38 +755,60 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   사용하되, 화면은 원본/번역 PDF 페이지 이미지를 기준면으로 표시한다. OCR
   블록은 같은 좌표의 투명 텍스트 레이어로 남아 검색·선택·복사가 가능하다.
   페이지 이미지를 만들 수 없을 때만 좌표 텍스트 재조판으로 폴백한다.
-  layout.json 없으면 404 (프론트는 탭에서 안내 문구 표시).
+  layout.json이 없거나 **텍스트 블록이 없으면**(image 블록뿐인 옛 figure_only 잡·전면 스캔)
+  404 `이 잡에는 좌표 텍스트 레이아웃이 없습니다 (그림 전용 엔진·스캔 문서) — 텍스트
+  보기(/html)를 사용하세요` (프론트는 탭에서 안내 문구 표시). `/alignment`·`/outline`·
+  `/viewer/pages`도 같은 판정(`artifacts.has_usable_layout`)과 같은 404를 쓴다.
   `?lang=` 뷰는 번역 PDF raster를 유발하므로 `/document.html`과 함께
   **503 + `Retry-After`**(전역 빌드 대기열 초과, §5 `/pdf`)를 낼 수 있다.
+
+### GET /api/jobs/{id}/document.html?lang=ko — 단독 HTML 내보내기
+- 좌표 layout을 쓸 수 있으면 **facsimile**(페이지 PNG 인라인 + 투명 텍스트 레이어), 아니면
+  **의미 기반** HTML(텍스트 보기와 같은 렌더)이다. 둘 다 KaTeX CSS/JS·woff2 폰트·크롭·페이지
+  PNG를 data: URI로 품은 파일 하나이고, `<meta charset>` 바로 뒤에 meta CSP
+  `default-src 'none'; img-src data: blob:; font-src data:; style-src 'unsafe-inline';
+  script-src 'unsafe-inline'`과 `<meta name="referrer" content="no-referrer">`를 둔다 —
+  디스크에서 열어도 정상 렌더되고, OCR 텍스트 속 추적·LAN 이미지를 포함한 어떤 외부 요청도
+  나가지 않는다(Chromium은 img-src 위반만 기록). KaTeX 옵션은 앱과 같다(maxSize 10,
+  maxExpand 1000, strict 'ignore', trust false — `test_layout`이 `constants.js`와 동기화를 고정).
+- 레거시 `/layout.html`은 이 경로로 307 리다이렉트한다.
 
 ### GET /api/jobs/{id}/page/{page}?lang=ko
 - 리더용 최종 페이지 PNG. 원문은 `pages/`, 번역은 `export.{lang}.pdf`를 잡 DPI로
   렌더한 `rendered/{lang}/` 캐시를 반환한다(캐시 마커는 PDF 크기·mtime·DPI·페이지 수).
 - 상태코드: **400** 미지원 lang · **404** 번역본 없음/페이지 번호가 layout에 없음/
-  이미지 파일 없음 · **409** 내보내기 불가(`PdfExportError` — 입력 누락·손상) ·
-  **503** 전역 빌드 대기열 초과(`Retry-After` 동반 — §5 `/pdf`의 전역 빌드 상한).
-  `layout.json`(또는 `layout.{lang}.json`)이 없는 잡은 원본 `pages/` PNG로 폴백한다.
+  이미지 파일 없음 · **409** 내보내기 불가(`PdfExportError` — 입력 누락·손상·빌드 시간 상한
+  초과·빌드 워커 비정상 종료) · **503** 전역 빌드 대기열 초과(`Retry-After` 동반 — §5 `/pdf`의
+  전역 빌드 상한). 좌표 layout을 쓸 수 없는 잡(원문 또는 `layout.{lang}.json`에 텍스트 블록이
+  없음)은 원본 `pages/` PNG로 폴백한다. 번역 페이지 raster는 export 워커 풀에서 만든다(§18).
 
 ### GET /api/jobs/{id}/outline?lang=ko
-- layout의 `title` 블록을 페이지·레벨·텍스트 목록으로 반환한다.
+- layout의 `title` 블록을 페이지·레벨·텍스트 목록으로 반환한다. 쓸 수 있는 layout이 없으면 404.
 
 ### GET /api/jobs/{id}/alignment?page=N&lang=ko
 - 원문 bbox와 같은 인덱스의 원문/번역 블록을 연결한다. 번역 페이지·블록 수,
-  type, bbox 대응이 어긋나면 잘못된 매핑을 내보내지 않고 409를 반환한다.
+  type, bbox 대응이 어긋나면 잘못된 매핑을 내보내지 않고 409를 반환한다. 쓸 수 있는
+  layout이 없으면 404.
 
 ### GET /api/jobs/{id}/viewer-manifest?lang=ko
 - 전체 화면 논문 뷰어의 부트스트랩 계약. schema/artifact revision, 페이지 수,
   원문 이미지·번역 이미지·alignment·outline capability, 품질 경고와 URL 템플릿을
   작은 JSON으로 반환한다.
 - 좌측 뷰어 기준면은 `source_page_template`을 사용해 항상 원문으로 고정한다.
-  `translated_page_image`는 번역 PDF raster 캐시가 실제 준비된 경우에만 true다.
+  `translated_page_image`는 번역 layout을 쓸 수 있고 번역 PDF raster 캐시가 실제 준비된
+  경우에만 true다. `alignment`·`outline` capability도 파일 존재가 아니라
+  `has_usable_layout`(텍스트 블록이 있는 layout)으로 정한다.
+- `quality`: `{state, warning_count, warnings(앞 20건), notice_count}` — `state`는 warnings가
+  있으면 `degraded`, 없으면 `ok`다. 정보성 notices는 세지 않는다(§4 잡 메시지).
 - `Cache-Control: private, no-cache`, `ETag`, `Vary: Authorization`을 제공하며
-  일치하는 `If-None-Match`에는 304로 응답한다.
+  일치하는 `If-None-Match`에는 304로 응답한다(`W/` 접두, 콤마 목록, `*` 모두 처리).
 
 ### GET /api/jobs/{id}/viewer/pages?start=N&limit=4&lang=ko&include=alignment
 - 긴 문서의 인접 페이지 메타/좌표를 한 번의 layout 파싱으로 반환하는 제한 배치.
   `limit`은 1–16이며, 각 item은 원문 이미지 URL과 선택적 alignment를 포함한다.
-  잘못된 범위/include는 422, 원문-번역 대응 불변식 위반은 409다.
+  잘못된 범위/include는 422, 원문-번역 대응 불변식 위반은 409, 쓸 수 있는 layout이 없으면 404다.
+- `ETag`를 보내고 `If-None-Match`가 맞으면 **layout을 파싱하기 전에** 304로 답한다
+  (예전에는 재검증 때마다 layout JSON 두 개를 전부 다시 파싱했다).
 
 ### GET /api/jobs/{id}/files/{path}
 - 잡 디렉터리 하위 정적 파일. 허용 디렉터리는 `pages/`·`images/`·`layout/`·`rendered/`.
@@ -740,6 +823,11 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 - 다운로드 파일명은 **`{원본이름}.markdown.zip`**(`Path(job.filename).stem` 기준,
   비면 `result`). 잡 디렉터리에는 `archive.zip`으로 캐시되며, 번역 완료 시 무효화돼
   다음 요청에서 번역본까지 담아 재생성된다.
+- 캐시 신선도는 **내용 서명**이다 — 멤버마다 (이름, inode, 크기, mtime_ns)를 해시해 zip
+  주석 `uocr-archive:v1:<hash>`로 남기고, 요청 때 같은 서명이 아니면 다시 만든다. 만드는 도중
+  입력이 바뀌면 같은 요청에서 다시 만든다(최대 3회). 번역 완료 경로는 `done`을 발행하기
+  **전에** archive·PDF 캐시를 무효화하고 예열을 시작한다(예전에는 번역 직후 ZIP이 옛 번역본을
+  줄 수 있었다). 확인과 전송 사이에 파일이 사라지면 500이 아니라 404다.
 
 ### GET /api/jobs/{id}/pdf?lang=ko[&view=dual]
 - 기본 `view=single`은 **레이아웃 보존 번역 PDF** (`{원본이름}.ko.pdf`, application/pdf)를 반환한다.
@@ -788,6 +876,34 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   mediabox는 CropBox를 무시한 PDF 원좌표라 CropBox≠MediaBox 문서에서 실제 페이지
   하단보다 아래를 기준으로 삼고, 회전 페이지에서는 derotation 없이 쓰면 가로/세로가
   뒤바뀐다. 블록 bbox와 같은 비회전 내부 좌표계로 맞춘 값만 쓴다.
+- **스캔·이미지 페이지**: 원문이 래스터 픽셀인 블록 — 보이는 원문 span의 중심이 안에 없고,
+  페이지 전면(85% 이상) 래스터와 50% 이상 겹치거나 래스터 안에 80% 이상 들어간 표 — 은
+  텍스트 리댁션으로 지울 수 없다. 예전에는 영어 픽셀 위에 한국어를 겹쳐 찍었다. 이제 원래
+  영역을 그 페이지의 **가장 흔한 바탕색**(50dpi 렌더에서 한 번 표본, 어두우면 흰색)으로 덮는
+  리댁션(`images=NONE` — 이미지 픽셀을 다시 인코딩하지 않는다. `IMAGE_PIXELS`는 300dpi JPEG
+  스캔 페이지를 Flate로 다시 써 0.92 → 1.73 MB로 키워 기각) 뒤 번역을 넣는다. 원문을 남긴
+  래스터 블록은 영역 전체가 장애물이고, 레이아웃의 그림 블록 안쪽은 건드리지 않는다. 투명
+  OCR 텍스트 레이어(알파 0 등 — Acrobat·ABBYY·ocrmypdf)는 '보이지 않는 원문'으로 본다. 세로로
+  길고 좁은 래스터 블록(종횡비 6 이상·12자 이상)은 여백 도장처럼 세로쓰기로 보고 원문을 둔다.
+  리포트 키 `raster_blocks_erased`.
+- **리댁션은 줄마다 기준선 띠**: span bbox 대신 MuPDF가 지우는 글리프 상자(폰트 상하단에서
+  위아래 10%를 뺀 것)의 가운데 띠(최대 0.5em)를 줄 방향을 따라 지운다 — 10pt/12pt 행간에서
+  예전 사각형이 다음 줄을 지우던 문제가 사라졌다. 블록·리스팅·표 셀 경로가 함께 쓴다.
+- **텍스트 평탄화**: 태그 제거는 `layout.HTML_TAG_RE` 화이트리스트(`p < 0.05 … n > 30`·`<think>`가
+  살아남는다), 모델 특수 토큰(`<|…|>`) 보존, 원문이 목록이면 `• `, 강조 기호는 단어 경계에서만
+  벗기고 코드 span은 보호, LaTeX 구조 변환(`\frac`→a/b, `\sqrt`, `\mathbb`, 악센트, 간격 명령,
+  `\|`→‖, 그리스 문자·화살표 등 KS X 1001 글리프 범위).
+- **회전 페이지**(`/Rotate 90/180/270`): 폰트 실측 주입과 한 줄 조판이 화면 좌표에서 계산하고
+  페이지 좌표로 되돌린다(`ENRICH_VERSION` 6).
+- **흐름 배치 보수화**: '피할 수 없는 내부 장애물' 예외는 벡터 도형 띠에만 적용(원문 span·
+  이미지·배치된 텍스트는 절대 가지치지 않는다), 압축 재배치에 읽기 순서 하한, 부분 리스팅이
+  남긴 행은 장애물로 유지, 정렬하지 못한 리스팅 줄은 그 줄만 원문으로 두는 보존 사유
+  `listing_line_unaligned`, 패스 상한에 닿으면 아무것도 지워졌다고 가정하지 않고 다시 계획.
+  표는 검색 클립마다 TextPage 하나(9셀 표: 10개 → 1개), 가로 괘선은 페이지 드로잉 1회에서 읽는다.
+- **기타**: 공백·NBSP가 같은 글리프인 폰트의 ToUnicode를 `<0020>`으로 고쳐 복사한 공백이 NBSP로
+  나오지 않게 하고(OCR 레이어 스캔 표본 1,995 → 0), 퇴화 det 좌표는 블록만 건너뛰되 크롭 번호는
+  소비한다. 보수적인 장애물 모델 때문에 일부 예전 겹쳐 찍기가 `no_fit`(원문 보존)으로 바뀌었고,
+  25쪽 표본 빌드는 약 12% 느려졌다(가짜 번역 95 → 108초).
 - `view=dual`은 UI의 기본 내보내기다. 같은 번호의 원본 페이지를 왼쪽, 위 단일
   번역 PDF 페이지를 오른쪽에 원래 크기로 붙이고 중앙에 1pt 선을 그린다. 따라서
   A4 세로 원본은 A3 가로 대조 페이지가 되며, 래스터화하지 않아 벡터·그림·텍스트
@@ -802,49 +918,100 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   폰트 메트릭 객체(`fitz.Font`)는 `lru_cache(maxsize=8)`로 재사용한다 — 조판
   dry-run이 블록마다 폰트 파일을 다시 파싱하던 비용 제거(결과 불변).
 - 상태코드: 400 미지원 lang **또는 미지원 `view`**(single|dual 외) · 404 번역본 없음 ·
-  409 미완료 잡 또는 좌표 레이아웃 없음(figure_only 엔진 — document.html 사용 안내) ·
-  500 내보내기 실패(`PdfExportError`) ·
+  409 미완료 잡, 좌표 레이아웃을 쓸 수 없음(원문·번역 layout에 텍스트 블록이 없음 —
+  figure_only 엔진 등, document.html 사용 안내), 내보내기 불가(`PdfExportError` — 입력 누락·
+  손상·layout 블록 불일치·MuPDF 오류·빌드 시간 상한 초과·빌드 워커 비정상 종료·삭제된 잡) ·
   **503 빌드 대기열 초과**(`PdfExportBusyError`, `Retry-After` 동반 — 아래 전역 상한).
+  예전에는 `PdfExportError`가 500이라 프록시가 본문을 가로채 사용자가 원인 문구를 잃었다.
+  `build_translated_pdf`는 페이지 처리·저장의 어떤 예외든 예외 클래스 이름을 담은
+  `PdfExportError`로 바꾸고(트레이스백은 서버 로그 WARNING), `build_dual_pdf`는 출력
+  디렉터리를 만들지 않는다 — 잡 디렉터리가 사라졌으면 `삭제된 작업입니다 …`로 실패한다.
+- **빌드는 export 워커 프로세스에서 돈다**(§18): 빌드 한 건의 상한은
+  `PDF_EXPORT_BUILD_TIMEOUT_S`(기본 900초, 0 이하=없음). 넘기거나 워커가 죽으면
+  `번역 PDF 생성이 시간 상한(…)을 넘어 중단했습니다 … (PDF_EXPORT_BUILD_TIMEOUT_S)` /
+  `… 처리 프로세스가 비정상 종료했습니다 …` 409이고 그 워커만 정리된다. 잡 락과 캐시 판정은
+  서버 프로세스에 남는다.
 - **전역 빌드 상한 (503 + `Retry-After`)**: 잡 단위 락은 *같은 잡*의 중복 빌드만 막는다.
-  서로 다른 잡 N개가 동시에 요청되면 빌드 N개가 함께 돌아 CPU를 포화시킨다(실측 9.4s/16p).
-  그래서 `pipeline/derived.py::export_build_slot`이 프로세스 전역 세마포어
+  `pipeline/derived.py::export_build_slot`이 프로세스 전역 세마포어
   (`PDF_EXPORT_MAX_CONCURRENT`, 기본 **2**)로 빌드 수를 묶고, 슬롯을
   `PDF_EXPORT_QUEUE_TIMEOUT_S`(기본 **30초**) 안에 못 얻으면 매달리는 대신
   **503 + `Retry-After`**로 거절한다(재시도하면 성공할 수 있는 일시적 과부하 —
   입력 누락·손상인 `PdfExportError`와 구분된다). 슬롯은 **실제 빌드에서만** 잡고
-  캐시 적중 경로에서는 잡지 않는다. `0` 이하로 두면 상한 비활성(예전 동작).
+  캐시 적중 경로에서는 잡지 않는다. `0` 이하로 두면 슬롯 상한 비활성(export 워커 풀은
+  최대 min(8, CPU)개라 그 이상은 워커를 기다린다). 같은 값이 export 워커 수라 빌드 N개가
+  **실제로 병렬**이다 — 예전 스레드 빌드는 GIL 때문에 코어 하나를 나눠 썼다(가속비 1.00).
   같은 슬롯을 쓰는 라우트는 이 `/pdf` 외에 `/document.html`·`/layout`·`/page/{n}`
   (번역 페이지 raster가 export를 유발한다)까지 넷이며, 모두 같은 503을 낼 수 있다.
   다만 **같은 (job, lang)의 예열 빌드가 도는 중**이라면 그 기다림은 줄서기가 아니라
   사용자가 원하는 바로 그 PDF가 만들어지는 시간이다. 이 경우에만 대기 상한을
   `PDF_EXPORT_WARM_WAIT_S`(기본 **180초**)로 바꾼다 — 30초로 묶으면 46쪽 문서
-  (실측 빌드 67~75s)에서 번역 직후 첫 다운로드가 **항상** 503이었다.
+  (실측 빌드 67~75s)에서 번역 직후 첫 다운로드가 **항상** 503이었다. 한 요청 안의 여러
+  단계(단일 → 대조, facsimile)는 **하나의 대기 예산**을 쓰고, 안쪽 호출이 더 큰 예산을 열면
+  이미 기다린 시간을 빼고 넓힌다 — 총 대기는 둘 중 큰 상한으로 묶인다.
   ⚠ 업그레이드 직후 `PDF_EXPORT_FORMAT_VERSION`이 오르면 전 캐시가 한꺼번에
   무효화돼 이 폭주가 **실제로** 일어난다(§15.1).
+- **예열(prewarm)**: 번역 완료 직후 PDF를 미리 빌드한다. 예열은 `N-1`개 크기의 예열 전용
+  슬롯을 비차단으로 먼저 잡아야 해서 사용자 클릭용 빌드 슬롯이 늘 하나 남는다 —
+  `PDF_EXPORT_MAX_CONCURRENT=1`이면 예열하지 않는다(첫 클릭이 빌드). 예열 중에 다시 들어온
+  예열 요청은 dirty 표시로 같은 스레드가 다시 돈다(최대 4회).
 - 응답 헤더: `X-UOCR-PDF-Replaced`, `-Preserved`, `-Relocated`, `-Table-Cells`,
   `-Specialist-Preserved`, `-Warnings`. 모두 숫자만 담아 원문·경고 본문이 프록시
-  메타데이터로 새지 않으며, 프런트 다운로드 토스트가 이를 요약한다.
+  메타데이터로 새지 않으며, 프런트 다운로드 토스트가 이를 요약한다. 보존 사유·주의 문장은
+  아래 `/pdf/report`로만 나간다.
 - 캐시: 단일판 `job.dir/export.{lang}.pdf` + `export.{lang}.report.json`, 대조판
-  `export.{lang}.dual.pdf` — 단일판은 `layout.{lang}.json`보다 오래되면 재생성하고,
-  대조판은 원본·단일판보다 오래되면 재생성한다. 번역 완료 시 함께 무효화한다.
-  리포트의 `format_version`이 현행 `PDF_EXPORT_FORMAT_VERSION`
-  (`pipeline/pdf_export/report.py`, 현재 **6**)과 다르면 캐시를 무시하고 재생성한다 —
+  `export.{lang}.dual.pdf`. 단일판의 유효 조건은 **빌드 스탬프 == 현재값**이다 —
+  `export.{lang}.font.txt`에 JSON `{"v":2,"font":<폰트 id>,"inputs":{파일:[inode,크기,
+  mtime_ns]}}`(source.pdf·layout.json·layout.{lang}.json)를 빌드 **전에** 잰 값으로 남긴다.
+  빌드 도중 입력이 바뀌면 그 결과는 유효로 인정되지 않고 다시 예열된다(예전 mtime 비교는
+  '입력 교체 뒤 쓰인 옛 출력'을 신선하다고 봤다). 폰트 id에는 명시 폰트(경로·크기·mtime),
+  시스템 CJK 폰트 후보 목록의 다이제스트, fontTools 유무가 들어간다(30초 TTL) —
+  `fonts-noto-cjk`나 fontTools를 설치하면 폴백 폰트로 만든 PDF가 무효화된다. 대조판은
+  원본·단일판보다 오래되면 재생성한다(mtime 규칙, 같은 잡 락 아래 직렬). 번역 완료 시 함께
+  무효화한다. 리포트의 `format_version`이 현행 `PDF_EXPORT_FORMAT_VERSION`
+  (`pipeline/pdf_export/report.py`, 현재 **10**)과 다르면 캐시를 무시하고 재생성한다 —
   내보내기 동작이 바뀐 사이클에서는 기존 export 캐시가 전부 한 번 재생성된다(§15.1).
+- 레이아웃 폰트 백필(`ENRICH_VERSION`이 오른 layout을 처음 읽을 때 실측 폰트를 다시 주입)은
+  export 워커 풀에서 돌고, 직렬화 결과가 기존 파일과 같으면 다시 쓰지도 예열하지도 않는다.
+
+### GET /api/jobs/{id}/pdf/report?lang=ko
+- 마지막 번역 PDF 빌드의 생성 리포트(`export.{lang}.report.json`)를
+  `{"job_id","lang", …report}`로 반환한다 — `format_version`, `replaced`, `kept`, `relocated`,
+  `table_cells_replaced`, `listing_lines_replaced`, `raster_blocks_erased`, `specialist_kept`,
+  `kept_reasons`, `warning_count`, `warnings`(앞 50건). 경로·문서 본문은 없다.
+- 단일·대조 PDF는 같은 번역 PDF 빌드에서 나오므로 리포트는 하나다. 프런트는 다운로드 뒤 이
+  JSON으로 '스캔 원문 N개 블록 지움'을 포함한 토스트와 'PDF 생성 리포트 · 주의 N건' 목록을
+  그린다.
+- 404 `PDF 생성 리포트가 없습니다 — 번역 PDF를 먼저 내보내세요`(빌드 전, 리포트 손상, 번역
+  갱신으로 지워진 뒤) · 400 미지원 lang.
 
 ### POST /api/jobs/{id}/cancel
-- 실행/대기 중 잡을 **삭제 없이** 중단. 202 `{"job_id","status":"canceling"}`
-  (이미 종료된 잡이면 현재 status 반환). 잡은 `canceled` 상태로 남고
+- 실행/대기 중 잡을 **삭제 없이** 중단. 잡은 `canceled` 상태로 남고
   완료된 청크까지의 부분 결과는 /markdown 등에서 계속 접근 가능
+- 202 `{"job_id","status"}`:
+  - 워커가 아직 맡지 않은 **대기 잡**은 같은 락 안에서 즉시 마감한다(`JobStore.try_cancel_queued`) —
+    `{"status":"canceled"}`와 함께 종료 SSE(`error {canceled:true}`)를 발행하고 대기열 자리를
+    비운다. 워커는 그 잡을 건너뛴다. 예전에는 앞 잡이 끝날 때까지 '취소 중…'으로 남았다.
+  - 실행 중(모델 로딩 대기 포함) 잡은 `{"status":"canceling"}` — 워커가 다음 확인 지점에서
+    마감한다. 렌더 중이면 그 페이지를 그리던 워커 프로세스를 바로 끝낸다(§18).
+  - 이미 종료된 잡이면 현재 status를 그대로 반환한다.
 
 ### POST /api/jobs/{id}/render-preview
-- 요청 본문(text/plain, ≤2MB)의 마크다운을 /html과 동일한 안전 렌더러로
-  HTML 프래그먼트 렌더 (라이브 미리보기용 — 프론트가 정리한 스트림 텍스트를 debounce 전송)
+- 요청 본문(text/plain, **≤256KiB**)의 마크다운을 /html과 동일한 안전 렌더러로
+  HTML 프래그먼트 렌더 (라이브 미리보기용 — 프론트가 정리한 스트림 텍스트를 debounce 전송).
+  예전 2MB 상한은 인증 없는 요청 한 건에 수십 초짜리 렌더를 허용했다 — 렌더러의 수식·코드
+  스캔은 이제 선형 시간이다(§14).
+- 413(256KiB 초과) · 429 + `Retry-After`(크기 가중 레이트리밋·동시 4건 — §5 남용 방어).
+  프런트는 429를 실패로 세지 않고 `Retry-After`(1–300초, 없으면 30초)만큼 쉰다.
 
 ### DELETE /api/jobs/{id}
 - 실행 중이면 취소(cancel) 후 삭제, 완료면 디렉터리 삭제. 204
+- 구독자에게 `error {"message":"삭제된 작업입니다","canceled":true,"deleted":true}`를
+  발행한다(실행 중 잡은 runner가, 그 밖은 삭제 전에 API가). TTL GC도 같은 경로
+  (`JobStore.delete_dir`)라 삭제 요청 표시를 세운다.
 - 이 잡의 **실행 중 번역 스레드에도 cancel을 전파**한다 — 삭제된 디렉터리에
-  유료 API 호출·파일 기록이 계속되지 않게 (번역 엔진의 state/캐시 기록은
-  삭제 경합 시 FileNotFoundError를 무시하는 best-effort)
+  유료 API 호출·파일 기록이 계속되지 않게. 번역 엔진과 파생 빌드는 잡 디렉터리를 **다시
+  만들지 않는다**(`parents=True` 금지) — 빌드 도중 삭제됐으면 되살린 디렉터리를 지우고
+  실패한다. 번역은 `작업 디렉터리가 없습니다 — 삭제된 작업은 번역할 수 없습니다`로 끝난다.
 
 ## 6. 디바이스 백엔드
 

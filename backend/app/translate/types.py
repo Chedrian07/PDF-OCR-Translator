@@ -17,9 +17,12 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
+import json
 import math
 import os
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 # 프롬프트/마스킹 규칙 개정 시 올린다 → 캐시 키가 바뀌어 자동 재번역 (fonts_v 패턴)
 # v2: 문체 few-shot 예시 추가 (4B급 모델 합쇼체 이탈 실측 → 예시로 0건)
@@ -53,6 +56,84 @@ REASONING_MAX_TOKENS = {
     "high": 40960,
     "xhigh": 81920,
 }
+
+# TRANSLATE_REASONING 값을 서버에 **어떤 필드로** 전달할지 (TRANSLATE_REASONING_STYLE).
+# reasoning을 끄는 표준 파라미터가 없어 서버 계열마다 다르다:
+#   openrouter           reasoning:{enabled:false} / reasoning:{effort} (종전 유일 방식)
+#   chat_template_kwargs chat_template_kwargs:{enable_thinking:false} — mlx_lm.server·oMLX·
+#                        vLLM·llama.cpp·SGLang. mlx_lm은 Qwen 계열에 thinking을 **기본 주입**
+#                        하고 reasoning 필드는 읽지 않아, 종전 off는 무효였다(실측: 2문장
+#                        유닛이 8192+16384 토큰을 사고에 쓰고 100초 뒤 잡 실패).
+#   reasoning_effort     OpenAI 공식 — chat은 최상위 reasoning_effort, responses는
+#                        reasoning.effort. off는 "none"으로 보낸다.
+#   none                 어떤 reasoning 필드도 보내지 않는다(엄격한 게이트웨이용).
+#   auto                 base URL로 고른다 — 루프백·사설·도커 내부 → chat_template_kwargs,
+#                        openrouter.ai → openrouter, api.openai.com → reasoning_effort,
+#                        그 외 공개 호스트 → openrouter(종전 동작 유지).
+REASONING_STYLES = ("auto", "openrouter", "chat_template_kwargs", "reasoning_effort", "none")
+
+# TRANSLATE_EXTRA_BODY가 덮어쓸 수 없는 키 — 클라이언트가 구조를 책임지는 필드다
+# (요청 본문·스트리밍 파서·잘림 재시도 예산·store:false 프라이버시 약속).
+EXTRA_BODY_RESERVED = frozenset({
+    "model", "messages", "input", "instructions", "stream", "stream_options", "n",
+    "max_tokens", "max_completion_tokens", "max_output_tokens", "store",
+})
+_EXTRA_BODY_MAX_CHARS = 4096
+
+
+def _host_is_local(host: str) -> bool:
+    """루프백·사설망·도커 내부·mDNS·단일 라벨(도커 서비스명) 호스트인가."""
+    if not host:
+        return False
+    if host in ("localhost", "host.docker.internal") or host.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return "." not in host  # ollama·vllm·omlx 같은 compose 서비스명
+    return not ip.is_global
+
+
+def resolve_reasoning_style(style: str, base_url: str) -> str:
+    """auto를 base URL 기준의 실제 전달 방식으로 확정한다(그 외 값은 그대로)."""
+    if style != "auto":
+        return style
+    host = (urlsplit(base_url.strip()).hostname or "").lower().rstrip(".")
+    if host == "openrouter.ai" or host.endswith(".openrouter.ai"):
+        return "openrouter"
+    if host == "api.openai.com":
+        return "reasoning_effort"
+    if _host_is_local(host):
+        return "chat_template_kwargs"
+    return "openrouter"
+
+
+def _env_extra_body(env) -> str:
+    """TRANSLATE_EXTRA_BODY — 모든 요청 본문에 병합할 JSON 객체(정규화 문자열로 보관).
+
+    서버별 비표준 파라미터(chat_template_kwargs의 추가 키, repetition_penalty 등)를
+    코드 수정 없이 전달하는 탈출구다. 객체가 아니거나 너무 크거나 클라이언트가
+    책임지는 키(EXTRA_BODY_RESERVED)를 건드리면 기동 시 바로 거부한다.
+    """
+    raw = (env.get("TRANSLATE_EXTRA_BODY") or "").strip()
+    if not raw:
+        return ""
+    if len(raw) > _EXTRA_BODY_MAX_CHARS:
+        raise TranslateError(
+            f"TRANSLATE_EXTRA_BODY가 너무 깁니다({len(raw)}자 > {_EXTRA_BODY_MAX_CHARS}자)"
+        )
+    try:
+        obj = json.loads(raw)
+    except ValueError as e:
+        raise TranslateError(f"TRANSLATE_EXTRA_BODY는 JSON 객체여야 합니다 ({e.msg})") from e
+    if not isinstance(obj, dict):
+        raise TranslateError("TRANSLATE_EXTRA_BODY는 JSON 객체({...})여야 합니다")
+    reserved = sorted(k for k in obj if k in EXTRA_BODY_RESERVED)
+    if reserved:
+        raise TranslateError(
+            "TRANSLATE_EXTRA_BODY는 다음 키를 덮어쓸 수 없습니다: " + ", ".join(reserved)
+        )
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 class TranslateError(RuntimeError):
@@ -148,10 +229,13 @@ class TranslateConfig:
     temperature: str = "0"  # "none"이면 파라미터 생략
     max_tokens_param: str = "max_tokens"  # max_tokens | max_completion_tokens | none
     context: bool = True  # 직전 유닛 꼬리를 참고 컨텍스트로 프롬프트에 포함
-    # reasoning 모델 제어 (OpenRouter 통합 파라미터): "" = 파라미터 미전송(호환 기본),
-    # off = {"enabled": false}, low|medium|high|xhigh = {"effort": ...}.
+    # reasoning 모델 제어: "" = 파라미터 미전송(호환 기본), off | low|medium|high|xhigh.
+    # 어떤 필드로 보낼지는 reasoning_style이 정한다(REASONING_STYLES 주석 참조).
     # 실측(qwen3.7-plus): off가 유닛당 37s→1.7s, 출력 토큰 ~1/40 — 번역엔 reasoning 불필요.
     reasoning: str = ""
+    reasoning_style: str = "auto"  # REASONING_STYLES — auto는 base URL로 확정
+    # 모든 요청 본문에 병합할 JSON 객체(정규화 문자열, "" = 없음) — TRANSLATE_EXTRA_BODY
+    extra_body: str = ""
 
     @property
     def max_output_tokens(self) -> int:
@@ -160,6 +244,32 @@ class TranslateConfig:
         thinking 토큰이 출력 예산에서 차감되므로 effort가 높을수록 예산을 키운다.
         미사용 토큰은 과금되지 않으므로 상한은 폭주 방지용이다."""
         return REASONING_MAX_TOKENS.get(self.reasoning, REASONING_MAX_TOKENS[""])
+
+    @property
+    def effective_reasoning_style(self) -> str:
+        """실제로 쓰는 reasoning 전달 방식 (auto를 base URL로 확정한 값)."""
+        return resolve_reasoning_style(self.reasoning_style, self.base_url)
+
+    @property
+    def extra_body_dict(self) -> dict:
+        return json.loads(self.extra_body) if self.extra_body else {}
+
+    @property
+    def request_variant(self) -> str:
+        """캐시 키 재료 — 종전 키(model·temperature·reasoning) 밖에서 요청을 바꾸는 설정.
+
+        종전과 **바이트 동일한 요청**이면 빈 문자열이다: reasoning 미설정이거나 openrouter
+        방식(종전 유일 방식)이고 extra body가 없으면 기존 units.json이 그대로 적중한다.
+        off를 chat_template_kwargs로 보내면 실제로 thinking이 꺼져 출력이 달라지므로
+        키가 바뀌어야 한다 — 종전 off가 무효였던 서버의 캐시를 재사용하지 않는다.
+        """
+        parts = []
+        style = self.effective_reasoning_style
+        if self.reasoning and style != "openrouter":
+            parts.append(f"reasoning_style={style}")
+        if self.extra_body:
+            parts.append(f"extra_body={self.extra_body}")
+        return ";".join(parts)
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "TranslateConfig":
@@ -182,6 +292,11 @@ class TranslateConfig:
         reasoning = (_clean(e.get("TRANSLATE_REASONING")) or "").lower()
         if reasoning not in REASONING_MAX_TOKENS:
             raise TranslateError("TRANSLATE_REASONING은 off|low|medium|high|xhigh 또는 빈 값이어야 합니다")
+        style = (_clean(e.get("TRANSLATE_REASONING_STYLE")) or "auto").lower()
+        if style not in REASONING_STYLES:
+            raise TranslateError(
+                "TRANSLATE_REASONING_STYLE은 " + "|".join(REASONING_STYLES) + " 중 하나여야 합니다"
+            )
         return cls(
             base_url=base_url,
             api_key=_clean(e.get("OPENAI_API_KEY")),
@@ -200,6 +315,8 @@ class TranslateConfig:
             max_tokens_param=mt_param,
             context=_env_flag(e, "TRANSLATE_CONTEXT", True),
             reasoning=reasoning,
+            reasoning_style=style,
+            extra_body=_env_extra_body(e),
         )
 
 
@@ -226,6 +343,7 @@ def cache_key(
     context_tail: str | None,
     temperature: str = "",
     reasoning: str = "",
+    request_variant: str = "",
 ) -> str:
     """유닛 캐시 키 — 원문·마스킹문·종류·모델·프롬프트·용어집·샘플링에 민감.
 
@@ -240,6 +358,9 @@ def cache_key(
     다른 문맥에서 서로의 번역을 강제로 재사용하지 않게 한다.
     temperature·reasoning도 출력을 바꾸는 요청 파라미터이므로 키에 넣는다 —
     reasoning을 off→high로 올린 뒤 재개해도 이전 설정의 번역이 재사용되던 문제.
+    request_variant(TranslateConfig.request_variant — reasoning 전달 방식·extra body)는
+    **비어 있지 않을 때만** 해시에 넣는다. 종전과 같은 요청이면 키가 그대로라 기존
+    units.json이 계속 적중한다.
     """
     h = hashlib.sha256()
     h.update(PROMPT_V.encode())
@@ -262,4 +383,7 @@ def cache_key(
     h.update(temperature.encode())
     h.update(b"\x1f")
     h.update(reasoning.encode())
+    if request_variant:
+        h.update(b"\x1f")
+        h.update(request_variant.encode())
     return h.hexdigest()

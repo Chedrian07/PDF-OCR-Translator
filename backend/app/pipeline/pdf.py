@@ -47,7 +47,9 @@ def quiet_fitz():
     정상 진행된다(실측: 27p 문서에서 p5 하나가 49줄). 표시만 끄면 동작·예외는
     불변이고 메시지는 내부 버퍼에 계속 쌓이므로, 호출부가 작업 단위로
     drain_mupdf_warnings()로 요약해 로거에 남긴다."""
-    import fitz
+    # PyMuPDF 1.28+는 레거시 `fitz` 모듈을 임포트하면 stdout에 폐지 경고를 찍는다.
+    # 같은 객체를 내보내는 pymupdf를 fitz 이름으로 받아 호출부는 그대로 둔다.
+    import pymupdf as fitz
 
     if fitz.TOOLS.mupdf_display_errors():
         fitz.TOOLS.mupdf_display_errors(False)
@@ -60,7 +62,7 @@ def drain_mupdf_warnings(context: str) -> None:
     버퍼는 프로세스 전역이라 동시 사용 시 다른 작업의 메시지가 섞일 수 있으나
     (잡 러너는 단일 워커) 진단용 요약이므로 best-effort로 충분하다."""
     try:
-        import fitz
+        import pymupdf as fitz
 
         text = fitz.TOOLS.mupdf_warnings()
     except Exception:  # pragma: no cover - 방어적

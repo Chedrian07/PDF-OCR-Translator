@@ -59,6 +59,17 @@ def _dump_raw_pages(output_path, pages):
         print(_e)
 
 
+def _split_multi_pages(outputs):
+    """[vendor patch P23] infer_multi 출력 → 페이지 원문 목록.
+
+    업스트림 ``outputs.split('<PAGE>')[1:]``는 첫 마커 앞을 항상 버렸다 — 모델이 선행
+    마커를 생략하면 1쪽 내용이 result·raw_pages에서 사라지고 이후 페이지의 크롭이 한 칸
+    앞 이미지(images[page_idx])로 잘렸다. 앱 merge.split_pages와 같은 규칙: 첫 마커 앞이
+    공백뿐일 때만 버린다(마커가 0개면 출력 전체가 1쪽, 빈 출력이면 0쪽)."""
+    parts = outputs.split('<PAGE>')
+    return parts[1:] if not parts[0].strip() else parts
+
+
 def _autocast_ctx(device, dtype):
     """[vendor patch P1] device-aware replacement for hardcoded torch.autocast("cuda", bf16)."""
     if device.type == "mps":
@@ -1379,7 +1390,7 @@ class UnlimitedOCRForCausalLM(DeepseekV2ForCausalLM, GenerationMixin):  # [vendo
 
         if save_results:
             print('=' * 15 + 'save results:' + '=' * 15)
-            pages = outputs.split('<PAGE>')[1:]
+            pages = _split_multi_pages(outputs)  # [vendor patch P23]
             _dump_raw_pages(output_path, [p.strip() for p in pages])  # [vendor patch P14]
             processed_pages = []
             for page_idx, page_output in enumerate(pages):

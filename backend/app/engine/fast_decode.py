@@ -307,8 +307,12 @@ def _cuda_graph_greedy_decode(model, input_ids, model_kwargs, processors, criter
 
     # ── ② 정적 상태 준비 ──
     from ..native_ops import GraphSlidingWindowNoRepeatNgram  # 지연 임포트 (torch 로드 후)
+    from ..vendor.unlimited_ocr.modeling_deepseekv2 import ring_slots_to_int, ring_slots_to_tensor
 
     pkv = model_kwargs["past_key_values"]  # 정상상태 — 링 캐시 텐서 주소 고정
+    # [P20] eager 워밍업은 호스트 int 링 슬롯으로 돌았다 — 캡처가 슬롯 인덱싱·갱신을
+    # 재생할 수 있게 여기서 0-dim 디바이스 텐서 슬롯으로 전환한다(③ 예열부터 텐서 경로).
+    ring_slots_to_tensor(pkv)
     cur_tok = state["input_ids"][:, -1:].clone().contiguous()  # [1,1] 마지막(미투입) 토큰
     pos_val = state["input_ids"].shape[1] - 1                  # 그 토큰의 위치(=인덱스)
     pos_ids = torch.full((1, 1), pos_val, dtype=torch.long, device=device)
@@ -396,6 +400,13 @@ def _cuda_graph_greedy_decode(model, input_ids, model_kwargs, processors, criter
         except Exception:  # pragma: no cover - 회수 실패해도 진행 (크래시 방지 우선)
             pass
         if not _done():
+            # [P20] eager는 호스트 int 슬롯 경로가 기본 — 그래프 단계에서 텐서로만 전진한
+            # 슬롯을 int로 옮겨 단일 상태로 되돌린다(배수 뒤라 .item() 값이 확정).
+            # 실패해도 텐서 경로가 그대로 동작하므로(저장 값 동일) 로그만 남긴다.
+            try:
+                ring_slots_to_int(pkv)
+            except Exception:  # pragma: no cover - 방어적
+                logger.warning("링 슬롯 int 복귀 실패 — 텐서 슬롯으로 eager 계속", exc_info=True)
             # eager 재개: past는 그대로, position_ids는 새 텐서(P19 계약)로 재구성.
             model_kwargs["past_key_values"] = pkv
             model_kwargs["position_ids"] = torch.full(

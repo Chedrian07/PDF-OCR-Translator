@@ -1019,32 +1019,106 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 |---|---|---|---|
 | CPU | ✅ 구현 | `OCR_DEVICE=cpu` | 기본 dtype float32 (`OCR_DTYPE`로 변경 가능) |
 | CUDA | ✅ 구현 | `OCR_DEVICE=cuda` | bf16, cu129 휠, sm_89/sm_120 확인 |
-| Metal | ✅ 구현 | `OCR_DEVICE=metal` (별칭 `mps`) | torch MPS. Apple Silicon 로컬 실행 전용 — Docker 불가. `uv sync --extra metal` |
+| MLX | ✅ 구현 | `OCR_DEVICE=mlx` | **Apple Silicon 기본**(auto의 1순위). in-process MLX 포팅(`engine/unlimited_mlx.py`). macOS 14+ arm64 로컬 실행 전용 — Docker 불가. `make setup-mlx` |
+| Metal | ✅ 구현 | `OCR_DEVICE=metal` (별칭 `mps`) | torch MPS 폴백. Apple Silicon 로컬 실행 전용 — Docker 불가. `make setup-mlx`(metal extra 포함)·`make dev-metal` |
 
-`app/engine/registry.py`가 단일 진입점: 디바이스/엔진 이름 검증 후 엔진 생성.
-CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스레드/첫 잡)에 수행되어
-실패 사유가 `/api/health`의 `model_load_error`로 노출된다.
+`app/engine/registry.py`가 단일 진입점: 디바이스/엔진 이름 검증(`VALID_DEVICES` =
+auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은 `load()` 시점(= 프리로드
+스레드/첫 잡)에 수행되어 실패 사유가 `/api/health`의 `model_load_error`로 노출된다.
+
+### 디바이스 자동 선택 (`OCR_DEVICE=auto`)
+
+- `Settings.from_env()`는 `OCR_DEVICE`가 없거나 비면 **`auto`**다(`Settings()` 데이터클래스
+  기본은 테스트·스크립트가 결정적이도록 `cpu`). 예전에는 Apple Silicon의 `make dev`가 조용히
+  CPU fp32로 돌았다.
+- auto는 **unlimited 엔진에만** 적용된다: `resolve_auto_device()`가 mlx(macOS arm64 + mlx 임포트
+  가능 + Metal 사용 가능 — 플랫폼을 먼저 봐서 Linux·Docker는 mlx를 임포트하지 않는다) → cuda
+  (`torch.cuda.is_available()`) → metal(torch MPS) → cpu 순으로 처음 쓸 수 있는 것을 고르고
+  INFO로 남긴다(`OCR_DEVICE=auto → mlx (…)`). 엔진은 디바이스를 푼 설정 사본을 받으므로
+  health의 `device`·`dtype`은 실제 값이다(`app.state.settings.device`는 `auto` 그대로 —
+  디바이스가 필요하면 `engine.device`를 본다). torch로 넘어가면(Linux, mlx 없는 Mac) 판정을
+  위해 기동 때 torch를 동기로 임포트한다(약 1–2초).
+- fake·textlayer·sidecar 엔진은 하드웨어를 조사하지 않는다(fake는 `cpu`로 표기).
+- unlimited 엔진을 Apple Silicon에서 **명시적으로 `cpu`**로 두면 MLX보다 수십 배 느리다는
+  WARNING을 기동 로그에 남긴다.
+- **명시적 `mlx`**를 Apple Silicon 밖이나 mlx 없이 쓰면 엔진은 만들어지지만 `load()`가 한국어
+  사유와 설치 안내(`cd backend && uv sync --extra metal --extra mlx (= make setup-mlx)`)를 담은
+  `EngineError`를 낸다 — health의 `model_load_error`. metal·cuda가 없는 환경과 같은 규칙이다.
+- 컨테이너는 영향이 없다: compose는 backend 서비스마다 `OCR_DEVICE`를 고정하고
+  (ocr-cpu·ocr-ovis·ocr-paddle = cpu, ocr-cuda = cuda), Dockerfile에는 `OCR_DEVICE`가 없어 CPU
+  이미지는 auto여도 cpu다. 부작용 하나: compose 없이 `docker run --gpus all`로 cuda 이미지를
+  띄우면 이제 cuda를 쓴다(예전 cpu).
+
+### MLX 엔진 (`engine/unlimited_mlx.py`)
+
+- 계약은 torch 엔진과 같다 — 이름 `unlimited`, 같은 프롬프트·해상도·no-repeat-ngram(35, 창
+  1024/128)·`MAX_LENGTH`, 같은 산출물 이름 규약, 같은 capability(멀티페이지 문맥·토큰
+  스트리밍·full layout·figure — 테스트가 고정). 충실도 게이트·청크 복구도 그대로 탄다.
+- dtype: `OCR_DTYPE=auto` → bfloat16(float16·float32도 가능), `OCR_MLX_QUANT_BITS=8`이면
+  디코더만 인메모리 8비트(group 64, affine — SAM·CLIP·projector·MoE 게이트는 그대로)로
+  health `dtype`은 `bfloat16+q8`. 0·8 밖의 값은 기동 시 실패한다.
+- `load()`: 가용성 확인 → 고정 스냅샷을 `huggingface_hub.snapshot_download`로 해석
+  (`HF_HOME`·`HF_HUB_CACHE`·`HF_HUB_OFFLINE` 존중, torch 경로와 같은 캐시) → strict 로드(키·모양이
+  정확히 같아야 한다) → `warmup()` 1회(약 0.45초 — 두 모드의 Metal 커널을 미리 JIT, 없으면 첫
+  실행 TTFT가 약 4배). 멱등·스레드 세이프.
+- 스트리밍: HF `TextStreamer`와 같은 텍스트를 같은 단위로 낸다. 바이트 수준 토크나이저면
+  접두 메모 디코더가 줄마다 통째로 다시 디코드하던 O(L²)를 없앤다(6,000토큰 한 줄 1.56 →
+  0.018초). EOS 문자열은 torch처럼 `\n`.
+- 취소·반복 감지는 토큰마다 확인한다(멈출 때 버리는 GPU 스텝 최대 1개). 취소는 부분 출력을
+  돌려주고, 반복은 `RepetitiveOutputError`, `MAX_LENGTH`는 `OutputLimitError`(multi는
+  `partial_output` 포함)다. 실행이 끝나면(예외 포함) `mx.clear_cache()`, 실행 락이 GPU 사용을
+  직렬화한다. 실행마다 INFO 한 줄(프롬프트·생성 토큰·TTFT·tok/s·종료 사유).
+- 공유 노브: `MAX_LENGTH`, `MAX_PAGE_OUTPUT_*`, `PAGES_PER_CHUNK`, `MODEL_ID`/`MODEL_REVISION`,
+  `OCR_FIDELITY_*`, `OCR_DTYPE`. **무시하는 torch 전용 노브**: `OCR_FAST_DECODE`,
+  `OCR_DECODE_BLOCK`, `OCR_CPU_THREADS`, `OCR_MOE_*`, `OCR_CUDA_GRAPHS`, `OCR_SDPA`,
+  `OCR_NGRAM_HOST`.
+- MLX 코드는 torch를 임포트하지 않지만 transformers의 `AutoTokenizer` 임포트가 torch가 설치돼
+  있으면 함께 올린다(약 1.2초·메모리). GPU를 기다리는 동안 GIL을 놓아 이벤트 루프가 막히지 않는다.
+- gundam 모드는 torch처럼 크롭 전부(최대 32타일)를 SAM 배치 하나로 인코딩한다 — 아주 긴 이미지는
+  메모리가 작은 Mac에서 순간적으로 튈 수 있다.
+- 메모리: 파라미터 bf16 6.67 GB(8비트 3.92 GB), 8쪽 청크 피크 약 8.3 GB(8비트 5.5 GB). 생성 중
+  256토큰마다·실행 뒤 캐시를 비워 활성 메모리가 파라미터 크기로 돌아온다. 잡 단위 ObjC 풀은 쓰지
+  않는다(§4 — 실측상 누적 없음). 속도 실측은 OCR_BENCHMARK.md(M4 Max: bf16 3.8–3.97 s/쪽).
+- `mlx==0.32.3` 고정. `mx.fast.rope`·`scaled_dot_product_attention`·`gather_mm`/`gather_qmm`·
+  `nn.quantize`에 기대므로, 올릴 때는 패리티 테스트와 `make test-mlx-real`을 다시 돌린다.
 
 ### Metal(MPS) 구현 노트
 
 - 사용자 노출 디바이스명은 `metal`, torch 디바이스는 `mps`
   (`engine/unlimited.py`의 `torch_device_name()`이 매핑, health에는 `metal`로 표기)
-- dtype `auto`: bf16 텐서 할당 프로브 성공 시 bfloat16(macOS 14+), 실패 시 float32 폴백.
-  `OCR_DTYPE=float16`도 선택 가능(구형 macOS에서 속도용 — bf16 권장)
+- torch 2.10 MPS는 **macOS 14.0+**가 필요하다 — 쓸 수 없으면 설치된 torch·macOS 버전을 담은
+  안내로 실패한다. dtype `auto`: bf16 텐서 할당 프로브 성공 시 bfloat16, 실패(사실상 도달하지
+  않는 프로브 실패) 시 float32 폴백. `OCR_DTYPE=float16`도 선택 가능(bf16 권장)
 - 벤더 코드는 P1/P4 패치(`_autocast_ctx`, 파라미터 디바이스 추종)로 디바이스 중립.
   단, torch 2.10.0 MPS의 조용한 버그 2건을 회피하는 패치가 추가로 필요했다 (PROVENANCE.md):
   - **P11**: 브로드캐스트 마스크 `masked_scatter_` 오동작 → 이미지 임베딩 미주입 → 빈 출력
   - **P12**: `torch.autocast("mps", bf16)`가 로짓 오염 → 반복 루프. MPS에서는 autocast 미사용
     (가중치가 bf16이라 성능 동일)
-- **디코드 성능**: MPS 디코드는 연산량이 아니라 커널 디스패치/호스트 동기화에 바운드된다.
-  토큰당 오버헤드를 3중으로 줄였다 — 벤더 P18(MoE 단일 토큰 패스트패스, `OCR_MOE_FAST`로
-  강제 on/off·기본 MPS 전용)·P19(rotary cos/sin 스텝 캐시로 스텝당 계산을 레이어 수회→1회)와
-  `fast_decode.py`의 명시적 `position_ids`(attention_mask 제거 → prepare_inputs가 토큰마다
-  마스크 전체에 돌리던 cumsum 커널 체인 제거). 셋 다 결과 비트 동일, 원본(비패스트패스) 경로 불변
+- **디코드 성능**: MPS 디코드는 연산량이 아니라 커널 디스패치/호스트 동기화에 바운드된다
+  (감사 프로파일: 동기화 대기가 CPU 시간의 69%). 기본 경로:
+  - P17 융합 MoE(**MPS 기본**, 로드 시 프리빌드) — 레이어당 GPU→CPU 동기화 0회. `OCR_MOE_FUSED=0`이면
+    P18(MoE 단일 토큰 패스트패스 — 레이어당 동기화 1회가 남아 1.20배)로 돌아간다.
+  - P20 eager 링 슬롯은 호스트 int + 슬라이스 `copy_`(MPS의 `index_copy_`는 KV 길이에 비례해 느렸다).
+  - no-repeat-ngram 프로세서는 MPS에서 **고정 길이 창**(`static_shape=True` — 창이 차기 전에도
+    음수 센티널로 왼쪽을 채운다)이라 길이마다 새 MPSGraph를 컴파일하지 않는다(실측: 새 길이 200개에
+    RSS +584 → +0.8 MB, 새 프롬프트 길이 묶음의 첫 실행 비용 +3–12초 → +0.1–0.3초 — 그래서 로드 시
+    워밍업 생성은 두지 않는다).
+  - P19(rotary 스텝 캐시)와 `fast_decode.py`의 명시적 `position_ids`.
+  - 측정(M4 Max, 다른 작업과 경합): 1쪽 캡 384토큰 42.5–44.9 → 91–96 tok/s, 8쪽 청크 무제한
+    34.0 → 9.8 s/쪽(112 tok/s), 전부 토큰 동일(OCR_BENCHMARK.md). 융합 경로는 P18 대비 토큰 동일
+    실측이지만 비트 동일을 보장하지는 않는다 — `OCR_MOE_FUSED=0`이 P18을 정확히 복원한다.
+  - `OCR_SDPA=1`(P16)은 옵트인: M4 Max에서 붕괴 없이 15–28% 빨랐지만 출력이 비트 동일하지 않다.
+  - 청크 크기에 따른 디코드 속도 차이는 작다(캡 기준 1쪽 약 95, 8쪽 85–90 tok/s) —
+    `PAGES_PER_CHUNK`는 Phase 4의 종단 간 재측정 전까지 8을 유지한다.
 - `PYTORCH_ENABLE_MPS_FALLBACK=1`을 엔진 생성 시 `setdefault` — 미구현 op는 CPU 폴백 (안전망)
-- 청크(infer 호출) 종료마다 `torch.mps.empty_cache()` — 유니파이드 메모리 반환으로
-  장문서 잡의 시스템 메모리 압박 완화
-- 첫 청크는 Metal 셰이더 컴파일로 이후보다 느림 (정상)
+- **메모리**: 청크(infer 호출) 종료마다 `torch.mps.empty_cache()`로 유니파이드 메모리를 반환한다.
+  그와 별개로 CPU/ObjC 힙 — MPS가 autorelease로 넘기는 임시 객체 — 은 끝나지 않는 워커 스레드에서
+  회수 지점이 없어 생성 토큰당 약 25 KB씩 쌓였다. 디코드 스텝·생성 구간·모델 로드·재시도 전 캐시
+  반환을 각각 ObjC 오토릴리스 풀(`engine/objc_pool.py`)로 감싸고, 워커가 잡마다 한 번 더 감싼다
+  (§4). 실측: 웜 384토큰 실행당 RSS +9.5–12.9 → +0.0–3.5 MB, 첫 실행 +1.4 → +0.29 GB. 로드 직후
+  드라이버 메모리 약 7.1 GB, 첫 실행 피크 약 12.0 GB. 웜 실행 뒤
+  `torch.mps.driver_allocated_memory`에 보이는 +1.6 GB는 Metal 내부의 회수 가능 캐시라
+  phys_footprint에 잡히지 않고 늘지 않는다.
 - 메모리 상한 조정이 필요하면 `PYTORCH_MPS_HIGH_WATERMARK_RATIO` (torch 문서 참조 — 기본값 권장)
 - `gpu_name`은 `sysctl machdep.cpu.brand_string` (예: "Apple M4 Max")
 
@@ -1052,8 +1126,9 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `OCR_DEVICE` | `cpu` | `cpu`\|`cuda`\|`metal` (`mps`는 `metal`의 별칭) |
-| `OCR_DTYPE` | `auto` | `auto`(cuda→bf16, metal→bf16 또는 fp32 폴백, cpu→fp32)\|`bfloat16`\|`float16`\|`float32` |
+| `OCR_DEVICE` | `auto` | `auto`\|`cpu`\|`cuda`\|`metal`\|`mlx` (`mps`는 `metal`의 별칭). 미설정·빈 값 = `auto` — unlimited 엔진이 mlx → cuda → metal → cpu 중 처음 쓸 수 있는 것(§6). `Settings()` 직접 생성 기본은 `cpu`. compose는 서비스마다 고정 |
+| `OCR_DTYPE` | `auto` | `auto`(cuda·mlx→bf16, metal→bf16 또는 fp32 폴백, cpu→fp32)\|`bfloat16`\|`float16`\|`float32` |
+| `OCR_MLX_QUANT_BITS` | `0` | (MLX 엔진) `0`=dtype 그대로 \| `8`=디코더만 인메모리 8비트(group 64 — health dtype `bfloat16+q8`). 그 밖의 값은 기동 실패(4비트는 숫자 오인식으로 미지원). 컨테이너에는 Metal이 없어 compose에 전달하지 않는다 |
 | `OCR_ENGINE` | `unlimited` | `unlimited`\|`fake`\|`textlayer`(§16)\|`ovisocr2`\|`paddleocr_vl` (sidecar 둘은 `OCR_SIDECAR_URL` 필수) |
 | `OCR_SIDECAR_URL` | (없음) | sidecar 엔진의 base URL — compose 프로필(ovis/paddle)이 자동 설정 |
 | `OCR_SIDECAR_CONNECT_TIMEOUT_S` | `10` | sidecar 연결 타임아웃(초) — 유한한 양수 |
@@ -1066,21 +1141,22 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
 | `MODEL_ID` | `baidu/Unlimited-OCR` | HF 모델 ID |
 | `MODEL_REVISION` | `ee63731b…` | HF revision 고정 (README의 검증 커밋) |
 | `PRELOAD_MODEL` | `1` | 기동 시 모델 로드 (0이면 첫 잡에서 lazy) |
-| `DATA_DIR` | `data` (Docker `/data`) | 잡 저장소 루트 (`{DATA_DIR}/jobs`). config.py 기본은 상대 경로 `data`, Dockerfile ENV가 `/data`로 덮는다. 백엔드 프로세스 하나만 소유한다 — `{DATA_DIR}/jobs/.owner.lock` (§2 단일 소유자 락) |
+| `DATA_DIR` | `data` (Docker `/data`) | 잡 저장소 루트 (`{DATA_DIR}/jobs`). config.py 기본은 상대 경로 `data`, Dockerfile ENV가 `/data`로 덮는다. 백엔드 프로세스 하나만 소유한다 — `{DATA_DIR}/jobs/.owner.lock` (§4 단일 소유자 락) |
 | `HF_HOME` | `/data/hf` | HF 캐시 (Dockerfile ENV + compose 볼륨) |
 | `RENDER_DPI` | `200` | 요청별 `dpi`로 오버라이드 가능. 72–400 (요청별 `dpi` 검증과 같은 범위) |
 | `PAGES_PER_CHUNK` | `8` | infer_multi 청크 크기 (1 이상) |
 | `MAX_PAGES` | `200` | 페이지 상한 (1 이상) |
 | `MAX_UPLOAD_MB` | `100` | 업로드 상한 (1 이상) |
 | `MAX_LENGTH` | `32768` | 생성 총 길이 상한 (1 이상) |
-| `MAX_PAGE_OUTPUT_CHARS` | `16384` | `<PAGE>` 기준 페이지별 decoded 출력 문자 hard limit (single에도 동일 적용, 0 이하=비활성) |
-| `MAX_PAGE_OUTPUT_TOKENS` | `6144` | 페이지별 생성 토큰 hard limit (fast decode는 최대 한 block만큼 정지 지연, 0 이하=비활성) |
+| `MAX_PAGE_OUTPUT_CHARS` | `16384` | `<PAGE>` 기준 페이지별 출력 **내용** 문자 hard limit — 레이아웃 태그(`<|ref|>`/`<|det|>` 블록)·HTML 표 태그는 세지 않는다(태그가 델타 사이에 걸치면 닫힐 때까지 최대 512자 보류). single에도 동일 적용, unlimited 엔진 전용, 0 이하=비활성 |
+| `MAX_PAGE_OUTPUT_TOKENS` | `6144` | 페이지별 생성 토큰 hard limit (fast decode는 최대 한 block만큼 정지 지연, 0 이하=비활성). 마크업만 반복하는 폭주는 이 상한이 멈춘다 |
 | `PAGE_SEPARATOR` | `\n\n---\n\n` | 병합 시 페이지 구분자. 백슬래시 이스케이프(`\n`·`\t`·`\uXXXX`)를 해석하고 한글 등 비ASCII는 그대로 보존 |
 | `OCR_CPU_THREADS` | `0` | CPU 백엔드 torch 스레드 수 (0=torch 기본) |
 | `OCR_FAST_DECODE` | `1` | 커스텀 그리디 디코드 루프(cpu/cuda/mps 공용, 호스트 동기화 블록 배칭). `0`이면 HF generate 폴백 |
 | `OCR_DECODE_BLOCK` | `8` | fast decode의 동기화 배칭 크기(토큰, 1 이상) — EOS를 블록 경계에서 확인 |
-| `OCR_MOE_FAST` | (미설정) | MoE 단일 토큰 디코드 패스트패스 강제 on/off (`1`/`0`). 미설정 시 **MPS에서만 on** — 벤더 P18, 결과 비트 동일 |
-| `OCR_MOE_FUSED` | (미설정) | CUDA MoE 융합 디코드(벤더 P17, 기본 **CUDA에서 on**) 킬스위치 — `0`이면 legacy 경로 완전 복원 |
+| `OCR_MOE_FAST` | (미설정) | MoE 단일 토큰 디코드 패스트패스(벤더 P18) 강제 on/off (`1`/`0`). 미설정 시 MPS에서만 on — 지금은 P17이 디코드를 받지 않을 때(`OCR_MOE_FUSED=0`)의 MPS 폴백, 결과 비트 동일 |
+| `OCR_MOE_FUSED` | (미설정) | MoE 융합 디코드(벤더 P17, 기본 **CUDA·MPS에서 on**, 로드 시 프리빌드) 킬스위치 — `0`이면 프리빌드까지 건너뛰어 legacy 경로 완전 복원(MPS는 P18) |
+| `OCR_SDPA` | (미설정) | 디코더 어텐션 SDPA 융합 커널(벤더 P16) 강제 on/off. 미설정 시 CUDA에서만 on. MPS는 옵트인 — M4 Max에서 15–28% 빨랐지만 출력이 비트 동일하지 않다 |
 | `OCR_NGRAM_HOST` | (미설정) | `1`이면 GPU/MPS에서도 no-repeat-ngram 배닝을 호스트(C++/파이썬) 티어로 강제 (절연 레버, `native_ops.py`) |
 | `FAKE_DELAY` | `0.02` | FakeEngine 페이지당 지연(초, 0 이상) — 테스트/데모 전용 |
 | `FRONTEND_DIR` | (미설정) | 정적 프론트엔드 경로 오버라이드 — 미설정이면 리포 상대 경로에서 탐색 |
@@ -1091,33 +1167,45 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
 | `TRANSLATE_API_MODE` | `auto` | `auto`\|`chat`\|`responses` (auto: responses 시도 → 미지원 시 chat) |
 | `TRANSLATE_CONCURRENCY` | `8` | 잡당 동시 번역 요청 수 (1–8) |
 | `TRANSLATE_GLOBAL_CONCURRENCY` | `TRANSLATE_CONCURRENCY` | 여러 잡을 합친 프로세스 전체 실제 번역 HTTP 상한 (1–8) |
-| `TRANSLATE_TIMEOUT_S` | `180` | 응답 읽기 타임아웃(초). 연결은 `min(10초, 이 값)`으로 별도 제한 |
+| `TRANSLATE_TIMEOUT_S` | `180` | 응답 읽기 타임아웃(초). 연결은 `min(10초, 이 값)`으로 별도 제한. 스트리밍(chat 기본)에서는 **토큰 사이 정지 시간** 상한, 비스트리밍(responses·`TRANSLATE_STREAM=0`)에서는 대기열+생성 전체 시간 상한. 읽기 타임아웃은 1번만 다시 시도하고, 그래도 넘으면 그 유닛을 분할 래더로 넘긴다(끝내 실패하면 `timeout` 사유로 원문을 둔다) |
 | `TRANSLATE_MAX_RETRIES` | `3` | 연결 오류와 408/429/500/502/503/504 재시도 횟수 |
 | `TRANSLATE_TEMPERATURE` | `0` | `none`이면 temperature 파라미터 자체 생략 |
-| `TRANSLATE_MAX_TOKENS_PARAM` | `max_tokens` | `max_tokens`\|`max_completion_tokens`\|`none` |
+| `TRANSLATE_MAX_TOKENS_PARAM` | `max_tokens` | `max_tokens`\|`max_completion_tokens`\|`none` — `none`은 잘림 2배 재시도를 끄고 경고를 남긴다(mlx_lm은 `max_tokens`가 없으면 512토큰에서 자른다) |
+| `TRANSLATE_STREAM` | `auto` | `auto`\|`1`\|`0` — auto는 chat 모드에서 SSE 스트리밍. 서버가 첫 스트리밍 요청을 400/415/422로 거부하면 비스트리밍으로 바꿔 고정한다. 스트리밍 중 취소는 소켓을 끊어 서버 생성까지 멈춘다 |
+| `TRANSLATE_MAX_RESPONSE_MB` | `32` | 번역 응답 본문 상한(MB, 1–1024) — 선언된 Content-Length와 실제로 읽은 바이트(비스트리밍 본문·SSE 스트림 모두)를 센다 |
+| `TRANSLATE_REASONING_STYLE` | `auto` | `TRANSLATE_REASONING`을 보낼 필드: `auto`\|`openrouter`\|`chat_template_kwargs`\|`reasoning_effort`\|`none`. auto는 base URL로 고른다 — 루프백·사설망·`host.docker.internal`·`*.local`·단일 라벨 호스트 → `chat_template_kwargs`(`enable_thinking`), `openrouter.ai` → `openrouter`(`reasoning.enabled/effort`), `api.openai.com` → `reasoning_effort`(off=`none`), 그 밖 공개 호스트 → `openrouter`(종전) (§13) |
+| `TRANSLATE_EXTRA_BODY` | (빈 값) | 모든 번역 요청 본문에 병합할 JSON 객체(4,096자 이하, 객체 값은 한 단계 병합). `model`·`messages`·`input`·`instructions`·`stream`·`stream_options`·`n`·`max_tokens`·`max_completion_tokens`·`max_output_tokens`·`store`는 덮어쓸 수 없다 |
 | `OCR_CUDA_GRAPHS` | (CUDA on) | 디코드 스텝 CUDA Graph 캡처·리플레이 — 커널 launch 갭 제거. `0`으로 비활성. 실측(8p): 191s→57s, sm 33%→98% |
-| `TRANSLATE_REASONING` | (미전송) | reasoning 모델 제어: `off`\|`low`\|`medium`\|`high`\|`xhigh`. reasoning 모델은 `off` 권장 — 실측 유닛당 37s→1.7s, 출력 토큰 ~1/40. effort별 요청 max_tokens: 8192/10240/20480/40960/81920 (미설정=8192) |
+| `TRANSLATE_REASONING` | (미전송) | reasoning 모델 제어: `off`\|`low`\|`medium`\|`high`\|`xhigh`(`max` 없음 — Q&A의 `LLM_REASONING_EFFORT`와 다르다). 전달 필드는 `TRANSLATE_REASONING_STYLE`. reasoning 모델은 `off` 권장 — 실측 유닛당 37s→1.7s, 출력 토큰 ~1/40. effort별 요청 max_tokens: 8192/10240/20480/40960/81920 (미설정=8192) |
 | `TRANSLATE_CONTEXT` | `1` | 직전 유닛 꼬리를 번역 문맥으로 제공. `0`이면 비활성 |
 | `QA_RATE_LIMIT_PER_MIN` | `30` | `POST /qa`의 잡·IP별 60초 윈도우 상한 (0 이하=비활성, §5) |
 | `QA_MAX_CONCURRENT` | `4` | 동시 처리 중인 Q&A 요청 수 상한 — 초과 시 429 `Retry-After: 5` |
 | `TRANSLATE_RATE_LIMIT_PER_MIN` | `12` | `POST /translate`의 잡·IP별 60초 윈도우 상한 (0 이하=비활성) |
 | `TRANSLATE_MAX_ACTIVE` | `4` | 동시에 실행 중인 번역 태스크 수 상한 — 초과 시 429 `Retry-After: 30` |
 | `TRUSTED_PROXY_HOPS` | `0` | 앱 앞단의 **신뢰 프록시 홉 수**. `0`=`X-Forwarded-For` 완전 무시(기본, 위조 방어). 리버스 프록시 뒤에 둘 때만 홉 수를 넣는다 — 그렇지 않으면 위 레이트리밋 키가 프록시 IP 하나로 붕괴한다. 정수가 아니면 경고 후 `0` (§5·§14) |
-| `PDF_EXPORT_MAX_CONCURRENT` | `2` | 서로 다른 잡의 PDF 내보내기 빌드 **프로세스 전역** 동시 실행 상한 (`0` 이하=비활성). 캐시 적중 경로는 슬롯을 잡지 않는다 (§5 `/pdf`) |
+| `TRUSTED_PROXY_IPS` | (빈 값 = 루프백) | `X-Forwarded-For`를 믿을 직접 연결 피어의 IP·CIDR 목록(콤마). `TRUSTED_PROXY_HOPS>0`일 때만 쓰인다. 목록 밖 피어의 헤더는 위조로 보고 피어 IP로 레이트리밋(한 번 경고). IP가 아닌 피어(유닉스 소켓)는 로컬이라 믿는다. Docker: 호스트 프록시가 게시 포트로 붙으면 브리지 게이트웨이(예: `172.17.0.1`) (§5) |
+| `PDF_EXPORT_MAX_CONCURRENT` | `2` | 서로 다른 잡의 PDF 빌드·래스터 **프로세스 전역** 동시 실행 상한이자 **export 워커 프로세스 수** — 빌드 N개가 실제로 병렬이다(§18). 예열은 N-1개 슬롯만 쓰므로 `1`이면 예열하지 않는다. `0` 이하=슬롯 상한 비활성(워커는 최대 min(8, CPU)개). 캐시 적중 경로는 슬롯을 잡지 않는다 (§5 `/pdf`) |
 | `PDF_EXPORT_QUEUE_TIMEOUT_S` | `30` | 위 슬롯 대기 상한(초) — 초과 시 매달리는 대신 503 + `Retry-After` |
-| `OCR_FIDELITY_THRESHOLD` | `0.70` | 페이지 OCR 충실도 게이트 임계값. 원본 PDF 텍스트 레이어와 대조해 이 값 미만인 페이지만 단독 재실행한다. `0` 이하=비활성. 텍스트 레이어가 없으면 자동 건너뜀 (§2 충실도 게이트) |
+| `OCR_FIDELITY_THRESHOLD` | `0.70` | 페이지 OCR 충실도 게이트 임계값. 원본 PDF 텍스트 레이어와 대조해 이 값 미만인 페이지만 단독 재실행한다. `0` 이하=비활성. 텍스트 레이어가 없으면 자동 건너뜀 (§4 충실도 게이트). sidecar의 잘린 페이지(`truncated`)를 텍스트 레이어로 바꿀지도 이 값으로 정한다 |
 | `OCR_FIDELITY_MAX_RETRY_RATIO` | `0.2` | 위 재실행의 상한(문서 페이지 수 대비 비율, 최소 2쪽). 상한에 걸려 건너뛴 페이지는 잡 경고로 남는다 |
 | `PDF_EXPORT_WARM_WAIT_S` | `180` | 같은 잡의 **예열 빌드**가 도는 동안 들어온 클릭의 대기 상한(초). 예열이 끝나면 캐시 적중이므로 일반 대기열 상한과 분리한다 (§5 `/pdf`) |
+| `PDF_PAGE_TIMEOUT_S` | `60` | 페이지 한 장의 MuPDF 작업(입력 렌더·충실도 분석·텍스트 레이어 추출·facsimile 래스터)과 업로드 검증 한 건의 상한(초). 넘긴 페이지는 흰 페이지(경고)로 대체하거나 그 분석을 건너뛴다. 렌더 초과가 한 잡에서 3번이면 잡 종료. `0` 이하=없음(권장하지 않음) (§18) |
+| `PDF_EXPORT_BUILD_TIMEOUT_S` | `900` | 번역·대조 PDF 빌드 한 건의 상한(초). 넘기면 그 다운로드는 409, 빌드 워커만 정리된다. `0` 이하=없음 (§18) |
+| `PDF_WORKER_MEM_LIMIT_MB` | `0` | PDF 워커 프로세스당 가상 메모리 상한(MB, `RLIMIT_AS` — Linux만). `0`=끔. 끄더라도 Linux 워커는 `oom_score_adj=1000` (§18) |
+| `PDF_MAX_PAGE_CONTENT_MB` | `64` | 업로드 게이트 — 페이지가 그리게 하는 콘텐츠(압축 해제 기준)의 페이지당 상한(MB). 넘으면 400. `0`=검사 끔 (§18) |
+| `PDF_MAX_PAGE_XOBJECT_CALLS` | `2000000` | 업로드 게이트 — Form XObject 중첩을 펼친 페이지당 그리기 호출 상한. 넘으면 400. `0`=검사 끔 (§18) |
 | `GPU_DEVICE` | `0` | (compose) CUDA_VISIBLE_DEVICES로 전달 — 두 번째 GPU는 `1` |
 | `HOST`/`PORT` | `0.0.0.0`/`8000` | 컨테이너 내부 uvicorn 바인드 (Dockerfile CMD 고정값) |
 | `BIND_HOST` | `0.0.0.0` | (compose) 호스트 쪽 포트 바인딩 주소 — **기본은 외부 노출**. 루프백 전용으로 되돌리려면 `127.0.0.1` (§8·§14) |
 | `ALLOWED_HOSTS` | config.py `localhost,127.0.0.1` / **compose `*`** | Host 헤더 화이트리스트(콤마 구분) — DNS rebinding 방어, 포트는 비교 시 무시. compose는 외부 노출 기본과 정합을 위해 `*`(모든 Host 허용)을 넘긴다 (§14) |
 | `OCR_CPU_MEM_LIMIT` / `OCR_CUDA_MEM_LIMIT` / `OCR_WEB_MEM_LIMIT` | `24g` / `16g` / `8g` | (compose) backend 서비스별 메모리 상한 (§8) |
 | `OVIS_MEM_LIMIT` / `PADDLE_MEM_LIMIT` | `24g` / `24g` | (compose) sidecar 컨테이너 메모리 상한 |
+| `OVIS_MAX_UPLOAD_MB` / `PADDLEOCR_MAX_UPLOAD_MB` | `128` / `128` | (compose → sidecar) `/v1/parse` 페이지 이미지 업로드 상한 |
+| `CUDA_LAUNCH_BLOCKING` | (빈 값) | (compose → ocr-cpu·ocr-cuda) CUDA 디버깅용 동기 실행 — 운영에서는 비워 둔다 |
 | `JOB_TTL_DAYS` | `0` | 터미널 잡(done/error/canceled) 자동 GC 보존 일수(0 이상) — `0`=비활성(기본, opt-in). 시작 시 1회 + 6시간 주기 (§15) |
 | `OCR_LANGUAGES` | `eng+kor` | (textlayer) Tesseract 언어 조합 — `tesseract -l` 인자 (§16) |
 | `NATIVE_TEXT_THRESHOLD` | `120` | (textlayer) 텍스트 레이어를 신뢰할 페이지당 최소 영숫자 수 — 미만이면 Tesseract 폴백 (§16) |
-| `LLM_PROVIDER` | `openai-responses` | (Q&A) 기본 LLM 공급자: `openai-responses`\|`openai-chat`\|`ollama` (§17) |
+| `LLM_PROVIDER` | `openai-responses` | (Q&A) 기본 LLM 공급자: `openai-responses`\|`openai-chat`\|`ollama`\|`local-openai` (§17). `local-openai`는 `LLM_LOCAL_OPENAI_BASE_URL` 없이는 기동 실패 |
 | `LLM_REASONING_EFFORT` | `low` | (Q&A) 기본 reasoning effort: `default`\|`none`\|`minimal`\|`low`\|`medium`\|`high`\|`xhigh`\|`max` |
 | `LLM_OPENAI_BASE_URL` | `https://api.openai.com/v1` | (Q&A) 공식 `api.openai.com` 호스트만 허용 — 그 외 값은 기동 시 즉시 실패 (§17.3) |
 | `LLM_OPENAI_API_KEY` | (없음) | **(Q&A 전용 OpenAI 키 — 번역용 `OPENAI_API_KEY`와 분리, 폴백 없음.)** 위 base URL이 공식 호스트로 고정돼 있어, 제3자 게이트웨이용 `OPENAI_API_KEY`를 재사용하면 그 키가 `api.openai.com`으로 전송된다. 미설정 시 `openai-*` 공급자는 `available:false`이고 `qa_available:false` (§17.3) |
@@ -1127,6 +1215,10 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
 | `LLM_OPENAI_CHAT_MODEL` | `chat-latest` | (Q&A) Chat Completions 기본 모델 |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | (Q&A) 로컬 Ollama 주소 — 루프백·`host.docker.internal`·`ollama`만 허용, 그 외 기동 시 즉시 실패 (§17.3). compose 컨테이너 기본값은 `http://host.docker.internal:11434` |
 | `OLLAMA_MODEL` | `qwen3:8b` | (Q&A) 기본 로컬 Ollama 모델 (`:cloud`/`remote_host` 모델은 차단) |
+| `LLM_LOCAL_OPENAI_BASE_URL` | (빈 값 = 미사용) | (Q&A `local-openai`) 로컬 OpenAI 호환 서버(oMLX·LM Studio·mlx_lm.server) 주소 — `127.0.0.1`·`localhost`·`::1`·`host.docker.internal`의 http(s)만 허용, 그 외 기동 실패 (§17.3) |
+| `LLM_LOCAL_OPENAI_MODEL` | (빈 값) | (Q&A `local-openai`) 기본 모델 — 서버 `/v1/models`의 id(mlx_lm.server는 `default_model`). 주소를 두면 필수 |
+| `LLM_LOCAL_OPENAI_MODELS` | (빈 값) | (Q&A `local-openai`) 추가로 고를 수 있는 모델(csv) — 그 밖의 모델 요청은 400 |
+| `LLM_LOCAL_OPENAI_API_KEY` | (빈 값) | (Q&A `local-openai`) 서버에 키를 걸었을 때만. 이 키만 쓴다 — `OPENAI_API_KEY`·`LLM_OPENAI_API_KEY`로 폴백하지 않는다 |
 | `PDF_EXPORT_FONT` | (빈 값) | 번역 PDF 내보내기용 한글 폰트 파일 경로 — 비우면 시스템 폰트 → 내장 CJK 폴백 (§5 /pdf) |
 
 - **기동 시 검증**: 숫자 노브는 `Settings.from_env()`에서 검증한다. 정수·숫자가 아니거나
@@ -1140,12 +1232,37 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
   `Settings.from_env()`가 직접 읽는다. 실행 cwd → 저장소 루트 순서로 처음 찾은 `.env`
   **하나만** 읽고, 이미 설정된 환경변수(셸·compose 주입)는 덮지 않는다. 저장소 밖
   상위 디렉터리는 보지 않는다(무관한 프로젝트의 키를 채택하지 않게). 파싱은
-  python-dotenv로 docker compose와 같은 규칙이다 — 따옴표 없는 값은 '공백+`#`'부터
-  주석, 따옴표 안의 `#`은 값, `export ` 접두사·CRLF·BOM 허용. ⚠ `KEY=   # 설명`처럼
+  python-dotenv로 docker compose와 대부분 같은 규칙이다 — 따옴표 없는 값은 '공백+`#`'부터
+  주석, 따옴표 안의 `#`은 값, `export ` 접두사·CRLF·BOM 허용, 중복 키는 마지막 값.
+  (차이: python-dotenv는 작은따옴표 안의 `${VAR}`도 치환하고 맨 `$VAR`는 그대로 두며
+  `${VAR:?err}` 형식이 없다.) ⚠ `KEY=   # 설명`처럼
   값 없이 주석만 두면 compose처럼 주석이 값이 되므로 `.env.example`은 설명을 별도
   줄에 둔다(어느 줄을 주석 해제해도 유효한 값). 읽은 경로는 INFO로 남기고 값은
   남기지 않는다. `DISABLE_DOTENV=1`이면 자동 탐색을 끈다 — pytest(conftest)와 E2E
   하네스가 개발자의 실키를 프로세스에 주입하지 않게 쓰는 스위치다(운영 노브 아님).
+- **모르는 `.env` 키 안내**: `.env`의 키가 `config.KNOWN_ENV_KEYS`(앱·배포·하네스 키
+  레지스트리)에 없고 다른 도구의 키(`HF_`·`TORCH_`·`PYTORCH_`·`CUDA_`·`COMPOSE_`·`UV_` 등
+  접두, 프록시, `TZ` 등)도 아니면 키마다 프로세스에서 한 번 WARNING으로 남기고(키 이름만 —
+  값은 남기지 않는다, 최대 20개) `/api/health`의 `config_warnings`에 싣는다. 안내에는 오타
+  후보(difflib, cutoff 0.75)와 별칭이 붙는다 — `REASONING_EFFORT` → 번역은
+  `TRANSLATE_REASONING`(off|low|medium|high|xhigh — max 없음), Q&A는
+  `LLM_REASONING_EFFORT`(max 허용), `OPENAI_API_BASE` → `OPENAI_BASE_URL`. 다른 도구가 읽는
+  키라면 무시해도 된다(안내 문구도 그렇게 말한다). 예전에는 이런 키가 조용히 무시돼
+  `REASONING_EFFORT`로 번역 reasoning을 껐다고 믿은 설정이 효과가 없었다.
+- **키 레지스트리 계약**: 코드가 읽는 키, `.env.example`의 키 줄, compose `${…}` 키는 모두
+  `config._APP_ENV_KEYS`·`_DEPLOY_ENV_KEYS`·`_HARNESS_ENV_KEYS` 중 하나에 있어야 한다
+  (`tests/test_config_env_registry.py`가 양방향 대조). 이 블록은 공백 구분 문자열로 둔다 —
+  따옴표 리터럴로 바꾸면 `tests/test_ci_ops_contracts.py`의 스캐너가 '코드가 읽는 키'로 세어
+  하네스 키까지 `.env.example`·compose 스레딩을 요구한다. 새 운영 키는 `.env.example`(키 줄 +
+  들여쓴 설명 줄 — 인라인 주석 금지)과 compose backend 4개 스레딩, 또는 `SERVICE_SCOPED`·
+  `NOT_OPERATOR_KNOBS` 등록(이유와 함께)이 필요하다.
+- **테스트·하네스 전용 스위치**(운영 노브 아님 — `.env.example`에 없다): `OCR_MPS_TESTS`
+  (`make test-mps`), `OCR_MLX_REAL_TESTS`(`make test-mlx-real`), `E2E_MOCK_PORT`·
+  `E2E_BACKEND_PORT`(mock 브라우저 E2E 포트), `E2E_BASE_URL`·`E2E_PDF`·`E2E_TIMEOUT_S`·
+  `E2E_VERIFY_MOCK_LLM`(`ui.e2e.mjs`), `MOCK_STREAM_DELAY_S`·`MOCK_STREAM_CHUNK`·`MOCK_FINISH`·
+  `MOCK_REASONING_CHARS`·`MOCK_TRANSLATE_RATIO`·`FAULT`(`scripts/mock_llm.py`), `DISABLE_DOTENV`,
+  `PDF_WORKER_MODE`(`process`|`inline` — inline은 PyMuPDF 격리·시간 상한을 끄고 기동 WARNING을
+  남긴다. conftest가 inline으로 켜고 verify_e2e 하네스는 지운다).
 
 ## 8. docker-compose
 

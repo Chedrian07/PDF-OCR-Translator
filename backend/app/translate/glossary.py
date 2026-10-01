@@ -8,18 +8,22 @@ policy 분류: A=원문 유지(약어·고유명사) B=확립 학술어 C=음차
 매칭은 단어 경계 + 대소문자 무시("cat"이 "category"에 걸리지 않는다). policy A는
 프롬프트/캐시 키에서 제외한다(시스템 프롬프트 5번 규칙이 처리).
 
-LLM 실패 시 시드+약어만으로 진행한다(예외를 삼키고 warnings에 남김).
+LLM 실패 시 시드+약어만으로 진행한다(예외를 삼키고 warnings에 남김). 단 취소
+(TranslateCancelled)는 실패가 아니라 그대로 올린다. 실패 여부는 llm_failed로 알려
+엔진이 그 용어집을 영구 결과로 굳히지 않고 다음 실행에서 다시 판정하게 한다.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import prompts
+from .types import TranslateCancelled
 
 _SEED_PATH = Path(__file__).parent / "data" / "seed_ko.json"
 
@@ -105,6 +109,10 @@ class Glossary:
         self.entries: list[GlossaryEntry] = entries or []
         self.warnings: list[str] = []
         self._re_cache: dict[str, re.Pattern] = {}
+        # build_glossary의 LLM 판정 결과 — llm_ok: 호출이 응답을 돌려줬다(엔드포인트
+        # 정상 신호), llm_failed: 호출·파싱이 실패해 시드+약어로 강등됐다.
+        self.llm_ok = False
+        self.llm_failed = False
 
     def _matcher(self, src: str) -> re.Pattern:
         pat = self._re_cache.get(src)
@@ -175,7 +183,12 @@ class Glossary:
              "first_unit_lay": e.first_lay}
             for e in self.entries
         ]
-        Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        # tmp + os.replace — 기록 도중 ENOSPC·강제 종료로 잘린 JSON이 남으면 그 잡의
+        # 번역이 매번 'Expecting value'로 실패했다(UI는 force를 못 보낸다, concurrency-9).
+        path = Path(path)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
 
     @classmethod
     def load(cls, path) -> "Glossary":
@@ -259,6 +272,7 @@ def build_glossary(md_text: str, ordered_units, client, cfg) -> Glossary:
             # 시드로 조용히 강등되던 지점). cfg가 없으면(테스트 등) 종전 4000 유지.
             mt = cfg.max_output_tokens if cfg is not None else 4000
             raw = client.complete(prompts.SYSTEM_GLOSSARY, prompt, max_tokens=mt)
+            g.llm_ok = True
             for it in _parse_glossary_json(raw):
                 if not isinstance(it, dict):
                     continue
@@ -276,7 +290,10 @@ def build_glossary(md_text: str, ordered_units, client, cfg) -> Glossary:
                 g.entries.append(GlossaryEntry(src, ko, pol))
                 seen.add(src)
                 seen_stems.add(_stem(src))
+        except TranslateCancelled:
+            raise  # 취소는 실패가 아니다 — 시드 용어집을 결과로 남기지 않는다
         except Exception as e:  # noqa: BLE001 — LLM 실패는 치명적이지 않다
+            g.llm_failed = True
             g.warnings.append(f"용어집 LLM 판정 실패 — 시드로 진행: {e}")
 
     g.compute_first_units(ordered_units)

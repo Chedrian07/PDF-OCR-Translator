@@ -293,6 +293,13 @@
               <button id="translate-summary" class="translate-summary" type="button" hidden></button>
             </div>
           </div>
+          <!-- 번역 참고 사항 — translate/state의 warnings(캐시 전량 무효화·용어집 판정 실패·참고문헌
+               규칙 불일치 등). 번역은 끝났지만 알아 둘 내용이라 흐린 접이식 목록으로 둔다
+               (JS가 채우고 표시/숨김) -->
+          <details id="translate-warnings" class="result-notes" hidden>
+            <summary id="translate-warnings-summary" class="result-notes-summary">번역 참고 사항</summary>
+            <ul id="translate-warnings-list" class="result-notes-list"></ul>
+          </details>
 
           <div class="tabs" role="tablist" aria-label="결과 보기">
             <button class="tab active" role="tab" type="button" data-tab="reader" aria-selected="true">읽기</button>

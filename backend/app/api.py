@@ -939,7 +939,11 @@ def _backfill_layout_fonts(job, pages: list, lang: str | None = None, st=None) -
     if not needs:
         return
     try:
-        if enrich_layout_fonts(src, pages):
+        # 텍스트 실측은 PDF 워커에서 돈다 — 요청 경로라 OCR 풀이 아니라 export 풀을 쓴다
+        # (OCR 잡의 렌더·분석이 이 백필 뒤에 줄서지 않게).
+        with pdf_worker.pool_scope(pdf_worker.POOL_EXPORT):
+            enriched = enrich_layout_fonts(src, pages)
+        if enriched:
             target = artifacts.layout(job.dir, lang)
             serialized = json.dumps(pages, ensure_ascii=False)
             try:

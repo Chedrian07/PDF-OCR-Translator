@@ -151,6 +151,45 @@ export function setDownload(anchor, url, downloadName) {
   }
 }
 
+// 클립보드 복사 — navigator.clipboard는 secure context(HTTPS·localhost) 전용이라
+// http://IP 접속(VPN 배포 기본)에서는 사용자 제스처 하의 execCommand 경로로 폴백한다.
+// 성공 여부를 돌려준다(호출부가 실패를 사용자에게 알린다).
+export async function copyTextToClipboard(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_) { /* 권한 거부 등 — 아래 폴백 */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return !!ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+// 텍스트를 파일로 내려받는다 (Blob URL — 서버 왕복 없음).
+export function downloadTextFile(filename, text, type = 'text/markdown;charset=utf-8') {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.hidden = true;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
 export function nowMs() {
   return typeof performance !== 'undefined' ? performance.now() : Date.now();
 }

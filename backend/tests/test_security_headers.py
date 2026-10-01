@@ -5,13 +5,16 @@
 리더는 서버 렌더 HTML을 SPA에 innerHTML로 넣으므로 SPA 문서의 정책이 핵심이다.
 정적 파일은 Cache-Control 없이 나가 업그레이드 뒤 옛 ES 모듈이 섞였다(frontend-15).
 브라우저 실측(Chromium): 외부 이미지 요청 0건, 주입된 onerror 미실행, 테마 부트스트랩
-인라인 스크립트는 해시로 정상 실행 — 여기서는 그 근거가 되는 헤더 계약을 고정한다.
+정상 실행 — 여기서는 그 근거가 되는 헤더 계약을 고정한다. 테마 부트스트랩은 같은 출처
+파일(frontend/theme-init.js)이라 'self'로 실행되고, 인라인 스크립트가 다시 생기면 해시로만
+허용된다.
 """
 
 import base64
 import hashlib
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,17 +34,22 @@ def _directives(policy: str) -> dict[str, list[str]]:
 
 
 class _InlineScripts(HTMLParser):
-    """CSP 해시 대조용 — 정규식이 아니라 HTML 파서로 인라인 스크립트 본문을 뽑는다."""
+    """CSP 해시 대조용 — 정규식이 아니라 HTML 파서로 인라인 스크립트 본문(bodies)과
+    외부 스크립트 주소(sources)를 뽑는다."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=False)
         self.bodies: list[str] = []
+        self.sources: list[str] = []
         self._inline = False
         self._buf: list[str] = []
 
     def handle_starttag(self, tag, attrs):
         if tag == "script":
-            self._inline = not any(name == "src" for name, _ in attrs)
+            src = next((value for name, value in attrs if name == "src"), None)
+            if src is not None:
+                self.sources.append(src)
+            self._inline = src is None
             self._buf = []
 
     def handle_data(self, data):
@@ -80,9 +88,15 @@ def test_spa_document_csp_blocks_external_images_but_allows_its_own_scripts(spa_
     assert "'unsafe-inline'" not in policy["script-src"]
     parser = _InlineScripts()
     parser.feed((REPO / "frontend" / "index.html").read_text(encoding="utf-8"))
-    assert parser.bodies, "테마 부트스트랩 인라인 스크립트가 사라졌다면 이 테스트를 재검토"
-    for body in parser.bodies:
-        assert _sha256_source(body) in policy["script-src"]
+    # 인라인 스크립트는 정확히 그 해시들만 허용된다(지금은 없다 — 해시 출처도 없어야 한다)
+    hashes = {src for src in policy["script-src"] if src.startswith("'sha256-")}
+    assert hashes == {_sha256_source(body) for body in parser.bodies}
+    # 앱 스크립트(테마 부트스트랩 theme-init.js 포함)는 같은 출처 파일이라 'self'로 실행된다
+    assert "'self'" in policy["script-src"]
+    assert any(src.endswith("theme-init.js") for src in parser.sources)
+    for src in parser.sources:
+        parts = urlsplit(src)
+        assert not parts.scheme and not parts.netloc, src     # 외부 출처 스크립트 없음
     assert response.headers["referrer-policy"] == "same-origin"
 
 

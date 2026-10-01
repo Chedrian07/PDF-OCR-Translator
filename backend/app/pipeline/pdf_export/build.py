@@ -598,7 +598,6 @@ def _plan_text_block(
             "(안전한 원문 span 없음) — 원문 보존"
         )
         return None
-    owned_rects = [span.rect for span in owned_records]
     # 원문 PDF의 실제 baseline 수보다 OCR 줄 수가 많으면 그 줄바꿈은
     # 문단의 줄바꿈이 아니라 가로 배치(표 헤더·행)의 평탄화다.
     # bbox 높이는 원문 줄 수만큼뿐이라 축소로는 절대 들어가지 않는다.
@@ -652,7 +651,8 @@ def _plan_text_block(
         align,
         bold,
         lineheights,
-        _source_text_rects(ctx.page, rect, owned_rects),
+        # span bbox가 아니라 baseline 띠로 지운다 — 일반 행간에서 이웃 보존 줄을 지키려고.
+        _source_text_rects(ctx.page, rect, owned_records),
         rect,
         None if bold else _leading_bold_prefix(owned_records, new),
         reflow_text,

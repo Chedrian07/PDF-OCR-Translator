@@ -360,3 +360,15 @@ def test_workers_do_not_rerun_the_parents_main_script(tmp_path):
     assert result.returncode == 0, result.stderr[-2000:]
     assert result.stdout.strip() == "True"
     assert len(marker.read_text().split()) == 1  # 메인 스크립트는 부모에서 한 번만 돌았다
+
+
+def test_workers_do_not_see_credentials(pdf_worker_processes, monkeypatch):
+    """워커는 비밀이 필요 없다 — MuPDF 결함으로 워커가 장악돼도 API 키·토큰을 읽지 못하게 지운다."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-for-workers")
+    monkeypatch.setenv("LLM_OPENAI_API_KEY", "sk-test-not-for-workers")
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    monkeypatch.setenv("SOME_DB_PASSWORD", "x")
+    monkeypatch.setenv("PDF_PAGE_TIMEOUT_S", "45")
+    names = set(pdf_worker.run("pdf_worker_tasks:env_names", timeout=30))
+    assert not {"OPENAI_API_KEY", "LLM_OPENAI_API_KEY", "HF_TOKEN", "SOME_DB_PASSWORD"} & names
+    assert {"PDF_PAGE_TIMEOUT_S", "PATH"} <= names  # 실행 환경과 노브는 그대로

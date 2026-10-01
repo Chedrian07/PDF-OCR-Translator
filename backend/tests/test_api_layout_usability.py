@@ -124,3 +124,26 @@ def test_unusable_layouts_are_not_prewarmed(client, sample_pdf, monkeypatch):
     (job2.dir / "layout.ko.json").write_bytes((job2.dir / "layout.json").read_bytes())
     assert api_mod._warm_export_pdf(st, job2, "ko") is True
     assert len(started) == 1
+
+
+def test_job_list_polling_does_not_reparse_every_layout(tmp_path, monkeypatch):
+    """잡 목록(5초 폴링, 한 쪽 최대 500건)도 잡마다 has_layout을 낸다 — 판정 캐시가 목록보다
+    작으면 같은 순서의 폴링이 LRU를 매번 밀어내 모든 layout.json을 다시 파싱한다."""
+    from app.pipeline import artifacts
+
+    text_layout = [{"page": 1, "blocks": [{"type": "text", "content": "본문"}]}]
+    dirs = []
+    for i in range(500):
+        job_dir = tmp_path / f"j_{i:012x}"
+        job_dir.mkdir()
+        artifacts.layout(job_dir).write_text(json.dumps(text_layout), encoding="utf-8")
+        dirs.append(job_dir)
+    artifacts._usable_layout_file.cache_clear()
+    assert all(artifacts.has_usable_layout(d) for d in dirs)  # 첫 폴링: 한 번씩 파싱
+
+    parses = []
+    real_loads = artifacts.json.loads
+    monkeypatch.setattr(artifacts.json, "loads", lambda *a, **k: parses.append(1) or real_loads(*a, **k))
+    for _poll in range(2):
+        assert all(artifacts.has_usable_layout(d) for d in dirs)
+    assert parses == []  # 이후 폴링은 stat만 — 파일이 바뀌지 않았으면 다시 읽지 않는다

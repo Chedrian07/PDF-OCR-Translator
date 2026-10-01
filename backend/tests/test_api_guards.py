@@ -149,6 +149,7 @@ def test_trusted_proxy_ips_accepts_addresses_and_cidrs(monkeypatch):
     assert api_mod._client_key(_req("172.17.0.1", "203.0.113.7")) == "203.0.113.7"   # 도커 브리지
     assert api_mod._client_key(_req("10.1.2.3", "203.0.113.8")) == "203.0.113.8"
     assert api_mod._client_key(_req("127.0.0.1", "203.0.113.9")) == "127.0.0.1"      # 명시하면 기본 대체
-    assert api_mod._client_key(_req("unknown", "203.0.113.9")) == "unknown"
+    # IP가 아닌 피어(유닉스 소켓 등 로컬 전송)는 원격 클라이언트일 수 없다 — 그 앞 프록시는 믿는다
+    assert api_mod._client_key(_req("unknown", "203.0.113.9")) == "203.0.113.9"
     monkeypatch.setenv("TRUSTED_PROXY_HOPS", "0")                 # 홉 0이면 목록과 무관하게 무시
     assert api_mod._client_key(_req("172.17.0.1", "203.0.113.7")) == "172.17.0.1"

@@ -610,7 +610,11 @@ def _plan_single_line(
         ink.normalize()
         if _ink_collides(ink, avoid):
             continue
-        origin = fitz.Point(x, baseline) * to_page
+        # Point 타입 없이 행렬을 직접 적용한다(측정용 대역 fitz에도 Point가 없다).
+        origin = (
+            float(x * to_page.a + baseline * to_page.c + to_page.e),
+            float(x * to_page.b + baseline * to_page.d + to_page.f),
+        )
         return _TextFitPlan(
             +working_page,
             size,
@@ -618,9 +622,9 @@ def _plan_single_line(
             align,
             bold,
             None,
-            (float(origin.x), float(origin.y)),
+            origin,
             ink,
-            (float(origin.x), float(origin.y)),
+            origin,
         )
     return None
 

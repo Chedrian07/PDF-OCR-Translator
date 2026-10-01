@@ -383,8 +383,11 @@ class Servers:
             raise SystemExit("목 LLM 기동 실패")
 
         env = dict(os.environ)
-        # .env 자동 로딩이 실키를 끌어오지 않도록 명시적으로 덮어쓴다.
+        # .env 자동 로딩이 실키를 끌어오지 않도록 명시적으로 덮어쓰고, 자동 로딩
+        # 자체도 끈다(DISABLE_DOTENV) — 여기서 덮지 않은 키(LLM_OPENAI_API_KEY 등)가
+        # 개발자 .env에 있으면 [7] C-1 단계가 실키로 api.openai.com을 호출하게 된다.
         env.update({
+            "DISABLE_DOTENV": "1",
             "OCR_ENGINE": "textlayer",
             "OCR_DEVICE": "cpu",
             "PRELOAD_MODEL": "0",

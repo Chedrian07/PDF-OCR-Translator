@@ -1004,7 +1004,9 @@ def test_cancel_keeps_partial_results(tmp_path, sample_pdf):
         jid = _upload(client, sample_pdf).json()["job_id"]
         r = client.post(f"/api/jobs/{jid}/cancel")
         assert r.status_code == 202
-        assert r.json()["status"] == "canceling"
+        # 워커가 이미 맡았으면 canceling(다음 확인 지점에서 마감), 아직 대기열에 있었으면
+        # 즉시 canceled다 — 대기 잡 취소가 즉시 반영되도록 바뀐 뒤로는 둘 다 정상이다.
+        assert r.json()["status"] in ("canceling", "canceled")
         body = wait_done(client, jid)
         assert body["status"] == "canceled", body
         # 삭제되지 않고 남아 있어야 함 (부분 결과 보존)

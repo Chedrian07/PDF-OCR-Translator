@@ -545,3 +545,41 @@ def test_기본_공급자가_local_openai면_질문이_로컬_서버로_간다(c
     assert body["provider"] == "local-openai" and body["local_only"] is True
     assert seen["chat_template_kwargs"] == {"enable_thinking": False}
     assert "[Page 1]" in seen["messages"][1]["content"]
+
+
+def test_ui처럼_local_openai를_명시해도_질문이_간다(client, sample_pdf):
+    """UI(qa.js)는 카탈로그에서 고른 provider를 항상 명시해 보낸다 — /api/providers가
+    광고한 local-openai를 POST /qa가 '지원하지 않는 프로바이더'(400)로 거절하면 안 된다."""
+    import httpx
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "qwen-local"}]})
+        return httpx.Response(200, json={"model": "qwen-local", "choices": [
+            {"message": {"content": "명시 답변"}}]})
+
+    client.app.state.llm_router = _real_router_with_local(handler)
+    advertised = {p["id"] for p in client.get("/api/providers").json()["providers"]}
+    assert "local-openai" in advertised
+    jid = _done_job(client, sample_pdf)
+    r = client.post(
+        f"/api/jobs/{jid}/qa",
+        json={"question": "요점?", "provider": "local-openai", "thinking": False},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["answer"] == "명시 답변"
+    assert r.json()["provider"] == "local-openai" and r.json()["local_only"] is True
+
+
+def test_health_qa_available은_local_openai_구성을_반영한다(client):
+    """기본 공급자가 local-openai면 qa_available은 LLM_LOCAL_OPENAI_* 구성 여부를 따른다
+    (구성 안 됐는데 true면 '질문 가능' 안내가 거짓이 된다)."""
+    import httpx
+
+    client.app.state.settings.llm_provider = "local-openai"
+    configured = _real_router_with_local(lambda request: httpx.Response(200, json={}))
+    client.app.state.llm_router = configured
+    assert client.get("/api/health").json()["qa_available"] is True
+
+    configured.local_openai = None
+    assert client.get("/api/health").json()["qa_available"] is False

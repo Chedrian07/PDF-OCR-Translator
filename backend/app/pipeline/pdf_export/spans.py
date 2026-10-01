@@ -5,9 +5,11 @@ OCR 레이아웃의 논리 줄과 원문 PDF의 시각 줄이 어긋나는 블�
 """
 from __future__ import annotations
 
+import math
 import re
 from statistics import median
 
+from ..pdf import quiet_fitz
 from .geometry import _rect_overlap_area
 from .models import _LineSegment, _SourceSpan
 from .text import _plain_text
@@ -34,6 +36,11 @@ def _source_span_records(fitz, page) -> list[_SourceSpan]:
         return out
     for block in blocks:
         for line in block.get("lines", ()):
+            raw_dir = line.get("dir") or (1.0, 0.0)
+            try:
+                direction = (float(raw_dir[0]), float(raw_dir[1]))
+            except (TypeError, ValueError, IndexError):
+                direction = (1.0, 0.0)
             for span in line.get("spans", ()):
                 bbox = span.get("bbox")
                 text = str(span.get("text") or "")
@@ -45,6 +52,7 @@ def _source_span_records(fitz, page) -> list[_SourceSpan]:
                         float(span.get("size") or 0.0),
                         int(span.get("flags") or 0),
                         (float(origin[0]), float(origin[1])),
+                        direction,
                     ))
     return out
 
@@ -462,6 +470,62 @@ def _listing_segments(
     return tuple(segments)
 
 
+# MuPDF 리댁션은 사각형에 **닿는** 글리프를 통째로 지운다. 글리프 상자는 폰트
+# ascender/descender 상자(= PyMuPDF span bbox의 세로 범위)의 위·아래를 높이의
+# 10%씩 깎은 것이다(실측 tiro·helv·cour·Times New Roman·AppleMyungjo 다섯 폰트 모두
+# 일치: tiro 10pt면 baseline 위 9.2pt~아래 1.4pt). span bbox 전체를 걸면 행간이
+# 1.2em 이하일 때 위·아래 줄의 글리프 상자에 닿아, 번역하지 않는 이웃 줄(수식·보존
+# 문단)이 통째로 사라졌다(10pt 글자/12pt 행간에서 아래 줄이 'y ending'만 남음).
+# 그래서 그 상자의 **가운데 띠**(최대 0.5em)만 건다 — 같은 span의 모든 글리프 상자
+# 안에 들어가고, 행간이 약 0.8em 이상이면 이웃 줄 글리프 상자에 닿지 않는다.
+_GLYPH_BOX_SHRINK = 0.10
+_BAND_HALF_EM = 0.25
+_BAND_PAD_PT = 0.25
+
+
+def _padded_rect(rect):
+    out = +rect
+    out += (-_BAND_PAD_PT, -_BAND_PAD_PT, _BAND_PAD_PT, _BAND_PAD_PT)
+    return out
+
+
+def _span_redaction_band(fitz, span: _SourceSpan):
+    """span 하나를 지우는 baseline 기준 띠. 회전된 줄은 줄 방향(dir)을 따라 만든다.
+
+    세로 범위는 span bbox에서 거꾸로 구한 ascender/descender로 계산하므로 폰트
+    메트릭이 특이해도 MuPDF 글리프 상자의 가운데를 겨눈다. 크기·방향을 알 수
+    없거나 상자가 퇴화했으면 예전처럼 span bbox(+0.25pt)를 쓴다.
+    """
+    rect = span.rect
+    size = float(span.size or 0.0)
+    dx, dy = span.dir
+    norm = math.hypot(dx, dy)
+    if size <= 0 or norm <= 1e-6:
+        return _padded_rect(rect)
+    dx, dy = dx / norm, dy / norm
+    # 글리프 위쪽 방향(y가 아래로 커지는 PDF 좌표에서 진행 방향을 반시계 90°).
+    ux, uy = dy, -dx
+    ox, oy = span.origin
+    corners = (
+        (rect.x0, rect.y0), (rect.x1, rect.y0), (rect.x0, rect.y1), (rect.x1, rect.y1),
+    )
+    along = [(x - ox) * dx + (y - oy) * dy for x, y in corners]
+    up = [((x - ox) * ux + (y - oy) * uy) / size for x, y in corners]
+    ascender, descender = max(up), min(up)
+    height = ascender - descender
+    inner_top = ascender - _GLYPH_BOX_SHRINK * height
+    inner_bottom = descender + _GLYPH_BOX_SHRINK * height
+    if inner_top - inner_bottom <= 0.05:
+        return _padded_rect(rect)
+    center = (inner_top + inner_bottom) / 2
+    half = min(_BAND_HALF_EM, (inner_top - inner_bottom) * 0.4)
+    low, high = (center - half) * size, (center + half) * size
+    start, end = min(along) - _BAND_PAD_PT, max(along) + _BAND_PAD_PT
+    xs = [ox + dx * t + ux * h for t in (start, end) for h in (low, high)]
+    ys = [oy + dy * t + uy * h for t in (start, end) for h in (low, high)]
+    return fitz.Rect(min(xs), min(ys), max(xs), max(ys))
+
+
 def _source_text_rects(page, rect, source_spans: list[object]) -> tuple[object, ...]:
     """원문 span을 행별 비연속 redaction 사각형으로 반환한다.
 
@@ -469,12 +533,23 @@ def _source_text_rects(page, rect, source_spans: list[object]) -> tuple[object, 
     같은 원문 꼬리가 번역문 옆에 남는다. 반대로 여러 행의 bounding union을 하나로
     지우면 그 사이에 낀 다른 owner의 제목까지 사라지므로 같은 행에서 닿는 span만
     병합하고 각 행을 별도 annotation으로 처리한다.
+
+    `_SourceSpan`을 넘기면 span마다 baseline 띠(`_span_redaction_band`)를 쓴다 —
+    span bbox 전체는 일반 행간에서 이웃 줄 글리프까지 지운다. 사각형만 넘기면
+    예전처럼 그 사각형(+0.25pt)을 쓴다.
     """
     if not source_spans:
         fallback = +rect
         fallback &= page.mediabox
         return (fallback,) if not fallback.is_empty else ()
-    ordered = sorted(source_spans, key=lambda span: (span.y0, span.x0))
+    fitz = quiet_fitz()
+    boxes = [
+        _span_redaction_band(fitz, source)
+        if isinstance(source, _SourceSpan)
+        else _padded_rect(source)
+        for source in source_spans
+    ]
+    ordered = sorted(boxes, key=lambda box: (box.y0, box.x0))
     groups: list[object] = []
     for source in ordered:
         merged = False
@@ -492,7 +567,6 @@ def _source_text_rects(page, rect, source_spans: list[object]) -> tuple[object, 
             groups.append(+source)
     output: list[object] = []
     for group in groups:
-        group += (-0.25, -0.25, 0.25, 0.25)
         group &= page.mediabox
         if not group.is_empty:
             output.append(group)

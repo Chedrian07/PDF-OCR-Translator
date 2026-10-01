@@ -702,6 +702,7 @@ def _plan_text_block(
         if reflow_text is not None
         else ()
     )
+    listing_dropped = _listing_dropped_lines(old, new, listing_segments)
     if listing_segments:
         listing_avoid = [span.rect for span in ctx.unowned_source]
         listing_avoid.extend(
@@ -731,6 +732,7 @@ def _plan_text_block(
         # 그마저 실패하면 아래 개별 배치에서 줄 단위로 부분 회수한다.
         if listing_changed and len(listing_targets) == listing_changed:
             targets.extend(listing_targets)
+            _keep_dropped_listing_lines(ctx, block_index, listing_dropped, result)
             return None
     return _FlowCandidate(
         block_index,
@@ -749,7 +751,63 @@ def _plan_text_block(
         None if bold else _leading_bold_prefix(owned_records, new),
         reflow_text,
         listing_segments,
+        listing_dropped,
     )
+
+
+def _listing_dropped_lines(old: str, new: str, segments) -> int:
+    """번역이 바뀐 OCR 줄 중 세그먼트가 되지 못한(원문 시각 줄에 정렬 실패) 줄 수."""
+    if not segments:
+        return 0
+    old_lines, new_lines = old.splitlines(), new.splitlines()
+    if len(old_lines) != len(new_lines):
+        return 0
+    changed = sum(
+        1 for before, after in zip(old_lines, new_lines)
+        if after.strip() and after.strip() != before.strip()
+    )
+    covered = sum(1 for segment in segments if segment.text and segment.text != segment.original)
+    return max(0, changed - covered)
+
+
+def _keep_dropped_listing_lines(
+    ctx: "_PageContext", block_index: int, dropped: int, result: PdfExportResult,
+) -> None:
+    """줄 단위 조판에서 빠진 줄(원문이 그대로 남는다)을 보존 사유로 남긴다."""
+    if dropped <= 0:
+        return
+    result.keep("listing_line_unaligned", dropped)
+    result.warnings.append(
+        f"p{ctx.pno}: 블록 {block_index + 1}의 {dropped}줄 교체 생략"
+        "(원문 줄 위치 정렬 실패) — 그 줄만 원문 보존"
+    )
+
+
+def _unplaced_listing_spans(ctx: "_PageContext", block_index: int, placed) -> list:
+    """부분 배치된 리스팅 블록에서 리댁션되지 않고 **남는** 원문 span 사각형."""
+    regions = [target.source_rect for target in placed if target.source_rect is not None]
+    out = []
+    for span in ctx.source_ownership.get(block_index, []):
+        area = max(0.01, span.rect.width * span.rect.height)
+        if not any(_rect_overlap_area(span.rect, region) >= area * 0.9 for region in regions):
+            out.append(span.rect)
+    return out
+
+
+def _partially_redacted_blocks(ctx: "_PageContext", targets) -> set[int]:
+    """원문 span 일부만 지워지는 교체 블록(줄 단위 부분 배치).
+
+    계획이 '교체됨'으로 세면 그 블록의 남는 원문 줄이 다른 flow의 장애물에서
+    빠진다 — 다음 패스에서 지워진다고 가정하지 않도록 돌려준다.
+    """
+    listing: dict[int, list] = {}
+    for target in targets:
+        if target.kind == "listing" and target.block_index >= 0:
+            listing.setdefault(target.block_index, []).append(target)
+    return {
+        index for index, placed in listing.items()
+        if _unplaced_listing_spans(ctx, index, placed)
+    }
 
 
 def _plan_page_targets(ctx: _PageContext, result: PdfExportResult):
@@ -866,8 +924,12 @@ def _plan_flow_targets(
             # 공간으로 보고 번역문을 최대 48pt 위로 끌어올려 지워지지 않은 영문
             # 위에 찍는다(실측: p2 "Main Contributions" 100% 피복, p8 5줄 겹침).
             pending = {candidate.block_index for candidate in component}
+            # 줄 단위로 일부만 들어간 형제의 남는 원문 줄. pending에서 빠져도 그 줄은
+            # 지워지지 않으므로, 뒤 형제가 그 위로 당겨지지 않게 계속 장애물로 둔다.
+            residual: list = []
             for candidate in component:
                 obstacles = list(fixed_rects)
+                obstacles.extend(residual)
                 obstacles.extend(
                     target.plan.ink_rect
                     for target in planned
@@ -918,6 +980,12 @@ def _plan_flow_targets(
                             f"p{ctx.pno}: 블록 {candidate.block_index + 1}의 "
                             f"{missing}줄 교체 생략(줄 폭 부족) — 그 줄만 원문 보존"
                         )
+                    _keep_dropped_listing_lines(
+                        ctx, candidate.block_index, candidate.listing_dropped, result,
+                    )
+                    residual.extend(_unplaced_listing_spans(
+                        ctx, candidate.block_index, listing_targets,
+                    ))
                     continue
                 # 최후 수단: 가독성 하한 아래로 축소해서라도 놓는다. 여기서
                 # 포기하면 번역 면에 영문 원문이 그대로 남고, 그건 사용자가
@@ -1414,15 +1482,24 @@ def _plan_until_consistent(base_ctx: _PageContext, result: PdfExportResult):
         ctx = replace(base_ctx, cleared_indices=cleared)
         targets, flow_candidates, links = _plan_page_targets(ctx, trial)
         _plan_flow_targets(ctx, flow_candidates, targets, trial)
+        # 줄 단위로 일부만 들어간 블록은 '지워졌다'고 볼 수 없다 — 남는 줄이 있다.
         placed = {t.block_index for t in targets if t.block_index >= 0}
+        placed -= _partially_redacted_blocks(ctx, targets)
         missing = cleared - placed
         if not missing:
             break
         if attempt == _MAX_PLAN_PASSES - 1:
+            # 수렴하지 못한 계획은 장애물 모델이 실제 리댁션과 어긋날 수 있다. 아무것도
+            # 지워진다고 가정하지 않는(가장 보수적인) 계획으로 한 번 더 세운다 — 모든
+            # 원문이 장애물이므로 남는 원문 위에 번역이 찍힐 수 없다.
             logger.warning(
-                "PDF 내보내기: p%d 계획이 %d패스 안에 수렴하지 않음 — 마지막 계획 사용",
+                "PDF 내보내기: p%d 계획이 %d패스 안에 수렴하지 않음 — 보수적 계획 사용",
                 base_ctx.pno, _MAX_PLAN_PASSES,
             )
+            trial = PdfExportResult(path=result.path)
+            ctx = replace(base_ctx, cleared_indices=frozenset())
+            targets, flow_candidates, links = _plan_page_targets(ctx, trial)
+            _plan_flow_targets(ctx, flow_candidates, targets, trial)
             break
         cleared = cleared - missing
     result.merge(trial)

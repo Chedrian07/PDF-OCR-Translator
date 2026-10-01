@@ -297,7 +297,9 @@ def test_dropped_page_is_detected_and_repaired(tmp_path):
     layout = json.loads((job.dir / "layout.json").read_text(encoding="utf-8"))
     page3 = [p for p in layout if p["page"] == 3][0]
     assert any(page_truth(3) in (b.get("content") or "") for b in page3["blocks"])
-    assert any("충실도" in w for w in job.warnings), job.warnings
+    # 고쳐서 채택한 경위는 참고다 — 남은 품질 저하가 없으니 경고(degraded)가 아니다
+    assert any("충실도" in n and "채택" in n for n in job.notices), job.notices
+    assert not any("충실도" in w for w in job.warnings), job.warnings
 
 
 def test_only_degraded_pages_are_rerun(tmp_path):
@@ -311,7 +313,7 @@ def test_no_degraded_pages_means_no_reruns(tmp_path):
     engine = PageDroppingEngine()
     job, _events = run_job(tmp_path, engine, pages=4, pages_per_chunk=4)
     assert engine.single_calls == []
-    assert not any("충실도" in w for w in job.warnings), job.warnings
+    assert not any("충실도" in m for m in job.warnings + job.notices), (job.warnings, job.notices)
 
 
 def client_view(events) -> str:
@@ -1107,8 +1109,10 @@ def test_gate_breaker_stops_partial_retries_but_keeps_recovering_lost_pages(tmp_
     )
 
     assert engine.single_calls == [1, 2, 3, 7], engine.single_calls
-    assert sum("측정 한계로 판단해 원래 결과 유지" in w for w in job.warnings) == 3, job.warnings
-    assert any("재처리를 멈춥니다" in w for w in job.warnings), job.warnings
+    # 측정 한계·회로 차단은 지표의 한계라 참고다(품질 경고로 읽히지 않게)
+    assert sum("측정 한계로 판단해 원래 결과 유지" in n for n in job.notices) == 3, job.notices
+    assert any("재처리를 멈춥니다" in n for n in job.notices), job.notices
+    assert not any("측정 한계" in w for w in job.warnings), job.warnings
     assert page_truth(7) in (job.dir / "result.md").read_text(encoding="utf-8")
 
 
@@ -1142,4 +1146,4 @@ def test_deterministic_engines_skip_the_gate(tmp_path, monkeypatch):
 
     assert job.status == "done", job.error
     assert len(calls) == 3                     # 페이지당 한 번 — 게이트 재실행 없음
-    assert not any("충실도" in w for w in job.warnings), job.warnings
+    assert not any("충실도" in m for m in job.warnings + job.notices), (job.warnings, job.notices)

@@ -7,6 +7,7 @@
 import importlib.util
 import json
 import pathlib
+import re
 import sys
 
 import pytest
@@ -198,7 +199,7 @@ def _serve_mock():
 
 
 @pytest.mark.parametrize("fault", ["", "refusal", "refusal_ko", "echo", "summary",
-                                   "drop_placeholder"])
+                                   "drop_placeholder", "paired_tags"])
 def test_mock_stream_and_plain_responses_carry_the_same_output(fault):
     """클라이언트 기본이 chat 스트리밍이 됐다 — 결함 모드가 SSE에서도 같은 출력을 내야
     하네스의 결함 주입이 스트리밍 경로에서도 유효하다."""
@@ -246,3 +247,146 @@ def test_mock_stream_ends_with_done_and_usage():
     assert usage["choices"] == [] and usage["usage"]["total_tokens"] > 0
     finish = _json.loads(events[-3][6:])["choices"][0]["finish_reason"]
     assert finish == "stop"
+
+
+# ───────────────── D-1: 원문별 호출 수 ≤ 번역 계획 (같은 유닛 이중 번역) ─────────────────
+
+def _lay(*contents: str, page: int = 1) -> list:
+    return [{"page": page, "blocks": [
+        {"type": "text", "bbox": [50, 100 + 60 * i, 900, 150 + 60 * i], "content": c}
+        for i, c in enumerate(contents)
+    ]}]
+
+
+SAME = "Same sentence about language models."
+OTHER = "Unique paragraph about the training data."
+
+
+def test_d1_allows_the_same_text_once_per_unit_position():
+    """위치(직전 문맥)가 다른 같은 원문은 캐시 키가 달라 각자 번역된다 — 중복 0을 요구하면
+    25쪽 실행이 정당한 중복 21종으로 늘 실패했다."""
+    md = f"{SAME}\n\n{OTHER}\n\n---\n\n{SAME}"
+    allowed, known, pending = verify_e2e.d1_unit_plan(md, None)
+    assert allowed == {SAME: 2, OTHER: 1} and known == {SAME, OTHER} and pending == 0
+    over, unplanned, other = verify_e2e.d1_findings(
+        {SAME: 2, OTHER: 1, "[논문 개요]\n용어집 프롬프트": 1}, allowed, known)
+    assert over == {} and unplanned == {} and other == 1
+    over, _, _ = verify_e2e.d1_findings({OTHER: 2}, allowed, known)
+    assert over == {OTHER: (2, 1)}  # 같은 유닛을 두 번 번역했다
+
+
+def test_d1_md_unit_wholly_covered_by_a_layout_block_is_not_planned():
+    """md 유닛이 layout 블록 하나와 같으면 그 블록의 번역을 쓴다 — 둘 다 호출하면 이중 번역."""
+    allowed, known, pending = verify_e2e.d1_unit_plan(SAME, _lay(SAME))
+    assert allowed == {SAME: 1} and pending == 0  # layout 유닛 몫 하나뿐
+    over, _, _ = verify_e2e.d1_findings({SAME: 2}, allowed, known)
+    assert over == {SAME: (2, 1)}
+
+
+LINE1 = "First line of the covered paragraph."
+LINE2 = "Second line of the covered paragraph."
+
+
+def test_d1_md_unit_covered_line_by_line_is_deferred():
+    allowed, known, pending = verify_e2e.d1_unit_plan(f"{LINE1}\n{LINE2}", _lay(LINE1, LINE2))
+    assert allowed == {LINE1: 1, LINE2: 1} and pending == 0
+    md_text = f"{LINE1}\n{LINE2}"
+    assert md_text in known
+    _, unplanned, _ = verify_e2e.d1_findings({LINE1: 1, LINE2: 1, md_text: 1}, allowed, known)
+    assert unplanned == {md_text: 1}  # 지연돼야 할 md 유닛을 1차에서 번역했다
+
+
+def test_d1_second_pass_is_planned_when_a_covering_block_was_kept():
+    """덮는 layout 블록의 번역이 실패(kept)하면 지연된 md 유닛은 2차에서 번역된다 — 정당하다."""
+    md_text = f"{LINE1}\n{LINE2}"
+    translated = [{"page": 1, "blocks": [{"content": LINE1}, {"content": "둘째 줄을 옮겼다."}]}]
+    allowed, _, pending = verify_e2e.d1_unit_plan(
+        md_text, _lay(LINE1, LINE2), translated_pages=translated, kept_original=["lay:1:0"],
+    )
+    assert pending == 1 and allowed[md_text] == 1
+    # 둘 다 번역됐으면 2차 패스는 없다
+    translated = [{"page": 1, "blocks": [{"content": "첫 줄을 옮겼다."},
+                                         {"content": "둘째 줄을 옮겼다."}]}]
+    allowed, _, pending = verify_e2e.d1_unit_plan(
+        md_text, _lay(LINE1, LINE2), translated_pages=translated,
+    )
+    assert pending == 0 and md_text not in allowed
+
+
+def test_d1_skipped_units_are_known_but_never_planned():
+    md = "## References\n\n[1] A. Author. A title of a paper. Journal, 2020.\n\n2504.19874"
+    allowed, known, _ = verify_e2e.d1_unit_plan(md, _lay("12"))
+    assert allowed == {}
+    assert "## References" in known and "12" in known
+    _, unplanned, _ = verify_e2e.d1_findings({"## References": 1}, allowed, known)
+    assert unplanned == {"## References": 1}
+
+
+def test_d1_counts_masked_text_like_the_mock_sees_it():
+    """목은 프롬프트의 '[번역할 원문]' 뒤 = 마스킹된 원문으로 센다."""
+    from app.translate.masking import mask
+
+    src = "As shown in Figure 2, the loss drops quickly [12]."
+    allowed, _, _ = verify_e2e.d1_unit_plan(src, None)
+    assert allowed == {mask(src)[0]: 1}
+    prompt = build_unit_prompt(mask(src)[0], [], [], context_tail="previous paragraph")
+    assert mock_llm._source_only(prompt) in allowed
+
+
+def test_d1_plan_for_job_reads_the_pinned_separator_and_reports(tmp_path):
+    jd = tmp_path / "j_1"
+    (jd / "translations" / "ko").mkdir(parents=True)
+    sep = "\n\n<<<page>>>\n\n"
+    (jd / "meta.json").write_text(json.dumps({"page_separator": sep}), encoding="utf-8")
+    (jd / "result.md").write_text(f"{SAME}{sep}{SAME}", encoding="utf-8")
+    allowed, _, pending = verify_e2e.d1_plan_for_job(jd, "ko")
+    assert allowed == {SAME: 2} and pending == 0  # 잡에 고정된 구분자로 페이지를 나눈다
+
+    (jd / "result.md").write_text(f"{LINE1}\n{LINE2}", encoding="utf-8")
+    (jd / "layout.json").write_text(json.dumps(_lay(LINE1, LINE2)), encoding="utf-8")
+    (jd / "layout.ko.json").write_text(json.dumps(
+        [{"page": 1, "blocks": [{"content": LINE1}, {"content": "둘째 줄을 옮겼다."}]}]
+    ), encoding="utf-8")
+    (jd / "translations" / "ko" / "report.json").write_text(
+        json.dumps({"kept_original": ["lay:1:0"]}), encoding="utf-8")
+    _, _, pending = verify_e2e.d1_plan_for_job(jd, "ko")
+    assert pending == 1
+
+
+def test_second_pass_log_line_matches_the_engine_wording():
+    """D-1은 엔진 로그의 2차 패스 수와 하네스 계산을 대조한다 — 문구가 바뀌면 조용히 0이 된다."""
+    engine_src = (pathlib.Path(__file__).resolve().parents[1] / "app" / "translate"
+                  / "engine.py").read_text(encoding="utf-8")
+    template = re.search(r'"(layout으로 덮이지 않는 지연 md 유닛 %d개 2차 번역)"', engine_src)
+    assert template, "엔진의 2차 패스 로그 문구가 바뀌었다 — 하네스 정규식도 함께 고친다"
+    assert verify_e2e._SECOND_PASS_LOG_RE.fullmatch(template.group(1) % 3)
+
+
+# ───────────────── 결함 모드: 쌍 태그 (translate-llm-10) ─────────────────
+
+def test_paired_tags_fault_pairs_placeholders_like_an_xml_habit():
+    from app.translate.masking import mask, unmask
+
+    masked, mapping = mask("As shown in Figure 2 and Table 3, the loss $L$ drops [12].")
+    out = mock_llm._apply_fault("paired_tags", masked)
+    assert '<f1 v="Figure 2"></f1>' in out              # 첫 태그 — 빈 쌍
+    assert "</f2>" in out and "</m3>" in out             # 나머지 — 내용을 감싼 쌍
+    _restored, missing, dup = unmask(out, mapping, masked)
+    assert not missing and "</f2>" in dup                # 엔진은 내용 쌍을 거부한다
+    single, smap = mask("See [12] for the details of the proposed method.")
+    restored, missing, dup = unmask(mock_llm._apply_fault("paired_tags", single), smap, single)
+    assert not missing and not dup and "[12]" in restored  # 빈 쌍은 자기 닫힘으로 접힌다
+
+
+# ───────────────── 포트 고정 (정해진 포트 범위에서 돌리기) ─────────────────
+
+def test_port_options_reject_a_collision_before_starting_anything():
+    import subprocess
+
+    r = subprocess.run(
+        [sys.executable, str(SCRIPTS / "verify_e2e.py"), "--mock-port", "18999",
+         "--api-port", "18999", "--work", "/nonexistent/should-not-be-created"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 2 and "달라야" in r.stderr
+    assert not pathlib.Path("/nonexistent/should-not-be-created").exists()

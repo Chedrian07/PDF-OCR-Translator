@@ -204,6 +204,10 @@ def _portable_text_for_font(text: str, fontfile: str | None) -> str:
         if fallback and all(font.has_glyph(ord(part)) for part in fallback):
             output.append(fallback)
             continue
+        # 결합 악센트(`\hat{y}` → y + U+0302 등)가 폰트에 없으면 빈 네모 대신 뺀다.
+        # 기본 글자는 앞에서 이미 그려지므로 'haty' 같은 깨짐 없이 'y'로 읽힌다.
+        if unicodedata.combining(char):
+            continue
         # macOS 명조처럼 Hangul은 있지만 precomposed Latin만 빠진 폰트에서도
         # tofu 대신 검색 가능한 기본 문자를 남긴다. 컨테이너 Noto는 ö/ü를 직접
         # 지원하므로 이 경로를 타지 않고 원 철자를 보존한다.

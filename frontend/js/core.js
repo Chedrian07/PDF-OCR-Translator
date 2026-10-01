@@ -733,18 +733,54 @@ export function translatedHtmlExportState(jobStatus, koStatus) {
   return { visible: true, reason: '' };
 }
 
-// 내보내기 대기열이 가득 차면 서버가 503 + Retry-After를 준다(빌드는 캐시 미스일
-// 때만 돌고, 그때 다른 잡 빌드와 겹치면 이 응답이 난다). 사용자가 할 수 있는 일은
-// "잠시 뒤 다시 누르기"뿐이라 한 번은 대신 눌러 준다. 0을 돌려주면 재시도하지 않는다.
-export const PDF_RETRY_MAX = 1;
-const PDF_RETRY_FALLBACK_S = 5;
-const PDF_RETRY_CAP_S = 60;
+/* ── 503(바쁨) 제한 재시도 + 산출물 조회 실패 분류 (순수 — tests/에서 검증) ────────
+ * 서버 계약: 503 + Retry-After = 빌드·예열·내보내기 대기열이 바쁘다 → 기다렸다 다시
+ * 시도하면 된다. 404/409만 "그 산출물이 없다/쓸 수 없다"는 확정 답이다. 그 밖의 실패
+ * (네트워크·5xx)는 일시 장애다 — 한국어 보기에서 이것을 "번역본 없음"으로 오해해
+ * 전역 언어를 원문으로 되돌리면, 번역은 멀쩡한데 사용자가 한국어를 다시 눌러야 한다.
+ */
+export function langFetchVerdict(status) {
+  const code = Math.floor(Number(status)) || 0;
+  if (code >= 200 && code < 300) return 'ok';
+  if (code === 404 || code === 409) return 'missing';
+  if (code === 503) return 'busy';
+  return 'error';
+}
+
+export const BUSY_RETRY_MAX = 4;              // 바쁨 응답 뒤 자동 재시도 횟수 상한
+const BUSY_RETRY_BACKOFF_S = [5, 10, 20, 30]; // Retry-After가 없거나 깨졌을 때의 대기
+const BUSY_RETRY_CAP_S = 60;                  // 거대 Retry-After로 화면이 오래 묶이지 않게
+
+// attempt번째(0부터) 바쁨 응답 뒤 기다릴 초. 0이면 더 재시도하지 않는다.
+// Retry-After는 delta-seconds와 HTTP-date를 모두 받는다(RFC 9110). 대기는 항상 1..60초.
+export function busyRetryDelay(status, retryAfter, attempt = 0, maxAttempts = BUSY_RETRY_MAX,
+  nowMs = Date.now()) {
+  if (langFetchVerdict(status) !== 'busy') return 0;
+  const n = Math.max(0, Math.floor(Number(attempt)) || 0);
+  if (n >= Math.max(0, Math.floor(Number(maxAttempts)) || 0)) return 0;
+  let seconds = BUSY_RETRY_BACKOFF_S[Math.min(n, BUSY_RETRY_BACKOFF_S.length - 1)];
+  const raw = retryAfter == null ? '' : String(retryAfter).trim();
+  if (/^\d+$/.test(raw)) {
+    if (Number(raw) > 0) seconds = Number(raw);
+  } else if (/[a-z]/i.test(raw)) {
+    const at = Date.parse(raw);
+    if (Number.isFinite(at)) seconds = (at - Number(nowMs)) / 1000;
+  }
+  return Math.min(BUSY_RETRY_CAP_S, Math.max(1, Math.ceil(seconds)));
+}
+
+// 바쁨 대기 중 안내 문구 (예: '한국어 레이아웃 준비 중… 30초 뒤 다시 시도합니다 (1/4)').
+export function busyWaitMessage(label, seconds, attempt, max) {
+  return `${label} 준비 중… ${seconds}초 뒤 다시 시도합니다 (${attempt}/${max})`;
+}
+
+// PDF 다운로드도 같은 계약이다. 번역 직후 첫 클릭은 예열 빌드(큰 문서는 60초 이상)를
+// 기다리므로, 한 번만 대신 눌러 주면 빌드가 끝나기 전에 오류 토스트로 끝난다.
+// 바쁨 재시도와 같은 상한까지 기다린다. 0을 돌려주면 재시도하지 않는다.
+export const PDF_RETRY_MAX = BUSY_RETRY_MAX;
 
 export function pdfRetryDelay(status, retryAfter, attempt = 0) {
-  if (status !== 503 || attempt >= PDF_RETRY_MAX) return 0;
-  const raw = Number(retryAfter);
-  const seconds = Number.isFinite(raw) && raw > 0 ? raw : PDF_RETRY_FALLBACK_S;
-  return Math.min(PDF_RETRY_CAP_S, Math.max(1, Math.ceil(seconds)));
+  return busyRetryDelay(status, retryAfter, attempt, PDF_RETRY_MAX);
 }
 
 // 다운로드 진행 문구. Content-Length가 없으면(청크 전송) 퍼센트를 만들 수 없으므로

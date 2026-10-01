@@ -95,7 +95,12 @@ def acquire_jobs_dir_lock(jobs_dir: Path) -> JobsDirLock:
     if fcntl is None:  # pragma: no cover — Windows
         return JobsDirLock(path)
     try:
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        except PermissionError:
+            # 다른 uid(예: root로 돈 컨테이너)가 만든 락 파일 — flock은 읽기 전용
+            # fd로도 잡히므로 보호를 포기하지 않는다.
+            fd = os.open(path, os.O_RDONLY)
     except OSError as e:
         logger.warning(
             "잡 디렉터리 소유 락 파일을 열 수 없어 단일 소유자 보호 없이 진행합니다: %s (%s)",

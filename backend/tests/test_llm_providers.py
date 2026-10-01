@@ -184,3 +184,146 @@ def test_ollama_thinking_is_requested_but_raw_trace_is_not_exposed() -> None:
     assert observed["think"] == "high"
     assert result.content == "로컬 번역"
     assert result.reasoning_summary is None
+
+
+# ── local-openai (루프백 OpenAI 호환 서버) — mlx-integration-11, infra-docs-15 ──
+
+from app.llm.providers import (  # noqa: E402
+    QA_PROVIDER_IDS,
+    GenerationResult,
+    LlmRouter,
+    LocalOpenAIClient,
+)
+
+
+def local_client(handler, **kw) -> LocalOpenAIClient:
+    return LocalOpenAIClient(
+        "http://127.0.0.1:1235/v1",
+        default_model=kw.pop("default_model", "qwen-local"),
+        models=kw.pop("models", ("qwen-small",)),
+        transport=httpx.MockTransport(handler),
+        **kw,
+    )
+
+
+def _ask(client: LocalOpenAIClient, **kw):
+    args = dict(model=None, system="answer", prompt="page", reasoning_effort="low",
+                reasoning_summary="concise", thinking=False)
+    args.update(kw)
+    return asyncio.run(client.generate(**args))
+
+
+def test_local_openai_payload는_thinking을_템플릿_인자로_보낸다() -> None:
+    observed = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed.update(json.loads(request.content))
+        observed["auth"] = request.headers.get("authorization")
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(200, json={"model": "qwen-local", "choices": [
+            {"message": {"content": "답변", "reasoning_content": "raw private trace",
+                         "reasoning": "more trace"}}]})
+
+    result = _ask(local_client(handler))
+    assert observed["chat_template_kwargs"] == {"enable_thinking": False}
+    assert observed["messages"][0]["role"] == "system"       # 로컬 템플릿은 developer를 모름
+    assert "store" not in observed and "reasoning_effort" not in observed
+    assert observed["max_tokens"] >= 4096                    # mlx_lm 기본 512로 잘리지 않게
+    assert observed["auth"] is None                          # 전용 키가 없으면 헤더도 없다
+    assert result.content == "답변" and result.reasoning_summary is None
+    assert result.provider == "local-openai" and result.remote is False
+
+    _ask(local_client(handler, api_key="local-key"), thinking=True, reasoning_effort="high")
+    assert observed["chat_template_kwargs"] == {"enable_thinking": True}
+    assert observed["reasoning_effort"] == "high" and observed["auth"] == "Bearer local-key"
+
+
+def test_local_openai_사고_흔적은_답변에서_걷어낸다() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": "Let me think...\n</think>\n\n최종 답변"}}]})
+
+    assert _ask(local_client(handler)).content == "최종 답변"
+
+    def unclosed(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": "<think>still thinking"}}]})
+
+    with pytest.raises(LlmError, match="empty response"):
+        _ask(local_client(unclosed))
+
+
+def test_local_openai_허용목록_밖_모델은_요청_전에_거절() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("허용목록 밖 모델로 요청이 나갔다")
+
+    with pytest.raises(LlmError, match="not an allowed local-openai model"):
+        _ask(local_client(handler), model="mlx-community/other-27b")
+
+
+def test_local_openai_리다이렉트는_따라가지_않는다() -> None:
+    """루프백 서버가 외부로 리다이렉트해도 원문이 따라 나가지 않는다(SSRF)."""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(307, headers={"Location": "https://evil.example/v1/chat"})
+
+    with pytest.raises(LlmError, match="rejected"):
+        _ask(local_client(handler))
+    assert calls == ["http://127.0.0.1:1235/v1/chat/completions"]
+
+
+def _router(local: LocalOpenAIClient | None) -> LlmRouter:
+    def dead(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("down")
+
+    return LlmRouter(
+        openai=openai_client(dead),
+        ollama=OllamaClient("http://127.0.0.1:11434", "qwen3:8b",
+                            transport=httpx.MockTransport(dead)),
+        default_provider="openai-responses",
+        default_reasoning_effort="low",
+        local_openai=local,
+    )
+
+
+def test_local_openai는_구성됐을_때만_공급자_목록에_광고한다() -> None:
+    def models_ok(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/models"
+        return httpx.Response(200, json={"data": [{"id": "qwen-local"}]})
+
+    without = asyncio.run(_router(None).providers())
+    assert "local-openai" not in [p["id"] for p in without["providers"]]
+
+    catalog = asyncio.run(_router(local_client(models_ok)).providers())
+    entry = next(p for p in catalog["providers"] if p["id"] == "local-openai")
+    assert entry["available"] is True and entry["remote"] is False
+    assert entry["models"] == ["qwen-small", "qwen-local"]
+    assert entry["default_model"] == "qwen-local"
+
+    def down(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    offline = asyncio.run(_router(local_client(down)).providers())
+    assert next(p for p in offline["providers"] if p["id"] == "local-openai")["available"] is False
+
+
+def test_router가_local_openai로_라우팅하고_구성여부를_알려준다() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "로컬 답"}}]})
+
+    router = _router(local_client(handler))
+    result = asyncio.run(router.ask(
+        question="q", context="c", provider="local-openai", model=None,
+        reasoning_effort="default", reasoning_summary="none", thinking=False,
+    ))
+    assert isinstance(result, GenerationResult) and result.content == "로컬 답"
+    assert router.configured("local-openai") and not _router(None).configured("local-openai")
+    assert router.default_model("local-openai") == "qwen-local"
+    assert "local-openai" in QA_PROVIDER_IDS
+    with pytest.raises(LlmError, match="not configured"):
+        asyncio.run(_router(None).ask(
+            question="q", context="c", provider="local-openai", model=None,
+            reasoning_effort="default", reasoning_summary="none", thinking=False,
+        ))

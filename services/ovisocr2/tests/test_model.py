@@ -91,6 +91,11 @@ def test_load_failure_does_not_set_load_error_itself(monkeypatch):
     def _boom(**kwargs):
         raise ConnectionError("hub unreachable")
 
+    # CUDA 가드는 통과시킨다 — torch가 import되는 환경(backend venv 등)에서는 진짜 torch가
+    # 'CUDA 없음'으로 PermanentLoadError를 먼저 내서, 이 테스트가 보려는 vLLM 로드 실패에
+    # 닿지 못하고 실패했다. 실행 환경과 무관하게 같은 경로를 타게 torch도 가짜로 둔다.
+    fake_torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "vllm", types.SimpleNamespace(LLM=_boom, SamplingParams=dict))
     m = OvisModel(OvisConfig.from_env())
     with pytest.raises(ConnectionError):

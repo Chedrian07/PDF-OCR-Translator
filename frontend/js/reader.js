@@ -1590,7 +1590,10 @@ export function captureReaderSelection() {
   if (selection && !selection.isCollapsed && selection.rangeCount) {
     const range = selection.getRangeAt(0);
     if (el.readerContent.contains(range.commonAncestorContainer)) {
-      text = selection.toString().replace(/\s+/g, ' ').trim().slice(0, 2000);
+      // selection.toString()은 카드 머리말('02 본문 원문 보기')과 KaTeX 내부 글자(MathML+HTML
+      // 두 벌)까지 섞는다 — 설명·인용에 쓸 문장은 본문만, 수식은 원래 TeX로 만든다.
+      text = (rangeReadableText(range) || selection.toString()).replace(/\s+/g, ' ').trim()
+        .slice(0, 2000);
       const start = range.startContainer.nodeType === 1
         ? range.startContainer
         : range.startContainer.parentElement;
@@ -1623,9 +1626,9 @@ export function openReaderQa(prompt, page = state.readerPage) {
 const newReaderNoteId = () =>
   `n${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
-function persistReaderNote(kind, page, text) {
+function persistReaderNote(kind, page, text, id = newReaderNoteId()) {
   const result = addReaderNote(state.readerNotes, {
-    id: newReaderNoteId(), kind, page, lang: readerLangKey(), text, at: Date.now(),
+    id, kind, page, lang: readerLangKey(), text, at: Date.now(),
   });
   if (!result.note) return null;
   if (result.added && !saveReaderNotes(state.currentJobId, result.items)) {
@@ -1672,15 +1675,71 @@ function wrapTextSegment(node, start, end, noteId) {
 function markRange(range, noteId) {
   const common = range.commonAncestorContainer;
   const root = common.nodeType === 1 ? common : common.parentNode;
-  let marked = 0;
+  const marks = [];
   for (const node of highlightableTextNodes(root, (n) => range.intersectsNode(n))) {
     const start = node === range.startContainer ? range.startOffset : 0;
     const end = node === range.endContainer ? range.endOffset : node.data.length;
     if (start >= end) continue;
-    wrapTextSegment(node, start, end, noteId);
-    marked += 1;
+    marks.push(wrapTextSegment(node, start, end, noteId));
   }
-  return marked;
+  return marks;
+}
+
+// 본문 블록 경계 — 같은 블록 안의 텍스트 조각은 붙여 쓰고, 블록이 바뀌면 띄어 쓴다
+// (하이라이트로 한 단어가 여러 텍스트 노드로 쪼개져도 단어 가운데 공백이 생기지 않게).
+const READABLE_BLOCK = 'p, li, td, th, h1, h2, h3, h4, h5, h6, blockquote, pre, figcaption, '
+  + '.reader-map-target, .reader-map-source, .reader-map-card, .doc-page';
+const READABLE_SKIP = '.reader-map-card-head, .reader-rail-head, .reader-rail-retry-note, button';
+
+function joinReadable(parts) {
+  let out = '';
+  let lastBlock = null;
+  for (const { block, text } of parts) {
+    if (!text) continue;
+    out += (out && block !== lastBlock ? ' ' : '') + text;
+    lastBlock = block;
+  }
+  return out.replace(/\s+/g, ' ').trim();
+}
+
+// 선택 범위를 사람이 읽을 문장으로 — 카드 머리말·버튼은 빼고, KaTeX 수식은 렌더된 글자
+// 두 벌 대신 원래 TeX(\( … \) / \[ … \])로 한 번만 넣는다.
+export function rangeReadableText(range) {
+  const common = range.commonAncestorContainer;
+  const root = common.nodeType === 1 ? common : common.parentNode;
+  if (!root) return '';
+  const parts = [];
+  const seenMath = new Set();
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (!range.intersectsNode(node)) continue;
+    const parent = node.parentElement;
+    if (!parent || parent.closest(READABLE_SKIP)) continue;
+    const block = parent.closest(READABLE_BLOCK);
+    const math = parent.closest('.katex');
+    if (math) {
+      if (seenMath.has(math)) continue;
+      seenMath.add(math);
+      const annotation = math.querySelector('annotation');
+      const tex = annotation ? annotation.textContent.trim() : '';
+      if (tex) parts.push({ block, text: math.closest('.katex-display') ? `\\[${tex}\\]` : `\\(${tex}\\)` });
+      continue;
+    }
+    const start = node === range.startContainer ? range.startOffset : 0;
+    const end = node === range.endContainer ? range.endOffset : node.data.length;
+    if (start < end) parts.push({ block, text: node.data.slice(start, end) });
+  }
+  return joinReadable(parts);
+}
+
+// 실제로 칠한 조각들의 글자 — 하이라이트 메모의 문장이다. 재렌더 뒤 같은 조각을 다시
+// 찾는 데 쓰므로 칠할 수 있는 본문(머리말·수식 제외)과 정확히 같은 글자만 담는다.
+function marksText(marks) {
+  return joinReadable(marks.map((mark) => ({
+    block: mark.parentElement && mark.parentElement.closest(READABLE_BLOCK),
+    text: mark.textContent,
+  })));
 }
 
 // 저장된 하이라이트 문장을 다시 그린 섹션에서 찾아 칠한다. 공백은 무시하고 비교한다 —
@@ -1742,8 +1801,14 @@ export function highlightReaderSelection() {
   const range = selection.getRangeAt(0);
   if (!el.readerContent.contains(range.commonAncestorContainer)) return;
   const page = state.readerSelectionPage;
-  const saved = persistReaderNote('highlight', page, state.readerSelection);
-  markRange(range, saved ? saved.note.id : '');
+  const noteId = newReaderNoteId();
+  const marks = markRange(range, noteId);
+  // 메모 문장은 실제로 칠한 본문 — 그래야 다시 그린 레일에서 같은 조각을 찾는다.
+  const saved = persistReaderNote('highlight', page, marksText(marks) || state.readerSelection, noteId);
+  for (const mark of marks) {
+    if (!saved) delete mark.dataset.noteId;           // 저장 실패 — 이번 화면에만 표시
+    else mark.dataset.noteId = saved.note.id;         // 이미 있던 같은 메모면 그 id에 묶는다
+  }
   selection.removeAllRanges();
   state.readerSelection = '';
   state.readerSelectionPage = state.readerPage;
@@ -1758,6 +1823,7 @@ export function highlightReaderSelection() {
 export function saveReaderCitation() {
   if (!state.readerSelection) return;
   const page = state.readerSelectionPage;
+  // state.readerSelection은 이미 본문·TeX로 정리된 문장이다(captureReaderSelection).
   const saved = persistReaderNote('citation', page, state.readerSelection);
   updateReaderResearchTools();
   if (saved) {

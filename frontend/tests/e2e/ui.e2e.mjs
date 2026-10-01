@@ -513,6 +513,13 @@ if (layoutCap === 'figure_only') {
   check('레이아웃 탭: figure_only 안내 카드(캔버스 없음)', layout.card && !layout.canvas, JSON.stringify(layout));
 } else {
   check('레이아웃 탭: 좌표 캔버스', layout.canvas && !layout.card, JSON.stringify(layout));
+  // 긴 문서에서 전 페이지 PNG를 한꺼번에 받지 않는다(frontend-7).
+  const lazyPages = await page.evaluate(() => {
+    const imgs = [...document.querySelectorAll('#doclayout-body img')];
+    return { count: imgs.length, lazy: imgs.filter((i) => i.getAttribute('loading') === 'lazy').length };
+  });
+  check('레이아웃 탭: 페이지 이미지는 loading=lazy', lazyPages.count > 0 && lazyPages.lazy === lazyPages.count,
+    JSON.stringify(lazyPages));
 }
 check('중복 레이아웃 HTML 버튼 제거', await page.evaluate(() => !document.getElementById('dl-layout')));
 await page.screenshot({ path: path.join(OUT, 'layout-tab.png') });
@@ -535,8 +542,313 @@ const dark = await dpage.evaluate(() => {
   return { p: b.querySelectorAll('p').length, color: p ? getComputedStyle(p).color : null };
 });
 check('다크 테마: 미리보기 렌더', dark.p >= 3 && !!dark.color, JSON.stringify(dark));
+// 테마 부트스트랩은 CSP(script-src 'self') 아래에서 외부 파일(theme-init.js)로 돈다.
+check('다크 테마: CSP 아래 테마 부트스트랩이 첫 페인트 전에 적용',
+  await dpage.evaluate(() => document.documentElement.getAttribute('data-theme') === 'dark'
+    && !!document.querySelector('meta[http-equiv="Content-Security-Policy"]')));
 await dpage.screenshot({ path: path.join(OUT, 'dark-preview.png') });
 await dctx.close();
+
+// ── 5.5) 안전·접근성·연구 도구 회귀 (frontend lane) ──────────────────────
+// 각 시나리오는 별도 컨텍스트에서 돈다 — 주 페이지의 콘솔/HTTP 오류 수집을 오염시키지 않게.
+const jobId = jobHash.replace(/^#/, '');
+const freshContext = (options = {}) => browser.newContext({ viewport: { width: 1280, height: 900 }, ...options });
+
+// (a) 문서 속 외부 이미지(열람 추적 비컨·LAN 주소)는 요청되지 않고 자리표시로 바뀐다(frontend-3).
+{
+  const imgCtx = await freshContext();
+  const beaconHits = [];
+  imgCtx.on('request', (r) => {
+    if (/tracker\.example|192\.168\.0\.1/.test(r.url())) beaconHits.push(r.url());
+  });
+  await imgCtx.route((url) => url.pathname === `/api/jobs/${jobId}/html`, async (route) => {
+    const res = await route.fetch();
+    const body = await res.text();
+    await route.fulfill({
+      response: res,
+      body: body.replace('</section>',
+        '<p><img src="https://tracker.example/p.png?doc=42" alt="beacon">'
+        + '<img src="http://192.168.0.1/cgi-bin/ping.gif"></p></section>'),
+    });
+  });
+  const imgPage = await imgCtx.newPage();
+  await imgPage.goto(`${BASE}/${jobHash}`, { waitUntil: 'domcontentloaded' });
+  await imgPage.waitForSelector('#result-section:not([hidden])', { timeout: 20_000 });
+  await imgPage.click('button[data-tab="preview"]');
+  await imgPage.waitForSelector('#preview-body .blocked-image', { timeout: 15_000 }).catch(() => {});
+  const blocked = await imgPage.evaluate(() => ({
+    placeholders: document.querySelectorAll('#preview-body .blocked-image').length,
+    externalImgs: [...document.querySelectorAll('img')]
+      .filter((i) => /tracker\.example|192\.168/.test(i.getAttribute('src') || '')).length,
+    label: document.querySelector('#preview-body .blocked-image')?.textContent || '',
+  }));
+  // CSP 자체도 막는가 — 스크립트가 직접 만든 외부 이미지는 img-src 위반으로 거절된다.
+  const violated = await imgPage.evaluate(() => new Promise((resolve) => {
+    document.addEventListener('securitypolicyviolation', (e) => resolve(e.violatedDirective), { once: true });
+    const probe = new Image();
+    probe.src = 'https://tracker.example/csp-probe.png';
+    setTimeout(() => resolve(''), 3000);
+  }));
+  check('외부 이미지: 미리보기에 붙기 전에 자리표시로 바뀌고 요청이 없다',
+    blocked.placeholders >= 2 && blocked.externalImgs === 0
+      && beaconHits.filter((u) => !u.includes('csp-probe')).length === 0,
+    JSON.stringify({ blocked, beaconHits }));
+  check('CSP: 스크립트가 만든 외부 이미지도 img-src로 거절된다', /img-src/.test(violated), violated);
+  await imgCtx.close();
+}
+
+// (b) 5초 목록 폴링이 목록을 다시 그려도 키보드 포커스·2단계 삭제 무장이 유지된다(frontend-4).
+{
+  const kept = await page.evaluate(async () => {
+    const { state } = await import('/js/state.js');
+    const { refreshJobs, renderJobList } = await import('/js/jobs.js');
+    const del = document.querySelector('#job-list .job-item.active .ji-del')
+      || document.querySelector('#job-list .ji-del');
+    del.focus();
+    del.click(); // 1단계 — 무장
+    // 다른 잡이 맨 위에 생겼다가(업로드) 사라지는(삭제) 두 번의 증분 렌더 + 실제 목록 갱신
+    state.jobs = [{ job_id: 'e2e-ghost', filename: 'ghost.pdf', status: 'queued',
+      created_at: new Date().toISOString() }, ...state.jobs];
+    renderJobList();
+    await refreshJobs();
+    return {
+      sameFocus: document.activeElement === del,
+      connected: del.isConnected,
+      armed: del.classList.contains('armed'),
+      ghost: !!document.querySelector('#job-list [data-job-id="e2e-ghost"]'),
+    };
+  });
+  check('작업 목록: 증분 렌더 뒤에도 포커스·삭제 무장 유지',
+    kept.sameFocus && kept.connected && kept.armed && !kept.ghost, JSON.stringify(kept));
+  await page.waitForTimeout(2800); // 무장 만료 — 실수로 지우지 않게
+  check('작업 목록: 2단계 삭제 무장은 시간이 지나면 풀린다',
+    await page.evaluate(() => !document.querySelector('#job-list .ji-del.armed')));
+}
+
+// (c) 잡 품질 경고: '주의 N건' 칩 → 펼침 목록, 'N페이지'는 리더 이동 링크, 목록 줄 표시(frontend-2).
+{
+  const warnCtx = await freshContext();
+  const injected = [
+    '2페이지: single OCR 실패 후 PDF 내장 텍스트 레이어로 복구 (이미지·정밀 레이아웃 제외; RuntimeError: e2e)',
+  ];
+  await warnCtx.route((url) => url.pathname === '/api/jobs' || url.pathname === `/api/jobs/${jobId}`,
+    async (route) => {
+      if (route.request().method() !== 'GET') { await route.continue(); return; }
+      const res = await route.fetch();
+      const data = await res.json();
+      if (Array.isArray(data.jobs)) {
+        for (const j of data.jobs) if (j.job_id === jobId) j.warnings = injected;
+      } else {
+        data.warnings = injected;
+        data.notices = ['e2e 참고: 페이지 단위로 처리했습니다'];
+      }
+      await route.fulfill({ response: res, json: data });
+    });
+  const warnPage = await warnCtx.newPage();
+  await warnPage.goto(`${BASE}/${jobHash}`, { waitUntil: 'domcontentloaded' });
+  await warnPage.waitForSelector('#job-warnings-chip:not([hidden])', { timeout: 20_000 });
+  const chip = await warnPage.evaluate(() => ({
+    text: document.getElementById('job-warnings-chip').textContent,
+    expanded: document.getElementById('job-warnings-chip').getAttribute('aria-expanded'),
+    panelHidden: document.getElementById('job-warnings').hidden,
+    listBadge: document.querySelector(`#job-list .job-item.active .ji-warn`)?.textContent || '',
+  }));
+  check('품질 경고: 헤더 "주의 N건" 칩(접힌 상태)과 목록 줄 표시',
+    chip.text === '주의 1건' && chip.expanded === 'false' && chip.panelHidden && chip.listBadge === '주의 1',
+    JSON.stringify(chip));
+  await warnPage.click('#job-warnings-chip');
+  const panel = await warnPage.evaluate(() => ({
+    hidden: document.getElementById('job-warnings').hidden,
+    items: document.querySelectorAll('#job-warnings-list li').length,
+    notices: document.querySelectorAll('#job-notices-list li').length,
+    noticesHidden: document.getElementById('job-notices').hidden,
+    link: document.querySelector('#job-warnings-list .warning-page-link')?.textContent || '',
+  }));
+  check('품질 경고: 펼친 목록에 경고·참고를 따로 보인다',
+    !panel.hidden && panel.items === 1 && panel.notices === 1 && !panel.noticesHidden && panel.link === '2페이지',
+    JSON.stringify(panel));
+  await warnPage.waitForSelector('#reader-content .reader-rail-page', { timeout: 15_000 });
+  await warnPage.click('#job-warnings-list .warning-page-link');
+  await warnPage.waitForFunction(() => document.getElementById('reader-page')?.value === '2', null, { timeout: 10_000 })
+    .catch(() => {});
+  check('품질 경고: "2페이지" 링크가 리더 2페이지로 이동',
+    await warnPage.evaluate(() => document.getElementById('reader-page')?.value === '2'));
+  await warnCtx.close();
+}
+
+// (d) 인용·하이라이트: 카드 경계를 넘는 하이라이트가 DOM을 복제하지 않고, 탭 전환·새로고침
+//     뒤에도 남으며, 목록·Markdown 내보내기·삭제가 동작한다(frontend-5/6/10).
+if (layoutCap !== 'figure_only') {
+  const noteCtx = await freshContext({ acceptDownloads: true });
+  const notePage = await noteCtx.newPage();
+  await notePage.goto(`${BASE}/${jobHash}`, { waitUntil: 'domcontentloaded' });
+  await notePage.waitForSelector('#reader-content .reader-rail-page[data-page="1"] .reader-map-card .reader-map-target',
+    { timeout: 20_000 });
+  const railShape = () => notePage.evaluate(() => {
+    const ids = [...document.querySelectorAll('#reader-content [data-block-id]')].map((n) => n.dataset.blockId);
+    return {
+      sections: document.querySelectorAll('#reader-content .reader-rail-page').length,
+      cards: ids.length,
+      duplicates: ids.length - new Set(ids).size,
+      marks: document.querySelectorAll('#reader-content mark.reader-highlight').length,
+    };
+  });
+  const before = await railShape();
+  const selectAcross = (crossCards) => notePage.evaluate((cross) => {
+    const textNode = (root) => {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode: (n) => (n.data.trim() && !n.parentElement.closest('.katex')
+          ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP),
+      });
+      return walker.nextNode();
+    };
+    const targets = [...document.querySelectorAll(
+      '#reader-content .reader-rail-page[data-page="1"] .reader-map-card .reader-map-target')];
+    const range = document.createRange();
+    if (cross) {
+      const a = textNode(targets[0]);
+      const b = textNode(targets[targets.length > 1 ? 1 : 0]);
+      range.setStart(a, Math.min(2, Math.max(0, a.length - 1)));
+      range.setEnd(b, b !== a ? Math.min(6, b.length) : a.length);
+    } else {
+      range.selectNodeContents(targets[0]); // 카드 하나 전체 — 인용
+    }
+    const selection = getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.getElementById('reader-content').dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    return { cards: targets.length, text: document.getElementById('reader-selection').textContent };
+  }, crossCards);
+  const picked = await selectAcross(true);
+  await notePage.click('.reader-tools-wrap > summary');
+  await notePage.click('#reader-highlight');
+  const afterHighlight = await railShape();
+  const stored = () => notePage.evaluate((id) => {
+    const raw = localStorage.getItem(`uocr-reader-notes-${id}`);
+    return raw ? JSON.parse(raw).items : [];
+  }, jobId);
+  const storedAfterHighlight = await stored();
+  check('하이라이트: 카드 경계를 넘어도 섹션·카드·data-block-id를 복제하지 않는다',
+    afterHighlight.sections === before.sections && afterHighlight.cards === before.cards
+      && afterHighlight.duplicates === 0 && afterHighlight.marks >= (picked.cards > 1 ? 2 : 1),
+    JSON.stringify({ before, afterHighlight, picked }));
+  check('하이라이트: 잡별 저장소와 목록에 남는다',
+    storedAfterHighlight.length === 1 && storedAfterHighlight[0].kind === 'highlight'
+      && await notePage.evaluate(() => document.querySelectorAll('#reader-notes-list li').length === 1),
+    JSON.stringify(storedAfterHighlight));
+  await notePage.click('button[data-tab="qa"]');
+  await notePage.click('button[data-tab="reader"]');
+  await notePage.waitForTimeout(300);
+  const afterTabs = await railShape();
+  check('하이라이트: 질문 탭을 다녀와도 레일을 다시 그리지 않아 남는다',
+    afterTabs.marks === afterHighlight.marks, JSON.stringify(afterTabs));
+
+  await selectAcross(false);
+  await notePage.click('#reader-cite');
+  await notePage.waitForFunction(() => document.querySelectorAll('#reader-notes-list li').length === 2,
+    null, { timeout: 5_000 }).catch(() => {});
+  const citeToast = await notePage.evaluate(() => document.getElementById('toast')?.textContent || '');
+  check('인용 저장: 목록에 쌓이고 정직한 안내(내보낼 수 있음)를 보인다',
+    (await stored()).length === 2 && /인용을 저장했습니다/.test(citeToast), citeToast);
+
+  const download = notePage.waitForEvent('download');
+  await notePage.click('#reader-notes-export');
+  const file = await download;
+  const md = readFileSync(await file.path(), 'utf8');
+  check('인용·하이라이트: Markdown 파일로 내보낸다',
+    file.suggestedFilename().endsWith('.notes.md') && md.startsWith('# ')
+      && md.includes('## 인용 (1)') && md.includes('## 하이라이트 (1)'), md.slice(0, 200));
+
+  await notePage.reload({ waitUntil: 'domcontentloaded' });
+  await notePage.waitForSelector('#reader-content .reader-map-card', { timeout: 20_000 });
+  await notePage.waitForFunction(() => document.querySelectorAll('#reader-content mark.reader-highlight').length > 0,
+    null, { timeout: 10_000 }).catch(() => {});
+  const reloaded = await notePage.evaluate(() => ({
+    notes: document.querySelectorAll('#reader-notes-list li').length,
+    badge: document.getElementById('reader-notes-badge')?.textContent || '',
+    marks: document.querySelectorAll('#reader-content mark.reader-highlight').length,
+  }));
+  check('새로고침 뒤에도 목록과 하이라이트가 그대로', reloaded.notes === 2 && reloaded.badge === '저장 2'
+    && reloaded.marks >= 1, JSON.stringify(reloaded));
+
+  await notePage.click('.reader-tools-wrap > summary');
+  const deleteButtons = notePage.locator('#reader-notes-list li .reader-note-del');
+  for (let i = 0; i < 5 && await deleteButtons.count(); i += 1) await deleteButtons.first().click();
+  const cleared = await notePage.evaluate((id) => ({
+    storage: localStorage.getItem(`uocr-reader-notes-${id}`),
+    marks: document.querySelectorAll('#reader-content mark.reader-highlight').length,
+    empty: !document.getElementById('reader-notes-empty').hidden,
+  }), jobId);
+  check('삭제: 저장값·하이라이트·목록이 함께 지워진다',
+    cleared.storage === null && cleared.marks === 0 && cleared.empty, JSON.stringify(cleared));
+  await noteCtx.close();
+}
+
+// (e) health: 프리로드 실패·워커 중지를 '로딩 중'과 구분해 보인다(frontend-8).
+{
+  const healthCtx = await freshContext();
+  await healthCtx.route((url) => url.pathname === '/api/health', (route) => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({
+      ...health, model_loaded: false, worker_alive: false,
+      model_load_error: 'E2E: 모델 가중치를 찾을 수 없습니다',
+    }),
+  }));
+  const healthPage = await healthCtx.newPage();
+  await healthPage.goto(BASE, { waitUntil: 'domcontentloaded' });
+  await healthPage.waitForSelector('#health-badges .badge', { timeout: 10_000 });
+  const shown = await healthPage.evaluate(() => ({
+    badges: [...document.querySelectorAll('#health-badges .badge')].map((b) => b.textContent),
+    notice: !document.getElementById('upload-model-notice').hidden,
+    noticeError: document.getElementById('upload-model-notice').classList.contains('is-error'),
+    noticeText: document.getElementById('upload-model-notice-text').textContent,
+  }));
+  check('health: 로드 실패·작업 처리기 중지 배지와 사유가 담긴 업로드 안내',
+    shown.badges.includes('모델 로드 실패') && shown.badges.includes('작업 처리기 중지됨')
+      && !shown.badges.some((b) => b.includes('로딩 중')) && shown.notice && shown.noticeError
+      && shown.noticeText.includes('모델 가중치를 찾을 수 없습니다'), JSON.stringify(shown));
+  await healthCtx.close();
+}
+
+// (f) SSE 첫 연결이 비-200(프록시 502)이면 기다리지 않고 바로 상태 폴링으로 강등한다(frontend-1).
+{
+  const sseCtx = await freshContext();
+  let uploadedId = '';
+  let fakedRunning = false;
+  await sseCtx.route((url) => /\/api\/jobs\/[^/]+\/events$/.test(url.pathname), (route) => route.fulfill({
+    status: 502, contentType: 'text/plain', body: 'bad gateway (e2e)',
+  }));
+  await sseCtx.route((url) => /^\/api\/jobs\/[^/]+$/.test(url.pathname), async (route) => {
+    const res = await route.fetch();
+    const data = await res.json().catch(() => null);
+    // 새로 올린 잡의 첫 상세 조회만 '실행 중'으로 보여 실시간 스트림 경로를 강제한다
+    // (FakeEngine은 즉시 끝난다). 업로드 응답 id를 기다리면 경합이 생겨 기존 잡이 아닌지로 고른다.
+    if (data && route.request().method() === 'GET' && !fakedRunning
+        && data.job_id && data.job_id !== jobId) {
+      fakedRunning = true;
+      uploadedId = data.job_id;
+      await route.fulfill({ response: res, json: {
+        ...data, status: 'running', result: null,
+        progress: { phase: 'ocr', current_page: 1, total_pages: 2 },
+      } });
+      return;
+    }
+    await route.fulfill({ response: res });
+  });
+  const ssePage = await sseCtx.newPage();
+  await ssePage.goto(BASE, { waitUntil: 'networkidle' });
+  await ssePage.setInputFiles('#file-input', PDF);
+  await ssePage.waitForTimeout(300);
+  await ssePage.click('#upload-btn');
+  const degraded = await ssePage.waitForFunction(
+    () => /상태 폴링으로 전환/.test(document.getElementById('stream-pane')?.textContent || ''),
+    null, { timeout: 4_000 }).then(() => true).catch(() => false);
+  await ssePage.waitForSelector('#result-section:not([hidden])', { timeout: 30_000 }).catch(() => {});
+  const finished = await ssePage.evaluate(() => !document.getElementById('result-section').hidden);
+  check('SSE 첫 연결 502: 바로 폴링으로 강등해 결과까지 이어진다', degraded && finished && fakedRunning,
+    JSON.stringify({ degraded, finished, fakedRunning, uploadedId }));
+  await sseCtx.close();
+}
 
 // ── 6) 선택 확장: mock-provider 번역 → PDF 다운로드 + 페이지 Q&A ─────────
 // mock-full-flow.e2e.mjs가 로컬 번역/OpenAI Responses mock과 FakeEngine을 띄운
@@ -621,6 +933,53 @@ if (VERIFY_MOCK_LLM) {
     return !link.hidden && link.textContent.includes('원문·한국어')
       && link.getAttribute('href')?.includes('view=dual');
   }));
+  /* 한국어 보기의 일시 503(예열 빌드·내보내기 대기열)은 "번역본 없음"이 아니다 — 진행을
+     보이며 Retry-After만큼 기다렸다 다시 묻고, 전역 언어를 원문으로 되돌리지 않는다
+     (frontend-9 · gap1-metal-real-e2e-7). 리더(/html)와 레이아웃 탭(/layout) 둘 다 본다. */
+  {
+    const busyCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const busyHits = { html: 0, layout: 0 };
+    const busyOnce = (kind) => async (route) => {
+      busyHits[kind] += 1;
+      if (busyHits[kind] === 1) {
+        await route.fulfill({
+          status: 503, contentType: 'application/json', headers: { 'Retry-After': '1' },
+          body: JSON.stringify({ detail: 'PDF 내보내기 대기열이 가득 찼습니다 — 잠시 후 다시 시도하세요' }),
+        });
+        return;
+      }
+      await route.continue();
+    };
+    await busyCtx.route((url) => url.pathname === `/api/jobs/${jobId}/html`
+      && url.searchParams.get('lang') === 'ko', busyOnce('html'));
+    await busyCtx.route((url) => url.pathname === `/api/jobs/${jobId}/layout`
+      && url.searchParams.get('lang') === 'ko', busyOnce('layout'));
+    const busyPage = await busyCtx.newPage();
+    await busyPage.goto(`${BASE}/${jobHash}`, { waitUntil: 'domcontentloaded' });
+    await busyPage.waitForSelector('#lang-toggle:not([hidden])', { timeout: 20_000 });
+    await busyPage.click('#lang-ko');
+    const readerWaited = await busyPage.waitForFunction(
+      () => /한국어 본문 준비 중… 1초 뒤 다시 시도합니다 \(1\/4\)/
+        .test(document.getElementById('reader-content')?.textContent || ''),
+      null, { timeout: 10_000 }).then(() => true).catch(() => false);
+    await busyPage.waitForSelector('#reader-content .reader-rail-page', { timeout: 20_000 });
+    await busyPage.click('button[data-tab="doclayout"]');
+    const layoutWaited = await busyPage.waitForFunction(
+      () => /한국어 레이아웃 준비 중/.test(document.getElementById('doclayout-body')?.textContent || ''),
+      null, { timeout: 10_000 }).then(() => true).catch(() => false);
+    await busyPage.waitForSelector('#doclayout-body .layout-canvas', { timeout: 30_000 }).catch(() => {});
+    const busyState = await busyPage.evaluate(() => ({
+      ko: document.getElementById('lang-ko').getAttribute('aria-pressed'),
+      canvas: !!document.querySelector('#doclayout-body .layout-canvas'),
+      toast: document.getElementById('toast')?.textContent || '',
+    }));
+    check('한국어 보기 503: 진행을 보이며 재시도하고 한국어를 유지한다',
+      readerWaited && layoutWaited && busyState.ko === 'true' && busyState.canvas
+        && !/원문을 표시합니다/.test(busyState.toast) && busyHits.html >= 2 && busyHits.layout >= 2,
+      JSON.stringify({ readerWaited, layoutWaited, busyState, busyHits }));
+    await busyCtx.close();
+  }
+
   await page.click('#viewer-open');
   await page.waitForSelector('#production-viewer.is-open');
   await page.waitForFunction(() =>

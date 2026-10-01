@@ -745,8 +745,9 @@ export function normalizeReaderNotes(raw) {
     const text = String(item.text == null ? '' : item.text).replace(/\s+/g, ' ').trim()
       .slice(0, READER_NOTE_MAX_CHARS);
     const page = Math.floor(Number(item.page));
-    const id = String(item.id == null ? '' : item.id).slice(0, 64);
-    if (!kind || !text || !(page >= 1) || !id || ids.has(id)) continue;
+    const id = String(item.id == null ? '' : item.id);
+    // id는 data 속성·선택자에 쓰인다 — 손댄 저장값이 선택자를 깨뜨리지 못하게 형식을 묶는다.
+    if (!kind || !text || !(page >= 1) || !/^[\w-]{1,64}$/.test(id) || ids.has(id)) continue;
     ids.add(id);
     out.push({
       id, kind, page, lang: item.lang === 'ko' ? 'ko' : 'orig', text,

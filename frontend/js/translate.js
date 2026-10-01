@@ -4,7 +4,7 @@ import {
   applyRetryLock, lockRetry, parseEventData, retryLockRemaining, safeParse, setDownload,
   showToast,
 } from './ui.js';
-import { apiGet } from './api.js';
+import { POLL_TIMEOUT_MS, apiGet } from './api.js';
 import {
   applyPdfExport, applyReaderTranslateCta, clearReaderAlignmentRetryLanguage, loadReader,
 } from './reader.js';
@@ -297,7 +297,7 @@ export function startTranslatePolling(id) {
     if (state.currentJobId !== id || state.translateGen !== gen || inFlight) return;
     let st;
     inFlight = true;
-    try { st = await apiGet(`/api/jobs/${id}/translate/state?lang=ko`); }
+    try { st = await apiGet(`/api/jobs/${id}/translate/state?lang=ko`, { timeoutMs: POLL_TIMEOUT_MS }); }
     catch (_) { return; }
     finally { inFlight = false; }
     if (state.currentJobId !== id || state.translateGen !== gen) return;

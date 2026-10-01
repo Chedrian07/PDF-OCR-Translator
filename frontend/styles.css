@@ -419,6 +419,8 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
 /* ---- History ------------------------------------------------------------ */
 .history { padding: 12px; }
 .job-list { display: flex; flex-direction: column; gap: 4px; }
+/* 최신 50건 뒤의 기록을 한 쪽씩 더 받는다 — 목록 바로 아래 전폭 */
+.job-list-more { margin-top: 8px; font-variant-numeric: tabular-nums; }
 .empty-note { font-size: 12.5px; color: var(--text-subtle); padding: 8px 4px; text-align: center; }
 
 .job-item {

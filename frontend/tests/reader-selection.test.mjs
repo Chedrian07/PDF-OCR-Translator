@@ -129,3 +129,22 @@ test('하이라이트: 카드 경계를 넘어도 조각마다 감싸고 메모 
   assert.equal(second.target.querySelector('.katex annotation').textContent, 'x^2', '수식 구조는 그대로');
   assert.ok(cleared);
 });
+
+test('도구를 펼치느라 문서 선택이 지워져도 잡아 둔 범위로 하이라이트한다', (t) => {
+  const { doc, first } = build(t);
+  const range = fakeRange(doc, first.target.firstChild, 0, first.target.firstChild, 5);
+  let live = true;
+  globalThis.getSelection = () => (live
+    ? { isCollapsed: false, rangeCount: 1, getRangeAt: () => range, toString: () => 'Alpha', removeAllRanges() {} }
+    : { isCollapsed: true, rangeCount: 0, getRangeAt: () => null, toString: () => '', removeAllRanges() {} });
+  t.after(() => { delete globalThis.getSelection; });
+  captureReaderSelection();          // mouseup — 'Alpha'를 잡는다
+  live = false;                      // [선택 문장 도구] summary 클릭이 선택을 지운다
+  highlightReaderSelection();
+  const marks = el.readerContent.querySelectorAll('mark.reader-highlight');
+  assert.deepEqual(marks.map((m) => m.textContent), ['Alpha']);
+  assert.equal(state.readerNotes.length, 1);
+  assert.equal(state.readerSelection, '');
+  highlightReaderSelection();        // 한 번 칠한 범위는 다시 쓰지 않는다
+  assert.equal(el.readerContent.querySelectorAll('mark.reader-highlight').length, 1);
+});

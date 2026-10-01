@@ -1281,10 +1281,15 @@ auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은
   (VPN/Tailscale, 방화벽 뒤 홈랩)를 전제로 한 기본값이며, 루프백 전용으로 되돌리려면
   `.env`에 `BIND_HOST=127.0.0.1` + `ALLOWED_HOSTS=localhost,127.0.0.1`을 넣는다
   (compose가 컨테이너로 전달한다). 자세한 내용은 §14 · README §보안 · SECURITY.md.
+  ⚠ Docker가 게시한 포트는 `ufw`·`firewalld` 같은 호스트 방화벽 규칙을 거치지 않는다
+  (Docker가 자체 포워딩 규칙을 그 앞에 넣는다) — '방화벽 뒤'는 네트워크 방화벽, `DOCKER-USER`
+  체인 규칙, 또는 밖에서 닿지 않는 `BIND_HOST`(루프백·VPN 인터페이스 주소)를 뜻한다.
+  이 기본값(0.0.0.0·`ALLOWED_HOSTS=*`)은 의도된 결정이며 `test_ci_ops_contracts`가 고정한다.
+  CSRF 방어도 두지 않는다(인증 없는 서비스와 같은 신뢰 네트워크 전제).
 - **공유 볼륨**: `hf-cache`(모델 가중치 ~6.7GB, 최초 1회 다운로드)와
   `ocr-data`(잡 결과)를 **네 backend 서비스가 모두 공유**한다 — 엔진(스택)을 바꿔도
   잡 이력이 남는다. ⚠ 그래서 backend는 **한 번에 하나만** 뜬다: 두 번째 backend는
-  잡 저장소 단일 소유자 락(§2)에 막혀 기동을 거부하고(`다른 백엔드가 이미 이 잡
+  잡 저장소 단일 소유자 락(§4)에 막혀 기동을 거부하고(`다른 백엔드가 이미 이 잡
   디렉터리를 사용 중입니다`), `restart: unless-stopped`로 재시작을 반복한다. 스택을
   바꿀 때는 먼저 떠 있는 backend를 `docker compose stop ocr-cpu`처럼 멈춘다.
   과거의 `ocr-ovis-data`/`ocr-paddle-data`는 더 이상 참조되지 않으며,
@@ -1301,13 +1306,29 @@ auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은
   트리 전체를 조용히 건너뛰고 exit 0을 낸다(실측: 0바이트 복사).
 - `ocr-cpu`는 프로필이 없어 `docker compose up` = CPU 서비스만 기동 (.env 불필요)
 - GPU: `docker compose up -d ocr-cuda` — 서비스명을 명시하면 cuda 프로필이 자동 활성화
-- **하드닝**: 전 서비스 `security_opt: no-new-privileges:true`. 4개 backend 서비스
-  (ocr-cpu/ocr-cuda/ocr-ovis/ocr-paddle)는 `extra_hosts: host.docker.internal:host-gateway`
-  — Linux에서도 호스트 Ollama(§17) 접근이 가능하게 한다.
+- **하드닝**: 전 서비스 `security_opt: no-new-privileges:true` + `cap_drop: [ALL]`(비루트라
+  쓰는 캡이 없다 — 경계 집합도 비운다). backend 4개는 `deploy.resources.limits.pids: 1024`
+  (fork 폭주 차단 — 실측 최대 PID: textlayer 8, unlimited CPU 8스레드 60). CPU 이미지 backend
+  (`ocr-cpu`·`ocr-ovis`·`ocr-paddle`)는 `read_only: true` + `tmpfs /tmp`(`rw,noexec,nosuid,nodev,
+  size=2g`)라 쓰기는 `/data` 볼륨과 `/tmp`뿐이다(docker diff 실측 — 침해된 프로세스가 컨테이너
+  레이어에 페이로드를 남기지 못한다). `/tmp`에는 업로드 스풀·폰트 서브셋·PDF 워커 임시
+  디렉터리가 생기므로 `MAX_UPLOAD_MB`를 크게 올리면 size도 함께 올린다(메모리 상한에
+  포함된다). `ocr-cuda`와 GPU sidecar는 아직 read-only가 아니다(드라이버 JIT·컴파일 캐시 쓰기를
+  GPU 호스트에서 검증한 뒤 적용). 4개 backend 서비스는 `extra_hosts:
+  host.docker.internal:host-gateway` — Linux에서도 호스트 Ollama(§17)·로컬 OpenAI 호환 서버에
+  접근할 수 있게 한다. `backend/Dockerfile`: digest 고정 베이스 + `apt-get upgrade`, 앱 코드는
+  `--chown` 없이 복사해 **root 소유·읽기 전용**(예전에는 실행 사용자가 쓸 수 있었다), 바이트코드
+  미리 컴파일, uvicorn `--timeout-graceful-shutdown 5`(열린 SSE가 `docker stop`을 10초 SIGKILL로
+  끌고 가지 않게 — 실측 10.3초/exit 137 → 6.4초/exit 0). `compose.ollama.yaml`의 Ollama는
+  `0.35.0@digest`로 고정한다(root로 돌며 캡은 건드리지 않았다).
   두 sidecar 이미지도 **비루트(uid 1000)로 실행**한다 — 사용자가 올린 임의 PDF의 렌더
   이미지를 파서에 먹이는 쪽이라 신뢰 경계가 backend보다 바깥이다. PaddleX 캐시는
   `$HOME` 기준이라 마운트 경로가 `/home/app/.paddlex`로 바뀌었고, **이미 root 소유로
-  채워진 기존 캐시 볼륨은 한 번 `chown -R 1000:1000` 해야 한다**(각 Dockerfile 주석에 명령 있음).
+  채워진 기존 캐시 볼륨은 한 번 소유권을 바꿔야 한다** — 볼륨 이름을 추측하지 말고 compose로
+  실행한다(`cap_drop: [ALL]` 때문에 그 실행에만 캡을 돌려준다):
+  `docker compose --profile ovis run --rm --no-deps --user 0 --cap-add CHOWN --cap-add
+  DAC_OVERRIDE --entrypoint chown ovisocr2 -R 1000:1000 /data/hf` (paddle은 `--profile paddle …
+  paddleocr-vl -R 1000:1000 /data/hf /home/app/.paddlex` — OCR_ENGINE_PROTOCOL.md §운영).
 - **로그 로테이션·리소스 상한**: 전 서비스가 YAML 앵커 `x-logging`으로 json-file
   `max-size 10m × max-file 3`(서비스당 최대 30MB)을 쓴다 — `restart: unless-stopped`와
   겹쳐 장기 구동 호스트의 디스크를 조용히 채우던 문제 차단. 메모리 상한은
@@ -1318,10 +1339,15 @@ auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은
   `LLM_OPENAI_API_KEY`·`PAGE_SEPARATOR`는 backend 4개 서비스
   (`ocr-cpu`/`ocr-cuda`/`ocr-ovis`/`ocr-paddle`) **전부**에 있다.
   남용 방어 4종(`QA_RATE_LIMIT_PER_MIN`·`QA_MAX_CONCURRENT`·
-  `TRANSLATE_RATE_LIMIT_PER_MIN`·`TRANSLATE_MAX_ACTIVE`)과 `TRUSTED_PROXY_HOPS`,
-  내보내기 전역 상한(`PDF_EXPORT_MAX_CONCURRENT`·`PDF_EXPORT_QUEUE_TIMEOUT_S`)도
-  마찬가지로 4개 전부에 있다 — 소비처(`api.py`·`pipeline/derived.py`)가 엔진과
-  무관하게 모든 backend에서 돈다. ⚠ 이 중 하나라도 빠지면 운영자는 `.env`로
+  `TRANSLATE_RATE_LIMIT_PER_MIN`·`TRANSLATE_MAX_ACTIVE`)과 `TRUSTED_PROXY_HOPS`·
+  `TRUSTED_PROXY_IPS`, 내보내기 전역 상한(`PDF_EXPORT_MAX_CONCURRENT`·
+  `PDF_EXPORT_QUEUE_TIMEOUT_S`·`PDF_EXPORT_WARM_WAIT_S`), PDF 워커 상한·업로드 게이트
+  (`PDF_PAGE_TIMEOUT_S`·`PDF_EXPORT_BUILD_TIMEOUT_S`·`PDF_WORKER_MEM_LIMIT_MB`·
+  `PDF_MAX_PAGE_CONTENT_MB`·`PDF_MAX_PAGE_XOBJECT_CALLS`), 번역 노브(`TRANSLATE_STREAM`·
+  `TRANSLATE_MAX_RESPONSE_MB`·`TRANSLATE_REASONING_STYLE`·`TRANSLATE_EXTRA_BODY` 등),
+  `LLM_LOCAL_OPENAI_*`도 마찬가지로 4개 전부에 있다 — 소비처(`api.py`·`pipeline/derived.py`·
+  `pipeline/pdf_worker.py`·번역·Q&A)가 엔진과 무관하게 모든 backend에서 돈다.
+  `OCR_MLX_QUANT_BITS`는 어느 서비스에도 없다 — MLX는 macOS 호스트 전용이다. ⚠ 이 중 하나라도 빠지면 운영자는 `.env`로
   **조였다고 믿는데 컨테이너는 코드 기본값을 쓴다**(유료 LLM 키 소진 방어에서
   가장 위험한 실패 형태). `tests/test_ci_ops_contracts.py`가 "코드가 읽는 env 키는
   `.env.example`에 있고, 엔진 무관 키는 4개 서비스 전부에 있다"를 고정한다.
@@ -1395,33 +1421,88 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
 ## 10. 프론트엔드 (frontend/, 정적 SPA)
 
 - **외부 네트워크 리소스 0** (CDN/폰트/트래커 금지), 빌드 스텝 없음, 바닐라 JS(ES modules)
-- ⚠ **`app.js`에는 로직이 없다**: 진입점(361줄 — 부트스트랩 `init()` + 테스트가 쓰는
-  공개 심볼 재노출)일 뿐이고, 실제 구현은 `frontend/js/` **16개 모듈(약 6,060줄)**에
+- ⚠ **`app.js`에는 로직이 없다**: 진입점(372줄 — 부트스트랩 `init()` + 테스트가 쓰는
+  공개 심볼 재노출)일 뿐이고, 실제 구현은 `frontend/js/` **17개 모듈(약 8,080줄)**에
   있다. 브라우저 네이티브 ES 모듈이라 번들러가 없으므로 임포트 그래프가 곧 구조다.
   | 모듈 | 역할 |
   |---|---|
-  | `constants.js` · `state.js` · `ui.js` | UI 상수 · 전역 DOM/상태 핸들 · DOM 헬퍼·토스트·테마 |
-  | `api.js` · `sse.js` | `/api` fetch 래퍼 · SSE 구독/재연결·폴백 폴링 |
-  | `core.js` | **순수 함수 코어**(스트림 파싱·진행률·라벨·URL 조립) — 노드 단위 테스트 대상 |
-  | `upload.js` · `jobs.js` · `health.js` | 드롭존/검증 · 잡 히스토리·라우팅 · health 배지 |
+  | `constants.js` · `state.js` · `ui.js` | UI 상수(KaTeX 옵션 포함) · 전역 DOM/상태 핸들 · DOM 헬퍼·토스트·테마·안전한 HTML 주입 |
+  | `api.js` · `sse.js` | `/api` fetch 래퍼(타임아웃·503 재시도) · SSE 구독/재연결·폴백 폴링 |
+  | `core.js` | **순수 함수 코어**(스트림 파싱·진행률·라벨·URL 조립·응답 판정·목록 페이징·노트·리포트 정리) — 노드 단위 테스트 대상 |
+  | `upload.js` · `jobs.js` · `health.js` | 드롭존/검증 · 잡 목록(키 기반 렌더·'더 보기')·라우팅·주의/참고 칩 · health 배지 |
   | `live.js` · `results.js` · `tabs.js` | 3-패널 라이브 뷰 · 완료 화면 · 결과 탭 |
   | `translate.js` · `qa.js` | 번역 실행/상태/경고 요약(429 재시도 잠금 포함) · 페이지 Q&A |
-  | `viewer.js` · `reader.js` | 전체화면 뷰어 부트스트랩 · 연속 스크롤 리더(원문↔번역 동기화) |
+  | `viewer.js` · `reader.js` · `notes.js` | 전체화면 뷰어 부트스트랩 · 연속 스크롤 리더(원문↔번역 동기화·PDF 생성 리포트) · 리더 노트 저장소 |
+- `theme-init.js`는 `<head>`에서 동기로 도는 테마 부트스트랩이다 — CSP `script-src 'self'`
+  아래 인라인 스크립트를 두지 않기 위해 파일로 뺐다.
 - 한국어 UI, 다크/라이트 자동(`prefers-color-scheme`) + 수동 토글(localStorage)
 - 구성:
-  - 헤더: 앱명 "Unlimited-OCR — PDF → Markdown", `/api/health` 기반 디바이스/엔진 배지
-  - 좌측: PDF 드롭존(+파일선택, 확장자/크기 검증) · 옵션(mode, dpi) · 잡 히스토리(5초 폴링)
+  - 헤더: "PDF OCR Translator — PDF → HTML · 한국어", `/api/health` 기반 디바이스/엔진 배지
+    (`MLX · M4 Max`처럼 칩 이름 포함). health는 정상이면 30초, 로딩·실패·sidecar 오류·워커
+    중지·조회 실패면 10초마다 다시 묻고 숨긴 탭에서는 멈춘다(보이면 즉시). `model_load_error`는
+    '모델 로드 실패'(사유는 툴팁), `worker_alive=false`는 '작업 처리기 중지됨' 배지다.
+  - 좌측: PDF 드롭존(+파일선택, 확장자/크기 검증) · 옵션(mode, dpi) · 잡 목록. 목록은 최신 50건을
+    5초마다 갱신하고(직렬화 — 진행 중이면 건너뜀), 서버가 `has_more`를 주면 '더 보기 (50/132)'로
+    `?before=<마지막 id>` 50건씩 이어 받는다. 넓힌 창은 5초 폴에서도 유지된다(500건 넘게는 커서로
+    이어 받음), 커서 잡이 지워져 422면 처음부터 다시 받는다. 행은 `job_id`로 키를 두고 바뀐 필드만
+    갱신해 포커스·2단계 삭제 상태가 폴링을 넘긴다. 경고가 있는 잡에는 '주의 N' 배지.
   - 메인(활성 잡, **공식 데모 GIF 재현 3-패널 라이브 뷰**):
     1. 원본+레이아웃 — 현재 페이지 이미지 위에 스트림의 `<|det|>label [x1,y1,x2,y2]<|/det|>`
        (0–999 정규화) 좌표로 컬러 박스를 실시간 오버레이, `<PAGE>` 마커로 페이지 자동 전환
     2. RAW OUTPUT — SSE `token` 델타 모노스페이스 append (자동 스크롤, 청크 경계 holdback)
     3. 실시간 미리보기 — 정리된 스트림 텍스트를 600ms debounce로
-       `POST /render-preview`에 보내 렌더된 HTML 표시
-    - 실행 중 STOP(정지) 버튼 → `POST /cancel` (부분 결과 보존) · 진행 바(phase + 페이지 n/N)
-    - 완료 시 탭 [미리보기(HTML)] [Markdown] [레이아웃] [원본 페이지] · [.md] [.zip] 다운로드 · 삭제
+       `POST /render-preview`(본문 256 KiB 상한)에 보내 렌더된 HTML 표시. 밀린 페이지는 3개씩
+       동시에 렌더하고 순서대로 반영한다(실패하면 받은 페이지는 두고 다음 주기에 실패 페이지부터).
+       429는 실패로 세지 않고 `Retry-After`(델타 초·HTTP 날짜, 1–300초, 없으면 30초)만큼 쉰다 —
+       연속 5번 실패하면 멈추는 규칙은 다른 오류에만 적용된다.
+    - 실행 중 STOP(정지) 버튼 → `POST /cancel` (부분 결과 보존) · 진행 바(phase + 페이지 n/N).
+      대기 중 잡의 202 `{status:'canceled'}`는 즉시 마감한다(GET 한 번).
+    - 완료 시 탭 [읽기] [미리보기] [Markdown] [레이아웃] [감지 박스] [원본 페이지] [질문],
+      다운로드 [원본 HTML] [한국어 HTML] [원문·한국어 PDF] [Markdown] [전체 ZIP] · 삭제
+    - 헤더의 '주의 N건' 칩(경고 없이 참고만 있으면 흐린 '참고 N건')을 펼치면 `warnings`, 흐린
+      참고 목록에 `notices`가 보인다. 'N페이지'·'3–5페이지' 언급은 읽기 뷰 링크다. 전체 화면
+      뷰어 아래에서는 패널을 inert로 둔다.
+    - 결과 툴바 아래 흐린 접이식 목록 두 개: '번역 참고 사항 N건'(`/translate/state`의
+      `warnings`)과 'PDF 생성 리포트 · 주의 N건'(PDF 다운로드 뒤 `/pdf/report` — 보존 사유를
+      한국어로, 예: `listing_line_unaligned` → '원문 줄 위치 정렬 실패(그 줄만 원문)', 주의
+      문장은 'N페이지: …', 50건 초과분은 개수 안내). 다운로드 토스트는 '스캔 원문 N개 블록
+      지움'까지 요약한다.
   - 미리보기 탭은 `/api/jobs/{id}/html` 응답을 주입 (클라이언트 md 렌더러 불필요)
-  - SSE 불가 환경 폴백: 1초 상태 폴링(+부분 markdown 주기 조회)
-- 성능: token append는 rAF 배칭, 히스토리 50개 제한
+  - SSE 폴백: 첫 연결이 비-200(프록시 502·404 등)으로 바로 닫히면 즉시, 연결 중 오류는 2번째에
+    1초 상태 폴링으로 바꾸고 10/20초 간격으로 SSE 재승격을 시도한다. **폴백은 상태만 폴링한다**
+    — 라이브 세 패널은 재승격 때 `replay`로 복구된다(부분 markdown을 주기적으로 읽지 않는다).
+    번역 SSE도 같은 규칙이다.
+  - 삭제: SSE `error {deleted:true}`를 받으면 그 잡의 화면·뷰어·구독을 닫고 목록 줄·읽던 위치·
+    노트를 지운다. 다른 탭·API로 지워졌을 때만 '열려 있던 작업이 삭제되었습니다.' 토스트를 띄운다.
+    완료된 잡이 다른 곳에서 지워지면 다음 **전체** 목록 폴(`has_more=false`)에서 사라진 것을
+    보고 GET 404로 확인한 뒤 닫는다.
+- **한국어 보기 응답 판정**(`core.langFetchVerdict`): 404/409만 '번역 없음'으로 원문 보기로
+  돌아간다. 503(+`Retry-After`)은 '… 준비 중… N초 뒤 다시 시도합니다 (k/4)'를 보이며 최대 4번,
+  1–60초씩 기다린다(Retry-After가 없으면 5/10/20/30초). 네트워크 오류·그 밖의 5xx는 한국어
+  보기를 유지하고 [다시 시도]·[원문 보기]를 띄운다. PDF 다운로드도 503을 최대 4번 기다린다.
+  같은 (탭, 잡, 언어) 요청은 진행 중 하나로 합치고, 아티팩트 요청은 시도당 240초, 폴링은 20초
+  타임아웃이다(멈춘 요청 하나가 폴링을 막지 않게).
+- **안전한 HTML 주입**: 서버 HTML(미리보기·레이아웃·라이브 미리보기 조각·리더 레일)은 inert
+  `<template>`에서 파싱한 뒤, 같은 출처·`data:image`·`blob:`이 아닌 이미지 출처(`src`·`srcset`·
+  `poster`·`<source>`)를 '[외부 이미지 차단됨: alt]' 자리표시로 바꾸고 넣는다 — 서버 렌더러의
+  차단(§14)과 이중 방어다. 레이아웃·미리보기 이미지는 `loading=lazy`·`decoding=async`.
+- **수식**: 로컬 KaTeX **0.18.10**(GHSA-238p-pmpm-9mq7은 0.18.2에서 수정). 모든 `katex.render`가
+  `constants.katexOptions`(`throwOnError:false, maxSize:10, maxExpand:1000, strict:'ignore',
+  trust:false`)를 쓴다 — `\rule{2000em}` 같은 거대 박스와 무한 매크로를 막는다. 음수 간격
+  (`\hspace{-300em}`)은 KaTeX가 상한을 두지 않아 스크롤 컨테이너가 자른다.
+  `tests/katex-vendor.test.mjs`가 VERSION·번들 일치와 옵션 사용을 고정한다.
+- **리더 노트**(`notes.js`): 하이라이트·인용은 localStorage `uocr-reader-notes-<잡 id>`
+  (`{v, updated, items}`, 읽을 때마다 검증)에 잡당 200개, 브라우저당 50개 잡(오래 손대지 않은 잡부터
+  정리)까지 남는다. 저장 실패(용량·사생활 보호 모드)는 '저장됨' 대신 오류 토스트다. [선택 문장
+  도구] 안 목록에서 페이지 이동·삭제·Markdown 복사·내보내기(`<이름>.notes.md`). 하이라이트는 레일을
+  다시 그린 뒤(언어 전환·정렬 도착·새로고침) 공백 무시 검색으로 다시 칠하고, 카드·페이지를 넘는
+  선택은 텍스트 노드 조각마다 `<mark>`로 감싼다(DOM 복제·KaTeX 분할 없음). 수식을 가로지른
+  하이라이트는 새로고침 뒤 목록에만 남을 수 있다.
+- 성능: token append는 rAF 배칭. 리더 레일은 레일이 다시 만들어질 때(잡·언어·페이지 수 변경)만
+  전체를 다시 그리고 그 밖에는 아직 안 그린 섹션만 채운다. 레이아웃 탭이 보이게 될 때와
+  `document.fonts.ready` 뒤 레이아웃 맞춤을 다시 돌린다.
+- 테스트: `tests/*.test.mjs`(node --test — `helpers/fake-dom.mjs`·`reader-setup.mjs`로 jsdom 없이
+  `js/*.js` 런타임을 돌린다) + `tests/e2e/`(`ui.e2e.mjs` 실서버, `mock-full-flow.e2e.mjs` hermetic).
 
 ## 11. 테스트 전략
 
@@ -1431,11 +1512,40 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
     번역·Q&A 라우트, 레이트리밋, 잡 GC
   - pdf.py 렌더 테스트(생성 PDF), render.py img src 재작성,
     `test_pdf_export*.py`(레이아웃 보존·시각 안전성), translate/sidecar/llm 계약
-- `services/{ovisocr2,paddleocr_vl}/tests/`: sidecar 파서·어댑터 (stdlib만 — 모델·CUDA 불필요)
+  - 테스트 격리(`conftest.py`): `DISABLE_DOTENV=1`(개발자 `.env`의 실키를 읽지 않는다)과 세션
+    임시 `DATA_DIR`을 앱 임포트 전에 강제하고, `PDF_WORKER_MODE=inline`으로 PyMuPDF 작업을
+    호출 스레드에서 돌린다(많은 테스트가 pymupdf 내부를 monkeypatch한다). 격리 자체는
+    `pdf_worker_processes` 픽스처(그 테스트만 process 모드, 앞뒤로 풀 종료)와
+    `test_pdf_worker.py`·`test_pdf_complexity_gate.py`·`test_pdf_isolation.py`가 검증한다.
+    테스트는 `create_app()`을 인자 없이 부르지 않는다(`Settings(data_dir=tmp_path/…)`).
+  - MLX 테스트(`test_mlx_*.py`)는 mlx가 없으면 건너뛰고, 전처리·후처리 패리티는 Linux CI에서도
+    돈다. 문서·계약 드리프트 검사: `test_ci_ops_contracts.py`(env 키·compose·Dockerfile·워크플로·
+    SECURITY.md), `test_config_env_registry.py`(키 레지스트리), `test_dependency_floor.py`
+    (보안 하한·레거시 `import fitz` 금지), `test_security_headers.py`(CSP 두 층 동기화).
+- **기기 의존 opt-in 테스트**(기본 스위트에서는 건너뛴다 — `-rs`로 사유가 보인다):
+  - `make test-mps` = `OCR_MPS_TESTS=1` `tests/test_mps_contract.py`·`test_objc_pool.py` — 실제
+    MPS에서 P11·정적 ngram·P18·P17 뷰·ObjC 풀 회수를 확인한다. torch·macOS 업그레이드 전후에
+    돌린다(M4 Max 약 4초).
+  - `make test-mlx-real` = `OCR_MLX_REAL_TESTS=1` `tests/test_mlx_model_parity.py` — 실가중치
+    bf16 그리디 첫 64토큰 고정과 torch CPU fp32 로짓 비교. 고정 스냅샷이 로컬 HF 캐시
+    (`HF_HOME`, 기본 `~/.cache/huggingface`)에 있어야 한다(`local_files_only` — `make dev`를 한
+    번 띄우면 받아진다). mlx 업그레이드·MLX 포팅 수정·스냅샷 갱신 전후에 돌린다.
+  - 두 타깃은 `uv run` 대신 `backend/.venv/bin/python`을 직접 부른다(extra·C++ 모듈이 기본
+    동기화 밖이라).
+- `services/{ovisocr2,paddleocr_vl}/tests/`: sidecar 파서·어댑터·수명주기(로드 재시도·엔진 사망
+  재시작) (stdlib만 — 모델·CUDA 불필요) + HTTP 계층(`test_api.py` — 웹 계층만 lock과 같은
+  버전으로 설치)
 - `native/tests/`: C++ ↔ 파이썬 레퍼런스 패리티
-- `frontend/tests/`: `node --test`(replay·reader-scroll 등) + `tests/e2e/`
-  (`ui.e2e.mjs` = 실서버 대상, `mock-full-flow.e2e.mjs` = hermetic playwright)
+- `frontend/tests/`: `node --test`(replay·reader-scroll·busy-retry·job-list·pdf-report·
+  translate-warnings 등 — `helpers/fake-dom.mjs`로 jsdom 없이 런타임 검증) + `tests/e2e/`
+  (`ui.e2e.mjs` = 실서버 대상, `mock-full-flow.e2e.mjs` = hermetic playwright — 포트는
+  `E2E_MOCK_PORT`·`E2E_BACKEND_PORT`로 고정 가능. CSP 아래 테마·외부 이미지 차단·내려받은
+  한국어 HTML을 디스크에서 열어 meta CSP 확인·'더 보기'·번역 참고 사항·PDF 리포트까지 본다)
 - 실모델 E2E: `scripts/smoke_e2e.sh` — compose 기동 후 샘플 PDF 변환, figure 파일 존재 검증
+  (`capabilities.figures=true`인데 figure가 하나도 없으면 실패). `scripts/smoke_image.sh IMAGE
+  [EXPECT_VERSION]`은 compose와 같은 하드닝으로 이미지를 띄워 health·네이티브·버전·비루트·
+  root 소유 코드를 본 뒤 smoke_e2e를 돌린다(CI `docker-image`·release 공용). Paddle GPU smoke는
+  입력 텍스트 레이어에 한글이 있는데(또는 `--expect-korean`) 출력에 없으면 실패한다.
 
 ### 11.1 전 구간 검증 하네스 (`make verify-e2e`)
 
@@ -1446,7 +1556,7 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
   `scripts/mock_llm.py`(OpenAI 호환 목 서버)를 가리킨다. 목 서버는 마스킹
   플레이스홀더를 보존한 채 결정적으로 "번역"하므로 복원·layout 정렬·PDF 조판까지
   실제 경로가 전부 돈다.
-  `?fault=refusal|refusal_ko|echo|summary|drop_placeholder|http400|http429`
+  `?fault=refusal|refusal_ko|echo|summary|drop_placeholder|paired_tags|http400|http429`
   쿼리(또는 `FAULT` 환경변수)로 **결함 주입**도 한다. 쿼리 경로는
   `OPENAI_BASE_URL=…/v1?fault=echo` 형태로 쓴다 — `client._endpoint_url()`이 base의
   query를 보존하므로 실제로 도달한다. 하네스는 `drop_placeholder`를 **쿼리 경로로**
@@ -1458,11 +1568,25 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
   PDF 내보내기(`verify_pdf_export`) → CropBox(`verify_cropbox`) → 뷰어 계약
   (`verify_viewer`) → 보안(`verify_security` — `/files` 경로 탈출 등) →
   번역 결함 주입(`verify_translation_faults`) → 워커 복원력(`verify_worker_resilience`).
-  총 80개 안팎의 `check()` 단언을 세고 마지막에 `통과 N / 실패 M`을 출력한다
-  (실패가 있으면 종료코드 1). `--pages 6` 기준 로컬 실측 ≈120초(단언 82개 — 그중 61초가 429 백오프 실증이다).
+  `check()` 단언 89개를 세고 마지막에 `통과 N / 실패 M`을 출력한다(실패가 있으면 종료코드 1 —
+  `--pages 4`와 25쪽 전체가 같은 89개). M4 Max 실측: `--pages 4` 약 2분(그중 약 61초가 429
+  백오프 실증이다), 25쪽 전체 약 6분.
+- **D-1(같은 유닛 이중 번역)**: 목이 센 원문별 LLM 호출 수를 하네스가 `result.md`·`layout.json`·
+  `layout.{lang}.json`·`report.json`으로 **다시 세운 번역 계획**과 대조한다 — layout이 덮어 지연된
+  md 유닛은 1차에서 호출되지 않아야 하고, 2차 패스 유닛 수는 엔진 로그와 같아야 하며, 원문별
+  호출 수는 그 원문을 가진 유닛 수 이하여야 한다. 같은 문장이 다른 자리에 나오는 것은 정상
+  이다(25쪽에 21종) — 예전의 '중복 원문 0건' 단언은 25쪽 전체에서 늘 실패했다.
 - 옵션: `--pdf PATH`(기본 `sample/2504.19874v1.pdf`) · `--pages N`(앞 N페이지만) ·
-  `--skip faults,worker,cropbox` · `--work DIR`(기본 `tmp/verify-e2e`).
+  `--skip faults,worker,cropbox` · `--work DIR`(기본 `tmp/verify-e2e`) ·
+  `--mock-port`·`--api-port`(기본 0 = 빈 포트 자동, 둘은 달라야 한다).
   포트는 매 실행마다 빈 포트를 잡아 개발 서버(8000)와 충돌하지 않는다.
+- **상속 환경 정리**: 자식 프로세스 환경은 `scrubbed_env()` 위에 만든다 — `.env.example`에
+  문서화된 앱 노브 전부, `DATA_DIR`·`FRONTEND_DIR`·`FAKE_DELAY`·`DISABLE_DOTENV`·
+  `PDF_WORKER_MODE`, 자격증명처럼 보이는 이름(`…KEY`·`…TOKEN`·`…SECRET`·`PASSWORD` 등), LLM
+  공급자 접두, `HTTP(S)/ALL/NO_PROXY`를 지우고 `LLM_PROVIDER=openai-responses`·
+  `OLLAMA_BASE_URL=http://127.0.0.1:9`를 고정한다. 셸에 실키·프록시가 있어도 외부 호출이
+  없고, `PDF_WORKER_MODE=inline`이 새어 들어와 격리가 꺼지지 않는다. 기동 중 실패하면 이미
+  띄운 자식 프로세스도 정리한다(고아 목이 다음 실행의 결함 주입을 끄던 문제).
   `make verify-e2e VERIFY_ARGS="--pages 4"` 형태로 인자를 넘긴다.
 - **작업 디렉터리는 포트처럼 자동으로 갈라지지 않는다.** `api.log`·`data-main`·
   `fault-*`는 고정 이름이고 각 단계가 시작할 때 `rmtree`한다 — 같은 `--work`로 두
@@ -1470,8 +1594,10 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
   (`.harness.lock`, pid 기록)을 걸고, 살아 있는 실행이 잡고 있으면 "다른 `--work`를
   쓰라"는 메시지와 함께 **종료코드 2**로 즉시 멈춘다. 죽은 프로세스가 남긴 락은
   stale로 보고 인수한다.
-- 결함 주입 단계는 `refusal`·`refusal_ko`·`echo`·`summary`·`drop_placeholder`와
-  HTTP 오류 2종(`http400` 결정적 4xx / `http429` 재시도성)을 모두 돌린다.
+- 결함 주입 단계는 `refusal`·`refusal_ko`·`echo`·`summary`·`drop_placeholder`·`paired_tags`와
+  HTTP 오류 2종(`http400` 결정적 4xx / `http429` 재시도성)을 모두 돌린다. `paired_tags`는 XML
+  습관이 있는 소형 모델처럼 자기 닫힘 플레이스홀더를 쌍 태그로 바꾸는 결함이다 — 하네스는
+  닫는 태그·플레이스홀더 잔여물이 없고 빈 쌍이 채택되지 않았는지 본다(25쪽 기준 30–60초 추가).
   429는 `Retry-After: 86400`을 함께 보내므로 상한(`_MAX_BACKOFF_S=30`)이 없으면
   워커가 하루 묶인다 — 하네스는 벽시계로 **20초 이상 300초 미만**을 단언해 상·하한을
   동시에 지킨다(하한이 없으면 "재시도를 아예 안 하는" 퇴화도 통과한다).
@@ -1485,12 +1611,23 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
 | `backend` | `uv sync --locked --extra cpu` → Noto CJK 설치 → `pytest --cov`(term+xml), coverage.xml 아티팩트 업로드. **네이티브 미설치 = 순수 파이썬 폴백 경로** |
 | `backend-native` | 같은 스위트를 `uv pip install ../native` 후 `.venv/bin/python -m pytest`로 다시 돌린다 — **프로덕션 컨테이너가 실제로 쓰는 조합**. `uocr-native`는 backend 의존성 그래프 밖이라 이 잡이 없으면 `HAVE_NATIVE=True` 경로가 CI에서 0회 실행된다(`test_native_ops.py`의 패리티 검사가 통째로 skip). 설치가 조용히 되돌려지는 것을 막으려고 pytest 앞에 `HAVE_NATIVE` 단언 스텝을 둔다 |
 | `lint` | `ruff check . ../services` — sidecar는 backend uv.lock에 고정된 ruff를 재사용 |
+| `dependency-audit` | backend `uv.lock`(배포 이미지와 같은 cpu extra)을 `uv export`로 풀어 `pip-audit==2.10.1 --strict`로 검사(torch `+cpu` 같은 로컬 버전 표기는 떼고 감사 — 안 떼면 조용히 빠진다). 수용 권고 9건(torch 2·transformers 7)은 이유 주석과 함께 `--ignore-vuln`, **2027-04-01**이 지나면 잡이 실패한다. 두 sidecar의 `requirements.lock`도 감사하고 `paddlepaddle==3.3.1`은 OSV로 본다. `make audit`(`scripts/dependency_audit.sh`)이 같은 검사를 로컬에서 돌린다(수용 목록·기한·pip-audit 버전이 같은지 계약 테스트가 본다) |
 | `frontend` | `node --test` 단위 테스트 |
 | `native` | C++ 빌드 + 패리티 pytest (`native/tests` — 모듈 자체의 의미론) |
-| `sidecar` | matrix(`ovisocr2`,`paddleocr_vl`) 파서/어댑터 pytest |
+| `sidecar` | matrix(`ovisocr2`,`paddleocr_vl`) 파서/어댑터·수명주기 pytest + HTTP 계층(웹 계층만 lock과 같은 버전으로 설치 — 엔진 사망 503·폼 필드 상한) |
+| `docker-image` | matrix(amd64·arm64) CPU 이미지 빌드(push 없음) → `scripts/smoke_image.sh`(compose와 같은 하드닝 아래 textlayer 전 구간). GHA 캐시는 main(push·nightly·수동)에서만 쓴다 — PR·태그 캐시는 다른 ref에서 복원되지 않아 쿼터만 먹는다 |
 | `verify-e2e` | §11.1 하네스를 `--pages 6`으로 실행 (업로드→OCR→번역→PDF→뷰어→보안→결함 주입→워커 복원력). 실패 시 `api.log`·내보낸 PDF 아티팩트 업로드 |
-| `e2e-mock` | mock OpenAI + FakeEngine 백엔드 hermetic 브라우저 E2E. 러너 시간이 커서 **PR에서는 돌지 않고** nightly(`schedule: 0 18 * * *`)·`workflow_dispatch`에서만 실행, 실패 시 스크린샷 아티팩트 업로드 |
+| `e2e-mock` | mock OpenAI + FakeEngine 백엔드 hermetic 브라우저 E2E. 러너 시간이 커서 **PR에서는 돌지 않고** main push·nightly(`schedule: 0 18 * * *`)·`workflow_dispatch`에서 실행, 실패 시 스크린샷 아티팩트 업로드. 릴리스가 태그 커밋의 push CI 성공을 요구하므로 **사실상 릴리스 게이트**다 |
 
+- 액션은 전부 **전체 커밋 SHA**로 고정하고(버전은 주석) checkout은 `persist-credentials: false`다.
+  Dependabot(`.github/dependabot.yml`)이 backend uv·액션·베이스 이미지·compose 이미지 갱신을 주 1회
+  묶어서 연다 — transformers·torch·torchvision(모델 카드 고정)과 vLLM 베이스, sidecar
+  lock(날짜 창·CDN URL로 다시 만들어야 한다)은 받지 않는다.
+- **릴리스**(`release.yml`): 태그 커밋의 CI가 끝날 때까지 최대 90분 기다리고, 아키텍처별 이미지를
+  빌드·스모크한 뒤 push **전에** `trivy`(0.75.0, digest 고정)로 수정판이 있는 HIGH/CRITICAL을
+  막는다(수용 목록 `.github/trivyignore.yaml` — purl로 현재 고정 버전에만, 2027-04-01 만료).
+  `release-assets` 잡이 아키텍처별 `.sha256`을 확인하고 `SHA256SUMS`를 써서 오프라인 tarball과
+  함께 릴리스에 첨부한다(릴리스가 없으면 초안 생성). GHA 캐시는 main 캐시를 읽기만 한다.
 - **`--locked`가 계약**: lock 드리프트(pyproject만 고치고 uv.lock 커밋 누락)를 CI에서
   즉시 실패시킨다. 없으면 uv가 조용히 재잠금해 통과시키고, Dockerfile의 `--frozen`은
   의존성을 빠뜨린 채 빌드해 컨테이너 기동 시 ImportError로 드러난다.
@@ -1513,6 +1650,11 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
 5. ~~페이지 Q&A(LLM 공급자 레이어)~~ — 완료 (§17)
 6. 동시 워커 (GPU 멀티 인스턴스 / 페이지 병렬) — **미완료**. 워커는 여전히
    프로세스당 1개이며(`main.py`가 `Worker`를 하나만 만든다) 잡은 FIFO다.
+7. ~~Apple Silicon in-process MLX 엔진~~ — 완료 (§2·§6, `OCR_DEVICE=auto`의 Apple 기본. torch
+   MPS는 폴백). **남은 항목**: 성능 기준선은 Phase 4에서 순차로 다시 잰다(OCR_BENCHMARK.md).
+8. ~~PyMuPDF 프로세스 격리 + 업로드 복잡도 게이트~~ — 완료 (§18). **남은 항목**: 큰 내보내기
+   빌드를 페이지 범위로 나눠 여러 워커에서 병렬로 만들기, 쉬는 워커 회수, 업로드 검증 전용의
+   더 짧은 시간 상한.
 
 ## 13. 한국어 번역 (Translation)
 

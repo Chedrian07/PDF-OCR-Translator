@@ -288,6 +288,47 @@ export function planPreviewRender(raw, cachedHtmls, lastTailMd, lastTailSep) {
   return { newPages, tailMd, tailSep, tailChanged };
 }
 
+// 확정 페이지 렌더 요청을 최대 concurrency개까지 겹쳐 보내되, 결과는 페이지 순서대로
+// commit한다(순수 오케스트레이션 — tests/에서 검증). 한 페이지가 실패하면 그 앞까지만
+// commit하고 멈춘다 — 이미 받은 앞쪽 결과를 버리지 않고, 다음 사이클은 실패한 페이지부터
+// 다시 보낸다. 예전에는 백로그를 RTT마다 한 장씩 보내다 한 장만 실패해도 받은 수십 장을
+// 모두 버리고 처음부터 다시 보냈다(frontend-11).
+//   pages: [{md, …}] · render(page) → Promise<{html}|{status}> · commit(page, html)
+//   반환 {failStatus: -1|HTTP 상태, committed: 처리한 페이지 수, stale: 중간에 무효화됨}
+export async function renderPagesInOrder(pages, render, commit, options = {}) {
+  const concurrency = Math.max(1, Math.floor(Number(options.concurrency)) || 1);
+  const isCurrent = typeof options.isCurrent === 'function' ? options.isCurrent : () => true;
+  const list = Array.isArray(pages) ? pages : [];
+  const pending = new Array(list.length);
+  let next = 0;
+  let committed = 0;
+  const launch = () => {
+    while (next < list.length && next - committed < concurrency) {
+      const page = list[next];
+      pending[next] = page.md ? Promise.resolve().then(() => render(page))
+        : Promise.resolve({ html: '' }); // 내용 없는 확정 페이지 — 요청하지 않는다
+      next += 1;
+    }
+  };
+  launch();
+  while (committed < list.length) {
+    let result;
+    try {
+      result = await pending[committed];
+    } catch (_) {
+      result = { status: 0 };
+    }
+    if (!isCurrent()) return { failStatus: -1, committed, stale: true };
+    if (!result || result.html == null) {
+      return { failStatus: Number((result && result.status) || 0), committed, stale: false };
+    }
+    commit(list[committed], result.html);
+    committed += 1;
+    launch();
+  }
+  return { failStatus: -1, committed, stale: false };
+}
+
 // ── SSE 폴링 강등 → 재승격 백오프 (순수 — frontend/tests/에서 직접 검증) ──────
 // 강등 후 attempt번째(0부터) 재시도까지 기다릴 지연: 10초 → 20초 → 30초 상한.
 export function ssePromoteDelay(attempt) {

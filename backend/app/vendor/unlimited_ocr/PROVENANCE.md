@@ -10,7 +10,8 @@
 업스트림 코드는 CUDA 전용(`.cuda()`/`torch.autocast("cuda")` 하드코딩)이라
 CPU 백엔드 지원을 위해 벤더링 후 아래 패치를 적용했다.
 수정 대상 파일: **P1–P15는 `modeling_unlimitedocr.py`**, **P16–P20은
-`modeling_deepseekv2.py`**, **P21은 `modeling_unlimitedocr.py` + `deepencoder.py`**.
+`modeling_deepseekv2.py`**, **P21은 `modeling_unlimitedocr.py` + `deepencoder.py`**,
+**P22는 `modeling_unlimitedocr.py`**.
 `configuration_deepseek_v2.py`·`conversation.py`는 원본 그대로다.
 (패치 지점은 소스에서 `grep -n "vendor patch P" *.py`로 전수 확인할 수 있다 —
 업스트림 갱신 시 이 목록이 아니라 grep 결과를 진리원으로 삼을 것.)
@@ -42,5 +43,7 @@ CPU 백엔드 지원을 위해 벤더링 후 아래 패치를 적용했다.
 | P20 | (`modeling_deepseekv2.py`) `SlidingWindowLlamaAttention.forward`의 **디코드 정상상태(링) 분기** 슬롯 상태를 **모드별 단일 표현**으로 관리 — 기본(eager: CPU/MPS 전 구간·CUDA eager)은 파이썬 int(`past_kv._ring_pos` dict) + 슬라이스 `copy_`, **CUDA Graph 모드에서만** 디바이스 상주 0-dim int64 텐서(`past_kv._ring_pos_t` dict) + `index_copy_`·`add_(1).remainder_(W)`. 전환은 모듈 함수 `ring_slots_to_tensor`(fast_decode 그래프 경로가 캡처 직전 1회)·`ring_slots_to_int`(그래프 실패 폴백의 eager 재개 직전)로만 하고 `_ring_tensor_mode` 플래그로 한 시점에 한 표현만 둔다(이중 상태 금지). `_prefill_length`는 캡처 시점 고정 상수라 int dict 유지 | app/engine/fast_decode.py의 **CUDA Graph 디코드 캡처(U2)**는 링 슬롯 인덱싱·갱신이 캡처 안에서 재생 가능한 텐서 연산이어야 함(파이썬 int 갱신은 캡처에 기록되지 않아 리플레이 시 같은 슬롯만 덮어씀). 두 경로의 저장 값은 동일(같은 슬롯에 같은 K/V) → **출력 불변**(int↔텐서 전환을 섞은 실행이 스텝별 비트 동일 — 테스트로 고정). **MPS 영향(2026-10, M4 Max·torch 2.10)**: 최초 P20은 텐서 슬롯을 전 백엔드에 적용했는데, MPS의 `index_copy_`는 KV 길이에 비례하는 비용(호출당 KV 406/679/2317에서 151/196/663µs — 슬라이스 `copy_`는 5~6µs, 토큰당 24회 → 8쪽 청크 토큰당 15.9ms)이라 기본 8쪽 청크 디코드가 34 tok/s로 떨어졌다(audit MPS-1). eager를 int 슬롯으로 되돌린 뒤 실측: 8쪽 청크(프롬프트 2,189) 캡 320토큰 33.2~34.6 → 53.8~54.7 tok/s(+60%), 1쪽 캡 384토큰·8쪽 캡 320토큰 출력 토큰 동일 |
 
 | P21 | 추론 경로의 죽은 계산·중간 텐서 3곳 제거 — (a) (`modeling_unlimitedocr.py`) `forward`에서 `labels is None`이고 `q_len>1`(프리필)이면 `lm_head` 전에 `hidden_states[:, -1:, :]`로 자른다, (b) (`modeling_unlimitedocr.py`) `prepare_inputs_for_generation`의 `cache_position` 계산 삭제(`model_inputs`에 포함되지 않던 죽은 값), (c) (`deepencoder.py`) `SAM` neck 뒤 `net_2` 출력의 불필요한 `clone()` 제거(`net_3`은 입력을 in-place 변경하지 않고 `x2`는 이후 미사용) | (a) 프리필이 (시퀀스 × vocab) fp32 logits를 통째로 실체화해 페이지당 ~1GB급 VRAM 스파이크를 냈다 — 추론(HF generate·fast_decode)은 `[:, -1, :]`만 소비하므로 **출력 불변**, 학습(labels) 경로는 전체 유지. (b) 디코드 스텝마다 버려지는 `torch.arange` 디바이스 할당 제거 — 소비처가 없어 **동작 불변**. (c) 값이 같은 복사본 제거 — **비트 동일** |
+
+| P22 | (`modeling_unlimitedocr.py`) `draw_bounding_boxes`가 모델 좌표를 픽셀로 바꾼 뒤 **이미지 안으로 clamp** — `_clamp_box`: x/y = `int(v/999*size)`, x는 [0, W]·y는 [0, H]로 clamp, clamp 뒤 x2<=x1 또는 y2<=y1이면 퇴화 상자로 건너뜀(숫자가 아니거나(bool 포함)·비유한·4개가 아닌 좌표도 건너뜀). 건너뛴 image 상자와 좌표를 못 읽은 image ref도 크롭 번호(`img_idx`)는 소비 | **보안·견고성**: 모델 출력(PDF 내용으로 유도 가능)의 좌표가 그대로 `Image.crop`/`ImageDraw`로 가면 거대·음수 좌표가 페이지보다 큰 검정 크롭(메모리 폭주)이나 Pillow crop/paste 좌표 산술 오버플로(GHSA-6r8x-57c9-28j4 — Pillow 12.3.0에서 수정, 의존성 상향은 별도)에 닿는다(audit gap2-dependency-vuln-reachability-2). 번호 소비는 기존 crop 실패 시와 같은 규칙 — 마크다운 참조(`images/{prefix}{idx}.jpg`)·boxes.json 정렬 유지. 정상 좌표(0~999)의 결과는 불변. 같은 clamp 규칙을 MLX 엔진 이식이 공유한다 |
 
 업스트림 갱신 시: 새 revision을 받아 이 패치들을 재적용하고 이 문서를 갱신할 것.

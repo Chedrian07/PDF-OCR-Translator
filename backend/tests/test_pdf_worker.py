@@ -302,3 +302,31 @@ def test_exceptions_carry_no_unpicklable_state():
         PdfWorkerCanceled(), PdfWorkerBusy("export", 1.0), PdfWorkerRemoteError("X", "y"),
     ):
         assert str(pickle.loads(pickle.dumps(error)))
+
+
+def test_temp_files_of_a_killed_worker_are_removed(pdf_worker_processes, tmp_path):
+    """상한 초과로 종료된 워커는 finally를 못 돌린다 — 워커 전용 임시 디렉터리를 부모가 지운다."""
+    report = tmp_path / "made.txt"
+    with pytest.raises(PdfWorkerTimeout):
+        pdf_worker.run("pdf_worker_tasks:temp_dir_then_sleep", (report,), timeout=1.0)
+    made = Path(report.read_text(encoding="utf-8"))
+    assert made.name.startswith("uocr-font-")
+    assert made.parent.name.startswith("pdfocr-worker-ocr-")  # 워커 전용 디렉터리 안
+    assert not made.parent.exists()
+
+
+def test_orphan_worker_temp_dirs_are_swept_once(monkeypatch, tmp_path):
+    import subprocess
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(pdf_worker, "_SWEPT_SCRATCH", False)
+    finished = subprocess.Popen([sys.executable, "-c", "pass"])
+    finished.wait()
+    orphan = tmp_path / f"pdfocr-worker-export-{finished.pid}"
+    alive = tmp_path / f"pdfocr-worker-export-{os.getpid()}"
+    for path in (orphan, alive):
+        (path / "font").mkdir(parents=True)
+    pdf_worker._sweep_orphan_scratch()
+    assert not orphan.exists()  # 주인이 없는(이전 서버가 SIGKILL로 남긴) 디렉터리
+    assert alive.exists()  # 살아 있는 프로세스의 것은 건드리지 않는다

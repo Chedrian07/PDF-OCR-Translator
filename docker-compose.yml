@@ -136,6 +136,9 @@ services:
       # 리버스 프록시 뒤에 둘 때만 홉 수를 넣는다: 0이면 레이트리밋 키가 프록시 IP
       # 하나로 붕괴해 사용자 한 명이 전체 상한을 소진한다(api.py::_client_key).
       TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
+      # 그 헤더를 믿을 직접 연결 피어(프록시) IP·CIDR — 비우면 루프백만. 목록 밖 피어가
+      # 보낸 X-Forwarded-For는 위조로 보고 무시한다(호스트 프록시는 브리지 주소로 보인다).
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-}
       # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) ──
       OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
       NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}
@@ -262,6 +265,7 @@ services:
       TRANSLATE_RATE_LIMIT_PER_MIN: ${TRANSLATE_RATE_LIMIT_PER_MIN:-12}
       TRANSLATE_MAX_ACTIVE: ${TRANSLATE_MAX_ACTIVE:-4}
       TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-}   # 신뢰 프록시 주소 — 설명은 ocr-cpu 참조
       # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) — 설명은 ocr-cpu 참조 ──
       OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
       NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}
@@ -369,6 +373,7 @@ services:
       TRANSLATE_RATE_LIMIT_PER_MIN: ${TRANSLATE_RATE_LIMIT_PER_MIN:-12}
       TRANSLATE_MAX_ACTIVE: ${TRANSLATE_MAX_ACTIVE:-4}
       TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-}   # 신뢰 프록시 주소 — 설명은 ocr-cpu 참조
       # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) — 설명은 ocr-cpu 참조 ──
       OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
       NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}
@@ -515,6 +520,7 @@ services:
       TRANSLATE_RATE_LIMIT_PER_MIN: ${TRANSLATE_RATE_LIMIT_PER_MIN:-12}
       TRANSLATE_MAX_ACTIVE: ${TRANSLATE_MAX_ACTIVE:-4}
       TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-}   # 신뢰 프록시 주소 — 설명은 ocr-cpu 참조
       # ── textlayer 엔진 · 페이지 Q&A (Localight 통합) — 설명은 ocr-cpu 참조 ──
       OCR_LANGUAGES: ${OCR_LANGUAGES:-eng+kor}
       NATIVE_TEXT_THRESHOLD: ${NATIVE_TEXT_THRESHOLD:-120}

@@ -34,6 +34,7 @@ from .geometry import (
     _textbox_ink_rect,
 )
 from .models import _FlowCandidate, _LineSegment, _Replacement, _SourceSpan, _TextFitPlan
+from .spans import _span_redaction_band
 
 _TEXT_ORIGIN_RE = re.compile(
     r"1 0 0 1 ([-+0-9.]+) ([-+0-9.]+) Tm"
@@ -123,7 +124,9 @@ def _plan_listing_lines(
                 source_rect,
                 block_index,
                 None,
-                tuple(span.rect for span in segment.spans),
+                # span bbox가 아니라 baseline 띠 — 줄 단위 조판은 행간이 촘촘한 리스팅에서
+                # 쓰이므로 위·아래 줄(보존되는 줄 포함) 글리프를 함께 지우기 쉽다.
+                tuple(_span_redaction_band(fitz, span) for span in segment.spans),
             ))
             break
     return planned, changed
@@ -137,8 +140,13 @@ def _microfix_plan(
     fontsize: float,
     fontname: str,
     fontfile: str | None,
+    spans: tuple[_SourceSpan, ...] = (),
 ) -> _Replacement | None:
-    """원문 한 행 안에서 더 짧은 안전 치환만 허용하는 보존 텍스트 계획."""
+    """원문 한 행 안에서 더 짧은 안전 치환만 허용하는 보존 텍스트 계획.
+
+    `spans`를 주면 지울 영역을 span별 baseline 띠로 잡는다 — 참고문헌은 행간이
+    촘촘해 사각형(+0.3pt)으로 지우면 위·아래 서지 항목의 글리프까지 사라진다.
+    """
     try:
         font = _metrics_font(fontfile, fontname)
         width = (
@@ -156,8 +164,14 @@ def _microfix_plan(
         origin[0] + width,
         origin[1] - fontsize * font.descender,
     )
-    redact = +rect
-    redact += (-0.3, -0.3, 0.3, 0.3)
+    bands = tuple(_span_redaction_band(fitz, span) for span in spans)
+    if bands:
+        redact = +bands[0]
+        for band in bands[1:]:
+            redact.include_rect(band)
+    else:
+        redact = +rect
+        redact += (-0.3, -0.3, 0.3, 0.3)
     return _Replacement(
         _TextFitPlan(
             +redact,
@@ -172,6 +186,7 @@ def _microfix_plan(
         fontname,
         fontfile,
         rect,
+        redact_rects=bands,
     )
 
 
@@ -206,6 +221,7 @@ def _preserved_reference_microfixes(
                 max(_MIN_FONT_PT, median((first.size, slash.size, tail.size))),
                 fontname,
                 fontfile,
+                (first, slash, tail),
             )
             if plan is not None:
                 fixes.append(plan)
@@ -223,6 +239,7 @@ def _preserved_reference_microfixes(
             max(_MIN_FONT_PT, span.size),
             "cour",
             None,
+            (span,),
         )
         if plan is not None:
             fixes.append(plan)

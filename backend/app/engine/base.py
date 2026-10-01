@@ -54,7 +54,14 @@ class OutputLimitError(RepetitiveOutputError):
     (마지막 세그먼트를 뺀 나머지)를 그대로 병합하고 잘린 페이지부터만 다시 처리한다.
     None이면(run_single·모름) 청크 전체를 페이지별로 다시 처리한다. 출력 문자열은
     문서 내용이므로 메시지(로그·잡 경고에 남는다)에는 넣지 않는다.
+
+    limit_label: 닿은 상한의 이름 — runner가 잡 경고·참고·라이브 문구에 '<이름> 도달'로
+    쓴다. 기본 'MAX_LENGTH'(in-process 엔진의 총 길이 상한). 다른 상한에서 잘리는 엔진은
+    하위 클래스에서 바꾼다 — 예: sidecar는 페이지당 출력 토큰 상한이라 MAX_LENGTH를
+    가리키면 효과 없는 설정으로 운영자를 이끈다.
     """
+
+    limit_label: str = "MAX_LENGTH"
 
     def __init__(self, message: str, partial_output: str | None = None) -> None:
         super().__init__(message)

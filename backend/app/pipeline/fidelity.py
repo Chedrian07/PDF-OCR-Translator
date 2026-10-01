@@ -41,6 +41,7 @@ born-digital PDF에서는 PyMuPDF가 뽑는 텍스트가 **공짜 정답**이다
 
 from __future__ import annotations
 
+import contextlib
 import re
 import unicodedata
 from collections import Counter
@@ -189,13 +190,17 @@ def score(truth: str, candidate: str) -> float:
 
 @dataclass(frozen=True)
 class PageFidelity:
-    """한 페이지의 판정 결과. score is None이면 정답이 없어 판정하지 않았다."""
+    """한 페이지의 판정 결과. score is None이면 정답이 없어 판정하지 않았다.
+
+    timed_out이면 분석이 PDF 워커의 시간 상한(PDF_PAGE_TIMEOUT_S)을 넘었거나 앞서 넘은
+    페이지라 판정하지 않았다 — 러너가 그 페이지의 게이트를 건너뛰고 참고(notice)를 남긴다."""
 
     page: int
     score: float | None
     truth_chars: int
     ocr_chars: int
     reason: str = ""
+    timed_out: bool = False
 
     @property
     def measurable(self) -> bool:
@@ -434,58 +439,114 @@ def page_fidelity(fitz, page, raw_page: str, page_number: int) -> PageFidelity:
     return page_fidelity_blocks(fitz, page, blocks, page_number)
 
 
-def _open_pdf(pdf_path):
-    """(fitz, doc) 또는 (None, 사유). 열 수 없으면 게이트를 걸지 않는다."""
+def _import_fitz():
+    """(fitz, None) 또는 (None, 사유). PyMuPDF가 없으면 게이트를 걸지 않는다."""
     try:
         import pymupdf as fitz
     except ImportError:  # pragma: no cover — 배포 환경엔 항상 있다
         return None, "pymupdf 없음"
+    return fitz, None
+
+
+# 분석이 PDF 워커의 시간 상한을 넘은 페이지의 판정 사유
+ANALYSIS_TIMEOUT_REASON = "분석 시간 상한 초과 — 판정 생략"
+
+
+def evaluate_layout_page_local(
+    pdf_path, page_index: int, entry: dict, should_cancel: CancelCheck = None,
+) -> PageFidelity:
+    """(PDF 워커) layout.json 페이지 하나(`{page, blocks}`)를 원본과 대조한다.
+
+    원본 PDF를 열 수 없으면 '판정 불가'다(게이트를 걸지 않는다). 페이지 분석 중의 예외는
+    그대로 올린다 — 러너의 게이트 격리(_gate)가 경고로 남긴다."""
+    from . import pdf_worker
+
+    pno = page_index + 1
+    fitz, missing = _import_fitz()
+    if fitz is None:
+        return PageFidelity(pno, None, 0, 0, missing)
+    with contextlib.ExitStack() as stack:
+        try:
+            doc = stack.enter_context(pdf_worker.open_document(pdf_path))
+        except Exception:  # noqa: BLE001 — 원본 PDF 접근 실패는 '판정 불가'
+            return PageFidelity(pno, None, 0, 0, "원본 PDF 열기 실패")
+        if pno < 1 or pno > doc.page_count:
+            return PageFidelity(pno, None, 0, 0, "페이지 범위 밖")
+        return page_fidelity_blocks(
+            fitz, doc[pno - 1], entry.get("blocks") or [], pno, should_cancel,
+        )
+
+
+def evaluate_raw_page_local(pdf_path, page_index: int, raw_page: str) -> PageFidelity:
+    """(PDF 워커) 단독 재실행 결과 한 장을 같은 잣대로 판정한다."""
+    from . import pdf_worker
+
+    page_number = page_index + 1
+    fitz, missing = _import_fitz()
+    if fitz is None:
+        return PageFidelity(page_number, None, 0, 0, missing)
+    with contextlib.ExitStack() as stack:
+        try:
+            doc = stack.enter_context(pdf_worker.open_document(pdf_path))
+        except Exception:  # noqa: BLE001
+            return PageFidelity(page_number, None, 0, 0, "원본 PDF 열기 실패")
+        if page_number < 1 or page_number > doc.page_count:
+            return PageFidelity(page_number, None, 0, 0, "페이지 범위 밖")
+        return page_fidelity(fitz, doc[page_number - 1], raw_page, page_number)
+
+
+def _isolated_page(
+    target: str, pdf_path, page_number: int, args: tuple, should_cancel: CancelCheck,
+    *, task_polls_cancel: bool,
+) -> PageFidelity:
+    """페이지 판정 하나를 PDF 워커에서 — 시간 상한·워커 사망은 그 페이지만 '판정 생략'.
+
+    task_polls_cancel: 작업이 벡터 순회 중에 스스로 취소를 확인하는가 — inline 모드에서
+    should_cancel을 키워드로 넘긴다(프로세스 모드에서는 부모가 워커를 끝낸다)."""
+    from . import pdf_worker
+
     try:
-        return fitz, fitz.open(pdf_path)
-    except Exception:  # noqa: BLE001 — 원본 PDF 접근 실패는 '판정 불가'
-        return None, "원본 PDF 열기 실패"
+        return pdf_worker.run_page(
+            target, pdf_path, page_number - 1, args, cancel=should_cancel,
+            cancel_kwarg="should_cancel" if task_polls_cancel else None,
+        )
+    except pdf_worker.PdfWorkerCanceled:
+        raise JobCanceled() from None
+    except pdf_worker.PdfWorkerTimeout:  # 앞서 상한을 넘은 페이지(격리 메모) 포함
+        return PageFidelity(page_number, None, 0, 0, ANALYSIS_TIMEOUT_REASON, timed_out=True)
+    except pdf_worker.PdfWorkerCrashed:
+        return PageFidelity(
+            page_number, None, 0, 0, "분석 중 처리 프로세스가 비정상 종료 — 판정 생략",
+            timed_out=True,
+        )
 
 
 def evaluate_layout_pages(
     pdf_path, layout_pages: list, should_cancel: CancelCheck = None
 ) -> list[PageFidelity]:
-    """layout.json 형태의 페이지들(`{page, blocks}`)을 한 번에 판정한다.
+    """layout.json 형태의 페이지들(`{page, blocks}`)을 판정한다.
 
-    should_cancel(runner의 cancel.is_set)이 참이 되면 페이지마다·벡터 경로 순회 중에
-    JobCanceled를 올린다 — 벡터가 많은 문서에서 청크 평가가 수 분 걸릴 때 취소 클릭이
-    그동안 무시되지 않게."""
-    fitz, doc = _open_pdf(pdf_path)
-    if fitz is None:
-        return [
-            PageFidelity(int(p.get("page") or 0), None, 0, 0, doc)
-            for p in layout_pages
-        ]
+    페이지마다 PDF 워커 작업 하나로 돈다(pdf_worker — 호출 맥락의 풀, OCR 경로는 ocr):
+    벡터·텍스트 분석이 서버 GIL을 쥐지 않고, 페이지 하나가 시간 상한(PDF_PAGE_TIMEOUT_S)을
+    넘거나 워커를 죽이면 그 페이지만 timed_out(판정 생략)으로 남는다(감사 A11 — 예전에는
+    벡터 10^6개 페이지 분석이 수 분·1.6GB를 서버 프로세스에서 썼다).
+    should_cancel(runner의 cancel.is_set)이 참이 되면 페이지마다·벡터 경로 순회 중에(워커
+    모드에서는 부모가 워커를 끝내) JobCanceled를 올린다 — 벡터가 많은 문서에서 청크 평가가
+    오래 걸릴 때 취소 클릭이 그동안 무시되지 않게."""
     out: list[PageFidelity] = []
-    try:
-        for p in layout_pages:
-            _check_cancel(should_cancel)
-            pno = int(p.get("page") or 0)
-            if pno < 1 or pno > doc.page_count:
-                out.append(PageFidelity(pno, None, 0, 0, "페이지 범위 밖"))
-                continue
-            out.append(
-                page_fidelity_blocks(
-                    fitz, doc[pno - 1], p.get("blocks") or [], pno, should_cancel
-                )
-            )
-    finally:
-        doc.close()
+    for p in layout_pages:
+        _check_cancel(should_cancel)
+        pno = int(p.get("page") or 0)
+        out.append(_isolated_page(
+            "app.pipeline.fidelity:evaluate_layout_page_local", pdf_path, pno, (p,),
+            should_cancel, task_polls_cancel=True,
+        ))
     return out
 
 
 def evaluate_raw_page(pdf_path, raw_page: str, page_number: int) -> PageFidelity:
-    """단독 재실행 결과 한 장을 같은 잣대로 판정한다(채택 여부 판단용)."""
-    fitz, doc = _open_pdf(pdf_path)
-    if fitz is None:
-        return PageFidelity(page_number, None, 0, 0, doc)
-    try:
-        if page_number < 1 or page_number > doc.page_count:
-            return PageFidelity(page_number, None, 0, 0, "페이지 범위 밖")
-        return page_fidelity(fitz, doc[page_number - 1], raw_page, page_number)
-    finally:
-        doc.close()
+    """단독 재실행 결과 한 장을 같은 잣대로 판정한다(채택 여부 판단용) — PDF 워커에서."""
+    return _isolated_page(
+        "app.pipeline.fidelity:evaluate_raw_page_local", pdf_path, page_number,
+        (raw_page,), None, task_polls_cancel=False,
+    )

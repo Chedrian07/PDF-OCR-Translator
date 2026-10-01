@@ -1105,7 +1105,15 @@ def execute_job(
             job.warnings = merger.warnings
             job.notices = merger.notices
         store.save(job)
-        broker.publish(job.id, "error", {"message": job.error, "canceled": True})
+        if job.delete_requested:
+            # 실행 중 잡의 DELETE — 아래 finally가 디렉터리와 목록을 지운다. 대기 잡 DELETE
+            # (api.delete_job)와 같은 종료 이벤트를 보내야 구독자(다른 탭 등)가 화면을 닫는다.
+            # 그냥 canceled면 곧 사라질 부분 결과 화면을 그리고 404만 받는다.
+            broker.publish(job.id, "error", {
+                "message": "삭제된 작업입니다", "canceled": True, "deleted": True,
+            })
+        else:
+            broker.publish(job.id, "error", {"message": job.error, "canceled": True})
         logger.info("잡 취소: %s", job.id)
     except Exception as e:  # noqa: BLE001 — 잡 단위 격리
         sink.flush()

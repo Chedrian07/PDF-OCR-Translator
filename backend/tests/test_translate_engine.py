@@ -1846,3 +1846,21 @@ def test_분할_결합_출력도_유닛_전체_기준_게이트를_통과해야_
     res, report, out = _run_md(tmp_path, cfg, src + "\n", _CannedEverywhere(canned))
     assert res.kept_original == ["md:0:0"] and report["split"] == 0
     assert canned not in out and src in out
+
+
+def test_여러_줄_layout_블록과_같은_md유닛은_한_번만_번역한다(tmp_path, cfg):
+    """md 문단(여러 줄)이 layout 블록 하나와 통째로 같으면 layout 번역을 재사용한다 —
+    verify_e2e 25쪽 실측에서 같은 원문 중복 호출이 365종(810회 중)이었다."""
+    blocks = [
+        "Amir Zandieh\nGoogle Research\nzandieh at google dot com",
+        "We study online vector quantization\nwith near optimal distortion rates.",
+    ]
+    md = "\n\n".join(blocks) + "\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    lay = _layout_of(blocks)
+    (tmp_path / "layout.json").write_text(json.dumps(lay, ensure_ascii=False), encoding="utf-8")
+
+    client = EchoClient()
+    res = run_translation(tmp_path, "ko", cfg, client=client)
+    assert client.unit_calls == len(blocks) and res.total == len(blocks)
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(md)

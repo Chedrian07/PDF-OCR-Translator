@@ -20,11 +20,12 @@ import json
 import logging
 import os
 import shutil
+import sys
 import threading
 import time
 from pathlib import Path
 
-from . import artifacts
+from . import artifacts, pdf_worker
 from .pdf import render_pdf_pages
 from .pdf_export import (
     PDF_EXPORT_FORMAT_VERSION,
@@ -60,14 +61,19 @@ _STAGING_STALE_S = 3600.0
 
 # ── 내보내기 빌드 전역 동시성 상한 ────────────────────────────────────────
 # 잡 단위 락은 **같은 잡**의 중복 빌드만 막는다. 서로 다른 잡 N개가 동시에 요청되면
-# N개 빌드가 함께 돈다(실측 ~11s/17p, CPU 포화 — 폰트 서브셋·리댁션 청킹 전에는
-# 같은 문서가 ~43s였다). PDF_EXPORT_FORMAT_VERSION이 오르면 기존 배포의 전 캐시가
-# 한꺼번에 무효화되므로 업그레이드 직후 이 폭주가 실제로 일어난다 — 전역 상한을
-# 두고 대기가 길어지면 매달리는 대신 거절한다.
+# N개 빌드가 함께 돈다(실측 ~11s/17p — 폰트 서브셋·리댁션 청킹 전에는 같은 문서가
+# ~43s였다). PDF_EXPORT_FORMAT_VERSION이 오르면 기존 배포의 전 캐시가 한꺼번에
+# 무효화되므로 업그레이드 직후 이 폭주가 실제로 일어난다 — 전역 상한을 두고 대기가
+# 길어지면 매달리는 대신 거절한다.
 PDF_EXPORT_MAX_CONCURRENT_ENV = "PDF_EXPORT_MAX_CONCURRENT"
 PDF_EXPORT_QUEUE_TIMEOUT_ENV = "PDF_EXPORT_QUEUE_TIMEOUT_S"
-# 기본값: 빌드는 단일 스레드 CPU 작업이라 2면 코어를 놀리지 않으면서도 폭주는 막는다.
-# 0 이하로 두면 상한 비활성(예전 동작).
+# 기본값 2. 빌드·facsimile 래스터는 export 풀의 **워커 프로세스**에서 돈다(pdf_worker —
+# 풀 크기가 이 값이다). 예전에는 같은 프로세스의 스레드라 MuPDF가 GIL을 쥐어 N개 빌드가
+# 코어 하나를 나눠 쓸 뿐이었고(2스레드 가속비 1.00 — 감사 concurrency-3·pdf-export-9),
+# 같은 프로세스의 OCR 디코드까지 굶겼다. 이제 N은 실제로 병렬인 프로세스 수이고 서버
+# 프로세스의 GIL과 무관하다 — 코어가 넉넉하면 올리고, OCR과 CPU를 나눠 쓰려면 내린다.
+# 0 이하로 두면 슬롯 상한 비활성(예전 동작) — 그래도 동시 빌드는 export 풀 크기
+# (min(8, CPU))를 넘지 않는다.
 _PDF_EXPORT_MAX_CONCURRENT_DEFAULT = 2
 # 한 건이 ~11s(17페이지 실측)이므로 30s면 앞선 두어 건은 기다려 주고, 그보다
 # 길면 재시도가 낫다. 캐시 적중은 이제 락을 기다리지 않으므로(_ensure_translated_pdf)
@@ -571,34 +577,41 @@ def _write_build_stamp(job, lang: str, font_id: str, inputs: dict) -> None:
 
 # ── 빌더 호출 경계: 예외 정규화 · 삭제된 잡 보호 ─────────────────────────────
 @functools.lru_cache(maxsize=1)
-def _mupdf_errors() -> tuple[type[BaseException], ...]:
-    """MuPDF가 던지는 예외 타입 — PyMuPDF는 파이프라인처럼 지연 임포트한다.
-
-    pymupdf.mupdf.FzErrorBase(디스크 만원·사라진 디렉터리에 저장·리댁션 실패 등)는
-    Exception의 직계라 OSError·ValueError·RuntimeError 어디에도 걸리지 않는다.
-    """
+def _mupdf_error_types(fitz) -> tuple[type[BaseException], ...]:
     try:
-        from .pdf import quiet_fitz
-
-        fitz = quiet_fitz()
         return (fitz.mupdf.FzErrorBase, fitz.FileDataError)
-    except Exception:  # noqa: BLE001 — PyMuPDF가 없으면 정규화할 대상도 없다
+    except AttributeError:  # pragma: no cover — PyMuPDF API 변화
         return ()
 
 
+def _mupdf_errors() -> tuple[type[BaseException], ...]:
+    """MuPDF가 던지는 예외 타입 — 이 프로세스가 PyMuPDF를 이미 실었을 때만.
+
+    pymupdf.mupdf.FzErrorBase(디스크 만원·사라진 디렉터리에 저장·리댁션 실패 등)는
+    Exception의 직계라 OSError·ValueError·RuntimeError 어디에도 걸리지 않는다. 빌드·
+    렌더가 PDF 워커에서 도는 동안 서버 프로세스는 PyMuPDF를 싣지 않는다 — 실리지 않았으면
+    여기서 MuPDF 예외가 날 수도 없으므로 정규화 대상을 비우고 임포트하지 않는다.
+    """
+    fitz = sys.modules.get("pymupdf")
+    return () if fitz is None else _mupdf_error_types(fitz)
+
+
 def _call_builder(builder, *args, message: str, **kwargs):
-    """빌더 호출 — MuPDF 예외를 사용자용 PdfExportError로 정규화한다.
+    """빌더 호출 — MuPDF 예외·PDF 워커 실패를 사용자용 PdfExportError로 정규화한다.
 
     지금은 두 빌더(build_translated_pdf·build_dual_pdf)가 스스로 모든 예외를
-    PdfExportError로 정규화한다. 예전 build_translated_pdf는 fitz.open만 감싸 MuPDF
-    예외가 그대로 새어 /pdf·/page가 메시지 없는 500을, /layout이 문서화된 '좌표 텍스트
-    폴백' 대신 500을 내고 예열 스레드가 traceback을 남기고 죽었다. 이 경계는 빌더를
-    바꿔 끼우는 이음매(테스트·api의 build= 인자)에도 같은 계약을 지키는 마지막 방어선이다.
+    PdfExportError로 정규화한다(워커 상한 초과·비정상 종료 포함). 예전 build_translated_pdf는
+    fitz.open만 감싸 MuPDF 예외가 그대로 새어 /pdf·/page가 메시지 없는 500을, /layout이
+    문서화된 '좌표 텍스트 폴백' 대신 500을 내고 예열 스레드가 traceback을 남기고 죽었다.
+    이 경계는 빌더를 바꿔 끼우는 이음매(테스트·api의 build= 인자)와 facsimile 렌더러(워커
+    상한 초과·비정상 종료)에도 같은 계약을 지키는 마지막 방어선이다.
     """
     try:
         return builder(*args, **kwargs)
     except (PdfExportError, PdfExportBusyError):
         raise
+    except pdf_worker.PdfWorkerError as error:
+        raise PdfExportError(f"{message} ({error})") from error
     except _mupdf_errors() as error:
         raise PdfExportError(message) from error
 
@@ -850,14 +863,18 @@ def _ensure_facsimile_pages(
 
 
 def _render_pages(render, pdf_path: Path, out_dir: Path, *, dpi: int, max_pages: int) -> None:
-    """번역 PDF 래스터 — 렌더러의 실패(전 페이지 실패·암호화·페이지 상한은
+    """번역 PDF 래스터 — 렌더러의 실패(전 페이지 실패·암호화·페이지 상한·시간 상한 누적은
     ValueError, 손상 PDF는 MuPDF 예외)를 사용자용 PdfExportError로 정규화한다.
-    예전에는 /page?lang=ko가 이 경우 409 안내 대신 500이었다."""
+    예전에는 /page?lang=ko가 이 경우 409 안내 대신 500이었다.
+
+    래스터는 export 풀의 워커에서 페이지마다 돈다(pool_scope — 렌더러 시그니처는 그대로라
+    주입된 대역도 그대로 쓸 수 있다). OCR 입력 렌더(ocr 풀)와 서로 기다리지 않는다."""
     try:
-        _call_builder(
-            render, pdf_path, out_dir, dpi=dpi, max_pages=max_pages,
-            message="번역 페이지 이미지를 만들 수 없습니다 — PDF 처리 중 오류가 났습니다",
-        )
+        with pdf_worker.pool_scope(pdf_worker.POOL_EXPORT):
+            _call_builder(
+                render, pdf_path, out_dir, dpi=dpi, max_pages=max_pages,
+                message="번역 페이지 이미지를 만들 수 없습니다 — PDF 처리 중 오류가 났습니다",
+            )
     except ValueError as error:
         raise PdfExportError(str(error) or "번역 페이지 이미지를 만들 수 없습니다") from error
 

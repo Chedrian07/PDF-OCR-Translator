@@ -12,6 +12,12 @@
 #   같은 이유로 전환은 `docker compose stop ovisocr2 ocr-ovis`(대상만 정지)를 쓰고,
 #   `--profile ovis down`은 ocr-cpu까지 내리는 전체 정리용으로만 쓴다.
 #
+# ⚠ backend는 한 번에 하나만: 네 backend(ocr-cpu·ocr-cuda·ocr-ovis·ocr-paddle)가 같은
+#   ocr-data(잡 저장소)를 쓰므로, 두 번째 backend는 실행 중인 잡을 지키려고 기동을
+#   거부하고(잡 저장소 단일 소유자 락 — docs/ARCHITECTURE.md §2) restart 정책으로
+#   재시작을 반복한다. 스택을 바꾸기 전에 떠 있는 backend를 먼저 멈춘다:
+#          docker compose stop ocr-cpu
+#
 # ocr-cpu는 프로필 없는 기본 서비스라 .env 없이도 기동된다.
 # ocr-cuda는 cuda 프로필 — 서비스명을 명시하면 프로필이 자동 활성화된다.
 # 모델 가중치(~6.7GB)는 최초 실행 시 hf-cache 볼륨에 1회 다운로드된다.

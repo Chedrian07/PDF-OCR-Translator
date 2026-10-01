@@ -287,7 +287,17 @@ class _TranslationRun:
     def __post_init__(self) -> None:
         self.job_dir = Path(self.job_dir)
         self.tdir = self.job_dir / "translations" / self.lang
-        self.tdir.mkdir(parents=True, exist_ok=True)  # error 상태도 기록할 수 있도록 선행 생성
+        # error 상태도 기록할 수 있도록 선행 생성하되 parents=False — 잡 디렉터리는 만들지
+        # 않는다. 삭제(DELETE·TTL GC)와 겹친 번역 스레드가 parents=True로 잡 디렉터리를
+        # 되살려 meta.json 없는 고아(translations/만 든 디렉터리)를 남겼다(api.py
+        # _write_translate_state와 같은 규칙).
+        try:
+            self.tdir.parent.mkdir(exist_ok=True)
+            self.tdir.mkdir(exist_ok=True)
+        except FileNotFoundError:
+            raise TranslateError(
+                "작업 디렉터리가 없습니다 — 삭제된 작업은 번역할 수 없습니다"
+            ) from None
         self.upath = self.tdir / "units.json"
         self.started = _now()
 

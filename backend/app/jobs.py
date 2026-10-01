@@ -45,6 +45,9 @@ _JOB_DIR_NAME = re.compile(r"^j_[0-9a-f]{12}$")
 # replay 사본(각 최대 8M자)을 연결 수에 비례해 쌓을 수 있었다.
 _SUBSCRIBERS_PER_CHANNEL = 8
 _SUBSCRIBERS_TOTAL = 64
+# 채널별 마지막 발행 시각 메모 상한 — 터미널 이벤트(done/error)에서 지우지만, 끝나지 않은
+# 채널이 쌓여도 무한히 자라지 않게.
+_ACTIVITY_MAX_CHANNELS = 4096
 
 
 class SubscriberLimitError(RuntimeError):
@@ -546,6 +549,9 @@ class EventBroker:
         # 잡 시작부터 지금까지 발행한 token 문자 수(절대 오프셋). 앞쪽 절단과
         # 무관하게 단조 증가하므로 rewind 지점을 절대 좌표로 지정할 수 있다.
         self._token_emitted: dict[str, int] = {}
+        # 채널별 마지막 발행 시각(time.time) — 실행 중 잡이 진행하고 있는지(웨지 관측)를
+        # health가 읽는다(Worker.progress_snapshot).
+        self._activity: dict[str, float] = {}
         self._lock = threading.Lock()
 
     @staticmethod
@@ -606,6 +612,12 @@ class EventBroker:
         # "대기 중 token을 비우고 히스토리를 스냅샷"하는 사이에 새 token이 큐로
         # 들어가면 replay와 중복된다. put_nowait는 블로킹하지 않아 안전하다.
         with self._lock:
+            if event in ("done", "error"):
+                self._activity.pop(job_id, None)
+            else:
+                if len(self._activity) >= _ACTIVITY_MAX_CHANNELS and job_id not in self._activity:
+                    self._activity.clear()
+                self._activity[job_id] = time.time()
             if event == "token":
                 text = data.get("text")
                 if isinstance(text, str) and text:
@@ -699,6 +711,11 @@ class EventBroker:
     def publish_progress(self, job: Job) -> None:
         self.publish(job.id, "progress", {**job.progress, "status": job.status})
 
+    def last_activity(self, job_id: str) -> float | None:
+        """채널에 마지막으로 이벤트(token·progress·reset 등)를 발행한 시각(time.time)."""
+        with self._lock:
+            return self._activity.get(job_id)
+
 
 class Worker(threading.Thread):
     """단일 워커: 모델이 프로세스당 1개이므로 잡을 직렬 처리한다."""
@@ -723,6 +740,10 @@ class Worker(threading.Thread):
         # 'model_loaded:false, error:null'(아직 로딩 전)로 보였다 — 워커도 기록한다.
         self.load_state = load_state
         self._queue: queue.Queue = queue.Queue()
+        # 지금 실행 중인 잡과 워커의 마지막 진행 시각 — /api/health가 워커 웨지(살아 있지만
+        # 진행하지 않는 상태)를 관측할 수 있게 한다. worker_alive는 스레드 생존만 본다.
+        self.current_job_id: str | None = None
+        self._last_beat: float | None = None
 
     def _settings_for(self, job: Job) -> "Settings":
         """이 잡을 실행할 설정 — 페이지 구분자는 잡에 고정된 값을 쓴다(재시작으로 다시
@@ -739,6 +760,23 @@ class Worker(threading.Thread):
 
     def stop(self) -> None:
         self._queue.put(None)
+
+    def _beat(self) -> None:
+        self._last_beat = time.time()
+
+    def progress_snapshot(self) -> tuple[str | None, float | None]:
+        """(실행 중 잡 ID 또는 None, 마지막 진행 시각 time.time 또는 None).
+
+        진행 = 잡 시작·종료, 그 잡 채널의 모든 이벤트(페이지 진행·토큰 스트림·모델 로딩 대기
+        알림). 잡이 있는데 이 시각이 오래됐으면 워커가 멈춘 것이다(예전에는 적대적 PDF 하나가
+        렌더를 영원히 붙잡아도 health가 worker_alive=true만 보였다 — 감사 security-2)."""
+        job_id = self.current_job_id
+        last = self._last_beat
+        if job_id is not None:
+            activity = self.broker.last_activity(job_id)
+            if activity is not None and (last is None or activity > last):
+                last = activity
+        return job_id, last
 
     def _drains_objc_pool_per_job(self) -> bool:
         """잡마다 ObjC 오토릴리스 풀로 감쌀지 — 실제 디바이스가 Metal(torch MPS)일 때만.
@@ -774,6 +812,8 @@ class Worker(threading.Thread):
                     # 대기 중에 API가 이미 취소로 마감했다(종료 이벤트도 그쪽이 발행)
                     continue
                 cancel = self.cancel_events.setdefault(job_id, threading.Event())
+                self.current_job_id = job_id
+                self._beat()
                 if job.delete_requested or cancel.is_set():
                     job.mark_finished("canceled", "사용자에 의해 취소되었습니다")
                     self.store.save(job)
@@ -833,3 +873,6 @@ class Worker(threading.Thread):
                     self.broker.publish(job_id, "error", {"message": stuck.error})
             finally:
                 self.cancel_events.pop(job_id, None)
+                if self.current_job_id is not None:
+                    self.current_job_id = None
+                    self._beat()

@@ -151,17 +151,59 @@ def export_wait_budget(seconds: float | None = None):
 
     라우트 하나가 여러 ensure를 연달아 호출할 때(예: /pdf?view=dual은 단일 PDF +
     대조 PDF) 바깥에서 한 번 열어 두면 그 요청 전체의 대기 상한이 하나로 묶인다.
+
+    이미 열린 예산 안에서 **더 큰** 예산(예열 대기 상한)을 요청하면 남은 예산을
+    늘린다 — 줄이지는 않는다. 예전에는 중첩이면 인자를 버려서, /pdf가 먼저 연
+    30s 예산 때문에 예열 대기 상한(180s)이 실제 라우트에서 한 번도 적용되지 않았다
+    (번역 직후 다운로드가 30.1s 뒤 503, 실경로 2회 재현). 연장 폭은 이 요청이 이미
+    기다린 시간을 빼서 잡으므로 요청 전체의 대기 합은 큰 쪽 상한을 넘지 않는다.
+    예열 스레드의 예산 0은 고정(pinned)이라 연장되지 않는다(_warm_budget).
     """
     owner = getattr(_EXPORT_WAIT, "remaining", None) is None
     if owner:
         _EXPORT_WAIT.remaining = max(
             0.0, _export_queue_timeout() if seconds is None else seconds,
         )
+        _EXPORT_WAIT.waited = 0.0
+    elif seconds is not None and not getattr(_EXPORT_WAIT, "pinned", False):
+        _EXPORT_WAIT.remaining = max(
+            _EXPORT_WAIT.remaining, seconds - getattr(_EXPORT_WAIT, "waited", 0.0),
+        )
     try:
         yield
     finally:
         if owner:
             _EXPORT_WAIT.remaining = None
+            _EXPORT_WAIT.waited = 0.0
+
+
+@contextlib.contextmanager
+def _warm_budget():
+    """예열 스레드 전용 예산 — 대기 0, 연장 불가(pinned), 예열 표식(warm).
+
+    예열은 사용자 요청을 밀어내면 안 되므로 어떤 락·슬롯도 기다리지 않는다.
+    예열 스레드 자신도 `_warm_inflight`가 참이라 그대로 두면 `_ensure_translated_pdf`
+    의 예열 대기 연장이 자기 예산을 0 → 180s로 늘려 버린다 — pinned가 그것을 막는다.
+    """
+    saved = (
+        getattr(_EXPORT_WAIT, "remaining", None),
+        getattr(_EXPORT_WAIT, "waited", 0.0),
+        getattr(_EXPORT_WAIT, "pinned", False),
+        getattr(_EXPORT_WAIT, "warm", False),
+    )
+    _EXPORT_WAIT.remaining = 0.0
+    _EXPORT_WAIT.waited = 0.0
+    _EXPORT_WAIT.pinned = True
+    _EXPORT_WAIT.warm = True
+    try:
+        yield
+    finally:
+        (
+            _EXPORT_WAIT.remaining,
+            _EXPORT_WAIT.waited,
+            _EXPORT_WAIT.pinned,
+            _EXPORT_WAIT.warm,
+        ) = saved
 
 
 def _acquire_within_budget(acquire) -> bool:
@@ -176,7 +218,9 @@ def _acquire_within_budget(acquire) -> bool:
     try:
         return bool(acquire(timeout=remaining))
     finally:
-        _EXPORT_WAIT.remaining = max(0.0, remaining - (time.monotonic() - started))
+        elapsed = time.monotonic() - started
+        _EXPORT_WAIT.remaining = max(0.0, remaining - elapsed)
+        _EXPORT_WAIT.waited = getattr(_EXPORT_WAIT, "waited", 0.0) + elapsed
 
 
 def _pdf_export_slots() -> threading.BoundedSemaphore | None:
@@ -411,8 +455,9 @@ def _ensure_translated_pdf(job, lang: str, settings, *, build=build_translated_p
     if current:
         return out, report
     # 캐시가 없고 같은 잡의 예열이 돌고 있으면, 그 예열이 곧 이 요청의 답이다.
-    # 일반 대기열 상한 대신 예열 대기 상한을 연다(중첩 안전 — 예열 스레드 자신은
-    # 이미 예산 0을 열어 둔 상태라 여기서 덮어쓰지 않는다).
+    # 일반 대기열 상한 대신 예열 대기 상한을 연다 — 라우트가 이미 연 예산 안이면
+    # 그 예산을 늘린다(export_wait_budget). 예열 스레드 자신은 예산이 0으로 고정돼
+    # 있어(_warm_budget) 늘어나지 않는다.
     budget = _warm_wait_timeout() if _warm_inflight(job.id, lang) else None
     with export_wait_budget(budget), _job_render_guard(job.id):
         # 락을 기다리는 사이 다른 스레드가 같은 PDF를 완성했을 수 있다.
@@ -507,45 +552,23 @@ def _ensure_facsimile_pages(
 
     target = artifacts.rendered_dir(job.dir, lang)
     marker = artifacts.facsimile_marker(job.dir, lang)
+    memo_key = (job.id, lang)
+    # 캐시 적중 판정은 락 밖에서 먼저 한다(_ensure_translated_pdf와 같은 이유) —
+    # 이미 렌더해 둔 페이지를 받으러 온 요청이 같은 잡의 다른 빌드(대조 PDF 등)가
+    # 쥔 잡 락 뒤에 줄을 서서 30s 뒤 503을 받지 않게 한다.
+    if _facsimile_hit(job, lang, settings, target, marker, page_numbers):
+        return target
+    # 같은 잡의 예열이 돌고 있으면 그 예열이 바로 이 요청이 기다리는 PDF를 만드는
+    # 중이다 — 잡 락을 잡기 **전에** 예열 대기 상한을 연다. 예전에는 기본 예산
+    # (30s)으로 락부터 기다려 /page·/layout·document.html?lang=ko가 예열 중에 503이
+    # 됐다(ENRICH 백필이 띄운 자기 예열 뒤에 줄을 서는 /layout?lang=ko 포함).
+    budget = _warm_wait_timeout() if _warm_inflight(job.id, lang) else None
     # PDF 빌드까지 락 안에서 수행한다 — 락 밖이면 같은 잡의 동시 첫 진입이 같은
     # export.{lang}.pdf를 중복으로 만든다.
-    with _job_render_guard(job.id):
+    with export_wait_budget(budget), _job_render_guard(job.id):
         pdf_path, _report = _ensure_translated_pdf(job, lang, settings, build=build)
-        pdf_stat = pdf_path.stat()
-        signature = {
-            "pdf_size": pdf_stat.st_size,
-            "pdf_mtime_ns": pdf_stat.st_mtime_ns,
-            "dpi": int(job.dpi),
-            "pages": len(page_numbers),
-        }
-
-        def _cache_valid() -> bool:
-            try:
-                saved = json.loads(marker.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                return False
-            if saved != signature:
-                return False
-            expected = [artifacts.page_image(target, number) for number in page_numbers]
-            return bool(expected) and all(path.is_file() for path in expected)
-
-        def _marker_id() -> tuple:
-            try:
-                stat = marker.stat()
-            except OSError:
-                return ()
-            return (stat.st_size, stat.st_mtime_ns)
-
-        memo_key = (job.id, lang)
-        # 같은 세대를 이 프로세스에서 이미 검증했으면 전 페이지 stat을 건너뛴다.
-        # marker 지문까지 함께 비교하므로, 캐시 무효화(marker 삭제/재기록)는 메모리
-        # 메모를 우회하지 못한다 — 디스크가 여전히 진실의 원천이다. 다만 marker는
-        # 그대로인데 PNG만 사라지는 경우가 있어 메모에는 TTL이 있다(자가 복구).
-        marker_id = _marker_id()
-        if marker_id and _facsimile_memo_get(memo_key) == (signature, marker_id):
-            return target
-        if _cache_valid():
-            _facsimile_memo_set(memo_key, signature, _marker_id())
+        signature = _facsimile_signature(job, pdf_path, page_numbers)
+        if _facsimile_valid(memo_key, marker, target, signature, page_numbers):
             return target
         target.mkdir(parents=True, exist_ok=True)
         _sweep_stale_staging(artifacts.rendered_root(job.dir), lang)
@@ -580,8 +603,75 @@ def _ensure_facsimile_pages(
                 tmp.unlink(missing_ok=True)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
-        _facsimile_memo_set(memo_key, signature, _marker_id())
+        _facsimile_memo_set(memo_key, signature, _marker_id(marker))
     return target
+
+
+def _facsimile_signature(job, pdf_path: Path, page_numbers: list[int]) -> dict:
+    """facsimile 세대 — 원천 PDF의 크기·mtime과 렌더 조건(DPI·페이지 수)."""
+    pdf_stat = pdf_path.stat()
+    return {
+        "pdf_size": pdf_stat.st_size,
+        "pdf_mtime_ns": pdf_stat.st_mtime_ns,
+        "dpi": int(job.dpi),
+        "pages": len(page_numbers),
+    }
+
+
+def _marker_id(marker: Path) -> tuple:
+    try:
+        stat = marker.stat()
+    except OSError:
+        return ()
+    return (stat.st_size, stat.st_mtime_ns)
+
+
+def _facsimile_valid(
+    memo_key: tuple[str, str], marker: Path, target: Path,
+    signature: dict, page_numbers: list[int],
+) -> bool:
+    """디스크의 facsimile 세대가 signature와 같고 페이지 PNG가 전부 있는가.
+
+    같은 세대를 이 프로세스에서 이미 검증했으면 전 페이지 stat을 건너뛴다.
+    marker 지문까지 함께 비교하므로, 캐시 무효화(marker 삭제/재기록)는 메모리
+    메모를 우회하지 못한다 — 디스크가 여전히 진실의 원천이다. 다만 marker는
+    그대로인데 PNG만 사라지는 경우가 있어 메모에는 TTL이 있다(자가 복구).
+    """
+    marker_id = _marker_id(marker)
+    if marker_id and _facsimile_memo_get(memo_key) == (signature, marker_id):
+        return True
+    try:
+        saved = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if saved != signature:
+        return False
+    expected = [artifacts.page_image(target, number) for number in page_numbers]
+    if not expected or not all(path.is_file() for path in expected):
+        return False
+    _facsimile_memo_set(memo_key, signature, _marker_id(marker))
+    return True
+
+
+def _facsimile_hit(
+    job, lang: str, settings, target: Path, marker: Path, page_numbers: list[int],
+) -> bool:
+    """락 없이 보는 캐시 적중 — 번역 PDF와 페이지 PNG가 모두 최신일 때만 참.
+
+    모든 산출물이 원자적 교체(os.replace)로만 갱신되므로 락 없이 읽어도 반쪽짜리
+    상태를 '최신'으로 오판하지 않는다. 재렌더 중이면 marker가 아직 옛 세대라
+    불일치로 떨어지고, 그때는 락을 잡는 정규 경로가 마저 처리한다.
+    """
+    current, pdf_path, _report = _translated_pdf_cache(
+        job, lang, _pdf_export_font_id(settings),
+    )
+    if not current:
+        return False
+    try:
+        signature = _facsimile_signature(job, pdf_path, page_numbers)
+    except OSError:
+        return False
+    return _facsimile_valid((job.id, lang), marker, target, signature, page_numbers)
 
 
 def _try_facsimile_pages(
@@ -628,9 +718,8 @@ def warm_translated_pdf(job, lang: str, settings, *, build=build_translated_pdf)
     호출 스레드에서 동기로 돈다. 백그라운드 실행은 `warm_translated_pdf_async`.
     실제로 빌드를 돌렸는지 여부와 무관하게, 끝났을 때 캐시가 최신이면 True.
     """
-    with export_wait_budget():
-        # 예산을 0으로 만들어 어떤 대기도 하지 않게 한다 — 경합하면 포기한다.
-        _EXPORT_WAIT.remaining = 0.0
+    # 예산 0 고정 — 어떤 대기도 하지 않고, 예열 대기 연장도 받지 않는다. 경합하면 포기한다.
+    with _warm_budget():
         try:
             _ensure_translated_pdf(job, lang, settings, build=build)
         except PdfExportBusyError:

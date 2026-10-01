@@ -7,16 +7,20 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import hashlib
 import json
 import logging
 import re
 import threading
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import MutableHeaders
 
 from . import __version__
 from .api import router
@@ -175,6 +179,125 @@ class UploadBodyLimitMiddleware:
         await send({"type": "http.response.body", "body": body})
 
 
+# ── HTML 응답 보안 헤더 · 정적 프런트엔드 캐시 정책 ─────────────────────────────
+# OCR·텍스트 레이어 마크다운의 `![](https://…)`는 렌더러를 지나 그대로 <img>가 된다.
+# 문서를 여는 순간 브라우저가 제3자·LAN 주소로 요청을 보내 열람 사실·IP·인스턴스
+# 주소가 새고 내부망 GET이 유도됐다(감사 frontend-3·pipeline-ocr-4·sidecar-5 — 근본
+# 수정은 렌더러 쪽). 그 심층 방어로 HTML 응답에 CSP를 붙여 외부 리소스 로드(이미지·
+# 폰트·연결)를 같은 출처와 data:/blob:으로 묶는다. 리더는 /html·/layout 조각을 SPA에
+# innerHTML로 넣으므로 실제 효력은 SPA 문서(index.html)의 정책에서 난다.
+# - 인라인 style 속성(레이아웃 좌표·KaTeX)은 쓰므로 style-src에 'unsafe-inline'.
+# - SPA의 인라인 스크립트(테마 부트스트랩)는 해시로 허용한다 — 주입된 인라인 스크립트·
+#   on* 속성은 막힌다. 해시는 index.html에서 계산하고 파일이 바뀌면 다시 계산한다.
+# - API가 내보내는 HTML(document.html 내려받기 등)은 KaTeX를 인라인으로 품으므로
+#   스크립트는 'unsafe-inline'을 두되 리소스 출처는 같은 규칙으로 묶는다.
+_CSP_COMMON = (
+    "default-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+)
+_API_HTML_CSP = "; ".join(
+    (_CSP_COMMON[0], "script-src 'self' 'unsafe-inline'", *_CSP_COMMON[1:])
+)
+# 외부로 나가는 링크 클릭에 인스턴스 주소(Referer)를 싣지 않는다 — 같은 출처끼리는 유지.
+_REFERRER_POLICY = "same-origin"
+_INLINE_SCRIPT = re.compile(
+    r"<script\b(?P<attrs>[^>]*)>(?P<body>.*?)</script\s*>", re.IGNORECASE | re.DOTALL,
+)
+_SCRIPT_SRC_ATTR = re.compile(r"\bsrc\s*=", re.IGNORECASE)
+
+
+def _inline_script_hashes(html: str) -> list[str]:
+    """인라인 <script> 본문의 CSP 해시('sha256-…'). src가 있는 스크립트는 제외한다.
+
+    브라우저는 스크립트 요소의 텍스트를 UTF-8 그대로 해시한다(개행은 HTML 파서가 LF로
+    정규화 — read_text의 범용 개행 처리와 같다)."""
+    hashes = []
+    for match in _INLINE_SCRIPT.finditer(html):
+        if _SCRIPT_SRC_ATTR.search(match.group("attrs")):
+            continue
+        digest = hashlib.sha256(match.group("body").encode("utf-8")).digest()
+        hashes.append(f"'sha256-{base64.b64encode(digest).decode('ascii')}'")
+    return hashes
+
+
+class _SpaContentSecurityPolicy:
+    """SPA 문서용 CSP — index.html이 바뀌면(배포·개발 중 수정) 해시를 다시 계산한다."""
+
+    def __init__(self, frontend_dir: Path | None) -> None:
+        self._index = frontend_dir / "index.html" if frontend_dir is not None else None
+        self._key: tuple[int, int] | None = None
+        self._value = self._build([])
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _build(hashes: list[str]) -> str:
+        script = " ".join(("'self'", *dict.fromkeys(hashes)))
+        return "; ".join((_CSP_COMMON[0], f"script-src {script}", *_CSP_COMMON[1:]))
+
+    def value(self) -> str:
+        if self._index is None:
+            return self._value
+        try:
+            stat = self._index.stat()
+        except OSError:
+            return self._value
+        key = (stat.st_mtime_ns, stat.st_size)
+        with self._lock:
+            if key != self._key:
+                try:
+                    html = self._index.read_text(encoding="utf-8")
+                except (OSError, ValueError):
+                    return self._value
+                self._value = self._build(_inline_script_hashes(html))
+                self._key = key
+            return self._value
+
+
+class SecurityHeadersMiddleware:
+    """응답 헤더 정책 — 순수 ASGI라 SSE·파일 스트리밍을 버퍼링하지 않는다.
+
+    - HTML 응답: Content-Security-Policy(위 설명) + Referrer-Policy.
+    - 정적 프런트엔드(/api 밖): Cache-Control: no-cache. 예전에는 Cache-Control 없이
+      Last-Modified만 나가 브라우저가 휴리스틱 신선도로 ES 모듈을 파일마다 다른 시점에
+      재검증 없이 재사용했다 — 업그레이드 뒤 새 reader.js가 옛 viewer.js에서 새 export를
+      import하면 SyntaxError로 앱 전체가 흰 화면이 됐다. no-cache는 '저장하되 매번
+      재검증'이라 ETag가 같으면 304로 끝난다.
+    라우트가 이미 정한 헤더는 덮어쓰지 않는다.
+    """
+
+    def __init__(self, app, spa_csp: _SpaContentSecurityPolicy) -> None:
+        self.app = app
+        self.spa_csp = spa_csp
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = _route_path(scope)
+        is_api = path == "/api" or path.startswith("/api/")
+
+        async def send_with_headers(message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                if headers.get("content-type", "").startswith("text/html"):
+                    if "content-security-policy" not in headers:
+                        headers["Content-Security-Policy"] = (
+                            _API_HTML_CSP if is_api else self.spa_csp.value()
+                        )
+                    if "referrer-policy" not in headers:
+                        headers["Referrer-Policy"] = _REFERRER_POLICY
+                if not is_api and "cache-control" not in headers:
+                    headers["Cache-Control"] = "no-cache"
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     settings.jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -248,6 +371,11 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
     app = FastAPI(
         title="Unlimited-OCR — PDF → Markdown", version=__version__, lifespan=lifespan,
     )
+    frontend = settings.resolve_frontend_dir()
+    # HTML 응답 CSP·Referrer-Policy와 정적 파일 재검증 정책 — 가장 안쪽 미들웨어.
+    app.add_middleware(
+        SecurityHeadersMiddleware, spa_csp=_SpaContentSecurityPolicy(frontend),
+    )
     # 요청 본문 상한 — 라우트 진입(폼 파싱=임시 스풀 파일 기록, JSON 메모리 적재)
     # 이전에 끊는다. 경로별 표는 UploadBodyLimitMiddleware 참조.
     # 먼저 등록하므로 TrustedHost 검증이 바깥에 남는다(Host 위조는 그대로 400).
@@ -291,7 +419,6 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
 
     app.include_router(router)
 
-    frontend = settings.resolve_frontend_dir()
     if frontend is not None:
         app.mount("/", StaticFiles(directory=frontend, html=True), name="frontend")
         logger.info("프론트엔드 서빙: %s", frontend)

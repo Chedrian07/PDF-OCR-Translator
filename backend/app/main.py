@@ -369,7 +369,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
     store = JobStore(settings.jobs_dir)
-    restored = store.load_existing()
+    # 페이지 구분자를 기록하기 전에 만든 잡에는 지금 설정을 한 번 고정해 둔다(jobs.Job).
+    restored = store.load_existing(default_page_separator=settings.page_separator)
     broker = EventBroker()
     engine = build_engine(settings)  # 잘못된 OCR_DEVICE/OCR_ENGINE은 여기서 즉시 실패
     cancel_events: dict[str, threading.Event] = {}

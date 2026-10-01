@@ -87,8 +87,7 @@ export const state = {
   readerActiveBlock: '',    // 클릭으로 고정한 현재 대응 블록 id
   readerSelection: '',      // 현재 페이지 텍스트에서 선택한 문장
   readerSelectionPage: 1,   // 선택이 실제로 속한 오른쪽 레일 페이지(sync off에서도 정확)
-  readerHighlights: [],     // 세션 내 하이라이트 [{page,lang,text}]
-  readerCitations: [],      // 세션 내 인용 [{page,lang,text}]
+  readerNotes: [],          // 이 잡의 인용·하이라이트 [{id,kind,page,lang,text,at}] (localStorage 영속)
   readerZoom: 100,          // PDF 페이지 이미지 폭 % (60–220, localStorage 'uocr-reader-zoom')
   readerImgTimers: new Map(), // page -> 이미지 재시도 타이머 (페이지별로 독립)
   readerSourceImagePages: new Set(), // primary 실패 뒤 원본 PNG가 성공한 페이지
@@ -254,6 +253,11 @@ export const EL_IDS = {
   readerExplain: 'reader-explain',
   readerHighlight: 'reader-highlight',
   readerCite: 'reader-cite',
+  readerNotesBadge: 'reader-notes-badge',
+  readerNotesCopy: 'reader-notes-copy',
+  readerNotesExport: 'reader-notes-export',
+  readerNotesList: 'reader-notes-list',
+  readerNotesEmpty: 'reader-notes-empty',
   readerSelection: 'reader-selection',
   readerOutline: 'reader-outline',
   readerActivity: 'reader-activity',

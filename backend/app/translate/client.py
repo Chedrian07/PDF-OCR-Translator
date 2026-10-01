@@ -565,9 +565,7 @@ class OpenAICompatClient:
             if status in (401, 403):
                 raise TranslateAPIError("번역 API 인증 실패 — OPENAI_API_KEY를 확인하세요")
             if status == 404 and mode == "chat":
-                raise TranslateAPIError(
-                    "번역 API 엔드포인트 없음 — OPENAI_BASE_URL이 /v1까지 포함하는지 확인하세요"
-                )
+                raise TranslateAPIError(_not_found_message(self.cfg.model, body))
             if status in _RETRYABLE and attempt < self.cfg.max_retries:
                 wait = self._backoff(headers, attempt)
                 ra = headers.get("Retry-After") or headers.get("retry-after")
@@ -699,6 +697,34 @@ class _StreamAccumulator:
             "usage": self.usage or {},
             "stream_stats": {"reasoning_chars": self.reasoning_chars},
         }
+
+
+def _error_detail(body: dict | str) -> str:
+    """오류 본문의 서버 메시지 — JSON {"error": "…"|{"message": "…"}}일 때만."""
+    if not isinstance(body, dict):
+        return ""
+    err = body.get("error")
+    if isinstance(err, dict):
+        err = err.get("message") or err.get("code") or ""
+    return str(err or body.get("detail") or "")[:300]
+
+
+def _not_found_message(model: str, body: dict | str) -> str:
+    """chat 404 진단 — 경로가 없는 것인지 모델 ID가 틀린 것인지 구분한다(probe:MLX-07).
+
+    종전에는 모든 404를 'OPENAI_BASE_URL이 /v1까지 포함하는지 확인'으로 바꾸고 서버
+    본문을 버렸다. mlx_lm은 모르는 모델 ID에 404 + {"error": …}를 내고 그 사이 현재
+    모델을 언로드하므로, 사용자는 URL만 고치며 헤맸다. JSON 오류 본문이 있으면 모델
+    ID 문제로 안내하고 서버 메시지를 보여 준다. 순수 'Not Found'만 경로 문제로 본다.
+    """
+    detail = _error_detail(body)
+    if detail:
+        return (
+            f"번역 API가 404를 반환했습니다 — 모델 ID(OPENAI_MODEL/TRANSLATE_MODEL={model})가 "
+            "서버의 /v1/models 목록과 다를 수 있습니다(mlx_lm.server는 default_model 또는 "
+            f"/v1/models의 id 그대로). 서버 응답: {detail}"
+        )
+    return "번역 API 엔드포인트 없음 — OPENAI_BASE_URL이 /v1까지 포함하는지 확인하세요"
 
 
 def _decode_body(raw: bytes) -> dict | str:

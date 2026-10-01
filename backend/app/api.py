@@ -30,7 +30,7 @@ from fastapi.responses import (
 from . import native_ops
 from .config import RENDER_DPI_MAX, RENDER_DPI_MIN
 from .jobs import SubscriberLimitError
-from .pipeline import artifacts, derived
+from .pipeline import artifacts, derived, pdf_worker
 from .pipeline.derived import PdfExportBusyError
 from .pipeline.pdf import probe_pdf, render_pdf_pages
 from .pipeline.pdf_export import (
@@ -73,6 +73,8 @@ _PREVIEW_MAX_BYTES = 256 * 1024
 _PREVIEW_COST_UNIT = 16 * 1024
 _PREVIEW_UNITS_PER_MIN = 600
 _PREVIEW_MAX_CONCURRENT = 4
+# 업로드 검증(probe) 워커가 모두 바쁠 때 재시도를 권하는 간격(초)
+_PROBE_BUSY_RETRY_AFTER_S = 5
 
 # 파생 산출물 보장 로직(잡 단위 락·facsimile 검증 메모·내보내기 빌드)은
 # pipeline/derived.py가 소유한다. 아래는 라우트와 회귀 테스트가 예전 이름으로
@@ -669,6 +671,11 @@ async def create_job(
             await anyio.to_thread.run_sync(probe_pdf, dest, settings.max_pages)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+        except pdf_worker.PdfWorkerBusy as e:
+            # 검증 워커가 모두 다른 업로드를 검사 중 — 파일 문제가 아니라 일시적 과부하다
+            raise HTTPException(
+                503, str(e), headers={"Retry-After": str(_PROBE_BUSY_RETRY_AFTER_S)},
+            ) from e
     except HTTPException:
         await anyio.to_thread.run_sync(st.store.delete_dir, job)
         raise

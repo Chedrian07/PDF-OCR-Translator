@@ -58,6 +58,9 @@ export function katexOptions(displayMode) {
 }
 
 export const STREAM_PANE_MAX_NODES = 3000;  // 원시 pane DOM 상한 (장시간 OCR 메모리 방어)
+// 라이브 미리보기 백로그(중간에 연 잡의 확정 페이지들)를 동시에 렌더 요청할 개수 —
+// RTT마다 한 장씩 보내면 VPN에서 수백 쪽이 수십 초 걸린다. 서버 부담은 작게 유지한다.
+export const PREVIEW_RENDER_CONCURRENCY = 3;
 export const STREAM_PANE_TRIM_SLACK = 600;  // 한 번에 덜어내는 여유분 — 매 프레임 삭제 방지
 
 export const QA_LS_PROVIDER = 'uocr-qa-provider';

@@ -14,6 +14,11 @@ import pytest
 # 서버의 실잡 저장소)을 어떤 경로로도 건드리지 않도록 세션 전용 임시 디렉터리로
 # 돌린다. 이미 설정돼 있어도 덮어쓴다 — 테스트가 실데이터를 고를 이유는 없다.
 os.environ["DISABLE_DOTENV"] = "1"
+# PyMuPDF 작업은 기본적으로 테스트 프로세스 안에서(inline) 실행한다 — 많은 테스트가
+# pymupdf·pdf_export 내부를 monkeypatch하는데, 워커 프로세스에는 그 패치가 닿지 않는다.
+# 프로세스 격리(시간 상한·비정상 종료·취소)는 pdf_worker_processes 픽스처를 쓰는 전용
+# 테스트가 실제 워커로 검증한다(app/pipeline/pdf_worker.py).
+os.environ["PDF_WORKER_MODE"] = "inline"
 _SESSION_DATA_DIR = tempfile.mkdtemp(prefix="pdfocr-pytest-data-")
 os.environ["DATA_DIR"] = _SESSION_DATA_DIR
 atexit.register(shutil.rmtree, _SESSION_DATA_DIR, ignore_errors=True)
@@ -55,6 +60,21 @@ def make_pdf_bytes(pages: int = 3, with_image: bool = True) -> bytes:
 @pytest.fixture
 def sample_pdf() -> bytes:
     return make_pdf_bytes()
+
+
+@pytest.fixture
+def pdf_worker_processes(monkeypatch):
+    """이 테스트에서만 PyMuPDF 작업을 실제 spawn 워커 프로세스로 격리한다.
+
+    앞뒤로 풀을 닫아 다른 테스트의 워커·카운터가 섞이지 않게 한다. 워커는 테스트
+    프로세스의 sys.path를 물려받으므로 tests/pdf_worker_tasks.py의 보조 작업도 실행할 수 있다.
+    """
+    from app.pipeline import pdf_worker
+
+    pdf_worker.shutdown_pools()
+    monkeypatch.setenv("PDF_WORKER_MODE", "process")
+    yield pdf_worker
+    pdf_worker.shutdown_pools()
 
 
 @pytest.fixture

@@ -441,3 +441,31 @@ def test_반복_검사는_복원된_불변_토큰을_세지_않는다():
     masked, mapping = mask(src)
     out = "증명에서 " + "항 $x$를 반복하고 " * 12 + "주정리를 보인다."
     assert untranslated_reason(src, out, mapping) == ""
+
+
+# ── 아주 짧은 유닛 게이트 (Phase-0 replay, translate-llm-11) ──────────────────
+
+@pytest.mark.parametrize(("src", "out", "reason"), [
+    ("Abstract", "요약입니다.", "label-sentence"),            # 캔드 응답 — 라벨이 문장으로
+    ("Related Work", "관련 연구입니다", "label-sentence"),
+    ("arXiv:2504.19874v1  [cs.LG]  28 Apr 2025", "요약입니다.", "number-mismatch"),
+    ("Introduction", "모델이 직전 문맥까지 번역했다. " * 6 + "서론", "length-ratio"),
+])
+def test_짧은_유닛의_캔드_대체는_거부된다(src, out, reason):
+    from app.translate.masking import untranslated_reason
+
+    assert untranslated_reason(src, out, mask(src)[1]) == reason
+
+
+@pytest.mark.parametrize(("src", "out"), [
+    ("Abstract", "초록"),
+    ("Abstract", "Abstract"),                                      # 고유명사식 echo 면제 유지
+    ("Thank you", "감사합니다."),                                  # 합쇼체지만 '-입니다'가 아니다
+    ("arXiv:2504.19874v1  [cs.LG]  28 Apr 2025", "arXiv:2504.19874v1 [cs.LG] 2025년 4월 28일"),
+    ("In 2019, we collected 10000 samples", "2019년에 10,000개 샘플을 수집하였다"),  # 구분 쉼표
+    ("The answer is yes.", "답은 그렇습니다."),                     # 문장 원문은 라벨 규칙 밖
+])
+def test_짧은_유닛의_정상_번역은_통과한다(src, out):
+    from app.translate.masking import untranslated_reason
+
+    assert untranslated_reason(src, out, mask(src)[1]) == ""

@@ -187,6 +187,31 @@ def _payload_text(body: dict) -> str:
     return "\n".join(m.get("content", "") for m in msgs if m.get("role") == "user")
 
 
+# 쌍 태그 결함용 — 자기 닫힘 플레이스홀더의 id·속성
+_PLACEHOLDER_PARTS_RE = re.compile(r"<([mkgucft]\d+)\b([^>]*?)\s*/>")
+_V_ATTR_RE = re.compile(r'\bv="([^"]*)"')
+
+
+def _pair_placeholders(text: str) -> str:
+    """자기 닫힘 플레이스홀더를 쌍 태그로 바꾼다 (translate-llm-10).
+
+    유닛의 첫 태그는 빈 쌍(`<m1 v="x"></m1>` — 자기 닫힘과 같으니 채택돼야 한다), 나머지는
+    미리보기를 번역해 감싼 쌍(`<f2 v="Figure 2">그림 2</f2>` — 닫는 태그와 'Figure 2그림 2'
+    같은 중복 내용이 산출물에 박히면 안 된다)으로 만든다."""
+    seen = [0]
+
+    def sub(m: re.Match[str]) -> str:
+        seen[0] += 1
+        pid, attrs = m.group(1), m.group(2)
+        if seen[0] == 1:
+            return f"<{pid}{attrs}></{pid}>"
+        preview = _V_ATTR_RE.search(attrs)
+        inner = _translate(preview.group(1)) if preview and preview.group(1) else "내용"
+        return f"<{pid}{attrs}>{inner}</{pid}>"
+
+    return _PLACEHOLDER_PARTS_RE.sub(sub, text)
+
+
 def _apply_fault(fault: str, src: str) -> str | None:
     if fault == "refusal":
         return "I cannot translate this text."
@@ -198,6 +223,8 @@ def _apply_fault(fault: str, src: str) -> str | None:
         return "요약입니다."
     if fault == "drop_placeholder":
         return PLACEHOLDER_RE.sub("", _translate(src))
+    if fault == "paired_tags":
+        return _pair_placeholders(_translate(src))
     return None
 
 

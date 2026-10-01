@@ -109,13 +109,62 @@ def test_enrich_corrupt_pdf_returns_false(tmp_path):
 
 
 def test_enrich_page_index_out_of_range(tmp_path):
+    from app.pipeline.pdf_fonts import ENRICH_VERSION
+
     pdf = _make_pdf(tmp_path)
     pages = [{"page": 99, "width": 612, "height": 792, "blocks": [
         {"type": "text", "bbox": [131, 227, 979, 271], "content": "x"},
     ]}]
-    # 범위를 벗어난 페이지는 조용히 스킵 — 아무것도 주입 안 함
-    assert enrich_layout_fonts(pdf, pages) is False
+    # 범위를 벗어난 페이지는 아무것도 주입하지 않지만 스탬프는 찍는다 — 스탬프가
+    # 없으면 백필 호출부가 매 요청 전 문서를 재스캔한다. 스탬프만으로도 저장이
+    # 필요하므로 True다.
+    assert enrich_layout_fonts(pdf, pages) is True
     assert "fs" not in pages[0]["blocks"][0]
+    assert pages[0]["fonts_v"] == ENRICH_VERSION
+
+
+def test_enrich_stamps_pages_it_had_to_skip(tmp_path, monkeypatch):
+    """텍스트 추출이 예외를 던진 페이지·번호가 깨진 페이지도 스탬프한다.
+
+    스탬프 없이 빠져나가면 `_backfill_layout_fonts`의 미스탬프 검사가 매 요청
+    참이 되어, 전 문서 재스캔 → layout 재기록 → 내보내기 PDF 캐시 무효화가
+    끝없이 반복된다(손상 PDF로 재현된 루프). 정상 페이지의 주입은 그대로다.
+    """
+    import fitz
+
+    from app.pipeline.pdf_fonts import ENRICH_VERSION
+
+    doc = fitz.open()
+    doc.new_page(width=612, height=792).insert_text((100, 200), "first page", fontsize=11)
+    doc.new_page(width=612, height=792).insert_text((100, 200), "second page", fontsize=11)
+    pdf = tmp_path / "two.pdf"
+    doc.save(pdf)
+    doc.close()
+
+    real_get_text = fitz.Page.get_text
+
+    def flaky_get_text(self, *args, **kwargs):
+        if self.number == 1:
+            raise RuntimeError("MuPDF가 이 페이지에서 예외를 낸다")
+        return real_get_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Page, "get_text", flaky_get_text)
+    bx1, by1 = _norm(80, 180)
+    bx2, by2 = _norm(600, 215)
+    pages = [
+        {"page": 1, "blocks": [{"type": "text", "bbox": [bx1, by1, bx2, by2], "content": "x"}]},
+        {"page": 2, "blocks": [{"type": "text", "bbox": [bx1, by1, bx2, by2], "content": "y"}]},
+        {"page": "not-a-number", "blocks": []},
+    ]
+    assert enrich_layout_fonts(pdf, pages) is True
+    assert "fs" in pages[0]["blocks"][0]
+    assert "fs" not in pages[1]["blocks"][0]
+    assert [page["fonts_v"] for page in pages] == [ENRICH_VERSION] * 3
+
+    # 백필 호출부의 재실행 조건(api._backfill_layout_fonts와 같은 식)이 꺼진다.
+    assert not any(int(page.get("fonts_v") or 0) < ENRICH_VERSION for page in pages)
+    # 다시 불러도 바뀔 것이 없으면 저장을 요구하지 않는다(스탬프가 이미 최신).
+    assert enrich_layout_fonts(pdf, pages[1:]) is False
 
 
 def test_enrich_detects_vertical_text_and_stamps_version(tmp_path):

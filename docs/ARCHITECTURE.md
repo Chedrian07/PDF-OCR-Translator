@@ -779,8 +779,8 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 - 상태코드: **400** 미지원 lang · **404** 번역본 없음/페이지 번호가 layout에 없음/
   이미지 파일 없음 · **409** 내보내기 불가(`PdfExportError` — 입력 누락·손상·빌드 시간 상한
   초과·빌드 워커 비정상 종료) · **503** 전역 빌드 대기열 초과(`Retry-After` 동반 — §5 `/pdf`의
-  전역 빌드 상한). 좌표 layout을 쓸 수 없는 잡(원문 또는 `layout.{lang}.json`에 텍스트 블록이
-  없음)은 원본 `pages/` PNG로 폴백한다. 번역 페이지 raster는 export 워커 풀에서 만든다(§18).
+  전역 빌드 상한). 요청한 쪽의 layout(원문은 `layout.json`, 번역은 `layout.{lang}.json`)에 텍스트
+  블록이 없으면 원본 `pages/` PNG로 폴백한다. 번역 페이지 raster는 export 워커 풀에서 만든다(§18).
 
 ### GET /api/jobs/{id}/outline?lang=ko
 - layout의 `title` 블록을 페이지·레벨·텍스트 목록으로 반환한다. 쓸 수 있는 layout이 없으면 404.

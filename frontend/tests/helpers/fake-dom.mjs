@@ -6,6 +6,8 @@
 // 사용: const dom = installFakeDom(t); → globalThis.document/window/requestAnimationFrame을
 // 테스트 동안 바꿔 끼우고 t.after에서 되돌린다.
 
+import { inspect } from 'node:util';
+
 class FakeClassList {
   constructor(node) { this.node = node; }
   get set() { return this.node._classes; }
@@ -126,6 +128,18 @@ class FakeNode {
     if (text) this.appendChild(this.ownerDocument.createTextNode(text));
   }
 }
+
+// 노드는 parentNode·ownerDocument로 서로를 가리키는 큰 순환 그래프다. 단정이 실패하면
+// assert가 양쪽 값을 util.inspect로 펼치는데, 이 그래프를 그대로 펼치면 메모리가 폭발한다.
+// 짧은 태그 표기로만 보이게 한다.
+FakeNode.prototype[inspect.custom] = function inspectNode() {
+  if (this.nodeType === 3) return `#text(${JSON.stringify(String(this.data).slice(0, 40))})`;
+  if (this.nodeType === 11) return `#fragment(${this.childNodes.length})`;
+  const id = this.getAttribute('id');
+  const cls = this.className ? `.${this.className.split(' ').join('.')}` : '';
+  const job = this.dataset && this.dataset.jobId ? `[data-job-id=${this.dataset.jobId}]` : '';
+  return `<${this.localName}${id ? `#${id}` : ''}${cls}${job}>`;
+};
 
 class FakeText extends FakeNode {
   constructor(doc, data) { super(doc, 3); this.data = String(data); }
@@ -354,6 +368,7 @@ export function createFakeDocument() {
       for (const fn of [...(doc.listeners.get(type) || [])]) fn({ type, ...init });
     },
   };
+  doc[inspect.custom] = () => '#fake-document';
   doc.documentElement = new FakeElement(doc, 'html');
   doc.body = new FakeElement(doc, 'body');
   doc.documentElement.appendChild(doc.body);
@@ -389,4 +404,14 @@ export function mount(doc, tag = 'div', id) {
   if (id) node.setAttribute('id', id);
   doc.body.appendChild(node);
   return node;
+}
+
+// 노드 동일성 단정. assert.equal(nodeA, nodeB)는 실패할 때 node:test 리포터가 actual/
+// expected 객체 그래프를 통째로 직렬화하다가 멈춘다(순환 DOM). 불리언으로만 단정한다.
+export function assertSameNode(assert, actual, expected, message) {
+  assert.ok(actual === expected, `${message || '같은 노드여야 한다'} — ${inspect(actual)} !== ${inspect(expected)}`);
+}
+
+export function assertNotSameNode(assert, actual, expected, message) {
+  assert.ok(actual !== expected, `${message || '다른 노드여야 한다'} — ${inspect(actual)}`);
 }

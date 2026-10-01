@@ -63,3 +63,8 @@ tmp/
 
 # smoke 테스트가 backend/에서 실행될 때 생기는 부산물
 backend/sample/
+
+# OCR 벤치마크 기본 출력(scripts/benchmark_ocr_engines.py --out bench_out) — 엔진별
+# 문서 OCR 전문이 저장된다. 사내·저작권 문서가 `git add -A` 한 번에 커밋되지 않게
+# 실행 위치(리포 루트·backend/)와 무관하게 무시한다.
+bench_out/

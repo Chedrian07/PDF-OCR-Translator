@@ -27,6 +27,7 @@ from fastapi.responses import (
 )
 
 from . import native_ops
+from .config import RENDER_DPI_MAX, RENDER_DPI_MIN
 from .pipeline import artifacts, derived
 from .pipeline.derived import PdfExportBusyError
 from .pipeline.pdf import probe_pdf, render_pdf_pages
@@ -494,8 +495,8 @@ async def create_job(
     if mode not in ("multi", "per_page"):
         raise HTTPException(400, "mode는 multi 또는 per_page 여야 합니다")
     dpi = dpi if dpi is not None else settings.render_dpi
-    if not (72 <= dpi <= 400):
-        raise HTTPException(400, "dpi는 72–400 범위여야 합니다")
+    if not (RENDER_DPI_MIN <= dpi <= RENDER_DPI_MAX):
+        raise HTTPException(400, f"dpi는 {RENDER_DPI_MIN}–{RENDER_DPI_MAX} 범위여야 합니다")
     filename = Path(file.filename or "document.pdf").name
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(400, "PDF 파일만 업로드할 수 있습니다")

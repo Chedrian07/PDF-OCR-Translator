@@ -599,6 +599,37 @@ def test_invalid_numeric_config_reports_setting_name(name, value):
         TranslateConfig.from_env(env)
 
 
+@pytest.mark.parametrize("value", ["abc", "0,2", "nan", "inf", "-1", "2.5", "-0.1"])
+def test_temperature는_none_또는_0에서_2_사이만_허용(value):
+    """오타·음수가 '연결 실패'로 위장되던 경로(probe:MLX-10)를 설정 경계에서 막는다."""
+    from app.translate.types import TranslateError
+
+    env = {"OPENAI_BASE_URL": "https://h/v1", "OPENAI_MODEL": "m",
+           "TRANSLATE_TEMPERATURE": value}
+    with pytest.raises(TranslateError, match="TRANSLATE_TEMPERATURE"):
+        TranslateConfig.from_env(env)
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    ("", "0"), ("0", "0"), ("0.7", "0.7"), ("2", "2"), ("NONE", "none"), (" 1.0 ", "1.0"),
+])
+def test_temperature_유효값은_표기를_보존(value, expected):
+    """캐시 키 재료라 유효한 값의 표기는 그대로 둔다(기존 units.json 적중 유지)."""
+    env = {"OPENAI_BASE_URL": "https://h/v1", "OPENAI_MODEL": "m",
+           "TRANSLATE_TEMPERATURE": value}
+    assert TranslateConfig.from_env(env).temperature == expected
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    ("", True), ("1", True), ("true", True),
+    ("0", False), ("false", False), ("False", False), ("OFF", False), ("No", False),
+])
+def test_translate_context_대소문자_무관하게_끈다(value, expected):
+    env = {"OPENAI_BASE_URL": "https://h/v1", "OPENAI_MODEL": "m",
+           "TRANSLATE_CONTEXT": value}
+    assert TranslateConfig.from_env(env).context is expected
+
+
 def test_numeric_config_defaults_and_clamps_are_preserved():
     env = {"OPENAI_BASE_URL": "https://h/v1", "OPENAI_MODEL": "m"}
     blank = TranslateConfig.from_env({

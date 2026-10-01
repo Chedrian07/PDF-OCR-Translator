@@ -71,14 +71,28 @@ const mock = createServer(async (req, res) => {
   }
 });
 
-function listen(server) {
+// 포트는 기본적으로 OS가 고른다. 여러 하네스를 한 호스트에서 나란히 돌릴 때는
+// E2E_MOCK_PORT / E2E_BACKEND_PORT로 서로 겹치지 않는 고정 포트를 줄 수 있다.
+function envPort(name) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return 0;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`${name}는 1–65535 정수여야 합니다 (받은 값: ${raw})`);
+  }
+  return port;
+}
+
+function listen(server, port = 0) {
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => resolve(server.address().port));
+    server.listen(port, '127.0.0.1', () => resolve(server.address().port));
   });
 }
 
 async function freePort() {
+  const fixed = envPort('E2E_BACKEND_PORT');
+  if (fixed) return fixed;
   const server = createNetServer();
   const port = await listen(server);
   await new Promise((resolve) => server.close(resolve));
@@ -97,7 +111,7 @@ async function waitHealth(url, proc) {
   throw new Error('mock E2E backend health timeout');
 }
 
-const mockPort = await listen(mock);
+const mockPort = await listen(mock, envPort('E2E_MOCK_PORT'));
 const backendPort = await freePort();
 const mockOrigin = `http://127.0.0.1:${mockPort}`;
 const base = `http://127.0.0.1:${backendPort}`;

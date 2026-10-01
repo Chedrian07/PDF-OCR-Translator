@@ -119,6 +119,7 @@ export function setViewerBackgroundInert(on) {
     '.app-header',
     '.sidebar',
     '.job-head',
+    '.job-warnings',
     '.progress-section',
     '.live-details',
     '.error-section',

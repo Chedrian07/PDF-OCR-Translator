@@ -867,11 +867,13 @@ def test_pipeline_recovers_a_truncated_chunk_page_by_page(mlx_app):
     assert job["status"] == "done", job
     assert [m for m, _ in model.prompts] == ["multi", "single", "single"]
     # runner는 잘림(OutputLimitError)을 반복 감지와 구분해 'MAX_LENGTH 도달'로 알리고,
-    # 엔진이 붙인 상세(MAX_LENGTH=1100 …)를 그대로 잇는다
+    # 엔진이 붙인 상세(MAX_LENGTH=1100 …)를 그대로 잇는다. 페이지별로 모두 살렸으니
+    # 품질 저하(warnings)가 아니라 처리 경위(notices)다.
     assert any(
-        "MAX_LENGTH 도달" in w and "페이지별 재처리" in w and "MAX_LENGTH=1100" in w
-        for w in job["warnings"]
-    ), job["warnings"]
+        "MAX_LENGTH 도달" in n and "페이지별 재처리" in n and "MAX_LENGTH=1100" in n
+        for n in job["notices"]
+    ), job["notices"]
+    assert job["warnings"] == []
     assert md.count("Single page body recovered alone.") == 2
     assert "alpha" not in md and "omega" not in md  # 잘린 multi 출력은 채택하지 않았다
 
@@ -896,7 +898,7 @@ def test_pipeline_keeps_the_completed_pages_of_a_truncated_chunk(mlx_app):
     assert "![](images/p0001_0.jpg)" in page1  # 살린 페이지의 multi 크롭도 그대로 병합됐다
     assert page2.strip() == "![](images/p0002_0.jpg)\n\nSingle page body recovered alone."
     assert "alpha" not in md and "omega" not in md  # 잘린 2쪽 multi 출력은 버렸다
-    messages = job["warnings"] + job.get("notices", [])
-    assert any("MAX_LENGTH 도달" in m and "앞 1쪽은 유지" in m for m in messages), messages
+    assert any("MAX_LENGTH 도달" in n and "앞 1쪽은 유지" in n for n in job["notices"]), job
+    assert job["warnings"] == []
     layout = json.loads((settings.jobs_dir / job["job_id"] / "layout.json").read_text(encoding="utf-8"))
     assert [p["page"] for p in layout] == [1, 2]

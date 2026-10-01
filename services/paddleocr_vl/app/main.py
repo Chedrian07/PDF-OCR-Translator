@@ -5,6 +5,7 @@ POST /v1/parse : 페이지 이미지 1장 → normalized page (figure는 [[FIGUR
 
 파이프라인 입력은 파일 경로가 필요하므로 업로드 이미지를 sidecar 컨테이너의
 임시 디렉터리에만 잠시 저장 후 삭제한다. 응답에는 어떤 파일 경로도 넣지 않는다.
+모델 로드 재시도·끈적한 CUDA 오류 시 자가 재시작은 lifecycle.py 참조.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
+from . import lifecycle
 from .adapter import adapt_page
 from .config import PaddleConfig
 from .model import PaddleModel
@@ -52,10 +54,21 @@ class ParseOptions(BaseModel):
 
 
 def _load_in_background() -> None:
-    try:
-        model.load()
-    except Exception:  # noqa: BLE001 — load_error로 health에 노출됨
-        pass
+    # 일시적 실패는 백오프 재시도(그동안 health는 status=ok·model_loaded=false라 backend가
+    # 기다린다), 결정적 실패·재시도 소진만 load_error로 health에 노출한다.
+    lifecycle.supervise_load(model, logger)
+
+
+_RESTART_DETAIL = "GPU 런타임 오류로 sidecar를 재시작합니다 — 모델 재로드 뒤 다시 시도하세요"
+
+
+def _restart_unavailable(e: Exception) -> HTTPException:
+    """복구 불가 CUDA 오류 → 프로세스 종료를 예약하고 503을 낸다.
+
+    503은 backend가 '재시작/재로드 중'으로 보고 준비될 때까지 기다렸다가 그 페이지만
+    다시 보내는 상태 코드다(502는 페이지 실패로 확정된다)."""
+    lifecycle.schedule_restart(logger, f"{e.__class__.__name__}: {str(e)[:200]}")
+    return HTTPException(503, _RESTART_DETAIL)
 
 
 @asynccontextmanager
@@ -139,6 +152,9 @@ def health() -> dict:
         "dtype": "bfloat16",
         "model_loaded": model.loaded,
         "load_error": model.load_error,
+        # 확장 필드(backend는 모르는 키를 무시한다) — 재시도 대기·재시작 대기를 구분해 보인다
+        "load_retry": model.load_retry,
+        "restarting": model.restart_required,
         **_gpu_info(),
     }
 
@@ -177,6 +193,8 @@ def parse(
     options: str = Form("{}"),
 ) -> dict:
     if not model.loaded:
+        if model.restart_required:
+            raise HTTPException(503, _RESTART_DETAIL)
         detail = model.load_error or "모델이 아직 로드되지 않았습니다"
         raise HTTPException(503, detail)
     try:
@@ -197,7 +215,10 @@ def parse(
         t1 = time.monotonic()
         try:
             raw = model.predict_page(tmp_path, max_pixels=opts.max_pixels)
-        except Exception as e:  # noqa: BLE001 — OOM만 1회 강등 재시도
+        except Exception as e:  # noqa: BLE001 — OOM만 1회 강등 재시도, CUDA 고착은 503
+            if model.restart_required:
+                logger.exception("복구 불가 CUDA 오류 (req=%s)", request_id[:64])
+                raise _restart_unavailable(e) from e
             if not _is_oom(e):
                 logger.exception("추론 실패 (req=%s)", request_id[:64])
                 raise HTTPException(502, f"추론 실패: {e.__class__.__name__}") from e
@@ -221,6 +242,9 @@ def parse(
                 raw = model.predict_page(tmp_path, max_pixels=reduced)
                 warnings.append(f"GPU 메모리 부족으로 해상도 강등(max_pixels→{reduced})")
             except Exception as e2:  # noqa: BLE001
+                if model.restart_required:
+                    logger.exception("OOM 재시도 중 복구 불가 CUDA 오류 (req=%s)", request_id[:64])
+                    raise _restart_unavailable(e2) from e2
                 model.release_cache()
                 logger.exception("OOM 재시도 실패 (req=%s)", request_id[:64])
                 raise HTTPException(

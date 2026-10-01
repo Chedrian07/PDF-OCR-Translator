@@ -243,6 +243,8 @@ class _PageContext:
     # 그 위에 번역이 찍힌다(실측 겹침 30건). _process_page가 수렴할 때까지
     # 이 집합을 줄여 가며 두 모델을 일치시킨다.
     cleared_indices: frozenset = frozenset()
+    # fixed_visuals 중 벡터 도형 장애물(flow의 전폭 장식 예외 대상).
+    drawing_visuals: list = field(default_factory=list)
     # 계획 패스 사이에 공유하는 페이지 분석 캐시(표 검색 TextPage, 가로 선분).
     # 패스마다 `replace()`로 새 컨텍스트를 만들어도 같은 dict를 가리킨다 — 리댁션
     # 전의 원본 페이지에서만 유효하므로 `_process_page`가 계획 직후 비운다.
@@ -297,6 +299,9 @@ class _PageVisuals:
     raster_rects: list
     image_regions: list
     fixed_visuals: list
+    # fixed_visuals 중 벡터 도형에서 온 것 — flow가 '피할 수 없는 전폭 장식'으로
+    # 뺄 수 있는 것은 이것뿐이다(원문 span·그림은 절대 빼지 않는다).
+    drawing_rects: list
     # 표 rule 보정이 쓰는 가로 선분 — 같은 get_drawings() 결과에서 뽑는다.
     # None이면 수집 실패(표 쪽이 직접 다시 읽는다).
     horizontal_segments: list | None
@@ -363,7 +368,9 @@ def _page_visual_obstacles(fitz, page, block_rects, oblocks) -> _PageVisuals:
         r for r in raster_rects if 0 < r.width * r.height < page_area * 0.85
     ]
     fixed_visuals = image_regions + drawing_rects
-    return _PageVisuals(raster_rects, image_regions, fixed_visuals, horizontal_segments)
+    return _PageVisuals(
+        raster_rects, image_regions, fixed_visuals, drawing_rects, horizontal_segments,
+    )
 
 
 def _plan_table_block(
@@ -736,12 +743,15 @@ def _plan_flow_targets(
         fixed_rects = [span.rect for span in ctx.unowned_source]
         # 이번 패스에서 지워질 블록의 원문은 장애물이 아니다 — 남을 블록만 센다.
         fixed_rects.extend(ctx.obstacle_spans(exclude=component_indices))
-        fixed_rects.extend(ctx.fixed_visuals)
+        fixed_rects.extend(ctx.image_regions)
         fixed_rects.extend(
             target.plan.ink_rect
             for target in targets
             if target.plan.ink_rect is not None
         )
+        # 벡터 도형 장애물은 따로 넘긴다 — flow가 블록 안쪽 전폭 장식 띠를 뺄 때
+        # 남는 원문 span까지 함께 빼면 번역이 보존 원문 위에 겹쳐 찍힌다.
+        decorative = ctx.drawing_visuals
         # 가로 평탄화 블록은 OCR 줄바꿈을 그대로 조판하면 구조적으로
         # 들어갈 수 없다. 원문의 시각적 줄 수로 되돌린 대안을 함께 시도한다.
         variants = [component]
@@ -754,7 +764,9 @@ def _plan_flow_targets(
             ])
         planned = None
         for variant in variants:
-            planned = _plan_flow_group(ctx.page, variant, fixed_rects)
+            planned = _plan_flow_group(
+                ctx.page, variant, fixed_rects, decorative_rects=decorative,
+            )
             if planned is not None:
                 break
         if planned is None:
@@ -788,6 +800,7 @@ def _plan_flow_targets(
                         continue
                     single = _plan_flow_group(
                         ctx.page, [replace(candidate, text=text)], obstacles,
+                        decorative_rects=decorative,
                     )
                     if single:
                         break
@@ -802,7 +815,7 @@ def _plan_flow_targets(
                     candidate.listing_segments,
                     candidate.fontname,
                     candidate.fontfile,
-                    obstacles,
+                    obstacles + list(decorative),
                     candidate.block_index,
                     bold=candidate.bold,
                 )
@@ -827,6 +840,7 @@ def _plan_flow_targets(
                         ctx.page, [replace(candidate, text=text)], obstacles,
                         scales=_LASTRESORT_SHRINK_STEPS,
                         min_pt=_LASTRESORT_MIN_FONT_PT,
+                        decorative_rects=decorative,
                     )
                     if single:
                         break
@@ -1244,6 +1258,7 @@ def _process_page(
         fitz, page, pno, aspect, oblocks, tblocks, block_rects,
         source_records, source_ownership, unowned_source, ambiguous_blocks,
         visuals.image_regions, visuals.fixed_visuals, fonts,
+        drawing_visuals=visuals.drawing_rects,
         analysis={"horizontal_segments": visuals.horizontal_segments},
     )
     try:

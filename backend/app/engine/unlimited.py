@@ -19,6 +19,7 @@ from pathlib import Path
 from ..config import Settings
 from ..native_ops import make_ngram_logits_processor
 from .base import EngineCapabilities, EngineError, OCREngine, RepetitiveOutputError, StreamSink
+from .objc_pool import autorelease_pool
 from .repetition import SemanticRepetitionDetector
 
 logger = logging.getLogger(__name__)
@@ -124,6 +125,12 @@ class UnlimitedEngine(OCREngine):
     def loaded(self) -> bool:
         return self._model is not None
 
+    @property
+    def _uses_mps(self) -> bool:
+        """MPS 작업 구간을 ObjC 오토릴리스 풀로 감쌀지 — 잡 워커는 끝나지 않는 스레드라
+        풀이 없으면 autorelease 객체가 영구히 쌓인다(gap1-metal-real-e2e-1)."""
+        return self.torch_device == "mps"
+
     def capabilities(self) -> EngineCapabilities:
         return EngineCapabilities(
             model_id=self._settings.model_id,
@@ -143,7 +150,10 @@ class UnlimitedEngine(OCREngine):
             return
         with _LOAD_LOCK:
             if self._model is None:
-                self._load_locked()
+                # 프리로드가 없으면 워커(끝나지 않는 스레드)가 로드한다 — .to('mps')의
+                # ObjC 임시 객체가 그 스레드에 남지 않게 풀로 감싼다 (objc_pool 참조)
+                with autorelease_pool(self._uses_mps):
+                    self._load_locked()
 
     def _load_locked(self) -> None:
         import torch
@@ -213,7 +223,8 @@ class UnlimitedEngine(OCREngine):
         try:
             import torch
 
-            torch.mps.empty_cache()
+            with autorelease_pool(True):
+                torch.mps.empty_cache()
         except Exception:  # pragma: no cover - 방어적
             pass
 
@@ -290,20 +301,24 @@ class UnlimitedEngine(OCREngine):
         )
         try:
             try:
-                outputs, _tokens = self._model.infer_multi(
-                    self._tokenizer,
-                    prompt=MULTI_PROMPT,
-                    image_files=[str(p) for p in image_paths],
-                    output_path=str(out_dir),
-                    image_size=1024,
-                    max_length=s.max_length,
-                    no_repeat_ngram_size=NGRAM_SIZE,
-                    ngram_window=MULTI_NGRAM_WINDOW,
-                    save_results=True,
-                    **self._gen_extras(
-                        sink, cancel, MULTI_NGRAM_WINDOW, repetition
-                    ),
-                )
+                # MPS: 이미지 H2D 복사·생성 루프·후처리 전체를 풀로 감싼다 — fast_decode는
+                # 스텝마다 따로 비우지만 HF generate 폴백(OCR_FAST_DECODE=0)은 이 바깥
+                # 풀이 유일한 회수 지점이다.
+                with autorelease_pool(self._uses_mps):
+                    outputs, _tokens = self._model.infer_multi(
+                        self._tokenizer,
+                        prompt=MULTI_PROMPT,
+                        image_files=[str(p) for p in image_paths],
+                        output_path=str(out_dir),
+                        image_size=1024,
+                        max_length=s.max_length,
+                        no_repeat_ngram_size=NGRAM_SIZE,
+                        ngram_window=MULTI_NGRAM_WINDOW,
+                        save_results=True,
+                        **self._gen_extras(
+                            sink, cancel, MULTI_NGRAM_WINDOW, repetition
+                        ),
+                    )
             except Exception as exc:
                 if repetition.detected and not cancel.is_set():
                     raise RepetitiveOutputError(repetition.message) from exc
@@ -332,22 +347,23 @@ class UnlimitedEngine(OCREngine):
         )
         try:
             try:
-                outputs = self._model.infer(
-                    self._tokenizer,
-                    prompt=SINGLE_PROMPT,
-                    image_file=str(image_path),
-                    output_path=str(out_dir),
-                    base_size=1024,
-                    image_size=640,
-                    crop_mode=True,
-                    max_length=s.max_length,
-                    no_repeat_ngram_size=NGRAM_SIZE,
-                    ngram_window=SINGLE_NGRAM_WINDOW,
-                    save_results=True,
-                    **self._gen_extras(
-                        sink, cancel, SINGLE_NGRAM_WINDOW, repetition
-                    ),
-                )
+                with autorelease_pool(self._uses_mps):  # run_multi와 같은 이유
+                    outputs = self._model.infer(
+                        self._tokenizer,
+                        prompt=SINGLE_PROMPT,
+                        image_file=str(image_path),
+                        output_path=str(out_dir),
+                        base_size=1024,
+                        image_size=640,
+                        crop_mode=True,
+                        max_length=s.max_length,
+                        no_repeat_ngram_size=NGRAM_SIZE,
+                        ngram_window=SINGLE_NGRAM_WINDOW,
+                        save_results=True,
+                        **self._gen_extras(
+                            sink, cancel, SINGLE_NGRAM_WINDOW, repetition
+                        ),
+                    )
             except Exception as exc:
                 if repetition.detected and not cancel.is_set():
                     raise RepetitiveOutputError(repetition.message) from exc

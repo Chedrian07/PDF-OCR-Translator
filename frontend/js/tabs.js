@@ -1,8 +1,9 @@
 import { ICON } from './constants.js';
-import { docLayoutIsFigureOnly, withLangUrl } from './core.js';
+import { busyWaitMessage, docLayoutIsFigureOnly, langFetchVerdict, withLangUrl } from './core.js';
 import { el, state } from './state.js';
 import { h, showToast, typesetMath } from './ui.js';
-import { revertToOriginal } from './translate.js';
+import { fetchTextWithBusyRetry } from './api.js';
+import { revertToOriginal, setLang } from './translate.js';
 import { initQaTab, prefillQaPageFromReader } from './qa.js';
 import { loadReader, readerViewportFocus } from './reader.js';
 
@@ -51,10 +52,67 @@ export function renderFigureOnlyDocLayout() {
   ));
 }
 
+/* ── 결과 탭 로드 공통 ─────────────────────────────────────────────────
+ * 계약: 503 + Retry-After(빌드·예열 중)는 제한 재시도하며 진행을 보여 주고,
+ * 404/409(번역본 없음)일 때만 원문으로 폴백한다. 그 밖의 실패(네트워크·5xx)는
+ * 일시 장애다 — 언어 선택을 그대로 두고 다시 시도 버튼을 띄운다(frontend-9).
+ */
+
+// 진행 중인 탭 로드 — (탭, 잡, 언어, 잡 열기 세대)별 1건. 바쁨 재시도로 수십 초를
+// 기다리는 동안 탭을 다시 눌러도 같은 요청을 겹쳐 보내지 않는다.
+const tabLoads = new Set();
+
+function loadContext() {
+  return { id: state.currentJobId, lang: state.currentLang, gen: state.openGen };
+}
+
+function isCurrentLoad(ctx) {
+  return state.currentJobId === ctx.id && state.currentLang === ctx.lang
+    && state.openGen === ctx.gen;
+}
+
+async function guardedTabLoad(kind, ctx, run) {
+  const key = `${kind}|${ctx.id}|${ctx.lang}|${ctx.gen}`;
+  if (tabLoads.has(key)) return;
+  tabLoads.add(key);
+  try {
+    await run();
+  } finally {
+    tabLoads.delete(key);
+  }
+}
+
+// 패널 내용을 안내 한 줄(로딩·바쁨 대기·확정 부재)로 바꾼다.
+function setPanelNote(container, text) {
+  container.textContent = '';
+  container.appendChild(h('p', { class: 'muted', role: 'status', text }));
+}
+
+// 일시 실패 안내 — 언어는 유지하고 [다시 시도](+ 한국어면 [원문 보기])를 준다.
+function renderLoadFailure(container, message, retry, ko) {
+  container.textContent = '';
+  const again = h('button', { class: 'btn btn-small', type: 'button', text: '다시 시도' });
+  again.addEventListener('click', () => retry());
+  const actions = h('div', { class: 'load-failure-actions' }, again);
+  if (ko) {
+    const original = h('button', { class: 'btn btn-small btn-ghost', type: 'button', text: '원문 보기' });
+    original.addEventListener('click', () => setLang('orig'));
+    actions.appendChild(original);
+  }
+  container.appendChild(h('div', { class: 'load-failure', role: 'alert' },
+    h('p', { class: 'muted', text: message }), actions));
+}
+
+function busyNotifier(ctx, label, show) {
+  return (seconds, attempt, max) => {
+    if (isCurrentLoad(ctx)) show(busyWaitMessage(label, seconds, attempt, max));
+  };
+}
+
 export async function loadDocLayout() {
   if (state.docLayoutLoaded) return;
-  const id = state.currentJobId;
-  if (!id) return;
+  const ctx = loadContext();
+  if (!ctx.id) return;
   // figure_only 엔진은 캔버스가 비어 "흰 바탕에 그림만" 나온다 — 캔버스를 아예 그리지 않고
   // 안내 카드로 대체(전체 내용은 미리보기/Markdown, 그림 위치는 감지 박스로 유도).
   if (docLayoutIsFigureOnly(state.layoutCapability, state.currentJobEngine, state.healthEngine)) {
@@ -62,95 +120,107 @@ export async function loadDocLayout() {
     renderFigureOnlyDocLayout();
     return;
   }
-  const lang = state.currentLang; // 응답 도착 시점에 언어가 바뀌었는지 판별용
-  el.doclayoutBody.textContent = '';
-  el.doclayoutBody.appendChild(h('p', { class: 'muted', text: '레이아웃을 불러오는 중…' }));
-  let html = null;
-  let missing = false;
-  try {
-    const res = await fetch(withLangUrl(`/api/jobs/${id}/layout`, lang), { headers: { Accept: 'text/html' } });
-    if (res.status === 404) missing = true;
-    else if (res.ok) html = await res.text();
-  } catch (_) { /* 아래 공통 실패 처리 */ }
-  if (state.currentJobId !== id || state.currentLang !== lang) return; // 잡/언어 전환 → 최신 로더에 위임
-  // 한국어 뷰에서 번역본을 못 받으면(404·실패) 조용히 원문으로 폴백 + 토스트.
-  if ((missing || html == null) && lang === 'ko' &&
-      revertToOriginal('한국어 레이아웃을 불러오지 못해 원문을 표시합니다.')) {
-    loadDocLayout();
-    return;
-  }
-  el.doclayoutBody.textContent = '';
-  if (missing) {
-    state.docLayoutLoaded = true; // 404는 재시도해도 같음
-    el.doclayoutBody.appendChild(h('p', {
-      class: 'muted',
-      text: '이 작업에는 레이아웃 데이터가 없습니다 (이 기능 추가 이전에 변환된 결과).',
-    }));
-    return;
-  }
-  if (html == null) {
-    const noLayout = state.resultHasLayout === false;
-    el.doclayoutBody.appendChild(h('p', {
-      class: 'muted',
-      text: noLayout
-        ? '이 작업은 레이아웃 기능 이전에 변환되어 레이아웃 데이터가 없습니다 — PDF를 다시 변환하면 생깁니다.'
-        : '레이아웃 뷰를 불러오지 못했습니다.',
-    }));
-    return;
-  }
-  state.docLayoutLoaded = true;
-  // Trusted server-rendered fragment (pipeline/layout.py — 텍스트 전부 이스케이프됨).
-  // 번역본은 루트에 lang="ko"가 붙어 오지만, 컨테이너에도 setResultLangAttr로 반영해 둔다.
-  el.doclayoutBody.innerHTML = html;
-  typesetMath(el.doclayoutBody);
-  if (window.uocrFitLayout) window.uocrFitLayout(el.doclayoutBody);
+  await guardedTabLoad('doclayout', ctx, async () => {
+    const ko = ctx.lang === 'ko';
+    setPanelNote(el.doclayoutBody, '레이아웃을 불러오는 중…');
+    const r = await fetchTextWithBusyRetry(withLangUrl(`/api/jobs/${ctx.id}/layout`, ctx.lang), {
+      accept: 'text/html',
+      isCurrent: () => isCurrentLoad(ctx),
+      onWait: busyNotifier(ctx, ko ? '한국어 레이아웃' : '레이아웃',
+        (text) => setPanelNote(el.doclayoutBody, text)),
+    });
+    if (!isCurrentLoad(ctx)) return; // 잡/언어 전환 → 최신 로더에 위임
+    const missing = langFetchVerdict(r.status) === 'missing';
+    if (missing && ko && revertToOriginal('한국어 레이아웃이 없어 원문을 표시합니다.')) {
+      loadDocLayout();
+      return;
+    }
+    if (missing) {
+      state.docLayoutLoaded = true; // 404는 재시도해도 같음
+      setPanelNote(el.doclayoutBody, '이 작업에는 레이아웃 데이터가 없습니다 (이 기능 추가 이전에 변환된 결과).');
+      return;
+    }
+    if (r.text == null) {
+      if (!ko && state.resultHasLayout === false) {
+        setPanelNote(el.doclayoutBody,
+          '이 작업은 레이아웃 기능 이전에 변환되어 레이아웃 데이터가 없습니다 — PDF를 다시 변환하면 생깁니다.');
+        return;
+      }
+      renderLoadFailure(el.doclayoutBody, ko
+        ? '한국어 레이아웃을 불러오지 못했습니다 — 잠시 후 다시 시도해 주세요.'
+        : '레이아웃 뷰를 불러오지 못했습니다.', loadDocLayout, ko);
+      return;
+    }
+    state.docLayoutLoaded = true;
+    // Trusted server-rendered fragment (pipeline/layout.py — 텍스트 전부 이스케이프됨).
+    // 번역본은 루트에 lang="ko"가 붙어 오지만, 컨테이너에도 setResultLangAttr로 반영해 둔다.
+    el.doclayoutBody.innerHTML = r.text;
+    typesetMath(el.doclayoutBody);
+    if (window.uocrFitLayout) window.uocrFitLayout(el.doclayoutBody);
+  });
 }
 
 export async function loadPreview() {
   if (state.previewLoaded) return;
-  const id = state.currentJobId;
-  if (!id) return;
-  const lang = state.currentLang;
-  el.previewBody.textContent = '';
-  el.previewBody.appendChild(h('p', { class: 'muted', text: '미리보기를 불러오는 중…' }));
-  let html = null;
-  try {
-    const res = await fetch(withLangUrl(`/api/jobs/${id}/html`, lang), { headers: { Accept: 'text/html' } });
-    if (res.ok) html = await res.text();
-  } catch (_) { /* 아래 공통 실패 처리 */ }
-  if (state.currentJobId !== id || state.currentLang !== lang) return;
-  if (html == null) {
-    // 한국어 뷰에서 번역본을 못 받으면 조용히 원문으로 폴백.
-    if (lang === 'ko' && revertToOriginal('한국어 미리보기를 불러오지 못해 원문을 표시합니다.')) { loadPreview(); return; }
-    el.previewBody.textContent = '';
-    el.previewBody.appendChild(h('p', { class: 'muted', text: '미리보기를 불러오지 못했습니다.' }));
-    return;
-  }
-  state.previewLoaded = true;
-  // Trusted server-rendered fragment (/html, same renderer as /render-preview).
-  el.previewBody.innerHTML = html;
-  typesetMath(el.previewBody);
+  const ctx = loadContext();
+  if (!ctx.id) return;
+  await guardedTabLoad('preview', ctx, async () => {
+    const ko = ctx.lang === 'ko';
+    setPanelNote(el.previewBody, '미리보기를 불러오는 중…');
+    const r = await fetchTextWithBusyRetry(withLangUrl(`/api/jobs/${ctx.id}/html`, ctx.lang), {
+      accept: 'text/html',
+      isCurrent: () => isCurrentLoad(ctx),
+      onWait: busyNotifier(ctx, ko ? '한국어 미리보기' : '미리보기',
+        (text) => setPanelNote(el.previewBody, text)),
+    });
+    if (!isCurrentLoad(ctx)) return;
+    if (r.text == null) {
+      if (langFetchVerdict(r.status) === 'missing' && ko
+          && revertToOriginal('한국어 번역본이 없어 원문 미리보기를 표시합니다.')) {
+        loadPreview();
+        return;
+      }
+      renderLoadFailure(el.previewBody, ko
+        ? '한국어 미리보기를 불러오지 못했습니다 — 잠시 후 다시 시도해 주세요.'
+        : '미리보기를 불러오지 못했습니다.', loadPreview, ko);
+      return;
+    }
+    state.previewLoaded = true;
+    // Trusted server-rendered fragment (/html, same renderer as /render-preview).
+    el.previewBody.innerHTML = r.text;
+    typesetMath(el.previewBody);
+  });
 }
 
 export async function loadMarkdown() {
   if (state.markdownLoaded) return;
-  const id = state.currentJobId;
-  if (!id) return;
-  const lang = state.currentLang;
-  el.mdCode.textContent = '불러오는 중…';
-  let text = null;
-  try {
-    const res = await fetch(withLangUrl(`/api/jobs/${id}/markdown`, lang), { headers: { Accept: 'text/markdown' } });
-    if (res.ok) text = await res.text();
-  } catch (_) { /* 아래 공통 실패 처리 */ }
-  if (state.currentJobId !== id || state.currentLang !== lang) return;
-  if (text == null) {
-    if (lang === 'ko' && revertToOriginal('한국어 Markdown을 불러오지 못해 원문을 표시합니다.')) { loadMarkdown(); return; }
-    el.mdCode.textContent = 'Markdown을 불러오지 못했습니다.';
-    return;
-  }
-  state.markdownLoaded = true;
-  el.mdCode.textContent = text;
+  const ctx = loadContext();
+  if (!ctx.id) return;
+  await guardedTabLoad('markdown', ctx, async () => {
+    const ko = ctx.lang === 'ko';
+    el.mdCode.textContent = '불러오는 중…';
+    const r = await fetchTextWithBusyRetry(withLangUrl(`/api/jobs/${ctx.id}/markdown`, ctx.lang), {
+      accept: 'text/markdown',
+      isCurrent: () => isCurrentLoad(ctx),
+      onWait: busyNotifier(ctx, ko ? '한국어 Markdown' : 'Markdown',
+        (text) => { el.mdCode.textContent = text; }),
+    });
+    if (!isCurrentLoad(ctx)) return;
+    if (r.text == null) {
+      if (langFetchVerdict(r.status) === 'missing' && ko
+          && revertToOriginal('한국어 Markdown이 없어 원문을 표시합니다.')) {
+        loadMarkdown();
+        return;
+      }
+      // <pre><code> 안에는 버튼을 두지 않는다 — 탭을 다시 누르면 같은 로더가 재시도한다.
+      el.mdCode.textContent = ko
+        ? '한국어 Markdown을 불러오지 못했습니다 — 탭을 다시 누르면 다시 시도합니다.'
+        : 'Markdown을 불러오지 못했습니다 — 탭을 다시 누르면 다시 시도합니다.';
+      return;
+    }
+    state.markdownLoaded = true;
+    el.mdCode.textContent = r.text;
+  });
 }
 
 /* ============================ Tabs / result wiring ============================ */

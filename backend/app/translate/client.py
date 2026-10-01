@@ -39,6 +39,7 @@ from urllib3.exceptions import ReadTimeoutError
 from .masking import is_degenerate_repetition
 from .types import (
     TranslateAPIError,
+    TranslateCancelled,
     TranslateConfig,
     TranslateEmptyOutput,
     TranslateOutputTruncated,
@@ -90,8 +91,8 @@ class _NeedsFallback(Exception):
     """내부용 — auto 모드에서 responses가 미지원일 때 chat 폴백을 신호."""
 
 
-class _RequestCancelled(TranslateAPIError):
-    """내부용 — 새 HTTP 요청을 보내기 전에 cancel/abort를 관찰했다."""
+class _RequestCancelled(TranslateCancelled):
+    """내부용 — 요청 전·진행 중에 cancel/abort를 관찰했다(공개 계약은 TranslateCancelled)."""
 
 
 class _ModeFlight:

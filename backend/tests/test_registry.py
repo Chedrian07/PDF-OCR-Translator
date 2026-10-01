@@ -342,3 +342,33 @@ def test_containers_pin_their_device_so_auto_stays_a_local_default():
         effective[name] = m.group(1) if m else value
     assert effective == {"ocr-cpu": "cpu", "ocr-cuda": "cuda", "ocr-ovis": "cpu", "ocr-paddle": "cpu"}
     assert "OCR_DEVICE" not in (repo / "backend" / "Dockerfile").read_text(encoding="utf-8")
+
+
+def _make_recipe(target: str, *args: str) -> str:
+    """`make -n <target>`가 실제로 실행할 명령 (make가 없으면 건너뛴다)."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    if shutil.which("make") is None:
+        pytest.skip("make 없음")
+    repo = Path(__file__).resolve().parents[2]
+    out = subprocess.run(
+        ["make", "-s", "-n", "-C", str(repo), target, *args],
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+    return out.stdout
+
+
+@pytest.mark.parametrize("target", ["setup-mlx", "setup-metal"])
+def test_apple_setup_targets_keep_mlx_torch_and_native_together(target):
+    """uv sync는 고른 extra만 남긴다 — metal 단독 sync가 mlx·native를 지웠다(Phase 0)."""
+    recipe = _make_recipe(target)
+    assert "uv sync --extra metal --extra mlx" in recipe
+    assert "uv pip install ../native" in recipe
+
+
+def test_dev_leaves_the_device_to_auto_and_dotenv_while_dev_metal_pins_mps():
+    """make dev가 OCR_DEVICE를 박으면 .env의 OCR_DEVICE가 무시된다(.env는 기존 env를 안 덮는다)."""
+    assert "OCR_DEVICE" not in _make_recipe("dev")
+    assert "OCR_DEVICE=metal uv run uvicorn app.main:app" in _make_recipe("dev-metal")

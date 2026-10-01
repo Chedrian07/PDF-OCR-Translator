@@ -13,7 +13,7 @@ import { el, state } from '../js/state.js';
 import {
   jobListItem, renderJobWarnings, toggleJobWarnings, updateJobListItem,
 } from '../js/jobs.js';
-import { installFakeDom, mount } from './helpers/fake-dom.mjs';
+import { assertSameNode, installFakeDom, mount } from './helpers/fake-dom.mjs';
 
 /* ---------------- 순수 ---------------- */
 
@@ -123,7 +123,7 @@ test('"N페이지" 링크는 읽기 탭을 열고 그 페이지로 간다', (t) 
   el.jobWarningsList.querySelectorAll('.warning-page-link')[1].click(); // '7'
   assert.equal(state.readerPage, 7);
   assert.ok(readerTab.classList.contains('active'), '읽기 탭이 활성화된다');
-  assert.equal(document.activeElement, el.readerPagePane, '포커스가 리더 원문 면으로 간다');
+  assertSameNode(assert, document.activeElement, el.readerPagePane, '포커스가 리더 원문 면으로 간다');
 });
 
 test('완료 전 잡의 경고는 평문으로 보인다 (리더가 없으므로 링크 없음)', (t) => {
@@ -162,5 +162,5 @@ test('작업 목록 줄에도 경고 개수를 표시하고, 경고가 사라지
   assert.equal(item.querySelectorAll('.ji-warn').length, 1);
   assert.equal(item.querySelector('.ji-warn').textContent, '주의 1');
   updateJobListItem(item, { job_id: 'job-a', filename: 'a.pdf', status: 'done', warnings: [] });
-  assert.equal(item.querySelector('.ji-warn'), null);
+  assert.ok(!item.querySelector('.ji-warn'), '경고 표시가 지워진다');
 });

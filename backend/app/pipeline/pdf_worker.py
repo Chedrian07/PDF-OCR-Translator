@@ -549,8 +549,13 @@ def _portable_exception(exc: BaseException) -> tuple:
     return ("exc", exc, text)
 
 
-# SIGALRM은 POSIX 전용이다(Windows에는 없다 — 그때는 부모의 상한만 남는다).
-_HAS_ALARM = hasattr(signal, "alarm") and hasattr(signal, "SIGALRM")
+# SIGALRM은 POSIX 전용이다(Windows에는 없다 — 그때는 부모의 상한만 남는다). 신호 이름을
+# 문자열로 쓰지 않는다 — env 키 계약 스캐너(test_ci_ops_contracts)가 대문자 문자열을 env 키로 센다.
+try:
+    _ALARM_SIGNAL = signal.SIGALRM
+except AttributeError:  # pragma: no cover — POSIX 밖
+    _ALARM_SIGNAL = None
+_HAS_ALARM = _ALARM_SIGNAL is not None and hasattr(signal, "alarm")
 
 
 def _child_main(conn, pool_name: str, mem_limit_mb: int, log_level: int) -> None:

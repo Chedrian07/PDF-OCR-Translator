@@ -157,3 +157,40 @@ def test_generation_is_identical_on_worker_and_concurrent_threads(tiny_model_and
         th.join()
     assert not errors, errors
     assert results == {"worker": expected, "c0": expected, "c1": expected}
+
+
+def test_warmup_runs_both_modes_and_cleans_up(tiny_model_and_inputs, tmp_path, monkeypatch):
+    import tempfile
+
+    from app.vendor.unlimited_ocr_mlx import warmup
+
+    class Tok:
+        eos_token_id = 1
+
+        def encode(self, text, add_special_tokens=False):
+            return [2 + ord(c) % 50 for c in text]
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    model, _ = tiny_model_and_inputs
+    seconds = warmup(model, Tok(), max_new_tokens=2)
+    assert seconds > 0
+    assert list(tmp_path.iterdir()) == []  # 임시 이미지 정리
+
+
+def test_exported_names_never_resolve_to_submodules():
+    """하위 모듈이 먼저 임포트돼도 ``from pkg import generate``는 함수여야 한다 — 하위 모듈
+    이름이 내보내는 이름과 같으면 임포트 시스템이 패키지 속성을 모듈로 덮는다."""
+    import pkgutil
+
+    import app.vendor.unlimited_ocr_mlx as pkg
+
+    submodules = {m.name for m in pkgutil.iter_modules(pkg.__path__)}
+    assert not (submodules & set(pkg.__all__))
+    code = (
+        "import inspect\n"
+        "import app.vendor.unlimited_ocr_mlx.generation, app.vendor.unlimited_ocr_mlx.inference\n"
+        "from app.vendor.unlimited_ocr_mlx import generate, infer, infer_multi, warmup, load\n"
+        "print(all(inspect.isfunction(f) for f in (generate, infer, infer_multi, warmup, load)))\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], cwd=BACKEND, capture_output=True, text=True)
+    assert out.stdout.strip() == "True", out.stderr[-1000:]

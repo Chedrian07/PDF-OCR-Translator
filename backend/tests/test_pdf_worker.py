@@ -188,7 +188,10 @@ def test_a_full_pool_makes_callers_wait_or_reports_busy(pdf_worker_processes):
     assert stats["in_use"] == 0 and stats["rejected_busy"] == 1
 
 
-def test_shutdown_stops_idle_and_busy_workers(pdf_worker_processes):
+@pytest.mark.parametrize("settle", [0.5, 0.05, 0.2])
+def test_shutdown_stops_idle_and_busy_workers(pdf_worker_processes, settle):
+    """작업 중인 워커를 다른 스레드가 종료해도 호출자는 PdfWorkerCrashed만 본다 — 정리가 두
+    스레드에서 겹쳐도(Process.close 이중 호출 → AttributeError) 새지 않는다. 시점을 바꿔 반복."""
     pdf_worker.run("pdf_worker_tasks:pid", pool="probe", timeout=30)
     errors: list[BaseException] = []
 
@@ -200,13 +203,13 @@ def test_shutdown_stops_idle_and_busy_workers(pdf_worker_processes):
 
     thread = threading.Thread(target=_long)
     thread.start()
-    time.sleep(0.5)
+    time.sleep(settle)
     started = time.monotonic()
     pdf_worker.shutdown_pools()
     thread.join(10)
     assert not thread.is_alive()
     assert time.monotonic() - started < 5
-    assert errors and isinstance(errors[0], PdfWorkerCrashed)
+    assert len(errors) == 1 and isinstance(errors[0], (PdfWorkerCrashed, pdf_worker.PdfWorkerError))
     assert _wait_no_children() == []
     # 닫은 뒤 다시 쓰면 새 풀이 lazily 만들어진다
     assert pdf_worker.run("pdf_worker_tasks:echo", ("again",), timeout=30) == "again"

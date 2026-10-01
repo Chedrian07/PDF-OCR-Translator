@@ -245,6 +245,9 @@ class _PageContext:
     cleared_indices: frozenset = frozenset()
     # fixed_visuals 중 벡터 도형 장애물(flow의 전폭 장식 예외 대상).
     drawing_visuals: list = field(default_factory=list)
+    # 원문이 텍스트가 아니라 래스터 픽셀인 블록(스캔 페이지·표 이미지). span이 없으니
+    # 남는 동안에는 블록 영역 전체가 장애물이고, 교체되면 그 픽셀을 덮어 지운다.
+    raster_blocks: frozenset = frozenset()
     # 계획 패스 사이에 공유하는 페이지 분석 캐시(표 검색 TextPage, 가로 선분).
     # 패스마다 `replace()`로 새 컨텍스트를 만들어도 같은 dict를 가리킨다 — 리댁션
     # 전의 원본 페이지에서만 유효하므로 `_process_page`가 계획 직후 비운다.
@@ -257,6 +260,20 @@ class _PageContext:
                 continue
             for span in spans:
                 yield span.rect
+        yield from self.raster_obstacles(self.cleared_indices | frozenset(exclude))
+
+    def raster_obstacles(self, skip: "set[int] | frozenset[int]" = frozenset()):
+        """남는 래스터 원문 블록의 영역 — 스캔에는 장애물로 셀 span이 없다.
+
+        이게 없으면 스캔 페이지의 보존 블록(수식·표·머리말 픽셀)은 장애물이 아니어서
+        번역이 그 위로 자라 겹쳐 찍힌다.
+        """
+        for owner in self.raster_blocks:
+            if owner in skip:
+                continue
+            rect = self.block_rects[owner]
+            if rect is not None:
+                yield rect
 
 
 # 페이지 면적의 이 비율을 넘는 벡터 도형은 "큰 도형"으로 본다. 10%면 A4에서
@@ -305,6 +322,9 @@ class _PageVisuals:
     # 표 rule 보정이 쓰는 가로 선분 — 같은 get_drawings() 결과에서 뽑는다.
     # None이면 수집 실패(표 쪽이 직접 다시 읽는다).
     horizontal_segments: list | None
+    # 페이지 대부분을 덮는 래스터 — 스캔 배경. image_regions에서는 빠지지만 그 위
+    # 블록의 원문은 이 픽셀이다.
+    scan_rasters: list = field(default_factory=list)
 
 
 def _page_visual_obstacles(fitz, page, block_rects, oblocks) -> _PageVisuals:
@@ -352,7 +372,8 @@ def _page_visual_obstacles(fitz, page, block_rects, oblocks) -> _PageVisuals:
         horizontal_segments = None
     # 그림 위 텍스트 방어용 영역: layout image 블록 ∪ 래스터 인스턴스.
     # 페이지의 85% 이상을 덮는 영역은 전면 스캔 배경으로 간주해 제외한다
-    # — 스캔 문서에서 모든 블록 교체가 생략되는 사고 방지.
+    # — 스캔 문서에서 모든 블록 교체가 생략되는 사고 방지. 대신 그 래스터는
+    # scan_rasters로 따로 넘겨, 그 위 블록을 교체할 때 원문 픽셀을 덮게 한다.
     page_area = page.rect.width * page.rect.height or 1.0
     image_regions = [
         r
@@ -368,9 +389,72 @@ def _page_visual_obstacles(fitz, page, block_rects, oblocks) -> _PageVisuals:
         r for r in raster_rects if 0 < r.width * r.height < page_area * 0.85
     ]
     fixed_visuals = image_regions + drawing_rects
+    scan_rasters = [
+        r for r in raster_rects if r.width * r.height >= page_area * _SCAN_RASTER_FRACTION
+    ]
     return _PageVisuals(
         raster_rects, image_regions, fixed_visuals, drawing_rects, horizontal_segments,
+        scan_rasters,
     )
+
+
+# image_regions의 85% 규칙과 같은 기준 — 이 비율 이상을 덮는 래스터가 스캔 배경이다.
+_SCAN_RASTER_FRACTION = 0.85
+# 래스터를 원문으로 보는 블록의 겹침 기준. 전면 스캔은 블록 면적의 절반 이상,
+# 표 이미지는 표 블록이 한 래스터 안에 거의(80%) 들어 있어야 한다.
+_SCAN_BLOCK_OVERLAP = 0.5
+_RASTER_TABLE_OVERLAP = 0.8
+# 레이아웃 그림 블록과 이만큼 겹치면 그림 속 글자다 — figure_text와 같은 30%.
+_FIGURE_OVERLAP = 0.30
+
+
+def _raster_backed_blocks(block_rects, oblocks, source_records, visuals) -> frozenset:
+    """원문이 텍스트가 아니라 래스터 픽셀인 블록 인덱스.
+
+    스캔 페이지(또는 투명 OCR 텍스트만 얹힌 스캔)에서는 텍스트 리댁션으로 지울
+    원문이 없어, 번역이 영어 스캔 글자 위에 그대로 겹쳐 찍혔다. 그런 블록은 교체할
+    때 그 영역을 바탕색으로 덮는다. born-digital 그림을 건드리지 않도록 좁게 고른다:
+    보이는 원문 span의 중심이 블록 안에 하나도 없고, (a) 전면 스캔 래스터와 블록
+    면적 절반 이상이 겹치거나 (b) 표 블록이 한 래스터 안에 들어 있어야 하며(표
+    이미지 — 표는 셀 단위로 번역하는 대상이다), 레이아웃 그림 블록 안의 글자는 뺀다.
+    """
+    if not visuals.raster_rects:
+        return frozenset()
+    figures = [
+        rect for rect, block in zip(block_rects, oblocks)
+        if rect is not None
+        and isinstance(block, dict)
+        and (str(block.get("type") or "") == "image" or block.get("image"))
+    ]
+    visible_centers = [
+        (span.rect.tl + span.rect.br) / 2 for span in source_records if span.visible
+    ]
+    out: set[int] = set()
+    for index, (rect, block) in enumerate(zip(block_rects, oblocks)):
+        if rect is None or not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "")
+        if block_type == "image" or block.get("image"):
+            continue
+        area = rect.width * rect.height
+        if area <= 0:
+            continue
+        on_scan = any(
+            _rect_overlap_area(rect, raster) / area >= _SCAN_BLOCK_OVERLAP
+            for raster in visuals.scan_rasters
+        )
+        table_image = block_type == "table" and any(
+            _rect_overlap_area(rect, raster) / area >= _RASTER_TABLE_OVERLAP
+            for raster in visuals.raster_rects
+        )
+        if not (on_scan or table_image):
+            continue
+        if any(_rect_overlap_area(rect, figure) / area >= _FIGURE_OVERLAP for figure in figures):
+            continue
+        if any(rect.contains(center) for center in visible_centers):
+            continue
+        out.add(index)
+    return frozenset(out)
 
 
 def _plan_table_block(
@@ -627,6 +711,7 @@ def _plan_text_block(
             for span in spans
         )
         listing_avoid.extend(ctx.fixed_visuals)
+        listing_avoid.extend(ctx.raster_obstacles(skip={block_index}))
         listing_avoid.extend(
             target.plan.ink_rect
             for target in targets
@@ -794,6 +879,10 @@ def _plan_flow_targets(
                     if other != candidate.block_index
                     for span in ctx.source_ownership.get(other, [])
                 )
+                # 래스터 원문 형제는 span이 없다 — 남을 수 있는 블록 영역을 예약한다.
+                obstacles.extend(ctx.raster_obstacles(
+                    frozenset(ctx.raster_blocks) - (pending - {candidate.block_index}),
+                ))
                 single = None
                 for text in (candidate.text, candidate.reflow_text):
                     if text is None:
@@ -944,8 +1033,12 @@ def _redact_in_chunks(page, rects, chunk: int = _REDACT_CHUNK, **apply_kwargs) -
         page.apply_redactions(**apply_kwargs)
 
 
-def _apply_page_redactions(fitz, page, targets, raster_rects) -> None:
-    """원문 텍스트(그리고 이모지의 이미지 절반)만 지운다 — 그래픽은 보존."""
+def _apply_page_redactions(fitz, page, targets, raster_rects, raster_covers=()) -> None:
+    """원문 텍스트(그리고 이모지의 이미지 절반)만 지운다 — 그래픽은 보존.
+
+    `raster_covers`는 `(영역, 바탕색)` 목록이다. 원문이 스캔 픽셀인 교체 블록의
+    영역을 바탕색으로 덮는다 — 텍스트 리댁션으로는 지울 수 없는 원문이다.
+    """
     # 2) 원문 텍스트 리댁션 (이미지·그래픽 보존) — 삽입 전에 일괄 적용
     source_rects = []
     text_rects = []
@@ -1005,6 +1098,124 @@ def _apply_page_redactions(fitz, page, targets, raster_rects) -> None:
             images=fitz.PDF_REDACT_IMAGE_REMOVE,
             graphics=fitz.PDF_REDACT_LINE_ART_NONE,
             text=fitz.PDF_REDACT_TEXT_NONE,
+        )
+    # 2c) 스캔 픽셀 덮기. 리댁션의 채움(fill)은 적용 시 페이지 내용 맨 위에 그려지고,
+    # 번역문은 그 뒤에 삽입되므로 '바탕색 사각형 위 한국어'가 된다. 이미지 객체와
+    # 다른 영역의 픽셀은 그대로다. PDF_REDACT_IMAGE_PIXELS로 실제 픽셀까지 지우지
+    # 않는 이유: 화면 결과는 같은데 MuPDF가 이미지를 디코드해 비압축(Flate)으로 다시
+    # 써서 JPEG 스캔이 페이지당 0.92→1.73MB(회색)·0.96→2.69MB(컬러)로 불어났다(실측,
+    # 300dpi). JPX 스캔이면 더 크다.
+    covers = list(raster_covers)
+    for start in range(0, len(covers), _REDACT_CHUNK):
+        for rect, fill in covers[start:start + _REDACT_CHUNK]:
+            page.add_redact_annot(rect, fill=fill)
+        page.apply_redactions(
+            images=fitz.PDF_REDACT_IMAGE_NONE,
+            graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+            text=fitz.PDF_REDACT_TEXT_NONE,
+        )
+
+
+# 덮을 영역의 바탕색을 고를 때 쓰는 렌더 해상도. 50dpi면 A4가 413x585px라 페이지당
+# 한 번 렌더하는 비용이 작고, 글자 획은 흐려져도 가장 흔한 색은 종이색이다.
+_RASTER_SAMPLE_DPI = 50
+# OCR bbox는 0–999 정수 좌표라 글리프 가장자리를 1pt 안쪽에서 자르기도 한다.
+_RASTER_ERASE_PAD_PT = 0.8
+# 바탕색이 이보다 어두우면(어두운 띠 위 흰 글자 등) 검은 번역 글자가 보이지 않으므로
+# 흰색으로 덮는다.
+_RASTER_DARK_LUMA = 0.5
+
+
+def _raster_erase_regions(ctx: _PageContext, targets) -> list:
+    """원문이 래스터인 교체 대상마다 덮을 원래 영역(번역이 옮겨 가도 원래 자리)."""
+    regions: list = []
+    seen: set[tuple] = set()
+    for target in targets:
+        if target.block_index not in ctx.raster_blocks:
+            continue
+        if target.kind not in ("text", "listing", "table") or target.source_rect is None:
+            continue
+        region = +target.source_rect
+        if target.kind == "text":
+            region += (
+                -_RASTER_ERASE_PAD_PT, -_RASTER_ERASE_PAD_PT,
+                _RASTER_ERASE_PAD_PT, _RASTER_ERASE_PAD_PT,
+            )
+        region &= ctx.page.mediabox
+        key = tuple(round(value, 2) for value in region)
+        if region.is_empty or key in seen:
+            continue
+        seen.add(key)
+        regions.append(region)
+    return regions
+
+
+def _raster_background_fills(fitz, page, regions) -> list:
+    """덮을 영역마다 스캔 바탕색(그 영역에서 가장 흔한 색). 알 수 없으면 흰색.
+
+    누렇게 바랜 스캔을 흰색으로 덮으면 블록마다 흰 사각형이 도드라진다. 페이지를
+    한 번만 낮은 해상도로 렌더하고(표시 공간), 영역별 최빈색을 고른다.
+    """
+    white = (1.0, 1.0, 1.0)
+    if not regions:
+        return []
+    zoom = _RASTER_SAMPLE_DPI / 72.0
+    try:
+        pixmap = page.get_pixmap(
+            matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csRGB, alpha=False,
+        )
+    except Exception:  # noqa: BLE001 — 렌더 실패는 흰색 덮기로 폴백
+        return [white] * len(regions)
+    bounds = fitz.IRect(0, 0, pixmap.width, pixmap.height)
+    fills = []
+    for region in regions:
+        shown = region * page.rotation_matrix
+        shown.normalize()
+        clip = fitz.IRect(
+            int(shown.x0 * zoom) - 1, int(shown.y0 * zoom) - 1,
+            int(shown.x1 * zoom) + 2, int(shown.y1 * zoom) + 2,
+        ) & bounds
+        if clip.is_empty:
+            fills.append(white)
+            continue
+        try:
+            _ratio, color = pixmap.color_topusage(clip=clip)
+        except Exception:  # noqa: BLE001
+            fills.append(white)
+            continue
+        red, green, blue = (component / 255.0 for component in color[:3])
+        luma = 0.299 * red + 0.587 * green + 0.114 * blue
+        fills.append((red, green, blue) if luma >= _RASTER_DARK_LUMA else white)
+    return fills
+
+
+def _warn_unerased_raster_sources(ctx: _PageContext, targets, visuals, result) -> None:
+    """보이는 원문 텍스트 없이 이미지 일부와 겹친 교체 블록 — 덮지 못하므로 알린다.
+
+    전면 스캔·표 이미지는 덮지만, 그 밖의 래스터(그림 일부 등)는 born-digital 그림을
+    지키려고 덮지 않는다. 그 위에 번역이 찍히면 이미지 속 글자와 겹쳐 보일 수 있다 —
+    리포트가 '깨끗한 교체'로만 세지 않도록 경고로 남긴다.
+    """
+    if not visuals.raster_rects:
+        return
+    warned: set[int] = set()
+    for target in targets:
+        index = target.block_index
+        if index < 0 or index in warned or index in ctx.raster_blocks:
+            continue
+        if target.kind not in ("text", "listing", "table"):
+            continue
+        if any(span.visible for span in ctx.source_ownership.get(index, [])):
+            continue
+        rect = ctx.block_rects[index] if index < len(ctx.block_rects) else None
+        if rect is None or not any(
+            _rect_overlap_area(rect, raster) > 1.0 for raster in visuals.raster_rects
+        ):
+            continue
+        warned.add(index)
+        result.warnings.append(
+            f"p{ctx.pno}: 블록 {index + 1}의 원문이 이미지 픽셀이라 지우지 못함 — "
+            "번역이 이미지 속 글자와 겹쳐 보일 수 있음"
         )
 
 
@@ -1259,6 +1470,7 @@ def _process_page(
         source_records, source_ownership, unowned_source, ambiguous_blocks,
         visuals.image_regions, visuals.fixed_visuals, fonts,
         drawing_visuals=visuals.drawing_rects,
+        raster_blocks=_raster_backed_blocks(block_rects, oblocks, source_records, visuals),
         analysis={"horizontal_segments": visuals.horizontal_segments},
     )
     try:
@@ -1275,7 +1487,18 @@ def _process_page(
     if repeated_scheme_link_rects:
         _normalize_repeated_scheme_links(page, repeated_scheme_link_rects)
 
-    _apply_page_redactions(fitz, page, targets, visuals.raster_rects)
+    # 래스터 원문을 덮을 영역과 그 바탕색은 페이지를 건드리기 **전에** 정한다 —
+    # 리댁션 뒤 렌더는 이미 덮인 색을 샘플링한다.
+    erase_regions = _raster_erase_regions(base_ctx, targets)
+    erase_fills = _raster_background_fills(fitz, page, erase_regions)
+    _warn_unerased_raster_sources(base_ctx, targets, visuals, result)
+    _apply_page_redactions(
+        fitz, page, targets, visuals.raster_rects, list(zip(erase_regions, erase_fills)),
+    )
+    result.raster_blocks_erased += len({
+        target.block_index for target in targets
+        if target.block_index in base_ctx.raster_blocks
+    })
     _insert_page_targets(page, targets, result)
 
 

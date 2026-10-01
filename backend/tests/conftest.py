@@ -1,8 +1,22 @@
+import atexit
 import io
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
+
+# ── 테스트 격리: app 패키지를 import하기 **전에** 고정한다 ──
+# 개발자의 실제 .env(실키)가 Settings.from_env()의 자동 탐색으로 테스트 프로세스
+# (와 자식 프로세스) 환경에 주입되지 않게 끄고, 기본 DATA_DIR(backend/data — 개발
+# 서버의 실잡 저장소)을 어떤 경로로도 건드리지 않도록 세션 전용 임시 디렉터리로
+# 돌린다. 이미 설정돼 있어도 덮어쓴다 — 테스트가 실데이터를 고를 이유는 없다.
+os.environ["DISABLE_DOTENV"] = "1"
+_SESSION_DATA_DIR = tempfile.mkdtemp(prefix="pdfocr-pytest-data-")
+os.environ["DATA_DIR"] = _SESSION_DATA_DIR
+atexit.register(shutil.rmtree, _SESSION_DATA_DIR, ignore_errors=True)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

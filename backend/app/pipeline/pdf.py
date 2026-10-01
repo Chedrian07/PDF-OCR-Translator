@@ -240,7 +240,9 @@ def _escape_markdown_line(line: str) -> str:
     return line
 
 
-def extract_embedded_page_markdown(pdf_path: Path, page_number: int) -> str | None:
+def extract_embedded_page_markdown(
+    pdf_path: Path, page_number: int, *, should_cancel: Callable[[], bool] | None = None,
+) -> str | None:
     """PDF의 1-based 페이지 텍스트 레이어를 안전한 plain-text Markdown으로 추출.
 
     OCR이 최종 실패한 페이지의 복구 경로다. 텍스트 블록을 **읽기 순서**(다단 인식 —
@@ -250,20 +252,42 @@ def extract_embedded_page_markdown(pdf_path: Path, page_number: int) -> str | No
     유닛이 되지 않아 복구 페이지가 한국어 번역본·번역 PDF에 영어로 남았고,
     ``get_text("text", sort=True)``가 같은 높이의 좌·우 단 줄을 한 줄로 섞었다.
     스캔 문서처럼 유효한 텍스트가 없거나 MuPDF 추출이 실패하면 ``None``을 반환한다.
+
+    추출은 PDF 워커에서 페이지 작업으로 돈다(pdf_worker.run_page) — 시간 상한을 넘었거나
+    앞서 렌더·분석이 상한을 넘은 페이지는 기다리지 않고 None이다. should_cancel이 참이 되면
+    진행 중인 추출의 워커를 끝내고 JobCanceled.
     """
+    from . import pdf_worker
+
+    try:
+        return pdf_worker.run_page(
+            "app.pipeline.pdf:embedded_page_markdown_local", pdf_path, page_number - 1,
+            cancel=should_cancel,
+        )
+    except pdf_worker.PdfWorkerCanceled:
+        _raise_job_canceled()
+    except pdf_worker.PdfWorkerError as error:  # 시간 상한·워커 비정상 종료·격리 메모
+        logger.warning("%d페이지 PDF 텍스트 레이어 복구를 건너뜀 (%s)", page_number, error)
+        return None
+
+
+def embedded_page_markdown_local(pdf_path: Path, page_index: int) -> str | None:
+    """(PDF 워커) extract_embedded_page_markdown의 본체 — page_index는 0-based."""
     from ..engine.textlayer import sanitize_text
+    from . import pdf_worker
     from .reading_order import page_text_blocks
 
+    page_number = page_index + 1
     fitz = quiet_fitz()
-    doc = None
     try:
-        doc = fitz.open(str(pdf_path))
-        if doc.needs_pass or not 1 <= page_number <= doc.page_count:
-            return None
+        with pdf_worker.open_document(pdf_path) as doc:
+            if doc.needs_pass or not 1 <= page_number <= doc.page_count:
+                return None
+            blocks = page_text_blocks(doc[page_number - 1], fitz)
         paragraphs: list[str] = []
         budget = MAX_EMBEDDED_TEXT_CHARS
         truncated = False
-        for block in page_text_blocks(doc[page_number - 1], fitz):
+        for block in blocks:
             text = block.text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
             # `<PAGE>`·`<|…|>`는 파이프라인 제어 문법이라 textlayer 엔진과 같은 정화를 거친다
             text = sanitize_text(_UNSAFE_TEXT_CONTROLS.sub("", text)).strip()
@@ -302,9 +326,40 @@ def extract_embedded_page_markdown(pdf_path: Path, page_number: int) -> str | No
         )
         return None
     finally:
-        if doc is not None:
-            doc.close()
         drain_mupdf_warnings(f"{page_number}페이지 텍스트 복구")
+
+
+def page_text_local(pdf_path: Path, page_index: int) -> str:
+    """(PDF 워커) 페이지 텍스트 레이어 원문(get_text) — 범위 밖이면 빈 문자열."""
+    from . import pdf_worker
+
+    try:
+        with pdf_worker.open_document(pdf_path) as doc:
+            if not 0 <= page_index < doc.page_count:
+                return ""
+            return doc[page_index].get_text()
+    finally:
+        drain_mupdf_warnings(f"{page_index + 1}페이지 텍스트")
+
+
+def page_plain_texts(pdf_path: Path, page_indices: list[int]) -> list[str] | None:
+    """여러 페이지(0-based)의 텍스트 레이어 원문 — 페이지마다 PDF 워커 작업.
+
+    하나라도 실패하거나 시간 상한을 넘으면 None — 호출자(병합기의 페이지 정합)는 위치 기반
+    배치로 돌아간다. 원문은 정합 대조용이라 일부만으로 판단하지 않는다."""
+    from . import pdf_worker
+
+    texts: list[str] = []
+    for index in page_indices:
+        try:
+            texts.append(pdf_worker.run_page(
+                "app.pipeline.pdf:page_text_local", pdf_path, index,
+            ))
+        except Exception as error:  # noqa: BLE001 — 정합은 선택적 개선이다
+            logger.info("%d페이지 텍스트 레이어를 읽지 못해 정합을 건너뜀 (%s: %s)",
+                        index + 1, error.__class__.__name__, str(error)[:200])
+            return None
+    return texts
 
 
 def _capped_scale(w_pt: float, h_pt: float, dpi: int) -> tuple[float, int]:

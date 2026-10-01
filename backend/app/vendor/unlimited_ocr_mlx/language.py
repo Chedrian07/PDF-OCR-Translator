@@ -1,8 +1,8 @@
 # Vendored from mlx-vlm 0.7.4 (MIT): mlx_vlm/models/deepseekocr/language.py
 # (LlamaAttention·MoEGate·DeepseekV2MoE·디코더) + mlx_vlm/models/unlimited_ocr/language.py
 # (링 캐시 모델) + mlx_vlm/models/mlp.py (DeepseekMLP). MLA·YaRN 분기는 이 모델이 쓰지
-# 않아 뺐다(config가 거부). 로컬 패치: [local patch M6] MoE 라우팅 수치를 torch와 같은
-# fp32로. 출처·패치 내역: PROVENANCE.md
+# 않아 뺐다(config가 거부). MoE 라우팅 수치는 업스트림 그대로다 — fp32 라우팅 패치(M6)는
+# 측정 후 기각했다. 출처·패치 내역: PROVENANCE.md
 """DeepseekV2 MoE 디코더 (Unlimited-OCR: 12층, MHA 10헤드, 64 routed top-6 + shared 2)."""
 
 from __future__ import annotations
@@ -83,20 +83,22 @@ class MoEGate(nn.Module):
         self.weight = mx.zeros((self.n_routed_experts, config.hidden_size))
 
     def __call__(self, x: mx.array) -> tuple[mx.array, mx.array]:
-        # [local patch M6] torch MoEGate: F.linear(x.float(), weight.float()) →
-        # softmax(dtype=float32) → topk. mlx-vlm 0.7.4는 bf16 matmul 결과(bf16로 반올림된
-        # 게이트 로짓)로 top-k를 골라 근접 전문가 선택이 torch와 갈릴 수 있었다.
-        gates = x.astype(mx.float32) @ self.weight.astype(mx.float32).T
+        # 업스트림 그대로: 게이트 로짓은 x dtype(bf16) matmul, softmax는 fp32 누적(precise).
+        # torch MPS/CPU 경로는 fp32 linear, CUDA autocast 경로는 bf16 linear로 계산한다.
+        # fp32로 바꾸는 패치(M6)는 8쪽 출력이 스파이크·MPS 모두에서 더 멀어져 기각했다
+        # (PROVENANCE.md M6 측정 기록).
+        gates = x @ self.weight.T
         scores = mx.softmax(gates, axis=-1, precise=True)
         k = self.top_k
         inds = mx.argpartition(scores, kth=-k, axis=-1)[..., -k:]
         weights = mx.take_along_axis(scores, inds, axis=-1)
         if k > 1 and self.norm_topk_prob:
+            # torch MoEGate의 norm_topk_prob 분기 (이 체크포인트는 False — 미사용)
             denominator = weights.sum(axis=-1, keepdims=True) + 1e-20
             weights = weights / denominator * self.routed_scaling_factor
         else:
             weights = weights * self.routed_scaling_factor
-        return inds, weights  # weights: float32 (torch topk_weight와 같은 dtype)
+        return inds, weights
 
 
 class DeepseekV2MoE(nn.Module):
@@ -116,9 +118,7 @@ class DeepseekV2MoE(nn.Module):
     def __call__(self, x: mx.array) -> mx.array:
         inds, scores = self.gate(x)
         y = self.switch_mlp(x, inds)  # [B, L, K, D] (x.dtype)
-        # [local patch M6] torch moe_infer: expert_out.type(fp32) * topk_weight(fp32)를
-        # fp32로 합산한 뒤 원 dtype으로 내린다 (mlx-vlm 0.7.4: bf16 곱·합).
-        y = (y.astype(mx.float32) * scores[..., None]).sum(axis=-2).astype(x.dtype)
+        y = (y * scores[..., None]).sum(axis=-2)
         if self.has_shared:
             y = y + self.shared_experts(x)
         return y

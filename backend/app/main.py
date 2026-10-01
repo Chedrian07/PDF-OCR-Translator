@@ -1,4 +1,8 @@
-"""FastAPI 앱 팩토리. 실행: uvicorn app.main:app"""
+"""FastAPI 앱 팩토리. 실행: uvicorn app.main:app
+
+`app`은 PEP 562 지연 속성이다 — 이 모듈을 import만 해서는 앱이 만들어지지 않는다
+(아래 `__getattr__` 참조).
+"""
 
 from __future__ import annotations
 
@@ -278,4 +282,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+# `app` 지연 생성을 한 번으로 묶는다 (동시에 처음 접근해도 앱은 하나).
+_DEFAULT_APP_LOCK = threading.Lock()
+
+
+def __getattr__(name: str) -> FastAPI:
+    """PEP 562 지연 속성 — `uvicorn app.main:app`·`from app.main import app`이
+    처음 `app`을 찾을 때만 기본 앱을 만들고, 이후에는 모듈 전역에 캐시한다.
+
+    예전에는 모듈 끝에서 `app = create_app()`을 바로 불러 **import만으로** 부작용이
+    났다. pytest 수집(conftest가 create_app을 import)이나 e2e_mock_app 같은 다른
+    진입점도 Settings.from_env()로 개발자의 실제 .env(실키)를 프로세스 환경에
+    주입했고, 개발 서버가 쓰는 DATA_DIR에 load_existing()을 돌려 실행 중 잡을
+    error로 덮고 work/를 지웠다.
+    """
+    if name != "app":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    with _DEFAULT_APP_LOCK:
+        built = globals().get("app")
+        if built is None:
+            try:
+                built = create_app()
+            except AttributeError as e:
+                # __getattr__에서 새어 나간 AttributeError는 호출자에게 '속성 없음'으로
+                # 보인다(uvicorn: Attribute "app" not found) — 진짜 원인을 가리지 않게 바꾼다.
+                raise RuntimeError(f"기본 앱 생성 실패: {e}") from e
+            globals()["app"] = built
+    return built

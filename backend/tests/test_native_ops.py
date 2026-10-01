@@ -1,3 +1,4 @@
+import functools
 import random
 
 import pytest
@@ -43,6 +44,21 @@ def test_native_matches_python_randomized():
 
 
 # ── 디바이스별 로짓 프로세서 패리티 (torch 필요 — cpu 텐서로 로직 검증) ──
+# "…[static]"은 MPS 기본 티어(static_shape=True: 창 길이 고정 + 음수 센티널 패딩).
+
+PROCESSOR_NAMES = [
+    "TorchSlidingWindowNoRepeatNgram",
+    "TorchSlidingWindowNoRepeatNgram[static]",
+    "HostSlidingWindowNoRepeatNgram",
+]
+
+
+def _proc_factory(proc_name):
+    if proc_name.endswith("[static]"):
+        cls = getattr(native_ops, proc_name.removesuffix("[static]"))
+        return functools.partial(cls, static_shape=True)
+    return getattr(native_ops, proc_name)
+
 
 def _processor_banned(proc_cls, seq, n, w, vocab):
     torch = pytest.importorskip("torch")
@@ -52,17 +68,17 @@ def _processor_banned(proc_cls, seq, n, w, vocab):
     return sorted(i for i in range(vocab) if scores[0, i] == float("-inf"))
 
 
-@pytest.mark.parametrize("proc_name", ["TorchSlidingWindowNoRepeatNgram", "HostSlidingWindowNoRepeatNgram"])
+@pytest.mark.parametrize("proc_name", PROCESSOR_NAMES)
 @pytest.mark.parametrize("seq,n,w", CASES)
 def test_processors_reference_cases(proc_name, seq, n, w):
-    proc_cls = getattr(native_ops, proc_name)
+    proc_cls = _proc_factory(proc_name)
     vocab = 16
     assert _processor_banned(proc_cls, seq, n, w, vocab) == _brute(seq, n, w)
 
 
-@pytest.mark.parametrize("proc_name", ["TorchSlidingWindowNoRepeatNgram", "HostSlidingWindowNoRepeatNgram"])
+@pytest.mark.parametrize("proc_name", PROCESSOR_NAMES)
 def test_processors_randomized_parity(proc_name):
-    proc_cls = getattr(native_ops, proc_name)
+    proc_cls = _proc_factory(proc_name)
     rng = random.Random(7)
     vocab = 8
     for _ in range(200):
@@ -72,10 +88,10 @@ def test_processors_randomized_parity(proc_name):
         assert _processor_banned(proc_cls, seq, n, w, vocab) == _brute(seq, n, w), (seq, n, w)
 
 
-@pytest.mark.parametrize("proc_name", ["TorchSlidingWindowNoRepeatNgram", "HostSlidingWindowNoRepeatNgram"])
+@pytest.mark.parametrize("proc_name", PROCESSOR_NAMES)
 def test_processors_window_slice_boundaries(proc_name):
     # 슬라이스 동치가 위험한 경계: L == w, L == w±1, L == n, w < n
-    proc_cls = getattr(native_ops, proc_name)
+    proc_cls = _proc_factory(proc_name)
     vocab = 6
     rng = random.Random(11)
     for L, n, w in [(64, 3, 64), (65, 3, 64), (63, 3, 64), (5, 5, 64), (40, 4, 2), (40, 1, 8)]:
@@ -92,17 +108,51 @@ def test_processor_production_shape():
     # 반복 유도: 마지막 34개 프리픽스를 윈도우 중간에 복제
     seq[1500:1534] = seq[-34:]
     ref = _brute(seq, 35, 1024)
-    assert _processor_banned(native_ops.TorchSlidingWindowNoRepeatNgram, seq, 35, 1024, vocab) == ref
-    assert _processor_banned(native_ops.HostSlidingWindowNoRepeatNgram, seq, 35, 1024, vocab) == ref
+    for name in PROCESSOR_NAMES:
+        assert _processor_banned(_proc_factory(name), seq, 35, 1024, vocab) == ref, name
+    # 창이 덜 찬 구간(프롬프트 < window — 1쪽 멀티 청크의 첫 ~750토큰)도 동일
+    short = seq[:600]
+    short[300:334] = short[-34:]
+    ref_short = _brute(short, 35, 1024)
+    for name in PROCESSOR_NAMES:
+        assert _processor_banned(_proc_factory(name), short, 35, 1024, vocab) == ref_short, name
 
 
 def test_make_processor_tiers():
     torch_proc = native_ops.make_ngram_logits_processor(35, 1024, "cuda")
     assert isinstance(torch_proc[0], native_ops.TorchSlidingWindowNoRepeatNgram)
+    assert torch_proc[0].static_shape is False  # CUDA 커널은 shape 무관 — 동적 슬라이스 유지
     mps_proc = native_ops.make_ngram_logits_processor(35, 1024, "mps")
     assert isinstance(mps_proc[0], native_ops.TorchSlidingWindowNoRepeatNgram)
+    assert mps_proc[0].static_shape is True  # MPS는 shape별 그래프 컴파일 — 창 길이 고정
     cpu_proc = native_ops.make_ngram_logits_processor(35, 128, "cpu")
     assert isinstance(cpu_proc[0], native_ops.HostSlidingWindowNoRepeatNgram)
+
+
+def test_static_shape_window_length_never_changes():
+    """MPS 티어의 밴 검사 창은 시퀀스 길이와 무관하게 항상 [window] — 길이가 토큰마다
+    바뀌면 MPS가 새 그래프를 컴파일·캐시해 RSS가 길이당 ~2.9MB씩 영구히 늘었다
+    (audit gap1-metal-real-e2e-4). 동적 티어(CUDA)는 기존처럼 min(L, window)."""
+    torch = pytest.importorskip("torch")
+    static = native_ops.TorchSlidingWindowNoRepeatNgram(4, 16, static_shape=True)
+    dynamic = native_ops.TorchSlidingWindowNoRepeatNgram(4, 16)
+    for length in range(1, 40):
+        seq = torch.arange(length, dtype=torch.long)
+        seg = static._segment(seq)
+        pads = max(0, 16 - length)
+        assert seg.shape == (16,), length
+        assert seg[pads:].tolist() == seq[-16:].tolist()  # 실제 토큰은 끝에 그대로
+        assert (seg[:pads] < 0).all()  # 앞은 음수 센티널
+        assert len(set(seg[:pads].tolist())) == pads  # 센티널끼리도 서로 다름
+        assert dynamic._segment(seq).shape == (min(length, 16),)
+
+
+def test_static_shape_unigram_never_bans_from_padding():
+    """n=1이면 모든 창이 '일치'하므로 센티널 창을 무효 처리하지 않으면 음수 인덱스가
+    다른 토큰을 밴한다 — 레퍼런스와 같은 집합만 밴해야 한다."""
+    proc = functools.partial(native_ops.TorchSlidingWindowNoRepeatNgram, static_shape=True)
+    for seq in ([3], [5, 0], [1, 1, 2]):
+        assert _processor_banned(proc, seq, 1, 8, 6) == _brute(seq, 1, 8), seq
 
 
 # ── GraphSlidingWindowNoRepeatNgram (CUDA Graph용 정적 shape) — CPU 텐서로 로직 검증 ──

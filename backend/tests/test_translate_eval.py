@@ -21,6 +21,7 @@ from tools.translate_eval import (
     check_glossary,
     check_hard_invariants,
     evaluate,
+    format_summary,
     load_job,
     parse_judge_json,
     reconstruct,
@@ -141,6 +142,7 @@ def _inject(job_dir, unit, translation, lang="ko"):
         state["model"],
         temperature=state.get("temperature", ""),
         reasoning=state.get("reasoning", ""),
+        request_variant=state.get("request_variant", ""),
     )
     cache = json.loads((tdir / "units.json").read_text(encoding="utf-8"))
     cache[key] = translation
@@ -258,6 +260,28 @@ def test_judge_스모크(job, cfg):
     sample = build_judge_sample(rec, sample_size=12)
     assert 1 <= len(sample) <= 12
     assert all(uid in rec.found and uid in rec.md_ids for uid in sample)
+
+
+def test_judge는_번역_예산을_쓰고_실패_사유를_집계한다(job, cfg):
+    """고정 1000토큰은 thinking 채점 모델에서 전부 잘려 judged=0이 됐다(translate-llm-19)."""
+    from app.translate.types import TranslateOutputTruncated
+
+    rec = reconstruct(load_job(job))
+    budgets = []
+
+    class Flaky(JudgeStub):
+        def complete(self, system, user, *, max_tokens):
+            budgets.append(max_tokens)
+            if len(budgets) == 1:
+                raise TranslateOutputTruncated("번역 API 출력이 max_tokens에서 전부 잘렸습니다")
+            return super().complete(system, user, max_tokens=max_tokens)
+
+    result = run_judge(rec, cfg, client=Flaky(), sample_size=12)
+    assert set(budgets) == {cfg.max_output_tokens}
+    assert result["failed"] == 1
+    assert result["failed_reasons"] == {"TranslateOutputTruncated": 1}
+    text = format_summary({**evaluate(job), "judge": result})
+    assert "실패 사유: TranslateOutputTruncated 1건" in text
 
 
 def test_parse_judge_json_관용파싱():

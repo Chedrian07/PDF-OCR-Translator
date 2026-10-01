@@ -207,6 +207,33 @@ def _clamp_bbox(
 _LITERAL_PLACEHOLDER = "&#91;&#91;FIGURE:{}]]"
 
 
+def _strip_markdown_control_syntax(markdown: str) -> str:
+    """markdown의 제어 문법 제거 — sidecar가 낸 placeholder **사이 조각마다** 따로 지운다.
+
+    통째로 지우면 `[<PAGE>[FIGURE:0]]`처럼 지운 자리 양쪽이 이어져 placeholder가 새로
+    생긴다. sidecar는 본문의 리터럴 `[[FIGURE:`를 이스케이프해 보내지만(감사 sidecar-9)
+    제어 문법 제거는 여기서 하므로, 그 뒤에 생긴 것은 문서 글자다 — 리터럴 표기로 둔다.
+    조각은 placeholder를 포함하지 않고 placeholder끼리는 겹칠 수 없어, 조각 경계를 넘는
+    새 placeholder도 생기지 않는다.
+    """
+    def _segment(text: str) -> str:
+        stripped = strip_special_tokens(text)
+        if stripped == text:
+            return text
+        return FIGURE_PLACEHOLDER_RE.sub(
+            lambda m: _LITERAL_PLACEHOLDER.format(m.group(1)), stripped
+        )
+
+    parts: list[str] = []
+    pos = 0
+    for m in FIGURE_PLACEHOLDER_RE.finditer(markdown):
+        parts.append(_segment(markdown[pos:m.start()]))
+        parts.append(m.group(0))
+        pos = m.end()
+    parts.append(_segment(markdown[pos:]))
+    return "".join(parts)
+
+
 def _resolve_figure_placeholders(markdown: str, valid: set[int]) -> tuple[str, int, int]:
     """살아남은 image 블록 index마다 **실제 그림 자리**인 `[[FIGURE:n]]` 하나만 남긴다.
 
@@ -270,7 +297,7 @@ def sanitize_page(page: PageResult) -> tuple[PageResult, list[str]]:
     """
     warnings: list[str] = []
 
-    markdown = strip_special_tokens(page.markdown)
+    markdown = _strip_markdown_control_syntax(page.markdown)
     if _PAGE_MARKER_RE.search(page.markdown) or _SPECIAL_TOKEN_RE.search(page.markdown):
         warnings.append("모델 출력의 제어 문법(<PAGE>·특수 토큰)을 제거함 (페이지·레이아웃 계약 보호)")
     if len(markdown) > MAX_MARKDOWN_CHARS:

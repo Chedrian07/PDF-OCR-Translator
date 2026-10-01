@@ -549,6 +549,10 @@ def _portable_exception(exc: BaseException) -> tuple:
     return ("exc", exc, text)
 
 
+# SIGALRM은 POSIX 전용이다(Windows에는 없다 — 그때는 부모의 상한만 남는다).
+_HAS_ALARM = hasattr(signal, "alarm") and hasattr(signal, "SIGALRM")
+
+
 def _child_main(conn, pool_name: str, mem_limit_mb: int, log_level: int) -> None:
     """워커 프로세스 본체 — 작업을 하나씩 받아 실행하고 결과를 돌려준다."""
     global _IN_WORKER
@@ -573,7 +577,7 @@ def _child_main(conn, pool_name: str, mem_limit_mb: int, log_level: int) -> None
             if message is None:
                 return  # 정상 종료 요청
             task_id, target, args, kwargs, alarm_s = message
-            if alarm_s:
+            if alarm_s and _HAS_ALARM:
                 signal.alarm(int(alarm_s))
             try:
                 reply = (task_id, True, resolve(target)(*args, **(kwargs or {})))
@@ -581,7 +585,8 @@ def _child_main(conn, pool_name: str, mem_limit_mb: int, log_level: int) -> None
                 reply = (task_id, False, _portable_exception(exc))
                 _close_cached_document()
             finally:
-                signal.alarm(0)
+                if _HAS_ALARM:
+                    signal.alarm(0)
             try:
                 conn.send((*reply, _peak_rss_bytes()))
             except (BrokenPipeError, EOFError, ConnectionResetError):

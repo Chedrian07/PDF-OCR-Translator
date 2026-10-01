@@ -1688,3 +1688,105 @@ def test_layout_잡에서도_D정책_첫_등장_병기가_프롬프트에_실린
     saved = json.loads((tmp_path / "translations/ko/glossary.json").read_text(encoding="utf-8"))
     entry = next(e for e in saved if e["src"] == "sparse attention")
     assert entry["first_unit_lay"] == "lay:1:0"
+
+
+# ── 용어집 실패·취소·손상 (translate-llm-6, concurrency-9, translate-llm-7) ─────
+
+# 대문자 후보가 3번 나와 용어집 LLM 판정이 실제로 호출되는 문서
+_GLOSSARY_MD = (
+    "We describe the Foo Bar encoder that maps every token to a vector.\n\n"
+    "We train the Foo Bar encoder with a contrastive objective.\n\n"
+    "We evaluate the Foo Bar encoder on three public benchmarks.\n"
+)
+
+
+class _GlossaryClient(EchoClient):
+    """용어집 프롬프트에 대한 응답을 바꿀 수 있는 스텁 — 유닛은 정상 번역."""
+
+    def __init__(self, glossary_reply):
+        super().__init__()
+        self.glossary_reply = glossary_reply
+        self.glossary_calls = 0
+
+    def complete(self, system, user, *, max_tokens):
+        if _marker(user) is None:
+            self.glossary_calls += 1
+            reply = self.glossary_reply
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
+        return super().complete(system, user, max_tokens=max_tokens)
+
+
+def test_용어집_LLM_실패는_다음_실행에서_다시_판정한다(tmp_path, cfg):
+    from app.translate.types import TranslateAPIError
+
+    down = _GlossaryClient(TranslateAPIError("번역 API 연결 실패: refused"))
+    _res, report, _ = _run_md(tmp_path, cfg, _GLOSSARY_MD, down)
+    tdir = tmp_path / "translations/ko"
+    assert (tdir / "glossary.json").is_file() and (tdir / "glossary.incomplete").is_file()
+    assert any("다음 실행에서 다시 판정" in w for w in report["warnings"])
+
+    ok = _GlossaryClient('[{"src": "Foo Bar", "ko": "푸 바", "policy": "D"}]')
+    _res2, report2, _ = _run_md(tmp_path, cfg, _GLOSSARY_MD, ok)
+    assert ok.glossary_calls == 1                         # 시드에 굳지 않고 다시 판정
+    assert not (tdir / "glossary.incomplete").exists()
+    saved = json.loads((tdir / "glossary.json").read_text(encoding="utf-8"))
+    assert any(e["src"] == "foo bar" for e in saved)
+    assert not any("다음 실행에서 다시 판정" in w for w in report2["warnings"])
+
+    again = _GlossaryClient("[]")
+    run_translation(tmp_path, "ko", cfg, client=again)
+    assert again.glossary_calls == 0 and again.unit_calls == 0   # 성공한 용어집·캐시 재사용
+
+
+def test_용어집_단계의_취소는_시드_용어집을_남기지_않는다(tmp_path, cfg):
+    from app.translate.client import _RequestCancelled
+
+    cancel = threading.Event()
+
+    class CancelInGlossary(_GlossaryClient):
+        def complete(self, system, user, *, max_tokens):
+            if _marker(user) is None:
+                cancel.set()
+                raise _RequestCancelled("번역 요청이 취소되었습니다")
+            return super().complete(system, user, max_tokens=max_tokens)
+
+    (tmp_path / "result.md").write_text(_GLOSSARY_MD, encoding="utf-8")
+    res = run_translation(tmp_path, "ko", cfg, client=CancelInGlossary("[]"), cancel=cancel)
+    assert res.status == "canceled"
+    assert not (tmp_path / "translations/ko/glossary.json").exists()
+
+
+def test_손상된_glossary_json은_다시_만들고_번역을_계속한다(tmp_path, cfg):
+    _run_md(tmp_path, cfg, _GLOSSARY_MD, _GlossaryClient("[]"))
+    gpath = tmp_path / "translations/ko/glossary.json"
+    gpath.write_text('[{"src": "foo', encoding="utf-8")      # 기록 도중 잘린 파일
+
+    client = _GlossaryClient("[]")
+    res, report, _ = _run_md(tmp_path, cfg, _GLOSSARY_MD, client)
+    assert res.status == "done" and client.glossary_calls == 1
+    assert any("손상" in w for w in report["warnings"])
+    assert isinstance(json.loads(gpath.read_text(encoding="utf-8")), list)
+    assert not list(gpath.parent.glob("*.tmp"))               # 원자적 기록 — 임시 파일 없음
+
+
+def test_용어집_호출_성공은_콜드_run의_첫_4xx를_유닛_강등으로_흡수한다(tmp_path, cfg):
+    """콜드 run에서 빠르게 돌아온 400 하나가 정상 엔드포인트에서도 잡 전체를 실패시키던
+    경쟁(translate-llm-7) — 같은 모델로 성공한 용어집 호출이 건강의 증거다."""
+    from dataclasses import replace
+
+    from app.translate.types import TranslateUnitRejected
+
+    class Oversized(_GlossaryClient):
+        def complete(self, system, user, *, max_tokens):
+            src = _marker(user)
+            if src is not None and "maps every token" in src:
+                self.calls += 1
+                raise TranslateUnitRejected("번역 API 오류 (HTTP 400): context length")
+            return super().complete(system, user, max_tokens=max_tokens)
+
+    # concurrency=1 — 거부 유닛이 첫 번째로 API를 탄다(유닛 성공 이력 0)
+    res, report, _ = _run_md(tmp_path, replace(cfg, concurrency=1), _GLOSSARY_MD, Oversized("[]"))
+    assert res.status == "done" and res.kept_original == ["md:0:0"]
+    assert report["kept_reasons"] == {"api-rejected": 1}

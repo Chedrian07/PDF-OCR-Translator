@@ -1502,6 +1502,76 @@ def _process_page(
     _insert_page_targets(page, targets, result)
 
 
+_TOUNICODE_BFCHAR_RE = re.compile(
+    rb"beginbfchar(.*?)endbfchar", re.DOTALL,
+)
+
+
+def _space_sharing_glyph(fontfile: str | None) -> int | None:
+    """공백(U+0020)과 NBSP(U+00A0)가 **같은 글리프**인 폰트면 그 gid. 아니면 None."""
+    if not fontfile:
+        return None
+    try:
+        font = quiet_fitz().Font(fontfile=fontfile)
+        space, nbsp = int(font.has_glyph(0x20)), int(font.has_glyph(0xA0))
+    except Exception:  # noqa: BLE001 — 확인 불가면 손대지 않는다
+        return None
+    return space if space and space == nbsp else None
+
+
+def _restore_space_tounicode(doc, fonts: _ExportFonts) -> int:
+    """삽입 폰트의 ToUnicode에서 공백 글리프가 U+00A0으로 역매핑된 것을 U+0020으로.
+
+    AppleSDGothicNeo처럼 공백과 NBSP가 같은 글리프인 폰트로 삽입하면 PyMuPDF가
+    만드는 ToUnicode가 그 글리프를 U+00A0 하나로만 적어, 번역문의 **모든** 공백이
+    NBSP로 추출된다(복사·검색·grep이 어긋난다). 화면은 같고 추출만 틀리므로, 같은
+    글리프임을 폰트 cmap으로 확인한 경우에만 그 bfchar 한 줄을 U+0020으로 고친다.
+    고친 ToUnicode 스트림 수를 돌려준다.
+    """
+    targets: dict[str, int] = {}
+    for name, fontfile in (
+        (fonts.serif_name, fonts.serif_ff),
+        (fonts.sans_name, fonts.sans_ff),
+        (fonts.table_name, fonts.table_ff),
+    ):
+        gid = _space_sharing_glyph(fontfile)
+        if gid is not None:
+            targets[name] = gid
+    if not targets:
+        return 0
+    seen: set[int] = set()
+    fixed = 0
+    for page in doc:
+        try:
+            page_fonts = page.get_fonts(full=True)
+        except Exception:  # noqa: BLE001
+            continue
+        for entry in page_fonts:
+            xref, resource = entry[0], str(entry[4]) if len(entry) > 4 else ""
+            gid = targets.get(resource)
+            if gid is None or xref in seen:
+                continue
+            seen.add(xref)
+            try:
+                kind, value = doc.xref_get_key(xref, "ToUnicode")
+                if kind != "xref":
+                    continue
+                cmap_xref = int(value.split()[0])
+                stream = doc.xref_stream(cmap_xref)
+            except Exception:  # noqa: BLE001 — 손상 font dict는 건너뛴다
+                continue
+            wrong = f"<{gid:04x}> <00a0>".encode()
+            right = f"<{gid:04x}> <0020>".encode()
+            updated = _TOUNICODE_BFCHAR_RE.sub(
+                lambda match: match.group(0).replace(wrong, right)
+                .replace(wrong.upper(), right), stream,
+            )
+            if updated != stream:
+                doc.update_stream(cmap_xref, updated)
+                fixed += 1
+    return fixed
+
+
 def _write_export_report(job_dir: Path, lang: str, result: PdfExportResult) -> None:
     """UI가 보존·재배치 정보를 읽을 수 있게 리포트를 원자적으로 저장한다."""
     # 캐시된 PDF 요청에서도 UI가 보존/재배치 정보를 읽을 수 있게 별도 리포트를
@@ -1586,6 +1656,7 @@ def build_translated_pdf(
                     fitz, doc[pno - 1], pno, tpage, opage, fonts, result,
                     misregistered,
                 )
+            _restore_space_tounicode(doc, fonts)
             tmp = job_dir / f".export.{lang}.{uuid.uuid4().hex}.tmp"
             try:
                 doc.save(tmp, garbage=3, deflate=True)

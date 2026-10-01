@@ -477,8 +477,13 @@ def execute_job(
             job.progress.update(current_page=done, total_pages=total)
             broker.publish_progress(job)
 
+        # 렌더는 PDF 워커 프로세스에서 페이지마다 돈다(pdf_worker — 서버 GIL을 쥐지 않고 페이지당
+        # 시간 상한). should_cancel은 렌더 중인 페이지의 워커까지 끝내 취소가 페이지 하나를 다
+        # 기다리지 않게 한다 — 예전에는 적대적 페이지 하나가 렌더 콜백에 영영 닿지 않아 취소·
+        # 삭제가 무시됐다(감사 security-2).
         pages = render_pdf_pages(
-            job.dir / "source.pdf", job.dir / "pages", job.dpi, settings.max_pages, _render_cb
+            job.dir / "source.pdf", job.dir / "pages", job.dpi, settings.max_pages, _render_cb,
+            should_cancel=cancel.is_set,
         )
         if cancel.is_set():
             raise JobCanceled()

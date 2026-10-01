@@ -395,3 +395,49 @@ def test_untranslated_reason이_규칙별_사유를_돌려준다():
     ok = "우리가 평가한 벤치마크 데이터셋에서 정확도가 향상되었다."
     assert untranslated_reason(src, ok, {}) == ""
     assert looks_untranslated(src, ok, {}) is False
+
+
+# ── 축퇴(반복 루프) 게이트 (probe:MLX-02, mlx-integration-4) ─────────────────
+
+_LOOP_SRC = (
+    "Unlike prior work, our method does not require any additional training data, and it "
+    "removes the unnecessary regions before the attention computation is performed."
+)
+
+
+def test_반복_루프_출력은_repetition으로_거부된다():
+    """'…영역을만만만만…'처럼 잘린 루프가 길이비 하한만 넘으면 채택·캐시되던 경로."""
+    from app.translate.masking import untranslated_reason
+
+    loop = "선행 연구와 달리 제안 방법은 추가 학습 데이터가 필요 없으며 불필요한 영역을" + "만" * 60
+    assert 0.25 * len(_LOOP_SRC) <= len(loop) <= 3 * len(_LOOP_SRC)  # 길이비로는 못 잡는다
+    assert untranslated_reason(_LOOP_SRC, loop, {}) == "repetition"
+
+    phrase = "제안 방법은 영역을 제거하였다. " + "그리고 영역을 제거하였다. " * 9
+    assert untranslated_reason(_LOOP_SRC, phrase, {}) == "repetition"
+
+    # 짧은 유닛의 글자 하나 루프 — 80자 기준에 못 미쳐도 정상 문장에는 없다
+    assert untranslated_reason("Results on the test set", "테스트 결과" + "과" * 30, {}) == (
+        "repetition"
+    )
+
+
+def test_원문에도_있는_반복과_구분선은_축퇴가_아니다():
+    from app.translate.masking import is_degenerate_repetition, longest_repetition
+
+    row = "| 0 " * 30 + "|"
+    assert longest_repetition(row) >= 80
+    assert not is_degenerate_repetition(row, row)            # 원문 표 행 그대로
+    assert longest_repetition("목차" + "." * 200 + "1") == 0  # 말줄임 리더
+    assert longest_repetition("구분선\n" + "-" * 120) == 0
+    assert not is_degenerate_repetition("짧은 반복 하하하하하하하하", "")  # 80자 미만
+
+
+def test_반복_검사는_복원된_불변_토큰을_세지_않는다():
+    """같은 수식이 여러 번 나오는 정상 번역을 루프로 오인하면 안 된다."""
+    from app.translate.masking import untranslated_reason
+
+    src = "We repeat the term $x$ " * 12 + "in the proof of the main theorem."
+    masked, mapping = mask(src)
+    out = "증명에서 " + "항 $x$를 반복하고 " * 12 + "주정리를 보인다."
+    assert untranslated_reason(src, out, mapping) == ""

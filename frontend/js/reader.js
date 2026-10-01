@@ -4,11 +4,12 @@ import {
   READER_ZOOM_KEY, READER_ZOOM_MAX, READER_ZOOM_MIN, katexOptions, readerPosKey,
 } from './constants.js';
 import {
-  PDF_RETRY_MAX, addReaderNote, alignmentBatchPlan, alignmentFailureIsPermanent, blockAtFraction,
+  PDF_REPORT_MAX_WARNINGS, PDF_RETRY_MAX, addReaderNote, alignmentBatchPlan,
+  alignmentFailureIsPermanent, blockAtFraction,
   busyWaitMessage, clampReaderPage, extractDocPages, langFetchVerdict, livePageImageUrl,
   normalizeAlignmentPayload, overlayInKeepWindow, pdfExportState, pdfProgressLabel,
-  pdfReportMessage, pdfRetryDelay, railAnchorFrom, railAnchorTarget, railPagesToRender,
-  readerFocusAt,
+  pdfReportDetails, pdfReportMessage, pdfReportUrl, pdfRetryDelay, railAnchorFrom,
+  railAnchorTarget, railPagesToRender, readerFocusAt,
   readerHydrationWindow, readerImageUrl, readerNoteLabel, readerNotesMarkdown, readerRailBandAt,
   removeReaderNote, splitInlineMath, translatedHtmlExportState, withLangUrl,
 } from './core.js';
@@ -17,7 +18,7 @@ import {
   copyTextToClipboard, downloadTextFile, h, localGet, localSet, nowMs, setDownload, setTrustedHtml,
   showToast, typesetMath,
 } from './ui.js';
-import { apiGet, fetchTextWithBusyRetry } from './api.js';
+import { POLL_TIMEOUT_MS, apiGet, fetchTextWithBusyRetry } from './api.js';
 import { loadReaderNotes, saveReaderNotes } from './notes.js';
 import { revertToOriginal, setLang } from './translate.js';
 import { prefillQaPageFromReader } from './qa.js';
@@ -1950,7 +1951,53 @@ export function applyPdfExport() {
     const u = state.resultUrls || {};
     setDownload(el.dlPdf, u.pdf || null, `${state.currentBaseName || 'document'}.ko.pdf`);
     setDownload(el.viewerDlPdf, u.pdf || null, `${state.currentBaseName || 'document'}.ko.pdf`);
+  } else {
+    renderPdfReport(null); // 잡 전환·번역 초기화 — 다른 빌드의 리포트를 남기지 않는다
   }
+}
+
+// PDF 생성 리포트 목록(결과 화면 아래 흐린 접이식). 원문 보존 사유·스캔 픽셀 지움 같은
+// 정보 줄과 주의 문장을 보인다. details가 없거나 알릴 것이 없으면 숨긴다.
+export function renderPdfReport(details) {
+  const box = el.pdfReport;
+  if (!box) return;
+  el.pdfReportList.textContent = '';
+  const lines = details ? details.lines : [];
+  const warnings = details ? details.warnings : [];
+  const more = details ? details.moreWarnings : 0;
+  box.hidden = !lines.length && !warnings.length;
+  if (box.hidden) {
+    box.open = false;
+    return;
+  }
+  const count = warnings.length + more;
+  el.pdfReportSummary.textContent = count ? `PDF 생성 리포트 · 주의 ${count}건` : 'PDF 생성 리포트';
+  for (const text of lines) el.pdfReportList.appendChild(h('li', { text }));
+  for (const text of warnings) el.pdfReportList.appendChild(h('li', { class: 'is-warn', text }));
+  if (more) {
+    el.pdfReportList.appendChild(h('li', {
+      text: `주의 ${more}건 더 — 리포트에는 앞 ${PDF_REPORT_MAX_WARNINGS}건만 남습니다`,
+    }));
+  }
+}
+
+// 다운로드 응답 헤더에는 숫자만 실린다 — 원문 보존 사유·스캔 픽셀 지움·주의 문장은 같은
+// 빌드의 JSON 리포트로 채운다. 없는 서버(404)·실패면 헤더 요약 토스트 그대로 둔다.
+// 그사이 잡이 바뀌었거나 PDF 내보내기가 숨겨졌으면(번역 초기화) 그리지 않는다.
+async function loadPdfReport(pdfUrl) {
+  const reportUrl = pdfReportUrl(pdfUrl);
+  const jobId = state.currentJobId;
+  if (!reportUrl || !jobId || !reportUrl.startsWith(`/api/jobs/${jobId}/pdf/`)) return;
+  let report;
+  try {
+    report = await apiGet(reportUrl, { timeoutMs: POLL_TIMEOUT_MS });
+  } catch (_) {
+    return;
+  }
+  if (state.currentJobId !== jobId || el.dlPdf.hidden) return;
+  const details = pdfReportDetails(report);
+  showToast(details.message, details.tone); // 헤더 요약을 같은 빌드의 전체 요약으로 바꾼다
+  renderPdfReport(details);
 }
 
 // 결과 화면과 뷰어에 같은 다운로드 버튼이 하나씩 있다. 둘 다 잠그되(같은 잡의
@@ -2043,6 +2090,7 @@ export async function downloadPdfWithReport(ev) {
       specialistKept: res.headers.get('X-UOCR-PDF-Specialist-Preserved'),
     };
     showToast(pdfReportMessage(report), Number(report.kept) || Number(report.warnings) ? 'warn' : '');
+    loadPdfReport(url); // 기다리지 않는다 — 버튼은 바로 풀리고 상세는 도착하는 대로
   } catch (e) {
     showToast(e && e.message ? e.message : 'PDF 다운로드에 실패했습니다.', 'error');
   } finally {

@@ -119,3 +119,14 @@ def import_task_modules() -> list[str]:
     for name in TASK_MODULES:
         importlib.import_module(name)
     return sorted(sys.modules)
+
+
+def temp_dir_then_sleep(report_path, seconds: float = 30) -> str:
+    """tempfile로 임시 디렉터리를 만들고(폰트 서브셋처럼) 경로를 남긴 뒤 오래 잔다."""
+    import tempfile
+    from pathlib import Path
+
+    made = tempfile.mkdtemp(prefix="uocr-font-")
+    Path(report_path).write_text(made, encoding="utf-8")
+    time.sleep(seconds)
+    return made

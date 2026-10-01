@@ -187,6 +187,19 @@ def _env_choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
     return v
 
 
+def _env_int_choice(name: str, default: int, allowed: tuple[int, ...], why: str = "") -> int:
+    """허용 목록형 정수 env — 비정수·목록 밖 값은 **변수명을 담은** ValueError로 기동 시 실패한다.
+
+    범위(lo/hi)로는 표현할 수 없는 이산 값(예: 양자화 비트 0|8)용이다. 목록 밖 값을
+    조용히 기본값으로 바꾸면 운영자는 설정이 먹었다고 믿는다."""
+    value = _env_int(name, default)
+    if value not in allowed:
+        raise ValueError(
+            f"{name}={_env_raw(name)!r}: {' 또는 '.join(map(str, allowed))}만 지원합니다{why}"
+        )
+    return value
+
+
 def _env_unescaped(name: str, default: str) -> str:
     """백슬래시 이스케이프(`\\n`·`\\t`·`\\uXXXX` 등)를 해석하는 문자열 env.
 
@@ -263,8 +276,11 @@ def _llm_provider() -> str:
 
 @dataclass
 class Settings:
-    device: str = "cpu"                 # cpu | cuda | metal (mps는 metal의 별칭)
+    device: str = "cpu"                 # auto | cpu | cuda | metal | mlx (mps는 metal의 별칭, registry.VALID_DEVICES)
     dtype: str = "auto"                 # auto | bfloat16 | float16 | float32
+    # MLX 엔진(device=mlx) 디코더 인메모리 양자화 비트 — 0=없음(dtype 그대로) | 8.
+    # 4비트는 감사 스파이크에서 숫자 오인식(2504→2304)이 측정돼 받지 않는다.
+    mlx_quant_bits: int = 0
     engine: str = "unlimited"           # unlimited | fake | textlayer | ovisocr2 | paddleocr_vl (registry.VALID_ENGINES)
     model_id: str = "baidu/Unlimited-OCR"
     model_revision: str = _DEFAULT_REVISION
@@ -349,6 +365,10 @@ class Settings:
         return cls(
             device="metal" if device == "mps" else device,
             dtype=os.environ.get("OCR_DTYPE", "auto").strip().lower(),
+            mlx_quant_bits=_env_int_choice(
+                "OCR_MLX_QUANT_BITS", 0, (0, 8),
+                " (0=양자화 없음, 8=MLX 디코더 8비트 — 4비트는 숫자 오인식으로 미지원)",
+            ),
             engine=os.environ.get("OCR_ENGINE", "unlimited").strip().lower(),
             model_id=os.environ.get("MODEL_ID", "baidu/Unlimited-OCR"),
             # `or` 폴백: compose가 ${MODEL_REVISION:-}로 **빈 문자열**을 넘겨도

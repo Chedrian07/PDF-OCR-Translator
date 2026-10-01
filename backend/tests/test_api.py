@@ -1439,3 +1439,38 @@ def test_click_during_warm_build_waits_for_it_instead_of_503(tmp_path, monkeypat
         derived._PDF_EXPORT_SLOTS = None
 
     assert outcome and outcome[0][0] == "ok", outcome
+
+
+def test_viewer_pages_honors_if_none_match_before_parsing_layouts(client, sample_pdf, monkeypatch):
+    """/viewer/pages는 ETag를 보내면서 If-None-Match를 보지 않아, 재검증마다 레이아웃
+    JSON 두 개를 전부 파싱한 뒤 같은 본문을 200으로 다시 보냈다."""
+    import app.api as api_mod
+
+    jid = _upload(client, sample_pdf).json()["job_id"]
+    wait_done(client, jid)
+    url = f"/api/jobs/{jid}/viewer/pages?start=1&limit=2"
+    first = client.get(url)
+    assert first.status_code == 200
+    etag = first.headers["etag"]
+
+    def _no_parse(*args, **kwargs):
+        raise AssertionError("304 판정에 레이아웃 파싱이 필요하지 않다")
+
+    monkeypatch.setattr(api_mod, "_load_layout_pages", _no_parse)
+    revalidated = client.get(url, headers={"if-none-match": etag})
+    assert revalidated.status_code == 304
+    assert revalidated.headers["etag"] == etag
+    assert revalidated.content == b""
+
+
+def test_viewer_etags_accept_weak_and_listed_validators(client, sample_pdf):
+    """gzip 프록시는 강한 ETag를 W/로 바꿔 돌려보낸다 — 약한 비교·콤마 목록·'*'도 304다."""
+    jid = _upload(client, sample_pdf).json()["job_id"]
+    wait_done(client, jid)
+    for url in (f"/api/jobs/{jid}/viewer-manifest", f"/api/jobs/{jid}/viewer/pages"):
+        etag = client.get(url).headers["etag"]
+        for header in (f"W/{etag}", f'"other", {etag}', "*"):
+            assert client.get(url, headers={"if-none-match": header}).status_code == 304, (
+                url, header,
+            )
+        assert client.get(url, headers={"if-none-match": '"viewer-stale"'}).status_code == 200

@@ -144,7 +144,7 @@ def probe_pdf(pdf_path: Path, max_pages: int) -> int:
         )
     except pdf_worker.PdfWorkerTimeout as error:
         raise ValueError(
-            f"PDF 검증이 시간 상한({timeout:g}초)을 넘었습니다 — 지나치게 복잡하거나 "
+            f"PDF 검증이 시간 상한({_limit_text(timeout)})을 넘었습니다 — 지나치게 복잡하거나 "
             "손상된 PDF입니다"
         ) from error
     except pdf_worker.PdfWorkerCrashed as error:

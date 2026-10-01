@@ -153,6 +153,30 @@ class TranslateUnitRejected(TranslateAPIError):
     """
 
 
+class TranslateOutputTruncated(TranslateUnitRejected):
+    """출력이 max_tokens에서 잘렸다(2배 재시도 후에도, 또는 재시도가 무의미).
+
+    잘린 번역은 절대 반환·캐시하지 않는다 — 종전에는 '래더가 흡수'한다며 반환했지만
+    플레이스홀더 없는 산문은 래더에 들어가지도 않아 문단 끝이 조용히 사라진 채
+    캐시됐다. 유닛 단위 거부라 엔진이 분할(반쪽은 예산 안에 든다)로 보내고, 끝내
+    실패하면 kept_reason 'truncated'로 원문을 유지한다.
+    """
+
+
+class TranslateEmptyOutput(TranslateUnitRejected):
+    """200 응답인데 본문이 비었다(사고만 내고 끝났거나 빈 문자열) — 유닛 단위 거부."""
+
+
+class TranslateTimeout(TranslateUnitRejected):
+    """응답이 TRANSLATE_TIMEOUT_S 동안 한 바이트도 오지 않았다(재시도 소진).
+
+    스트리밍에서는 토큰 사이 정지 시간이 상한이라, 이 오류는 그 유닛의 생성이 멈췄거나
+    서버 대기열이 막혔다는 뜻이다. 이번 실행에서 성공한 호출이 있으면 엔진이 유닛
+    단위로 강등해 분할(짧은 생성)로 회복을 시도한다 — 종전에는 '연결 실패'로 잡 전체가
+    실패했다.
+    """
+
+
 def _clean(v: str | None) -> str:
     """env 값 정리 — 공백/따옴표 제거 (.env를 셸/compose 밖에서 읽었을 때 대비)."""
     return (v or "").strip().strip("'\"").strip()

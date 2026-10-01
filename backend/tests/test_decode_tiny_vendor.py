@@ -159,3 +159,42 @@ def test_graph_capture_failure_respects_eos_cut(monkeypatch):
     _install_fake_cuda(monkeypatch)
     out = fd.fast_greedy_decode(_tiny_vendor_model(ring_window), _gen_kwargs(60, eos=eos), block=block)
     assert out[0].tolist() == ref_eos
+
+
+def test_graph_side_stream_warmup_respects_max_length(monkeypatch):
+    """max_length가 (P+W+block, P+W+2·block) 구간이면 사이드스트림 예열이 남은 길이만큼만
+    돌아야 한다 — 예전엔 block개를 무조건 돌려 최대 block-1개를 초과 생성·스트리밍했다
+    (audit decode-correctness-6). 상한에 닿으면 캡처 없이 끝난다."""
+    ring_window, block = 3, 4
+    max_length = len(PROMPT) + ring_window + block + 3
+    ref, ref_streamer = _eager_reference(max_length=max_length, block=block)
+    assert len(ref) == max_length
+
+    _install_fake_cuda(monkeypatch)
+    captures: list = []
+    monkeypatch.setattr(torch.cuda, "graph", lambda g, *a, **k: captures.append(g))
+    streamer = _Streamer()
+    kwargs = _gen_kwargs(max_length)
+    kwargs["streamer"] = streamer
+    out = fd.fast_greedy_decode(_tiny_vendor_model(ring_window), kwargs, block=block)
+
+    assert out[0].tolist() == ref  # 길이 == max_length, eager와 동일
+    assert streamer.generated() == ref_streamer.generated()  # 초과 토큰 스트리밍 없음
+    assert captures == []  # 상한 도달 → 캡처 단계에 들어가지 않음
+    assert fd.hit_length_limit(out, kwargs) is True
+
+
+@pytest.mark.parametrize("block", [1, 3, 8])
+def test_fast_decode_matches_hf_generate_on_vendor_model(block):
+    """실제 벤더 prepare_inputs(링 분기)·P19/P20·P21 위에서 fast_greedy_decode가
+    HF generate와 토큰 동일 — 블록 크기는 동기화 빈도만 바꾼다."""
+    from transformers import LogitsProcessorList
+
+    model = _tiny_vendor_model()
+    hf_kwargs = _gen_kwargs(48)
+    hf_kwargs["logits_processor"] = LogitsProcessorList(hf_kwargs["logits_processor"])
+    hf_kwargs["attention_mask"] = torch.ones_like(hf_kwargs["input_ids"])
+    with torch.no_grad():
+        expected = model.generate(**hf_kwargs)
+    got = fd.fast_greedy_decode(_tiny_vendor_model(), _gen_kwargs(48), block=block)
+    assert got[0].tolist() == expected[0].tolist()

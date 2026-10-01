@@ -1,7 +1,7 @@
 import { ssePromoteDelay, syncedStreamPageNo } from './core.js';
 import { el, state } from './state.js';
 import { isTerminal, parseEventData } from './ui.js';
-import { apiGet } from './api.js';
+import { POLL_TIMEOUT_MS, apiGet } from './api.js';
 import {
   appendSystemLine, applyStreamReset, drainGroundToUI, enqueueToken, flushStream,
   restoreTokenReplay,
@@ -186,7 +186,7 @@ export function startFallbackPolling(id) {
     inFlight = true;
     let job;
     try {
-      job = await apiGet(`/api/jobs/${id}`);
+      job = await apiGet(`/api/jobs/${id}`, { timeoutMs: POLL_TIMEOUT_MS });
     } catch (e) {
       if (e.status === 404 && current()) {
         clearInterval(timer);

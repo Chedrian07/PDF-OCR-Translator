@@ -254,7 +254,7 @@ class OpenAICompatClient:
                 raise _RequestCancelled("번역 요청이 취소되었습니다")
             status = resp.status_code
             hdrs = dict(resp.headers)
-            ctype = str(hdrs.get("Content-Type") or hdrs.get("content-type") or "").lower()
+            ctype = _header(hdrs, "Content-Type").lower()
             if status == 200 and payload.get("stream") and "text/event-stream" in ctype:
                 return status, self._read_sse(resp, abort), hdrs
             return status, _decode_body(self._read_body(resp, hdrs, abort)), hdrs
@@ -278,7 +278,7 @@ class OpenAICompatClient:
 
     def _read_body(self, resp, hdrs: dict, abort: threading.Event) -> bytes:
         cap = self._cap_bytes()
-        declared = str(hdrs.get("Content-Length") or hdrs.get("content-length") or "")
+        declared = _header(hdrs, "Content-Length")
         if declared.isdigit() and int(declared) > cap:
             raise self._too_large()
         buf = bytearray()
@@ -569,7 +569,7 @@ class OpenAICompatClient:
                 raise TranslateAPIError(_not_found_message(self.cfg.model, body))
             if status in _RETRYABLE and attempt < self.cfg.max_retries:
                 wait = self._backoff(headers, attempt)
-                ra = headers.get("Retry-After") or headers.get("retry-after")
+                ra = _header(headers, "Retry-After") or None
                 logger.warning(
                     "번역 API HTTP %d — %.1fs 후 재시도 (%d/%d)%s",
                     status, wait, attempt + 1, self.cfg.max_retries,
@@ -587,7 +587,7 @@ class OpenAICompatClient:
             raise TranslateAPIError(f"번역 API 오류 (HTTP {status}): {_body_preview(body)}")
 
     def _backoff(self, headers: dict, attempt: int) -> float:
-        ra = headers.get("Retry-After") or headers.get("retry-after")
+        ra = _header(headers, "Retry-After") or None
         if ra is not None:
             try:
                 # 상한 없이 따르면 "Retry-After: 3600" 한 줄이 워커를 한 시간 묶어
@@ -726,6 +726,16 @@ def _not_found_message(model: str, body: dict | str) -> str:
             f"/v1/models의 id 그대로). 서버 응답: {detail}"
         )
     return "번역 API 엔드포인트 없음 — OPENAI_BASE_URL이 /v1까지 포함하는지 확인하세요"
+
+
+def _header(headers: dict, name: str) -> str:
+    """헤더 값을 대소문자 무관하게 찾는다 — dict(resp.headers)는 서버가 보낸 표기를 그대로
+    키로 쓴다. mlx_lm.server는 'Content-type'을 보내 SSE 판정이 빗나갔다(실측)."""
+    wanted = name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == wanted:
+            return str(value)
+    return ""
 
 
 def _decode_body(raw: bytes) -> dict | str:

@@ -1,7 +1,8 @@
 import { ICON, readerPosKey } from './constants.js';
 import {
-  armTransition, clampReaderPage, fmtTime, groundAnnounce, jobModelChip, jobNotices,
-  jobRowSignature, parseViewerSearch, progressPhaseText, statusLabel, warningSegments,
+  JOB_LIST_LIMIT_MAX, JOB_LIST_PAGE, appendJobPage, armTransition, clampReaderPage, fmtTime,
+  groundAnnounce, jobListMoreLabel, jobListUrl, jobModelChip, jobNotices, jobRowSignature,
+  normalizeJobPage, parseViewerSearch, progressPhaseText, statusLabel, warningSegments,
 } from './core.js';
 import { armTimers, el, state } from './state.js';
 import { h, isTerminal, localGet, localRemove, safeParse, showToast } from './ui.js';
@@ -27,6 +28,9 @@ import { forgetReaderNotes } from './notes.js';
 // 진행 중이면 그냥 건너뛴다 — 응답이 느릴수록 요청이 쌓이지 않는다.
 let jobsRefresh = null;
 let jobsRefreshAgain = false;
+// 목록 창이 바뀔 때('더 보기') 증가 — 그 전에 출발한 창 응답이 늦게 와서 방금 이어 붙인
+// 줄을 덮지 않게 버리고, 새 창으로 한 번 더 받는다.
+let jobListGen = 0;
 
 export function refreshJobs() {
   if (jobsRefresh) {
@@ -52,15 +56,22 @@ export function pollJobs() {
 }
 
 async function refreshJobsOnce() {
-  let data;
+  const gen = jobListGen;
+  let page;
   try {
-    data = await apiGet('/api/jobs', { timeoutMs: POLL_TIMEOUT_MS });
+    page = await fetchJobWindow(state.jobListLimit);
   } catch (_) {
     return; // keep last known list on transient failure
   }
-  const jobs = (data && Array.isArray(data.jobs)) ? data.jobs : [];
-  state.jobs = jobs.slice(0, 50);
+  if (gen !== jobListGen) { // 응답을 기다리는 사이 '더 보기'로 창이 넓어졌다
+    jobsRefreshAgain = true;
+    return;
+  }
+  state.jobs = page.jobs;
+  state.jobsHasMore = page.hasMore;
+  state.jobsTotal = page.total;
   renderJobList();
+  renderJobListMore();
 
   if (state.currentJobId) {
     const open = state.jobs.find((j) => j.job_id === state.currentJobId);
@@ -82,6 +93,107 @@ async function refreshJobsOnce() {
       }
     }
   }
+}
+
+// 목록 창(최신 limit개). 기본 창은 예전처럼 GET /api/jobs 한 번이다. 서버 limit 상한(500)을
+// 넘는 창은 before 커서로 이어 받고, 잇는 도중 커서 잡이 지워지면(422) 처음부터 한 번 더 받는다.
+async function fetchJobWindow(limit) {
+  const want = Math.max(1, Math.floor(Number(limit)) || JOB_LIST_PAGE);
+  for (let attempt = 0; ; attempt += 1) {
+    let jobs = [];
+    let hasMore = false;
+    let total = null;
+    try {
+      for (;;) {
+        const before = jobs.length ? jobs[jobs.length - 1].job_id : null;
+        const page = normalizeJobPage(await apiGet(
+          jobListUrl(Math.min(JOB_LIST_LIMIT_MAX, want - jobs.length), before),
+          { timeoutMs: POLL_TIMEOUT_MS },
+        ));
+        const count = jobs.length;
+        jobs = appendJobPage(jobs, page.jobs);
+        hasMore = page.hasMore;
+        if (page.total != null) total = page.total;
+        // 다 받았거나, 뒤가 없거나, 진전이 없으면(구버전 서버가 limit을 무시) 멈춘다
+        if (jobs.length >= want || !hasMore || jobs.length === count) break;
+      }
+      return { jobs: jobs.slice(0, want), hasMore: hasMore || jobs.length > want, total };
+    } catch (e) {
+      if (e && e.status === 422 && jobs.length && attempt === 0) continue;
+      throw e;
+    }
+  }
+}
+
+// '더 보기' — 지금 목록의 마지막 잡 다음 한 쪽(50건)을 before 커서로 받아 잇고, 이후 5초
+// 폴링도 넓어진 창을 유지한다. 커서 잡이 그사이 지워졌거나(422) 응답을 기다리는 사이 목록
+// 끝이 바뀌었으면(새 잡·삭제로 창이 밀림) 이어 붙이면 틈이 생길 수 있다 — 넓힌 창을 처음부터
+// 다시 받는다.
+export async function loadMoreJobs() {
+  if (state.jobsLoadingMore || !state.jobsHasMore) return;
+  const last = state.jobs[state.jobs.length - 1];
+  if (!last) return;
+  const btn = el.jobListMore;
+  const hadFocus = !!btn && typeof document !== 'undefined' && document.activeElement === btn;
+  const firstNew = state.jobs.length;
+  // 창을 먼저 넓힌다 — 응답을 기다리는 사이 도는 폴링도 넓은 창을 받아, 좁은 옛 창이 이어
+  // 붙인 줄을 덮지 않는다. 이미 출발한 좁은 창 응답은 세대 번호로 버린다.
+  state.jobListLimit = Math.max(state.jobListLimit, firstNew + JOB_LIST_PAGE);
+  jobListGen += 1;
+  state.jobsLoadingMore = true;
+  renderJobListMore();
+  let page = null;
+  let failed = false;
+  try {
+    page = normalizeJobPage(await apiGet(
+      jobListUrl(JOB_LIST_PAGE, last.job_id), { timeoutMs: POLL_TIMEOUT_MS },
+    ));
+  } catch (e) {
+    failed = !(e && e.status === 422); // 422 = 커서 잡이 지워졌다 → 아래에서 처음부터
+  }
+  state.jobsLoadingMore = false;
+  if (failed) {
+    renderJobListMore();
+    showToast('작업 목록을 더 불러오지 못했습니다.', 'error');
+    return;
+  }
+  const tail = state.jobs[state.jobs.length - 1];
+  if (!page || !tail || tail.job_id !== last.job_id) {
+    jobListGen += 1;
+    await refreshJobs();
+  } else {
+    state.jobs = appendJobPage(state.jobs, page.jobs);
+    state.jobListLimit = Math.max(state.jobListLimit, state.jobs.length);
+    state.jobsHasMore = page.hasMore;
+    if (page.total != null) state.jobsTotal = page.total;
+    renderJobList();
+  }
+  renderJobListMore();
+  // 끝까지 받아 버튼이 사라지면 포커스가 body로 빠진다 — 새로 붙은 첫 줄로 넘긴다.
+  if (hadFocus && btn.hidden) {
+    const rows = el.jobList.children;
+    const row = rows[Math.min(firstNew, rows.length - 1)];
+    const open = row && row.querySelector('.ji-open');
+    if (open) open.focus({ preventScroll: false });
+  }
+}
+
+// '더 보기' 버튼 — 서버가 창 뒤에 잡이 더 있다고 할 때만 보인다(구버전 서버는 숨김).
+// 받는 중에도 disabled로 바꾸지 않는다 — 포커스된 버튼이 비활성이 되면 키보드 포커스가
+// body로 빠진다. 연타는 jobsLoadingMore가 막고, aria-busy가 스피너와 클릭 차단을 맡는다.
+export function renderJobListMore() {
+  const btn = el.jobListMore;
+  if (!btn) return;
+  btn.hidden = !state.jobsHasMore || !state.jobs.length;
+  if (state.jobsLoadingMore) {
+    btn.setAttribute('aria-busy', 'true');
+    btn.setAttribute('aria-disabled', 'true');
+  } else {
+    btn.removeAttribute('aria-busy');
+    btn.removeAttribute('aria-disabled');
+  }
+  btn.textContent = state.jobsLoadingMore
+    ? '불러오는 중…' : jobListMoreLabel(state.jobs.length, state.jobsTotal);
 }
 
 // 키(job_id) 기반 증분 렌더 — 기존 <li>를 재사용하고 바뀐 줄만 제자리에서 고친다.
@@ -283,12 +395,13 @@ export function armDelete(btn, key, onConfirm) {
 export function removeJobFromList(id) {
   state.jobs = state.jobs.filter((j) => j.job_id !== id);
   renderJobList();
+  renderJobListMore();
 }
 
 export function upsertJob(job) {
   state.jobs = state.jobs.filter((j) => j.job_id !== job.job_id);
   state.jobs.unshift(job);
-  state.jobs = state.jobs.slice(0, 50);
+  state.jobs = state.jobs.slice(0, Math.max(JOB_LIST_PAGE, state.jobListLimit));
   renderJobList();
 }
 

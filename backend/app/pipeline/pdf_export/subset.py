@@ -37,6 +37,7 @@ from pathlib import Path
 
 from ..pdf import quiet_fitz
 from .text import (
+    _GENERATED_SYMBOLS,
     _LATEX_COMMANDS,
     _PORTABLE_SYMBOL_FALLBACKS,
     _SUBSCRIPT_MAP,
@@ -89,6 +90,8 @@ def _substitution_range() -> str:
         _translation_targets(_SUBSCRIPT_MAP),
         _translation_targets(_UNICODE_SUPERSCRIPT_ASCII),
         "".join(_LATEX_COMMANDS.values()),
+        # 구조 변환(√·이중선 대문자·결합 악센트)과 목록 글머리표('• ').
+        _GENERATED_SYMBOLS,
         "".join(_PORTABLE_SYMBOL_FALLBACKS),
         "".join(_PORTABLE_SYMBOL_FALLBACKS.values()),
     ))

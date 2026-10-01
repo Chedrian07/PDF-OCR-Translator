@@ -927,12 +927,22 @@ def _backfill_layout_fonts(job, pages: list, lang: str | None = None, st=None) -
         return
     try:
         if enrich_layout_fonts(src, pages):
+            target = artifacts.layout(job.dir, lang)
+            serialized = json.dumps(pages, ensure_ascii=False)
+            try:
+                unchanged = target.read_text(encoding="utf-8") == serialized
+            except OSError:
+                unchanged = False
+            if unchanged:
+                # 같은 백필을 동시에 시작한 다른 요청(리더가 /viewer/pages·/alignment·
+                # /outline을 한꺼번에 부른다)이 같은 내용을 이미 썼다. 다시 교체하면
+                # inode·mtime만 바뀌어 내보내기 PDF 캐시를 또 무효화하고 예열을 띄운다.
+                return
             # 요청별 고유 tmp — 동시 백필 요청이 같은 tmp에 겹쳐 쓰는 레이스 차단.
             # (병합 워커의 .layout.json.tmp와도 이름이 겹치지 않는다.)
             tmp = artifacts.layout_tmp(job.dir)
-            target = artifacts.layout(job.dir, lang)
             try:
-                tmp.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
+                tmp.write_text(serialized, encoding="utf-8")
                 os.replace(tmp, target)
             finally:
                 tmp.unlink(missing_ok=True)

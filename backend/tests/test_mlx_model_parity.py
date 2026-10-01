@@ -443,7 +443,7 @@ def test_tiny_ring_window_is_exercised(tiny_pair, tmp_path):
 def test_tiny_greedy_generation_matches_torch_fast_decode(tiny_pair, tmp_path, mode):
     from app.engine.fast_decode import fast_greedy_decode
     from app.native_ops import make_ngram_logits_processor
-    from app.vendor.unlimited_ocr_mlx.generate import generate
+    from app.vendor.unlimited_ocr_mlx.generation import generate
 
     torch = tiny_pair.torch
     inp, dummy = _tiny_inputs(mode, tmp_path)

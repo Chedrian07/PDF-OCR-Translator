@@ -3,8 +3,9 @@
 from app.translate.segment import (
     apply_layout,
     assemble_markdown,
+    layout_line_map,
     layout_units,
-    reconcile_markdown_with_layout,
+    map_unit_lines,
     split_markdown,
 )
 
@@ -145,6 +146,7 @@ def test_apply_layout_content외_필드_불변():
 
 
 def test_markdown과_layout_번역을_단일_표기로_정렬():
+    """md 유닛의 모든 줄이 layout 블록과 대응하면 layout 번역을 그대로 쓴다."""
     md = "How to Read a Paper\nBody sentence.\nAnother sentence.\n\n---\n\n[1] Author, Paper."
     source = [
         {"page": 1, "blocks": [
@@ -166,28 +168,55 @@ def test_markdown과_layout_번역을_단일_표기로_정렬():
             {"type": "ref_text", "content": "[1] 저자, 논문."},
         ]},
     ]
-    independently_translated = (
-        "논문 읽기\n별도 본문 번역.\n별도 다른 번역.\n\n---\n\n[1] Author, Paper."
-    )
-    out = reconcile_markdown_with_layout(
-        md, independently_translated, source, translated, "\n\n---\n\n",
-    )
-    assert out == "논문을 읽는 방법\n본문 문장.\n다른 문장.\n\n---\n\n[1] Author, Paper."
+    mapping = layout_line_map(source, translated)
+    assert "[1] Author, Paper." not in mapping            # ref_text는 매핑하지 않는다
+    units = split_markdown(md, "\n\n---\n\n")
+    assert map_unit_lines(units[0].src, mapping) == "논문을 읽는 방법\n본문 문장.\n다른 문장."
+    assert map_unit_lines(units[1].src, mapping) is None
 
 
-def test_markdown_layout_대응률이_낮으면_기존_번역_유지():
-    md = "Unmatched one.\nUnmatched two.\nMatched."
+def test_한_줄이라도_매핑이_없으면_유닛은_자기_번역을_쓴다():
+    """종전 줄 단위 reconcile은 매핑 안 된 줄을 원문(영어)으로 남겼다(translate-llm-1)."""
     source = [{"page": 1, "blocks": [{"type": "text", "content": "Matched."}]}]
     translated = [{"page": 1, "blocks": [{"type": "text", "content": "일치."}]}]
-    assembled = "번역 하나.\n번역 둘.\n기존 일치."
-    assert reconcile_markdown_with_layout(
-        md, assembled, source, translated, "\n\n---\n\n",
-    ) == assembled
+    mapping = layout_line_map(source, translated)
+    assert map_unit_lines("Unmatched one.\nMatched.", mapping) is None
+    assert map_unit_lines("  Matched.  ", mapping) == "  일치.  "   # 줄 앞뒤 공백 보존
+    assert map_unit_lines("", mapping) is None
+
+
+def test_번역에_실패한_블록은_매핑하지_않는다():
+    """원문이 그대로 남은(번역 실패) 블록이 md 줄을 영어로 '매핑'하면 안 된다."""
+    source = [{"page": 3, "blocks": [
+        {"type": "text", "content": "Failed sentence."},
+        {"type": "page_number", "content": "7"},
+        {"type": "text", "content": "Translated sentence."},
+    ]}]
+    translated = [{"page": 3, "blocks": [
+        {"type": "text", "content": "Failed sentence."},
+        {"type": "page_number", "content": "7"},
+        {"type": "text", "content": "번역된 문장."},
+    ]}]
+    final = {"lay:3:1", "lay:3:2"}                      # 보존(쪽 번호) + 번역 성공
+    mapping = layout_line_map(source, translated, final)
+    assert mapping == {"7": "7", "Translated sentence.": "번역된 문장."}
+    assert map_unit_lines("7\nTranslated sentence.", mapping) == "7\n번역된 문장."
+
+
+def test_같은_원문의_상충_번역은_매핑하지_않는다():
+    source = [{"page": 1, "blocks": [
+        {"type": "text", "content": "Same line."}, {"type": "text", "content": "Same line."},
+    ]}]
+    translated = [{"page": 1, "blocks": [
+        {"type": "text", "content": "같은 줄."}, {"type": "text", "content": "동일한 줄."},
+    ]}]
+    assert layout_line_map(source, translated) == {}
+    assert layout_line_map("깨진 값", translated) == {}
 
 
 def test_layout_line_sources_는_reconcile과_같은_필터를_쓴다():
     """엔진의 2단 패스가 md 유닛 지연 여부를 판단하는 집합 — ref_text·다중 줄·
-    중복 원문은 reconcile이 매핑하지 않으므로 여기서도 제외한다."""
+    중복 원문은 layout_line_map이 매핑하지 않으므로 여기서도 제외한다."""
     from app.translate.segment import layout_line_sources
 
     pages = [
@@ -205,14 +234,6 @@ def test_layout_line_sources_는_reconcile과_같은_필터를_쓴다():
     ]
     assert layout_line_sources(pages) == {"Single line block."}
     assert layout_line_sources("깨진 값") == set()
-
-
-def test_reconcile_폴백은_받은_assembled를_그대로_돌려준다():
-    """엔진이 `reconciled is assembled`로 폴백을 판정하므로 동일 객체여야 한다."""
-    md = "Unmatched one.\nUnmatched two.\nUnmatched three."
-    assembled = "번역 하나.\n번역 둘.\n번역 셋."
-    out = reconcile_markdown_with_layout(md, assembled, [], [], "\n\n---\n\n")
-    assert out is assembled
 
 
 # ── 참고문헌 규칙 불일치 관측 (md heading 스윕 vs layout ref_text) ──────────

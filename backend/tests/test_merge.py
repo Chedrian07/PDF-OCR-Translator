@@ -372,95 +372,124 @@ def test_misaligned_chunk_is_repositioned_against_the_source_pdf(tmp_path):
     assert marks[2] in layout[2]["blocks"][0]["content"], "layout이 한 칸 밀렸다"
 
 
-def test_realigned_pages_name_crops_by_the_model_page_not_the_slot(tmp_path):
-    """정렬이 페이지를 옮기면 layout의 크롭 이름도 같은 기준을 따라야 한다.
+def _color_of(path) -> str:
+    """JPEG 손실을 감안해 가장 강한 채널 이름으로 색을 판별한다."""
+    from PIL import Image
 
-    크롭 파일은 벤더가 **모델 페이지 인덱스**로 저장하고(`page_{k}_{j}.jpg`)
-    `_move_chunk_files`·`_rewrite_refs`도 k로 이름을 짓는다. `_ingest_layout`만
-    물리 슬롯으로 이름을 지으면 layout이 **없는 파일**을 가리키고 실제 파일은
-    고아가 된다(레이아웃 뷰에서 그림이 통째로 빠진다).
+    with Image.open(path) as im:
+        r, g, b = im.convert("RGB").getpixel((im.width // 2, im.height // 2))
+    return max((r, "red"), (g, "green"), (b, "blue"))[1]
+
+
+def test_realigned_pages_name_and_crop_figures_by_the_physical_slot(tmp_path):
+    """정렬이 페이지를 옮기면 그림은 **물리 슬롯**의 이름·래스터를 따라야 한다.
+
+    예전 기대값(모델 인덱스로 이름 짓기)은 감사에서 결함으로 확인된 동작이었다: 모델이
+    2쪽을 건너뛰면 3쪽 그림이 `p0002_0.jpg`로 저장되고, 충실도 게이트가 빈 2쪽을 단독
+    재처리해 교체(replace_page → `p0002_*` 삭제)하는 순간 3쪽 그림이 지워지고 2쪽 그림으로
+    덮였다. 게다가 벤더는 그 그림을 **입력 래스터 2(2쪽)**에서 잘랐다 — 3쪽 래스터에서
+    다시 잘라야 한다.
     """
-    import json as _json
+    import fitz
+    from PIL import Image
 
-    from app.pipeline.merge import ChunkResult, IncrementalMerger
+    job = tmp_path / "job"
+    (job / "pages").mkdir(parents=True)
+    marks = ["ALPHAPAGEONE", "BRAVOPAGETWO", "CHARLIEPAGETHREE"]
+    colors = [(220, 30, 30), (30, 200, 30), (30, 30, 220)]
+    names = ["red", "green", "blue"]
+    doc = fitz.open()
+    for i, mark in enumerate(marks):
+        pg = doc.new_page()
+        for line in range(12):
+            pg.insert_text((60, 120 + line * 18), " ".join([mark] * 5), fontsize=11)
+        Image.new("RGB", (300, 400), colors[i]).save(job / "pages" / f"page_{i + 1:04d}.png")
+    doc.save(str(job / "source.pdf"))
+    doc.close()
 
-    job_dir = tmp_path / "job"
-    (job_dir / "pages").mkdir(parents=True)
-    merger = IncrementalMerger(job_dir, "\n\n---\n\n")
-
-    chunk_dir = job_dir / "work" / "chunk_00"
+    m = IncrementalMerger(job, SEP)
+    chunk_dir = job / "work" / "chunk_00"
     (chunk_dir / "images").mkdir(parents=True)
-    # 모델 페이지 0·1의 크롭. 벤더 규약은 page_{모델인덱스}_{크롭}.jpg
-    (chunk_dir / "images" / "page_0_0.jpg").write_bytes(b"crop0")
-    (chunk_dir / "images" / "page_1_0.jpg").write_bytes(b"crop1")
-    (chunk_dir / "raw_pages.json").write_text(
-        _json.dumps({"pages": [
-            "<|det|>image [10, 10, 500, 500]<|/det|>",
-            "<|det|>image [10, 10, 500, 500]<|/det|>",
-        ]}), encoding="utf-8",
-    )
-    chunk = ChunkResult(chunk_dir, 1, 3, "a\n\n<PAGE>\n\nb")
-    merger._move_chunk_files(chunk)
-    # 정렬 결과: 모델 0 → 슬롯 0, 모델 1 → 슬롯 2 (가운데 페이지는 유실)
-    merger._ingest_layout(chunk, ["<|det|>image [10, 10, 500, 500]<|/det|>", "",
-                                  "<|det|>image [10, 10, 500, 500]<|/det|>"],
-                          [0, None, 1])
+    # 모델이 2쪽을 건너뛰었다(마커 2개). 벤더는 모델 페이지 k의 그림을 입력 래스터 k에서
+    # 잘랐다 — 모델 1(=3쪽 내용)의 크롭은 2쪽(초록) 래스터에서 나왔다.
+    Image.new("RGB", (60, 60), colors[0]).save(chunk_dir / "images" / "page_0_0.jpg")
+    Image.new("RGB", (60, 60), colors[1]).save(chunk_dir / "images" / "page_1_0.jpg")
+    for k in (0, 1):
+        Image.new("RGB", (300, 400), colors[k]).save(chunk_dir / f"result_with_boxes_{k}.jpg")
+    body = [" ".join([marks[0]] * 60), " ".join([marks[2]] * 60)]
+    raw = [f"<|det|>text [0,0,999,99]<|/det|>{b}\n<|det|>image [100, 300, 900, 900]<|/det|>"
+           for b in body]
+    (chunk_dir / "raw_pages.json").write_text(json.dumps({"pages": raw}), encoding="utf-8")
+    m.add_chunk(ChunkResult(
+        chunk_dir, 1, 3,
+        f"<PAGE>\n{body[0]}\n![](images/page_0_0.jpg)\n<PAGE>\n{body[1]}\n![](images/page_1_0.jpg)",
+    ))
 
-    on_disk = {f.name for f in (job_dir / "images").iterdir()}
-    referenced = {
-        b["image"]
-        for page in merger.layout_pages
-        for b in page["blocks"]
-        if b.get("image")
-    }
-    assert referenced <= on_disk, f"없는 파일을 참조한다: {referenced - on_disk}"
-    assert on_disk <= referenced | {"boxes.json"}, f"고아 파일: {on_disk - referenced}"
-    # 3쪽 슬롯의 그림은 모델 1쪽의 크롭(p0002_0.jpg)이어야 한다
-    page3 = [p for p in merger.layout_pages if p["page"] == 3][0]
-    assert page3["blocks"][0]["image"] == "p0002_0.jpg", page3["blocks"][0]
+    assert "![](images/p0001_0.jpg)" in m.pages_md[0]
+    assert m.pages_md[1] == ""
+    assert "![](images/p0003_0.jpg)" in m.pages_md[2]
+    on_disk = {f.name for f in (job / "images").iterdir()} - {"boxes.json"}
+    assert on_disk == {"p0001_0.jpg", "p0003_0.jpg"}            # 2쪽 이름의 그림은 없다
+    assert _color_of(job / "images" / "p0001_0.jpg") == names[0]
+    assert _color_of(job / "images" / "p0003_0.jpg") == names[2]  # 3쪽 래스터에서 다시 잘랐다
+    assert m.figure_boxes["p0003_0.jpg"]["image_width"] == 300
+    layout = json.loads((job / "layout.json").read_text(encoding="utf-8"))
+    referenced = {b["image"] for p in layout for b in p["blocks"] if b.get("image")}
+    assert referenced == on_disk
+    # 엉뚱한 래스터에 그려진 오버레이는 옮겨진 페이지의 것으로 쓰지 않는다
+    assert (job / "layout" / "page_0001.jpg").is_file()
+    assert not (job / "layout" / "page_0003.jpg").exists()
 
-
-def test_image_only_raw_pages_do_not_create_a_layout_json(tmp_path):
-    """image det뿐이거나 빈 원출력(`['']`)은 '좌표 데이터'가 아니다.
-
-    예전에는 비어 있지 않은 raw 리스트면 무조건 has_layout_data를 세워, figure_only
-    엔진(Ovis)·전면 스캔 잡도 image 블록뿐인 layout.json을 남겼다 → has_layout=True →
-    document.html이 OCR 텍스트 없는 원문 래스터, /pdf?lang=ko가 번역 안 된 원문."""
-    m = IncrementalMerger(tmp_path, SEP)
-    c0 = _mk_multi_chunk(tmp_path, "chunk_00", 2)
-    (c0 / "raw_pages.json").write_text(
-        json.dumps({"pages": ["<|det|>image [10, 10, 500, 500]<|/det|>", ""]}),
-        encoding="utf-8",
-    )
-    m.add_chunk(ChunkResult(c0, 1, 2, "<PAGE>\nA ![](images/page_0_0.jpg)\n<PAGE>\nB"))
-    assert not (tmp_path / "layout.json").exists()
-    assert m.has_layout_data is False
-
-    # 뒤 청크에서 텍스트 좌표가 처음 오면 그때 앞 페이지까지 포함해 기록한다
-    c1 = _mk_multi_chunk(tmp_path, "chunk_01", 1)
-    (c1 / "raw_pages.json").write_text(
-        json.dumps({"pages": ["<|det|>text [10, 10, 900, 200]<|/det|>본문"]}),
-        encoding="utf-8",
-    )
-    m.add_chunk(ChunkResult(c1, 3, 1, "<PAGE>\n본문"))
-    layout = json.loads((tmp_path / "layout.json").read_text(encoding="utf-8"))
-    assert [p["page"] for p in layout] == [1, 2, 3]
-    assert layout[0]["blocks"][0]["image"] == "p0001_0.jpg"
+    # 게이트가 빈 2쪽을 단독 재처리해 채택해도 3쪽 그림은 그대로다
+    single = job / "work" / "fidelity" / "page_0002"
+    (single / "images").mkdir(parents=True)
+    Image.new("RGB", (60, 60), colors[1]).save(single / "images" / "0.jpg")
+    (single / "raw_pages.json").write_text(json.dumps({"pages": [
+        f"<|det|>text [0,0,999,99]<|/det|>{' '.join([marks[1]] * 60)}\n"
+        "<|det|>image [100, 300, 900, 900]<|/det|>"
+    ]}), encoding="utf-8")
+    assert m.replace_page(2, ChunkResult(single, 2, 1, "B\n![](images/0.jpg)", single=True))
+    assert _color_of(job / "images" / "p0002_0.jpg") == names[1]
+    assert _color_of(job / "images" / "p0003_0.jpg") == names[2]
+    assert "![](images/p0003_0.jpg)" in m.pages_md[2]
 
 
-def test_replacing_a_page_with_image_only_output_keeps_layout_absent(tmp_path):
-    """단독 재처리 교체(replace_page)도 같은 기준 — image뿐인 결과로 layout.json을
-    새로 만들지 않는다."""
-    m = IncrementalMerger(tmp_path, SEP)
-    c0 = _mk_multi_chunk(tmp_path, "chunk_00", 1)
-    m.add_chunk(ChunkResult(c0, 1, 1, "<PAGE>\nA"))
-    single = tmp_path / "work" / "fidelity" / "page_0001"
-    _touch(single / "images" / "0.jpg")
-    (single / "raw_pages.json").write_text(
-        json.dumps({"pages": ["<|det|>image [10, 10, 500, 500]<|/det|>"]}), encoding="utf-8"
-    )
-    assert m.replace_page(1, ChunkResult(single, 1, 1, "![](images/0.jpg)", single=True))
-    assert not (tmp_path / "layout.json").exists()
+def test_two_model_pages_in_one_slot_get_distinct_crop_names(tmp_path):
+    """한 슬롯에 모델 페이지 둘이 합쳐지면(쪼개진 페이지) 크롭 번호가 둘 다 0부터라 이름이
+    겹친다 — 두 번째부터 `x{k}_` 접두사로 구분하고 layout도 모델 페이지별로 매긴다."""
+    import fitz
+
+    job = tmp_path / "job"
+    job.mkdir()
+    marks = ["ALPHAPAGEONE", "BRAVOPAGETWO"]
+    doc = fitz.open()
+    for mark in marks:
+        pg = doc.new_page()
+        for line in range(12):
+            pg.insert_text((60, 120 + line * 18), " ".join([mark] * 5), fontsize=11)
+    doc.save(str(job / "source.pdf"))
+    doc.close()
+
+    m = IncrementalMerger(job, SEP)
+    c = _mk_multi_chunk(job, "chunk_00", 3)  # page_0_0, page_1_0, page_2_0
+    two = " ".join([marks[1]] * 60)
+    model = [" ".join([marks[0]] * 60), two[: len(two) // 2], two[len(two) // 2 :]]
+    raw = [f"<|det|>text [0,0,999,99]<|/det|>{t}\n<|det|>image [100, 300, 900, 900]<|/det|>"
+           for t in model]
+    (c / "raw_pages.json").write_text(json.dumps({"pages": raw}), encoding="utf-8")
+    m.add_chunk(ChunkResult(
+        c, 1, 2,
+        "<PAGE>\n" + "\n<PAGE>\n".join(
+            f"{t}\n![](images/page_{k}_0.jpg)" for k, t in enumerate(model)
+        ),
+    ))
+
+    on_disk = {f.name for f in (job / "images").iterdir()} - {"boxes.json"}
+    layout = json.loads((job / "layout.json").read_text(encoding="utf-8"))
+    referenced = {b["image"] for p in layout for b in p["blocks"] if b.get("image")}
+    assert on_disk == referenced == {"p0001_0.jpg", "p0002_0.jpg", "p0002_x2_0.jpg"}
+    assert "![](images/p0002_0.jpg)" in m.pages_md[1]
+    assert "![](images/p0002_x2_0.jpg)" in m.pages_md[1]
 
 
 def test_boxes_json_is_rewritten_when_the_last_figure_disappears(tmp_path):

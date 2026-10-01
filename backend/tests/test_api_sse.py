@@ -81,3 +81,78 @@ def test_resync_does_not_redeliver_a_reset_it_already_dequeued(client, monkeypat
     assert names == ["progress", "replay", "replay", "done"], names
     resynced = _events(chunks)[2][1]
     assert resynced["text"].endswith("2쪽 재처리")
+
+
+# ── security-4: SSE 구독자 상한 ──────────────────────────────────────────────
+def test_broker_caps_subscribers_per_channel_and_in_total():
+    import pytest
+
+    from app.jobs import EventBroker, SubscriberLimitError
+
+    broker = EventBroker(max_per_channel=2, max_total=3)
+    a1 = broker.subscribe("job-a")
+    broker.subscribe_with_replay("job-a")
+    assert not broker.has_room("job-a")
+    with pytest.raises(SubscriberLimitError):
+        broker.subscribe("job-a")                      # 채널 상한
+    with pytest.raises(SubscriberLimitError):
+        broker.subscribe_with_replay("job-a")
+    broker.subscribe("job-b")
+    with pytest.raises(SubscriberLimitError):
+        broker.subscribe("job-c")                      # 전체 상한
+    broker.unsubscribe("job-a", a1)                    # 끊긴 연결은 자리를 돌려준다
+    assert broker.has_room("job-a") and broker.has_room("job-c") is True
+    broker.subscribe("job-c")
+
+
+def test_sse_routes_answer_503_with_retry_after_when_capped(client, sample_pdf):
+    """상한 초과는 '잠시 뒤 재시도'다(프런트 계약: 503 + Retry-After). EventSource는 200이
+    아니면 재연결하지 않으므로 프런트는 폴링으로 넘어간다."""
+    from conftest import wait_done
+
+    broker = client.app.state.broker
+    jid = client.post(
+        "/api/jobs", files={"file": ("sample.pdf", sample_pdf, "application/pdf")},
+    ).json()["job_id"]
+    wait_done(client, jid)
+    held = [broker.subscribe(jid) for _ in range(broker.max_per_channel)]
+    try:
+        busy = client.get(f"/api/jobs/{jid}/events")
+        assert busy.status_code == 503, busy.text
+        assert busy.headers["Retry-After"] == "5"
+    finally:
+        for q in held:
+            broker.unsubscribe(jid, q)
+    with client.stream("GET", f"/api/jobs/{jid}/events") as stream:   # 자리가 나면 정상
+        assert stream.status_code == 200
+
+    channel = f"{jid}:translate:ko"
+    held = [broker.subscribe(channel) for _ in range(broker.max_per_channel)]
+    try:
+        client.app.state.translate_tasks[(jid, "ko")] = {"thread": None, "cancel": None}
+        busy = client.get(f"/api/jobs/{jid}/translate/events?lang=ko")
+        assert busy.status_code == 503 and busy.headers["Retry-After"] == "5"
+    finally:
+        client.app.state.translate_tasks.pop((jid, "ko"), None)
+        for q in held:
+            broker.unsubscribe(channel, q)
+
+
+def test_sse_stream_closes_quietly_when_the_cap_is_hit_after_the_check(client, monkeypatch):
+    """판정과 구독 사이 경합 — 이벤트 없이 재연결 간격만 늘리고 닫는다(구독 누수 없음)."""
+    from app.api import job_events
+    from app.jobs import SubscriberLimitError
+
+    store = client.app.state.store
+    broker = client.app.state.broker
+    job = store.create("race.pdf", "multi", 200)
+
+    def _full(job_id):
+        raise SubscriberLimitError(job_id)
+
+    monkeypatch.setattr(broker, "subscribe_with_replay", _full)
+    try:
+        chunks = _drive(client.app, lambda request: job_events(request, job.id), lambda i, c: None)
+    finally:
+        store.delete_dir(job)
+    assert chunks == ["retry: 5000\n\n"]

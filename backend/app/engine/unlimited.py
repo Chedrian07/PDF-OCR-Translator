@@ -196,11 +196,30 @@ class UnlimitedEngine(OCREngine):
             use_safetensors=True,
             attn_implementation="eager",
         )
-        model = model.eval().to(self.torch_device)
+        model = self._place_model(model)
         # loaded/load()의 락 없는 빠른 경로가 _model 을 기준으로 판단하므로 마지막에 대입
         self._tokenizer = tokenizer
         self._model = model
         logger.info("모델 로딩 완료")
+
+    def _place_model(self, model):
+        """eval → (cuda/mps) P17 융합 MoE 스택 프리빌드 → 디바이스 이동 → MPS 캐시 반환.
+
+        스택은 이동 **전**(가중치가 CPU에 있을 때) 만든다 — expert별 디바이스 버퍼가 생기지
+        않고, 이후 .to()는 이미 디바이스에 있는 스택 뷰를 그대로 둔다(메모리 중복 0).
+        첫 디코드 때 디바이스에서 지연 재스택하던 구 동작은 MPS 힙 단편화로 드라이버
+        메모리 +1.7~3.3GB가 남고 첫 실행 피크가 15~16GB였다(audit MPS-2).
+        OCR_MOE_FUSED=0이면 프리빌드하지 않는다(legacy 개별 가중치 그대로)."""
+        from ..vendor.unlimited_ocr.modeling_deepseekv2 import prebuild_fused_moe
+
+        model = model.eval()
+        if self.torch_device in ("cuda", "mps"):
+            stacked = prebuild_fused_moe(model, self.torch_device)
+            if stacked:
+                logger.info("융합 MoE(P17) expert 스택 프리빌드: %d개 레이어", stacked)
+        model = model.to(self.torch_device)
+        self._release_device_cache()
+        return model
 
     def gpu_name(self) -> str | None:
         if self.device == "metal":

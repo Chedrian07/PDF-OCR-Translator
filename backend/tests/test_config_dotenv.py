@@ -164,6 +164,104 @@ def test_dotenv_로드_경로는_INFO로_남기고_값은_남기지_않는다(tm
     assert "sk-should-never-be-logged" not in text
 
 
+# ── 모르는 .env 키 안내 (감사 translate-llm-13·infra-docs-7·mlx-integration-8) ──
+
+@pytest.fixture
+def fresh_dotenv_log(monkeypatch):
+    """키마다 프로세스에서 한 번만 로그를 남긴다 — 테스트마다 그 기억을 비운다."""
+    monkeypatch.setattr(config_module, "_LOGGED_DOTENV_WARNINGS", set())
+
+
+def test_모르는_dotenv_키는_이름과_안내만_한_번_경고한다(tmp_path, monkeypatch, caplog, fresh_dotenv_log):
+    """루트 .env의 REASONING_EFFORT는 어떤 코드도 읽지 않아 번역 reasoning을 껐다고 믿은
+    설정이 조용히 무시됐다. 모르는 키는 이름·오타 후보·별칭 안내만 남긴다(값은 절대 없음)."""
+    env = tmp_path / ".env"
+    env.write_text(
+        "OPENAI_MODEL=known-model\n"
+        "REASONING_EFFORT='value-must-not-leak-1'\n"
+        "OPENAI_MODLE=value-must-not-leak-2\n"
+        "MY_TOOL_SETTING=value-must-not-leak-3\n"
+        "HF_HOME=/tmp/hf-cache\n"                 # 다른 도구의 키 — 경고하지 않는다
+        "TOKENIZERS_PARALLELISM=false\n"
+        "NO_PROXY=localhost\n"
+        "OVIS_MODEL_ID=ATH-MaaS/OvisOCR2\n"       # compose가 읽는 배포 키
+        "OCR_MPS_TESTS=1\n"                       # 문서화된 하네스 키
+        "sk-proj-pasted-token-must-not-leak\n",   # '=' 없는 줄(붙여 넣은 토큰) — 보지 않는다
+        encoding="utf-8",
+    )
+    for key in ("OPENAI_MODEL", "REASONING_EFFORT", "OPENAI_MODLE", "MY_TOOL_SETTING", "HF_HOME",
+                "TOKENIZERS_PARALLELISM", "NO_PROXY", "OVIS_MODEL_ID", "OCR_MPS_TESTS"):
+        monkeypatch.delenv(key, raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="app.config"):
+        warnings = load_dotenv_file(env)
+
+    assert [w.split(":", 1)[0] for w in warnings] == [
+        "REASONING_EFFORT", "OPENAI_MODLE", "MY_TOOL_SETTING",
+    ]
+    reasoning, typo, other = warnings
+    assert "TRANSLATE_REASONING(off|low|medium|high|xhigh — max 없음)" in reasoning
+    assert "LLM_REASONING_EFFORT(max 허용)" in reasoning
+    assert "OPENAI_MODEL의 오타" in typo
+    assert "다른 도구용이면 무시" in other
+    logged = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(logged) == 3 and all(env.name in m for m in logged)
+    everything = "\n".join(warnings + logged)
+    assert "value-must-not-leak" not in everything and "sk-proj" not in everything
+    assert os.environ["REASONING_EFFORT"] == "value-must-not-leak-1"  # 적용 규칙은 그대로
+
+    # 다시 읽어도 로그는 키마다 한 번 — 반환값(=health)에는 매번 실린다
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="app.config"):
+        again = load_dotenv_file(env)
+    assert again == warnings
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_모르는_키_안내는_상한을_두고_이름_꼴이_아닌_키는_보지_않는다(tmp_path, fresh_dotenv_log):
+    from app.config import unknown_dotenv_key_warnings
+
+    many = {f"UNKNOWN_KEY_{i:02d}": "v" for i in range(30)}
+    assert len(unknown_dotenv_key_warnings(many)) == 20
+    weird = {"키-이름": "v", "A" * 65: "v", "OPENAI_API_BASE": "http://x", "x" * 3: None}
+    assert unknown_dotenv_key_warnings(weird) == [
+        "OPENAI_API_BASE: 이 앱이 읽지 않는 .env 키 — 번역 엔드포인트 주소는 OPENAI_BASE_URL입니다",
+    ]
+    assert load_dotenv_file(tmp_path / "없는파일.env") == []
+
+
+def test_dotenv_안내는_Settings와_health의_config_warnings로_보인다(tmp_path, monkeypatch, fresh_dotenv_log):
+    import dataclasses
+
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    monkeypatch.chdir(tmp_path)  # cwd .env가 먼저 — 저장소 루트의 실제 .env는 읽지 않는다
+    monkeypatch.delenv("DISABLE_DOTENV", raising=False)
+    monkeypatch.delenv("REASONING_EFFORT", raising=False)
+    (tmp_path / ".env").write_text("REASONING_EFFORT=zz-secret-zz\n", encoding="utf-8")
+
+    settings = Settings.from_env()
+    assert len(settings.config_warnings) == 1
+    assert settings.config_warnings[0].startswith("REASONING_EFFORT: ")
+
+    app_settings = dataclasses.replace(
+        settings, engine="fake", device="cpu", preload_model=False,
+        data_dir=tmp_path / "data", frontend_dir=tmp_path / "no-frontend",
+    )
+    with TestClient(create_app(app_settings)) as client:
+        health = client.get("/api/health").json()
+    assert health["config_warnings"] == list(settings.config_warnings)
+    assert "zz-secret-zz" not in "".join(health["config_warnings"])  # 값은 싣지 않는다
+
+    # 직접 만든 Settings(.env를 읽지 않음)는 안내가 없다
+    plain = Settings(engine="fake", device="cpu", data_dir=tmp_path / "data2",
+                     preload_model=False, frontend_dir=tmp_path / "no-frontend")
+    with TestClient(create_app(plain)) as client:
+        assert client.get("/api/health").json()["config_warnings"] == []
+
+
 # ── PAGE_SEPARATOR 이스케이프 해석 (감사 api-jobs-12) ──
 
 def test_PAGE_SEPARATOR는_한글과_이스케이프를_함께_보존한다(monkeypatch):

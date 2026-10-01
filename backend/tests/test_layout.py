@@ -430,3 +430,42 @@ def test_facsimile_falls_back_when_page_images_too_large(tmp_path, monkeypatch):
     )
     assert "data:image/png;base64," in ok
     assert 'class="layout-canvas facsimile-canvas"' in ok
+
+
+def test_degenerate_huge_coordinates_do_not_fail_the_page():
+    """퇴화한 det 좌표(수천 자리 숫자)가 와도 parse_page_blocks는 예외를 던지지 않는다.
+
+    int()의 문자열 변환 상한(4300자리)을 넘는 숫자는 ValueError를 냈고, merge가 이를
+    막지 않아 이미 끝난 앞 청크까지 포함한 잡 전체가 error로 끝났다. 벤더도 같은
+    페이로드를 literal_eval 실패로 건너뛰므로 그 박스는 블록 없이 버린다.
+    """
+    raw = (
+        "<|det|>text [100, 120, 900, 300]<|/det|>정상 본문\n"
+        "<|det|>table [" + "7" * 4400 + ", 1, 2, 3]<|/det|>퇴화 좌표\n"
+        "<|det|>title [10, 20, 900, 60]<|/det|>뒤 제목"
+    )
+    blocks = parse_page_blocks(raw)
+    assert [(b["type"], b["content"]) for b in blocks] == [
+        ("text", "정상 본문"), ("title", "뒤 제목"),
+    ]
+
+
+def test_absurd_image_box_keeps_vendor_crop_numbering():
+    """상한 안이지만 터무니없는 좌표의 image 박스는 블록으로 만들지 않되 crop 번호는 센다.
+
+    벤더는 literal_eval에 성공한 페이로드의 박스마다 크롭 번호를 쓴다(좌표가 이상해도).
+    박스를 지우며 번호까지 당기면 뒤 그림이 엉뚱한 크롭 파일을 가리킨다. 반대로
+    literal_eval이 실패하는 페이로드는 벤더가 크롭을 하나도 만들지 않는다.
+    """
+    raw = (
+        "<|ref|>image<|/ref|><|det|>"
+        "[[1, 2, 3, 4], [5, " + "9" * 20 + ", 7, 8], [10, 20, 30, 40]]<|/det|>\n"
+        "<|ref|>image<|/ref|><|det|>[[0, " + "9" * 4400 + ", 1, 2]]<|/det|>\n"
+        "<|det|>image [50, 50, 60, 60]<|/det|>"
+    )
+    blocks = parse_page_blocks(raw)
+    assert [(b["bbox"], b["crop_index"]) for b in blocks] == [
+        ([1, 2, 3, 4], 0),
+        ([10, 20, 30, 40], 2),
+        ([50, 50, 60, 60], 3),
+    ]

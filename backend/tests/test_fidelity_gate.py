@@ -830,3 +830,60 @@ def test_cancel_during_repair_leaves_no_hole_in_the_live_stream(tmp_path):
     assert job.status == "canceled", job.status
     markers = client_view(events).count(PAGE_MARKER)
     assert markers == 4, f"되감은 자리가 비었다 — 마커 {markers}개"
+
+
+class _CountingPage:
+    """MuPDF 페이지 프록시 — 무거운 분석 호출 횟수를 센다."""
+
+    _COUNTED = ("get_image_info", "get_drawings", "get_cdrawings", "get_text")
+
+    def __init__(self, page):
+        self._page = page
+        self.calls: dict[str, int] = {}
+
+    def __getattr__(self, name):
+        attr = getattr(self._page, name)
+        if name not in self._COUNTED:
+            return attr
+
+        def counted(*args, **kwargs):
+            self.calls[name] = self.calls.get(name, 0) + 1
+            return attr(*args, **kwargs)
+
+        return counted
+
+
+def test_graphic_analysis_runs_once_per_page_not_per_figure_block(tmp_path):
+    """그림 블록마다 페이지 전체의 이미지·벡터 목록을 다시 뽑으면 벡터 10^6개
+    페이지 + 블록 3개에 24초·1.67GB였다 — 블록 수와 무관하게 페이지당 한 번."""
+    import fitz
+    import pymupdf
+
+    from app.pipeline.fidelity import truth_text
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_textbox(fitz.Rect(50, 60, 545, 300), _PARAGRAPH, fontsize=11)
+    for i in range(6):
+        y = 320 + i * 80
+        page.draw_rect(fitz.Rect(60, y, 540, y + 60), color=(0, 0, 0), fill=(0.9, 0.9, 0.9))
+        page.insert_text((80, y + 30), f"FIGURE LABEL {i}", fontsize=9)
+    path = tmp_path / "figs.pdf"
+    doc.save(path)
+    doc.close()
+
+    blocks = [
+        {"type": "image", "bbox": [90, int((320 + i * 80) / 842 * 999), 910,
+                                    int((380 + i * 80) / 842 * 999)]}
+        for i in range(6)
+    ]
+    opened = pymupdf.open(path)
+    try:
+        counting = _CountingPage(opened[0])
+        masked = truth_text(pymupdf, counting, blocks)
+        assert "FIGURE LABEL" not in masked and "CyberGym" in masked
+        assert counting.calls.get("get_cdrawings") == 1, counting.calls
+        assert counting.calls.get("get_image_info") == 1, counting.calls
+        assert "get_drawings" not in counting.calls, counting.calls
+    finally:
+        opened.close()

@@ -1456,39 +1456,93 @@ def job_file(request: Request, job_id: str, file_path: str) -> FileResponse:
     return _JobFileResponse(full)
 
 
+def _archive_members(job) -> list[tuple[Path, str]]:
+    """archive.zip에 담을 (파일, zip 안 이름) — 순서가 곧 zip 순서다."""
+    members: list[tuple[Path, str]] = []
+    md = artifacts.markdown(job.dir)
+    if md.is_file():
+        members.append((md, "result.md"))
+    # 변환 메타(엔진/모델/경고)도 동봉 — 어떤 모델로 변환했는지 아카이브만으로 확인 가능
+    meta = artifacts.meta(job.dir)
+    if meta.is_file():
+        members.append((meta, "meta.json"))
+    # 번역본(result.ko.md 등)도 포함 (glob은 result.md 자신은 제외)
+    for extra in sorted(job.dir.glob("result.*.md")):
+        members.append((extra, extra.name))
+    images = artifacts.images_dir(job.dir)
+    if images.is_dir():
+        for f in sorted(images.iterdir()):
+            if f.is_file():
+                members.append((f, f"images/{f.name}"))
+    return members
+
+
+# archive.zip 세대 표식 — zip 주석(comment)에 담는다. 내용물의 지문이라 새 파일 이름이
+# 필요 없고, 받은 사람에게는 의미 없는 짧은 해시로만 보인다.
+_ARCHIVE_STAMP_PREFIX = b"uocr-archive:v1:"
+
+
+def _archive_stamp(members: list[tuple[Path, str]]) -> bytes:
+    """담을 파일들의 지문(이름·inode·크기·mtime_ns) — 원자적 교체마다 바뀐다."""
+    parts = []
+    for path, name in members:
+        try:
+            stat = path.stat()
+        except OSError:
+            parts.append(f"{name}:missing")
+            continue
+        parts.append(f"{name}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}")
+    digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:32]
+    return _ARCHIVE_STAMP_PREFIX + digest.encode("ascii")
+
+
+def _archive_current(zip_path: Path, stamp: bytes) -> bool:
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            return zf.comment == stamp
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
 @router.get("/jobs/{job_id}/archive")
 def job_archive(request: Request, job_id: str) -> FileResponse:
+    """결과 마크다운·메타·번역본·그림 묶음(zip).
+
+    캐시는 존재 여부가 아니라 **내용 지문**으로 판정한다. 예전에는 파일이 있으면
+    그대로 내보내, 번역이 끝나기 직전에 시작된 빌드가 무효화(unlink) 뒤에 옛
+    번역(또는 번역 없는) zip을 다시 써 넣으면 다음 번역 전까지 그 zip이 계속
+    나갔다(결정적 재현). 빌드 전 지문을 zip 주석에 남기고, 빌드 도중 입력이
+    바뀌었으면 같은 요청에서 다시 만든다."""
     job = _get_job(request, job_id)
     if job.status != "done":
         raise HTTPException(409, "아직 변환이 완료되지 않았습니다")
     zip_path = artifacts.archive(job.dir)
-    if not zip_path.is_file():
+    for _attempt in range(3):
+        members = _archive_members(job)
+        stamp = _archive_stamp(members)
+        if _archive_current(zip_path, stamp):
+            break
         # 요청별 고유 tmp — 동시 요청 둘이 같은 tmp에 겹쳐 써 손상 zip이 캐시되는
         # 레이스 차단(sync 핸들러는 스레드풀 병렬). 둘 다 완주하면 마지막 replace가 승자.
         tmp = artifacts.archive_tmp(job.dir)
         try:
             with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
-                md = artifacts.markdown(job.dir)
-                if md.is_file():
-                    zf.write(md, "result.md")
-                # 변환 메타(엔진/모델/경고)도 동봉 — 어떤 모델로 변환했는지 아카이브만으로 확인 가능
-                meta = artifacts.meta(job.dir)
-                if meta.is_file():
-                    zf.write(meta, "meta.json")
-                # 번역본(result.ko.md 등)도 포함 — 번역 완료 시 이 zip 캐시가 삭제돼
-                # 다음 요청에서 번역본까지 담아 재생성된다. (glob은 result.md 자신은 제외)
-                for extra in sorted(job.dir.glob("result.*.md")):
-                    zf.write(extra, extra.name)
-                images = artifacts.images_dir(job.dir)
-                if images.is_dir():
-                    for f in sorted(images.iterdir()):
-                        if f.is_file():
-                            zf.write(f, f"images/{f.name}")
+                zf.comment = stamp
+                for path, name in members:
+                    try:
+                        zf.write(path, name)
+                    except FileNotFoundError:
+                        continue  # 그 사이 교체·삭제 — 지문이 달라져 다음 회차가 다시 만든다
             tmp.replace(zip_path)
+        except FileNotFoundError:
+            raise HTTPException(404, "잡을 찾을 수 없습니다") from None  # 삭제 경합
         finally:
             tmp.unlink(missing_ok=True)
+        if _archive_stamp(_archive_members(job)) == stamp:
+            break  # 빌드 중 입력이 그대로였다 — 방금 만든 zip이 최신이다
     stem = Path(job.filename).stem or "result"
-    return FileResponse(
+    # 확인과 전송 사이에 무효화(번역 완료)·삭제가 끼면 500이 아니라 404다.
+    return _JobFileResponse(
         zip_path,
         media_type="application/zip",
         filename=f"{stem}.markdown.zip",
@@ -1556,7 +1610,8 @@ def job_pdf(
         )),
     }
     stem = Path(job.filename).stem or "document"
-    return FileResponse(
+    # 확인과 전송 사이에 무효화(번역 완료)·삭제가 끼면 500이 아니라 404다.
+    return _JobFileResponse(
         out, media_type="application/pdf", filename=f"{stem}.{lang}.pdf", headers=headers)
 
 

@@ -1,7 +1,7 @@
 # Vendored from https://huggingface.co/baidu/Unlimited-OCR
 # revision ee63731b6461c8afcdcc7b15352e7d2ffecc2ead (2026-07-03), MIT License.
 # Patched for device-agnostic (CPU/CUDA) inference + security hardening.
-# Patch inventory: PROVENANCE.md (P1-P9).
+# Patch inventory: PROVENANCE.md (all patches; `grep -n "vendor patch P"` is the source of truth).
 from .modeling_deepseekv2 import DeepseekV2Model, DeepseekV2ForCausalLM
 from .configuration_deepseek_v2 import DeepseekV2Config
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
@@ -102,6 +102,32 @@ def extract_coordinates_and_label(ref_text, image_width, image_height):
     return (label_type, cor_list)
 
 
+def _clamp_box(points, image_width, image_height):
+    """[vendor patch P22] 모델 좌표(0~999 정규화) 상자 → 이미지 안으로 clamp한 픽셀 상자.
+
+    규칙(MLX 엔진 이식과 공유): x/y = int(v/999*size), x는 [0, W], y는 [0, H]로 clamp,
+    clamp 뒤 x2<=x1 또는 y2<=y1이면 퇴화 상자로 None. 숫자가 아니거나(bool 포함)
+    유한하지 않거나 4개가 아닌 좌표도 None — 호출자는 crop/draw를 건너뛴다.
+    모델 출력은 PDF 내용으로 유도할 수 있어 거대·음수·뒤집힌 좌표가 그대로 crop에
+    가면 거대한 검정 크롭이나 Pillow 좌표 산술 오버플로(GHSA-6r8x-57c9-28j4)에 닿는다."""
+    try:
+        x1, y1, x2, y2 = points
+        coords = []
+        for value, size in ((x1, image_width), (y1, image_height), (x2, image_width), (y2, image_height)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            scaled = value / 999 * size
+            if not math.isfinite(scaled):
+                return None
+            coords.append(min(max(int(scaled), 0), size))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    x1, y1, x2, y2 = coords
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
 def draw_bounding_boxes(image, refs, ouput_path, image_prefix=''):
 
     image_width, image_height = image.size
@@ -125,6 +151,11 @@ def draw_bounding_boxes(image, refs, ouput_path, image_prefix=''):
     for i, ref in enumerate(refs):
         try:
             result = extract_coordinates_and_label(ref, image_width, image_height)
+            if not result and ref[1] == 'image':
+                # [vendor patch P22] 좌표를 못 읽은 image ref도 마크다운에는
+                # ![](images/{prefix}{idx}.jpg) 한 자리를 차지한다 — 번호를 소비해 뒤 그림이
+                # 앞 그림 파일을 가리키는 어긋남을 막는다.
+                img_idx += 1
             if result:
                 label_type, points_list = result
 
@@ -132,13 +163,15 @@ def draw_bounding_boxes(image, refs, ouput_path, image_prefix=''):
 
                 color_a = color + (20, )
                 for points in points_list:
-                    x1, y1, x2, y2 = points
-
-                    x1 = int(x1 / 999 * image_width)
-                    y1 = int(y1 / 999 * image_height)
-
-                    x2 = int(x2 / 999 * image_width)
-                    y2 = int(y2 / 999 * image_height)
+                    # [vendor patch P22] 좌표를 이미지 안으로 clamp하고 퇴화 상자는 건너뛴다.
+                    # 건너뛴 image 상자도 번호는 소비(기존 crop 실패 시와 같은 규칙)해
+                    # 마크다운 참조·boxes.json과 정렬을 유지한다.
+                    box = _clamp_box(points, image_width, image_height)
+                    if box is None:
+                        if label_type == 'image':
+                            img_idx += 1
+                        continue
+                    x1, y1, x2, y2 = box
 
                     if label_type == 'image':
                         try:

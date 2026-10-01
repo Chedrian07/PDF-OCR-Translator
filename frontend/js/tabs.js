@@ -189,8 +189,8 @@ export async function loadPreview() {
     }
     state.previewLoaded = true;
     // Trusted server-rendered fragment (/html, same renderer as /render-preview) —
-    // 외부 이미지 src는 붙이기 전에 막는다(frontend-3).
-    setTrustedHtml(el.previewBody, r.text);
+    // 외부 이미지 src는 붙이기 전에 막고, 그림은 보일 때 받는다(frontend-3·7).
+    setTrustedHtml(el.previewBody, r.text, { lazyImages: true });
     typesetMath(el.previewBody);
   });
 }

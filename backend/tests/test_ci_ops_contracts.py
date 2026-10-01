@@ -80,6 +80,7 @@ NOT_OPERATOR_KNOBS = {
     "DATA_DIR",     # Dockerfile ENV(/data) + compose 볼륨이 정한다
     "FRONTEND_DIR", # 이미지 안 경로 — 리포 상대 탐색이 기본
     "FAKE_DELAY",   # FakeEngine 전용(테스트/데모)
+    "DISABLE_DOTENV",  # 테스트·하네스 격리 스위치 — 컨테이너에는 .env 자체가 없다
 }
 
 # 소비처가 일부 스택에만 있는 키 → 그 서비스에만 둔다 (§8: 전부에 복붙하면

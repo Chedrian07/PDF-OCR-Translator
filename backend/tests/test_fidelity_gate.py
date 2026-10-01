@@ -1000,3 +1000,53 @@ def test_distrusted_equation_blocks_count_on_both_sides(tmp_path):
     finally:
         opened.close()
     assert result.measurable and result.score > 0.95, result
+
+
+class _TextLayerPage:
+    """텍스트 레이어만 흉내 내는 페이지 — 깨진 글리프 같은 정답을 직접 주입한다."""
+
+    def __init__(self, text: str):
+        import pymupdf
+
+        self.rect = pymupdf.Rect(0, 0, 595, 842)
+        self.derotation_matrix = pymupdf.Matrix(1, 1)
+        self._text = text
+
+    def get_text(self, kind):
+        assert kind == "dict"
+        return {"blocks": [{"lines": [{"bbox": (50, 50, 545, 70),
+                                       "spans": [{"text": self._text}]}]}]}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "".join(chr(0xE000 + i % 300) for i in range(600)) + " real words " * 10,  # Type3 PUA
+        "\ufffd" * 400 + " a few readable words " * 5,                         # 대체 문자
+        "\x01\x02\x14\x0c" * 120 + " words " * 20,                                  # ToUnicode 없는 수식 글꼴
+        "∑∫≤≥⟨⟩∥√±×÷→←" * 60 + " x y z ",                                           # 거의 기호
+    ],
+)
+def test_untrustworthy_text_layers_are_not_judged(text):
+    """정답 텍스트 레이어가 깨졌으면(PUA·U+FFFD·제어 문자·기호뿐) 판정하지 않는다 —
+    정상 전사도 0점이 되어 단독 재처리를 헛되이 쓰고 거짓 경고를 남겼다."""
+    import pymupdf
+
+    from app.pipeline.fidelity import page_fidelity_blocks
+
+    blocks = [{"type": "text", "content": "Transcribed paragraph " * 30}]
+    result = page_fidelity_blocks(pymupdf, _TextLayerPage(text), blocks, 1)
+    assert not result.measurable, result
+    assert "신뢰 불가" in result.reason
+
+
+def test_trustworthy_text_layer_is_still_judged():
+    import pymupdf
+
+    from app.pipeline.fidelity import page_fidelity_blocks
+
+    blocks = [{"type": "text", "content": _PARAGRAPH}]
+    result = page_fidelity_blocks(pymupdf, _TextLayerPage(_PARAGRAPH), blocks, 1)
+    assert result.measurable and result.score > 0.95
+    lost = page_fidelity_blocks(pymupdf, _TextLayerPage(_PARAGRAPH), [], 1)
+    assert lost.measurable and lost.score == pytest.approx(0.0)

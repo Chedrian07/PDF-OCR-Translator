@@ -601,6 +601,16 @@ def test_sink_errors_propagate_and_release_the_device_cache(monkeypatch, tmp_pat
 
 
 @needs_mlx
+def test_failure_before_generation_propagates_without_stale_stats(monkeypatch, tmp_path, tok):
+    eng = _engine(monkeypatch, ScriptedModel(), tok)
+    eng.run_single(_page_images(tmp_path, 1)[0], tmp_path / "ok", RecSink(), threading.Event())
+    assert eng.last_generation is not None
+    with pytest.raises(ValueError, match="이미지를 열 수 없습니다"):
+        eng.run_single(tmp_path / "missing.png", tmp_path / "bad", RecSink(), threading.Event())
+    assert eng.last_generation is None  # 이전 실행의 통계가 남지 않는다
+
+
+@needs_mlx
 def test_load_is_idempotent_under_concurrent_callers(monkeypatch, tok):
     loads, warmups = [], []
     model = ScriptedModel()

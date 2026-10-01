@@ -406,3 +406,89 @@ def test_prewarm_thread_start_failure_does_not_leave_it_inflight(tmp_path, monke
     with pytest.raises(RuntimeError):
         derived.warm_translated_pdf_async(job, "ko", SimpleNamespace(pdf_export_font=""))
     assert not derived._warm_inflight("warm-start-fail", "ko")
+
+
+# ── pdf-export-16: 자동 폰트 해석·서브셋 가능 여부도 캐시 정체성이다 ─────────
+@pytest.fixture
+def fake_font_env(tmp_path, monkeypatch):
+    """시스템 폰트 후보를 임시 경로로 바꾸고 폰트 환경 메모를 매번 다시 계산하게 한다."""
+    from app.pipeline import derived
+    from app.pipeline.pdf_export import fonts
+
+    candidate = tmp_path / "fonts" / "NotoSerifCJK-KR.otf"
+    monkeypatch.setattr(fonts, "_SYSTEM_FONT_CANDIDATES", (str(candidate),))
+    monkeypatch.setattr(fonts, "_SYSTEM_SANS_FONT_CANDIDATES", ())
+    monkeypatch.setattr(fonts, "_fontconfig_candidates", lambda: ())
+    monkeypatch.setattr(derived, "_FONT_ENV", None)
+    monkeypatch.setattr(derived, "_FONT_ENV_TTL_S", 0.0)
+    return candidate
+
+
+def test_auto_font_identity_changes_when_a_korean_font_is_installed(fake_font_env):
+    """폰트 없는 환경의 '1em 전각 자간' PDF가 fonts-noto-cjk 설치 뒤에도 캐시로 나갔다."""
+    from types import SimpleNamespace
+
+    from app.pipeline import derived
+
+    settings = SimpleNamespace(pdf_export_font="")
+    without = derived._pdf_export_font_id(settings)
+    fake_font_env.parent.mkdir(parents=True)
+    fake_font_env.write_bytes(b"fake-otf")
+    with_font = derived._pdf_export_font_id(settings)
+    assert with_font != without
+    assert derived._pdf_export_font_id(settings) == with_font   # 같은 환경 → 같은 값
+
+
+def test_font_identity_tracks_fonttools_availability(fake_font_env, monkeypatch):
+    """fontTools 설치 전 만든 비서브셋(대용량) PDF도 설치 뒤 다시 만든다."""
+    from types import SimpleNamespace
+
+    from app.pipeline import derived
+
+    for explicit in ("", str(fake_font_env)):
+        settings = SimpleNamespace(pdf_export_font=explicit)
+        monkeypatch.setattr(derived, "_fonttools_available", lambda: False)
+        full = derived._pdf_export_font_id(settings)
+        monkeypatch.setattr(derived, "_fonttools_available", lambda: True)
+        assert derived._pdf_export_font_id(settings) != full, explicit
+
+
+def test_installing_fonttools_rebuilds_a_cached_export(client, sample_pdf, monkeypatch):
+    """라우트 경로 — 폰트 환경이 바뀌면 다음 다운로드가 캐시 대신 다시 만든다."""
+    import app.api as api_mod
+    from app.pipeline import derived
+
+    _export_env(monkeypatch)
+    monkeypatch.setattr(derived, "_FONT_ENV", None)
+    monkeypatch.setattr(derived, "_FONT_ENV_TTL_S", 0.0)
+    monkeypatch.setattr(derived, "_fonttools_available", lambda: False)
+    jid, _job_dir = _ko_layout_job(client, sample_pdf)
+    builds: list[int] = []
+    real_build = api_mod.build_translated_pdf
+    monkeypatch.setattr(
+        api_mod, "build_translated_pdf",
+        lambda *a, **kw: (builds.append(1), real_build(*a, **kw))[1],
+    )
+    assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200
+    assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200
+    assert builds == [1]                                   # 같은 환경 → 캐시 적중
+    monkeypatch.setattr(derived, "_fonttools_available", lambda: True)
+    assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200
+    assert builds == [1, 1]                                # 환경 변화 → 재빌드
+
+
+def test_font_environment_is_memoized_between_requests(monkeypatch):
+    """캐시 판정은 /page?lang 요청마다 돈다 — 후보 stat·fc-list를 매번 하지 않는다."""
+    from types import SimpleNamespace
+
+    from app.pipeline import derived
+
+    calls: list[int] = []
+    monkeypatch.setattr(derived, "_FONT_ENV", None)
+    monkeypatch.setattr(
+        derived, "_system_font_digest", lambda: (calls.append(1), "digest")[1],
+    )
+    settings = SimpleNamespace(pdf_export_font="")
+    for _ in range(5):
+        derived._pdf_export_font_id(settings)
+    assert calls == [1]

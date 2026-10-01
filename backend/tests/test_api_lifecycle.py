@@ -171,3 +171,133 @@ def test_restart_resubmits_queued_jobs_that_never_started(settings, sample_pdf):
         body = wait_done(client, jid, timeout=30)
         assert body["status"] == "done", body
         assert body["error"] is None
+
+
+# ── F1-7: 정상 종료가 열린 SSE 스트림에 막히지 않는다 ───────────────────────────
+def test_shutdown_hooks_chain_the_server_handlers_and_flag_the_app():
+    """uvicorn은 연결이 다 닫힌 뒤에야 lifespan 종료를 보낸다 — 앱은 서버의 신호
+    처리기를 감싸 종료 요청을 알아야 한다. 원래 처리기(uvicorn handle_exit)는 그대로
+    불리고, 수명이 끝나면 원래대로 돌려 놓는다."""
+    import signal
+    import threading
+
+    from app.main import ShutdownSignal, _install_shutdown_hooks, _remove_shutdown_hooks
+
+    assert threading.current_thread() is threading.main_thread()
+    original = signal.getsignal(signal.SIGTERM)
+    received: list[int] = []
+
+    def server_handler(signum, frame):              # uvicorn Server.handle_exit 자리
+        received.append(signum)
+
+    signal.signal(signal.SIGTERM, server_handler)
+    flag = ShutdownSignal()
+    try:
+        installed = _install_shutdown_hooks(flag)
+        assert signal.SIGTERM in installed
+        signal.raise_signal(signal.SIGTERM)
+        assert flag.requested is True
+        assert received == [signal.SIGTERM]           # 서버의 정상 종료 절차도 그대로
+        _remove_shutdown_hooks(installed)
+        assert signal.getsignal(signal.SIGTERM) is server_handler
+    finally:
+        signal.signal(signal.SIGTERM, original)
+
+
+def test_shutdown_hooks_do_nothing_off_the_main_thread():
+    import threading
+
+    from app.main import ShutdownSignal, _install_shutdown_hooks
+
+    result: dict = {}
+    thread = threading.Thread(
+        target=lambda: result.update(installed=_install_shutdown_hooks(ShutdownSignal())),
+    )
+    thread.start()
+    thread.join(5)
+    assert result["installed"] == {}
+
+
+def _drive_until_end(app, make_response, *, after: int, action) -> tuple[list[str], float]:
+    """SSE body_iterator를 직접 돌린다(TestClient는 스트림 전체를 버퍼링한다).
+    after개 청크를 받은 뒤 action()을 부르고, 스트림이 스스로 끝날 때까지 잰다."""
+    from starlette.requests import Request
+
+    async def drive():
+        request = Request({"type": "http", "app": app, "headers": []})
+
+        async def receive():
+            await asyncio.sleep(3600)
+            return {"type": "http.disconnect"}
+
+        request._receive = receive
+        response = await make_response(request)
+        chunks: list[str] = []
+        started = None
+        try:
+            async for chunk in response.body_iterator:
+                chunks.append(chunk)
+                if len(chunks) == after:
+                    action()
+                    started = time.monotonic()
+        finally:
+            await response.body_iterator.aclose()
+        return chunks, time.monotonic() - started
+
+    return asyncio.run(asyncio.wait_for(drive(), timeout=10))
+
+
+def test_job_sse_stream_ends_promptly_once_shutdown_starts(client):
+    from app.api import job_events
+
+    store = client.app.state.store
+    job = store.create("stream.pdf", "multi", 200)            # 제출하지 않은 대기 잡 — 이벤트 없음
+    shutdown = client.app.state.shutdown
+    try:
+        chunks, elapsed = _drive_until_end(
+            client.app, lambda request: job_events(request, job.id),
+            after=2, action=lambda: setattr(shutdown, "requested", True),
+        )
+        assert chunks[1].startswith("event: progress")
+        assert elapsed < 2.5                                   # 다음 폴(≤1s)에서 끝난다
+    finally:
+        shutdown.requested = False
+        store.delete_dir(job)
+
+
+def test_translation_sse_stream_ends_promptly_once_shutdown_starts(client):
+    import json
+    import threading
+
+    from app.api import translate_events
+    from app.pipeline import artifacts
+
+    st = client.app.state
+    job = st.store.create("translating.pdf", "multi", 200)
+    job.status = "done"
+    state_path = artifacts.translate_state(job.dir, "ko")
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps({"lang": "ko", "status": "running", "current": 1, "total": 9}))
+    with st.translate_lock:
+        st.translate_tasks[(job.id, "ko")] = {"thread": None, "cancel": threading.Event()}
+    try:
+        chunks, elapsed = _drive_until_end(
+            client.app, lambda request: translate_events(request, job.id, "ko"),
+            after=2, action=lambda: setattr(st.shutdown, "requested", True),
+        )
+        assert chunks[1].startswith("event: progress")
+        assert elapsed < 2.5
+    finally:
+        st.shutdown.requested = False
+        with st.translate_lock:
+            st.translate_tasks.pop((job.id, "ko"), None)
+        st.store.delete_dir(job)
+
+
+def test_closed_app_flags_shutdown_for_leftover_streams(settings):
+    from app.main import create_app
+
+    app = create_app(settings)
+    with TestClient(app):
+        assert app.state.shutdown.requested is False
+    assert app.state.shutdown.requested is True

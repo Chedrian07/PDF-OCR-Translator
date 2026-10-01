@@ -370,9 +370,11 @@ Apple Silicon에서는 번역 모델도 로컬로 돌릴 수 있습니다. 세 �
 
 - Docker 컨테이너의 backend에서 호스트 서버로 갈 때는 `127.0.0.1` 대신 `host.docker.internal`.
 - 모델 id가 틀리면 서버가 404를 내고, 오류 문구가 모델 id를 확인하라고 알려 줍니다.
-- **thinking 끄기**: `TRANSLATE_REASONING=off` — 루프백 주소에는 `chat_template_kwargs:
-  {"enable_thinking": false}`로 전달됩니다(실측 mlx_lm.server + Qwen3.5-0.8B: 유닛당 0.18초,
-  reasoning 0자 — 예전 방식은 5.8초·4,075자를 생각하다 잘렸다). 서버가 이 인자를 무시하면
+- **thinking 끄기**: `TRANSLATE_REASONING=off` — `TRANSLATE_REASONING_STYLE=auto`(기본)가 루프백·
+  사설망·`host.docker.internal` 주소를 보고 `chat_template_kwargs: {"enable_thinking": false}`로
+  전달합니다(공개 호스트 이름으로 띄웠다면 `TRANSLATE_REASONING_STYLE=chat_template_kwargs`로
+  고정). 실측(mlx_lm.server + Qwen3.5-0.8B): 유닛당 0.18초·reasoning 0자 — 예전 방식은
+  5.8초 동안 4,075자를 생각하다 잘렸습니다. 서버가 이 인자를 무시하면
   서버 쪽에서 끕니다: `mlx_lm.server --chat-template-args '{"enable_thinking":false}'`,
   oMLX·LM Studio는 모델별 thinking 설정 또는 비-thinking(Instruct) 모델.
 - `TRANSLATE_API_MODE=chat` — 로컬 서버(mlx_lm)에는 `/v1/responses`가 없어 auto 모드는 잡마다
@@ -401,6 +403,8 @@ OPENAI_MODEL=default_model
 TRANSLATE_API_MODE=chat
 # thinking 끄기 — 루프백 주소면 chat_template_kwargs enable_thinking=false로 전달된다
 TRANSLATE_REASONING=off
+# reasoning 전달 방식 — auto는 루프백·사설망·host.docker.internal이면 chat_template_kwargs
+TRANSLATE_REASONING_STYLE=auto
 # max_tokens를 꼭 보낸다 (none이면 mlx_lm이 512토큰에서 자른다)
 TRANSLATE_MAX_TOKENS_PARAM=max_tokens
 # 요청을 모아 처리하는(연속 배칭) 서버는 8, 하나씩 처리하는 서버는 1–2

@@ -246,6 +246,10 @@ class _TranslationRun:
     # 대표 메시지. 이전 run의 캐시가 있는 재개 run에서만 미룬다(_may_degrade 참조).
     unverified_rejects: int = 0     # gate_lock으로 보호 (worker 스레드에서 증가)
     unverified_msg: str = ""
+    # 이전 run이 남긴 캐시 중 현재 출력 게이트를 통과하지 못해 버리고 다시 번역한 수
+    # (gate_lock으로 보호). 종전 코드가 채택·캐시한 루프·잘림 흔적·캔드 응답을 재사용하지
+    # 않기 위한 재검증이다(probe:MLX-02 — 재실행해도 같은 손상이 재사용됐다).
+    cache_rejected: int = 0
     flights: SingleFlight = field(default_factory=SingleFlight)
     # 축퇴 스윕의 패스 간 기억 — 정규화 출력 → 그 출력을 받은 (정규화) 원문 서명 집합,
     # 그리고 이미 축퇴로 판정한 출력. 1차 스윕이 results에서 지운 출력을 2차 스윕이
@@ -426,6 +430,28 @@ class _TranslationRun:
         )
         return masked, mapping, pairs, first, keep, key
 
+    def _read_cache(self, u, key: str, mapping: dict) -> tuple[bool, str]:
+        """캐시 조회 — 이전 run이 남긴 항목은 현재 출력 게이트로 다시 검증한다.
+
+        이번 run에서 게시된 값은 방금 게이트를 통과했으므로 그대로 쓴다. 이전 캐시가
+        게이트(반복 루프·짧은 유닛 캔드 응답 등)에 걸리면 지우고 다시 번역한다 —
+        게이트가 강화되기 전에 채택된 손상이 force 없이는 영원히 재사용되던 문제.
+        """
+        hit, text = self.flights.read(key)
+        if not hit or key not in self.flights.prior_keys:
+            return hit, text
+        reason = untranslated_reason(u.src, text, mapping) if text.strip() else "empty"
+        if not reason:
+            return True, text
+        self.flights.discard(key)
+        with self.gate_lock:
+            self.cache_rejected += 1
+        logger.warning(
+            "이전 캐시 재검증 탈락 — 다시 번역: %s (lang=%s, unit=%s, 사유=%s)",
+            self.job_dir.name, self.lang, u.id, reason,
+        )
+        return False, ""
+
     def _may_degrade(self, exc: TranslateUnitRejected) -> bool:
         """step-0의 결정적 4xx를 유닛 강등(래더 → 원문 유지)으로 흡수해도 되는가.
 
@@ -465,7 +491,7 @@ class _TranslationRun:
             return u, u.src, "canceled", "", stats
         masked, mapping, pairs, first, keep, key = precomputed or self._unit_key(u)
         if not self.force:
-            hit, cached_text = self.flights.read(key)
+            hit, cached_text = self._read_cache(u, key, mapping)
             if hit:
                 # 캐시 적중은 API를 타지 않으므로 progressed를 세우지 않는다 —
                 # 죽은 엔드포인트에서도 신규 유닛이 조용히 강등되는 것을 막는다.
@@ -594,7 +620,7 @@ class _TranslationRun:
             return u, u.src, "canceled", "", _zero_stats()
         precomputed = self._unit_key(u)
         key = precomputed[5]
-        hit, cached_text = self.flights.read(key)
+        hit, cached_text = self._read_cache(u, key, precomputed[1])
         if hit:
             # translate_unit과 동일 — 캐시 적중은 엔드포인트 건강의 증거가 아니다.
             return u, cached_text, "cached", key, _zero_stats()
@@ -1069,6 +1095,8 @@ class _TranslationRun:
             # 캐시가 전량 무효화돼 전량 재번역(비용)이 발생한 것이다.
             "cache_prior": prior_cache_n,
             "cache_reused": len(prior_hits),
+            # 이전 캐시 중 현재 출력 게이트에 걸려 버리고 다시 번역한 유닛 수
+            "cache_rejected": self.cache_rejected,
             "reference_rule": self.ref_rule,
             "cached": self.cached_n,
             "translated": self.translated_n,

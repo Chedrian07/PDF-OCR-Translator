@@ -197,8 +197,13 @@ class FakeFragment extends FakeNode {
   querySelectorAll(sel) { return FakeElement.prototype.querySelectorAll.call(this, sel); }
 }
 
-function parseCompound(text) {
-  const out = { tag: null, id: null, classes: [], attrs: [] };
+function parseCompound(input) {
+  const out = { tag: null, id: null, classes: [], attrs: [], nots: [] };
+  // :not(단순 복합 선택자) — 결합자 없는 형태만.
+  const text = input.replace(/:not\(([^()]*)\)/g, (_, inner) => {
+    out.nots.push(parseCompound(inner.trim()));
+    return '';
+  });
   const re = /([a-zA-Z][\w-]*)|#([\w-]+)|\.([\w-]+)|\[([\w:-]+)(?:([~^$*|]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+)))?\]/g;
   let m;
   let consumed = '';
@@ -209,7 +214,7 @@ function parseCompound(text) {
     else if (m[3]) out.classes.push(m[3]);
     else out.attrs.push({ name: m[4], op: m[5] || null, value: m[6] ?? m[7] ?? m[8] ?? null });
   }
-  if (consumed.length !== text.length) throw new Error(`fake-dom: unsupported selector "${text}"`);
+  if (consumed.length !== text.length) throw new Error(`fake-dom: unsupported selector "${input}"`);
   return out;
 }
 
@@ -240,6 +245,7 @@ function matchesCompound(node, c) {
     if (v == null) return false;
     if (a.op === '=' && v !== a.value) return false;
   }
+  for (const not of c.nots) if (matchesCompound(node, not)) return false;
   return true;
 }
 

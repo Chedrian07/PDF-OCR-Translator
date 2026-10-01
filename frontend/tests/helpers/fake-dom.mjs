@@ -87,6 +87,9 @@ class FakeNode {
     if (at < 0) throw new Error('removeChild: not a child');
     this.childNodes.splice(at, 1);
     child.parentNode = null;
+    // 브라우저의 focus fixup: 포커스된 노드가 (이동을 포함해) 트리에서 빠지면 body로 간다.
+    const doc = this.ownerDocument;
+    if (doc && doc.activeElement && child.contains(doc.activeElement)) doc.activeElement = doc.body;
     return child;
   }
   remove() { if (this.parentNode) this.parentNode.removeChild(this); }
@@ -107,10 +110,17 @@ class FakeNode {
     if (this.nodeType === 3) return this.data;
     return this.childNodes.map((c) => c.textContent).join('');
   }
+  _clearChildren() {
+    const doc = this.ownerDocument;
+    const focused = doc && doc.activeElement;
+    for (const c of this.childNodes) c.parentNode = null;
+    const dropped = this.childNodes;
+    this.childNodes = [];
+    if (focused && dropped.some((c) => c.contains(focused))) doc.activeElement = doc.body;
+  }
   set textContent(value) {
     if (this.nodeType === 3) { this.data = String(value); return; }
-    for (const c of this.childNodes) c.parentNode = null;
-    this.childNodes = [];
+    this._clearChildren();
     this._html = undefined;
     const text = value == null ? '' : String(value);
     if (text) this.appendChild(this.ownerDocument.createTextNode(text));
@@ -230,8 +240,7 @@ class FakeElement extends FakeNode {
   set id(value) { this.setAttribute('id', value); }
   get innerHTML() { return this._html !== undefined ? this._html : ''; }
   set innerHTML(value) {
-    for (const c of this.childNodes) c.parentNode = null;
-    this.childNodes = [];
+    this._clearChildren();
     this._html = String(value);
   }
   setAttribute(name, value) {

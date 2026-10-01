@@ -1718,7 +1718,25 @@ def _write_export_report(job_dir: Path, lang: str, result: PdfExportResult) -> N
 def build_translated_pdf(
     job_dir: Path, lang: str, *, fontfile: str = "",
 ) -> PdfExportResult:
-    """source.pdf + layout.json + layout.{lang}.json → export.{lang}.pdf (원자적 교체)."""
+    """source.pdf + layout.json + layout.{lang}.json → export.{lang}.pdf (원자적 교체).
+
+    실패는 전부 PdfExportError(사용자에게 그대로 보여 줄 수 있는 문구)로 낸다. 예전에는
+    fitz.open만 감싸 페이지 조판·저장 중의 MuPDF·조판 예외가 그대로 새어 /pdf·/page가
+    문구 없는 500을 내고 예열 스레드가 traceback을 남겼다(호출부 derived._call_builder는
+    MuPDF 예외만 정규화한다). 원래 예외는 서버 로그와 예외 사슬(__cause__)에 남긴다.
+    """
+    try:
+        return _build_translated_pdf(job_dir, lang, fontfile=fontfile)
+    except PdfExportError:
+        raise
+    except Exception as error:  # noqa: BLE001 — MuPDF·조판 예외를 사용자 메시지로 정규화
+        logger.warning("번역 PDF 생성 실패(lang=%s): %s", lang, type(error).__name__, exc_info=True)
+        raise PdfExportError(
+            f"번역 PDF를 만들 수 없습니다 — PDF 처리 중 오류가 났습니다 ({type(error).__name__})"
+        ) from error
+
+
+def _build_translated_pdf(job_dir: Path, lang: str, *, fontfile: str) -> PdfExportResult:
     fitz = quiet_fitz()
     src = job_dir / "source.pdf"
     orig_path = job_dir / "layout.json"
@@ -1780,15 +1798,28 @@ def build_translated_pdf(
                     or opage is None
                 ):
                     continue
-                _process_page(
-                    fitz, doc[pno - 1], pno, tpage, opage, fonts, result,
-                    misregistered,
-                )
-            _restore_space_tounicode(doc, fonts)
+                try:
+                    _process_page(
+                        fitz, doc[pno - 1], pno, tpage, opage, fonts, result,
+                        misregistered,
+                    )
+                except PdfExportError:
+                    raise
+                except Exception as error:  # noqa: BLE001 — 어느 페이지인지 문구에 남긴다
+                    logger.warning("번역 PDF %d페이지 조판 실패", pno, exc_info=True)
+                    raise PdfExportError(
+                        f"{pno}페이지를 번역 PDF로 조판하지 못했습니다 ({type(error).__name__})"
+                    ) from error
             tmp = job_dir / f".export.{lang}.{uuid.uuid4().hex}.tmp"
             try:
+                _restore_space_tounicode(doc, fonts)
                 doc.save(tmp, garbage=3, deflate=True)
                 tmp.replace(result.path)
+            except Exception as error:  # noqa: BLE001 — 디스크 만원·삭제된 잡 디렉터리 등
+                logger.warning("번역 PDF 저장 실패(lang=%s)", lang, exc_info=True)
+                raise PdfExportError(
+                    f"번역 PDF를 저장하지 못했습니다 ({type(error).__name__})"
+                ) from error
             finally:
                 tmp.unlink(missing_ok=True)
         finally:
@@ -1815,6 +1846,10 @@ def build_dual_pdf(source_pdf: Path, translated_pdf: Path, out: Path) -> Path:
     ):
         if not path.is_file():
             raise PdfExportError(message)
+    # 출력 디렉터리(잡 디렉터리)는 만들지 않는다 — 삭제(DELETE·TTL GC)와 겹친 빌드가
+    # parents=True로 meta.json 없는 잡 디렉터리를 되살려 영구 고아를 남겼다.
+    if not out.parent.is_dir():
+        raise PdfExportError("삭제된 작업입니다 — 대조 PDF를 만들 디렉터리가 없습니다")
 
     fitz = quiet_fitz()
     source = translated = dual = None
@@ -1869,7 +1904,6 @@ def build_dual_pdf(source_pdf: Path, translated_pdf: Path, out: Path) -> Path:
                 width=1,
             )
 
-        out.parent.mkdir(parents=True, exist_ok=True)
         dual.save(str(tmp), garbage=3, deflate=True)
         tmp.replace(out)
         return out

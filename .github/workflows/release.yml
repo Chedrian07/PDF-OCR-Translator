@@ -95,6 +95,21 @@ jobs:
           RELEASE_VERSION: ${{ steps.image.outputs.version }}
           OUT_DIR: ${{ runner.temp }}/release-smoke
         run: ./scripts/smoke_image.sh "$IMAGE" "$RELEASE_VERSION"
+      # 배포 전 취약점 게이트 — 0.1.0은 수정판이 이미 있던 HIGH/CRITICAL 20건(OS libexpat
+      # 6 · pillow·urllib3·anyio 등)을 안은 채 GHCR과 오프라인 tar.gz로 나갔다.
+      # 수정판이 있는 HIGH/CRITICAL이 하나라도 있으면 push 전에 멈춘다. 수용 목록은
+      # .github/trivyignore.yaml(이유·재검토 기한)이다. trivy는 digest 고정 공식 이미지로 돈다.
+      # 패키지 스캐너가 보지 못하는 동봉 MuPDF 버전은 backend tests/test_dependency_floor.py가 본다.
+      - name: Scan the image before publishing (trivy, HIGH/CRITICAL with a fix)
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}-cpu-${{ matrix.arch }}
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD/.github/trivyignore.yaml:/trivyignore.yaml:ro" \
+            aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+            image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+            --ignorefile /trivyignore.yaml --exit-code 1 --no-progress "$IMAGE"
       - name: Export tested image for offline installation
         env:
           IMAGE: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}-cpu-${{ matrix.arch }}

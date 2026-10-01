@@ -410,3 +410,82 @@ def test_expected_marker_count_with_slack_does_not_trip():
     assert detector.feed(md) is False
     assert detector.feed("", stream_end=True) is False
     assert detector.reason is None
+
+
+# ── 페이지 문자 예산 = 내용 문자 (레이아웃 블록·HTML 표 태그 제외, audit decode-correctness-3) ──
+
+
+def _sparse_timetable(rows: int = 110, cols: int = 16) -> str:
+    """희소 시간표 — 원문 대부분이 <td> 마크업인 정상 표 페이지(감사 재현: 85행 17,163자)."""
+    body = "".join(
+        "<tr>" + "".join(f"<td>{r}</td>" if c == 0 else "<td></td>" for c in range(cols)) + "</tr>"
+        for r in range(rows)
+    )
+    return "<|ref|>table<|/ref|><|det|>[[40, 80, 960, 940]]<|/det|>\n<table>" + body + "</table>\n"
+
+
+def _feed_in_chunks(detector: SemanticRepetitionDetector, text: str, size: int) -> bool:
+    detected = False
+    for start in range(0, len(text), size):
+        detected = detector.feed(text[start : start + size])
+        if detected:
+            break
+    return detector.feed("", stream_end=True) or detected
+
+
+@pytest.mark.parametrize("chunk", [1, 7, 64, 100_000])
+def test_markup_heavy_table_page_fits_the_character_budget(chunk):
+    page = _sparse_timetable()
+    assert len(page) > 16_384  # 원문 길이로는 기본 상한을 넘는 정상 페이지
+    detector = SemanticRepetitionDetector(max_page_tokens=None)
+    assert _feed_in_chunks(detector, page, chunk) is False
+    assert detector.page_chars < 1_000  # 셀 내용(행 번호)만 센다
+
+
+def test_plain_text_still_hits_the_character_budget():
+    words = " ".join(f"word{index}" for index in range(3_000))  # 고유 단어 ~25k자
+    detector = SemanticRepetitionDetector(max_page_tokens=None)
+    assert _feed_in_chunks(detector, words, 64) is True
+    assert detector.reason == "page_char_limit"
+
+
+def test_markup_split_across_deltas_counts_like_whole_text():
+    page = _sparse_timetable(rows=5) + "본문 <b>강조</b> 끝"
+    whole = SemanticRepetitionDetector(max_page_chars=None, max_page_tokens=None)
+    whole.feed(page, stream_end=True)
+    for size in (1, 2, 3, 5, 11):
+        split = SemanticRepetitionDetector(max_page_chars=None, max_page_tokens=None)
+        _feed_in_chunks(split, page, size)
+        assert split.page_chars == whole.page_chars, size
+
+
+def test_unclosed_markup_hold_is_bounded():
+    detector = SemanticRepetitionDetector(max_page_chars=None, max_page_tokens=None)
+    detector.feed("<td " + "x" * 2_000)  # '>'가 끝내 오지 않는 조각
+    assert len(detector._markup_tail) == 0  # 보류 상한(512)을 넘으면 내용으로 센다
+    assert detector.page_chars >= 2_000
+    detector.feed("<|det|>[[1, 2,")  # 닫히지 않은 짧은 레이아웃 블록은 잠시 보류
+    assert detector._markup_tail == "<|det|>[[1, 2,"
+    detector.feed(" 3, 4]]<|/det|>끝", stream_end=True)
+    assert detector._markup_tail == ""
+
+
+def test_exact_empty_row_loop_is_still_caught_by_rolling_guard():
+    """빈 셀 행의 정확 반복은 기존 rolling 채널이 그대로 잡는다(이 채널은 바꾸지 않음)."""
+    detector = SemanticRepetitionDetector(max_page_tokens=None)
+    unit = "<tr><td></td><td></td><td></td><td></td></tr>"
+    assert _feed_in_chunks(detector, unit * 400, 64) is True
+    assert detector.reason == "rolling_repeat"
+
+
+def test_markup_only_loop_is_still_stopped_by_the_token_budget():
+    """rolling 채널을 피하는(속성값이 바뀌는) 마크업 폭주는 문자 예산에 안 잡히지만
+    토큰 예산(하드 리밋)이 막는다."""
+    detector = SemanticRepetitionDetector(max_page_tokens=6_144)
+    for index in range(2_000):
+        detector.feed(f'<tr><td data-row="{index}"></td></tr>')
+        if detector.feed_tokens(12):
+            break
+    assert detector.detected is True
+    assert detector.reason == "page_token_limit"
+    assert detector.page_chars == 0

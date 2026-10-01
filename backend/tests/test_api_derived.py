@@ -6,6 +6,7 @@ derived를 직접 부르는 테스트만으로는 라우트가 먼저 연 대기
 """
 
 import json
+import os
 import shutil
 import threading
 import time
@@ -232,3 +233,176 @@ def test_prewarm_budget_is_pinned_at_zero():
             assert derived._EXPORT_WAIT.remaining == 0.0
     assert getattr(derived._EXPORT_WAIT, "remaining", None) is None
     assert getattr(derived._EXPORT_WAIT, "pinned", False) is False
+
+
+# ── F1-2: 캐시 판정은 기록된 입력 지문의 일치로 ─────────────────────────────
+_NEW_TRANSLATION = "갱신된 번역 문장입니다"
+
+
+def _retranslate_layout(job_dir: Path, text: str = _NEW_TRANSLATION) -> None:
+    """재번역 완료를 흉내낸다 — layout.ko.json을 원자적으로 교체(새 inode)."""
+    pages = json.loads((job_dir / "layout.json").read_text(encoding="utf-8"))
+    for page in pages:
+        for block in page.get("blocks", ()):
+            if block.get("type") in ("text", "title"):
+                block["content"] = text
+    tmp = job_dir / ".layout.ko.retranslate.tmp"
+    tmp.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(job_dir / "layout.ko.json")
+
+
+def _pdf_text(data: bytes) -> str:
+    import pymupdf
+
+    with pymupdf.open(stream=data, filetype="pdf") as doc:
+        # NBSP 등 공백 변형은 하나로 정규화한다(조판기가 단어 사이에 넣을 수 있다)
+        return " ".join(" ".join(page.get_text() for page in doc).split())
+
+
+def test_translation_replaced_during_build_is_not_frozen_as_current(
+    client, sample_pdf, monkeypatch,
+):
+    """빌드 도중 재번역이 끝나면(layout.ko.json 교체) 그 빌드는 옛 번역으로 만든 PDF다.
+
+    예전에는 출력 mtime이 입력보다 늦다는 이유로 그 PDF가 '최신'으로 굳어, 다음
+    무효화 전까지 모든 다운로드가 옛 번역을 받았다(결정적 재현). 이제는 빌드 전
+    지문으로 표식을 남겨 캐시로 확정하지 않고, 새 입력으로 다시 예열한다."""
+    import app.api as api_mod
+    from app.pipeline import derived
+
+    _export_env(monkeypatch)
+    jid, job_dir = _ko_layout_job(client, sample_pdf)
+    job = client.app.state.store.get(jid)
+    real_build = api_mod.build_translated_pdf
+    calls: list[str] = []
+
+    def _build_then_retranslate(*args, **kwargs):
+        result = real_build(*args, **kwargs)        # 옛 번역을 읽어 조판했다
+        calls.append(threading.current_thread().name)
+        if len(calls) == 1:
+            _retranslate_layout(job_dir)            # 그 사이 재번역이 끝났다
+            # 실제 경합의 순서 재현: 빌더는 입력을 먼저 읽고 출력을 **마지막에** 쓴다 —
+            # 출력 mtime이 교체된 입력보다 늦다(예전 mtime 판정이 '최신'으로 오판한 조건).
+            later = time.time_ns() + 1_000_000_000
+            os.utime(result.path, ns=(later, later))
+        return result
+
+    monkeypatch.setattr(api_mod, "build_translated_pdf", _build_then_retranslate)
+    first = client.get(f"/api/jobs/{jid}/pdf?lang=ko")
+    assert first.status_code == 200, first.text
+    assert _NEW_TRANSLATION not in _pdf_text(first.content)   # 요청 시점 입력의 결과
+
+    font_id = derived._pdf_export_font_id(client.app.state.settings)
+    _wait_warm_idle(jid)                            # 입력 변경 감지 → 재예열
+    current, _out, _report = derived._translated_pdf_cache(job, "ko", font_id)
+    assert current, "재예열이 새 번역으로 캐시를 다시 만들어야 한다"
+    assert len(calls) == 2 and calls[1].startswith("pdf-warm-"), calls
+
+    second = client.get(f"/api/jobs/{jid}/pdf?lang=ko")
+    assert second.status_code == 200
+    assert _NEW_TRANSLATION in _pdf_text(second.content)
+    assert len(calls) == 2                          # 재예열 결과를 그대로 받았다
+
+
+def test_cache_is_stale_when_an_input_is_replaced_within_the_same_mtime_tick(
+    client, sample_pdf, monkeypatch,
+):
+    """mtime 해상도가 거친 파일시스템(같은 틱의 교체)에서도 교체를 놓치지 않는다 —
+    지문에 inode가 들어 있어 크기·mtime이 같아도 다른 파일로 판정한다."""
+    from app.pipeline import derived
+
+    _export_env(monkeypatch)
+    jid, job_dir = _ko_layout_job(client, sample_pdf)
+    job = client.app.state.store.get(jid)
+    assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200
+    font_id = derived._pdf_export_font_id(client.app.state.settings)
+    assert derived._translated_pdf_cache(job, "ko", font_id)[0]
+
+    layout = job_dir / "layout.ko.json"
+    before = layout.stat()
+    payload = layout.read_bytes()
+    tmp = job_dir / ".layout.ko.same.tmp"
+    tmp.write_bytes(payload)                        # 같은 내용·크기
+    os.utime(tmp, ns=(before.st_atime_ns, before.st_mtime_ns))   # 같은 mtime
+    tmp.replace(layout)
+    assert layout.stat().st_mtime_ns == before.st_mtime_ns
+    assert not derived._translated_pdf_cache(job, "ko", font_id)[0]
+
+
+def test_legacy_font_marker_is_rebuilt_once_into_a_build_stamp(
+    client, sample_pdf, monkeypatch,
+):
+    """업그레이드 직후 예전 폰트 표식(문자열)만 있는 캐시는 한 번 다시 만든다."""
+    import app.api as api_mod
+    from app.pipeline import artifacts
+
+    _export_env(monkeypatch)
+    jid, job_dir = _ko_layout_job(client, sample_pdf)
+    assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200
+    artifacts.export_font_marker(job_dir, "ko").write_text("auto", encoding="utf-8")
+
+    builds: list[int] = []
+    real_build = api_mod.build_translated_pdf
+    monkeypatch.setattr(
+        api_mod, "build_translated_pdf",
+        lambda *a, **kw: (builds.append(1), real_build(*a, **kw))[1],
+    )
+    assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200
+    assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200
+    assert builds == [1]
+    stamp = json.loads(artifacts.export_font_marker(job_dir, "ko").read_text(encoding="utf-8"))
+    assert set(stamp["inputs"]) == {"source.pdf", "layout.json", "layout.ko.json"}
+
+
+def test_prewarm_requested_while_one_is_running_runs_again_afterwards(tmp_path, monkeypatch):
+    """진행 중 예열에 들어온 부탁을 버리면, 그 부탁을 만든 새 입력(재번역 완료)이
+    반영되지 않은 채 끝난다 — dirty로 남겨 같은 스레드가 한 번 더 돈다."""
+    from types import SimpleNamespace
+
+    from app.pipeline import derived
+
+    gate = threading.Event()
+    entered = threading.Event()
+    rounds: list[int] = []
+    real_warm = derived.warm_translated_pdf
+
+    def _counting_warm(*args, **kwargs):
+        rounds.append(1)
+        return real_warm(*args, **kwargs)
+
+    def _slow_build(job_dir, lang, *, fontfile=""):
+        entered.set()
+        assert gate.wait(10)
+        raise derived.PdfExportError("입력 없음")   # 결과는 상관없다 — 회차만 센다
+
+    monkeypatch.setattr(derived, "warm_translated_pdf", _counting_warm)
+    job = SimpleNamespace(id="dirty-warm", dir=tmp_path)
+    settings = SimpleNamespace(pdf_export_font="")
+    try:
+        assert derived.warm_translated_pdf_async(job, "ko", settings, build=_slow_build)
+        assert entered.wait(5)
+        # 진행 중 — 새로 띄우지 않지만(False) 버리지도 않는다
+        assert derived.warm_translated_pdf_async(job, "ko", settings, build=_slow_build) is False
+        assert derived.warm_translated_pdf_async(job, "ko", settings, build=_slow_build) is False
+        gate.set()
+        _wait_warm_idle("dirty-warm")
+    finally:
+        gate.set()
+    assert len(rounds) == 2      # 부탁 두 번은 한 회차로 합쳐진다
+    assert ("dirty-warm", "ko") not in derived._WARM_DIRTY
+
+
+def test_prewarm_thread_start_failure_does_not_leave_it_inflight(tmp_path, monkeypatch):
+    """스레드를 못 띄웠는데 '예열 중' 표식이 남으면 이후 예열이 전부 건너뛰어진다."""
+    from types import SimpleNamespace
+
+    from app.pipeline import derived
+
+    def _no_threads(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", _no_threads)
+    job = SimpleNamespace(id="warm-start-fail", dir=tmp_path)
+    with pytest.raises(RuntimeError):
+        derived.warm_translated_pdf_async(job, "ko", SimpleNamespace(pdf_export_font=""))
+    assert not derived._warm_inflight("warm-start-fail", "ko")

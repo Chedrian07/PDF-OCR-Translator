@@ -14,7 +14,11 @@ from pathlib import Path
 # 9: 피할 수 없는 전폭 내부 띠를 장애물에서 제외 + 윗변이 가려진 상자는 장애물
 #    아래에서 시작하는 후보를 추가. 자리가 있는데도 버려지던 번역이 들어간다
 #    (실측 no_fit 66 → 25). 조판 결과가 달라진다.
-PDF_EXPORT_FORMAT_VERSION = 9
+# 10: 스캔(래스터) 원문 픽셀을 바탕색으로 덮고 번역 삽입, baseline 띠 리댁션(이웃
+#     보존 줄 유지), 평문화 보정(부등호 사이 문장·글머리표·코드·LaTeX 구조),
+#     회전 페이지 한 줄 경로·폰트 백필 좌표계, flow의 원문 장애물·읽기 순서 유지,
+#     부분 리스팅 잔여 줄 장애물, 공백 ToUnicode 복원. 조판 결과가 달라진다.
+PDF_EXPORT_FORMAT_VERSION = 10
 
 
 class PdfExportError(RuntimeError):

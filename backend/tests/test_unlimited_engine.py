@@ -3,6 +3,8 @@
 - MPS 작업 구간(로드·infer·infer_multi·empty_cache)은 ObjC 오토릴리스 풀 안에서
   돈다 — 잡 워커는 끝나지 않는 스레드라 풀이 없으면 객체가 영구히 쌓인다
   (audit gap1-metal-real-e2e-1). CPU/CUDA는 풀을 켜지 않는다.
+- cuda/mps 로드는 P17 융합 MoE 스택을 디바이스 이동 **전에** 만든다 — expert별
+  디바이스 버퍼·지연 재스택 단편화를 없앤다(audit MPS-2).
 """
 
 import contextlib
@@ -131,3 +133,45 @@ def test_metal_model_load_runs_inside_autorelease_pool(monkeypatch):
     engine.load()  # 이미 로드됨 — 재진입 없음
     assert seen == [1]
     assert spy.depth == 0
+
+
+class _PlacementModel:
+    def __init__(self, log: list) -> None:
+        self.log = log
+
+    def eval(self):
+        self.log.append("eval")
+        return self
+
+    def to(self, device):
+        self.log.append(("to", device))
+        return self
+
+
+@pytest.mark.parametrize("device,torch_device", [("metal", "mps"), ("cuda", "cuda")])
+def test_place_model_prebuilds_fused_stacks_before_device_move(monkeypatch, device, torch_device):
+    import app.vendor.unlimited_ocr.modeling_deepseekv2 as md
+
+    log: list = []
+    monkeypatch.setattr(md, "prebuild_fused_moe", lambda model, dev: log.append(("prebuild", dev)) or 11)
+    engine = _engine(monkeypatch, device)
+    monkeypatch.setattr(engine, "_release_device_cache", lambda: log.append("release"))
+    model = _PlacementModel(log)
+
+    assert engine._place_model(model) is model
+    assert log == ["eval", ("prebuild", torch_device), ("to", torch_device), "release"]
+
+
+def test_place_model_on_cpu_keeps_legacy_expert_weights(monkeypatch):
+    import app.vendor.unlimited_ocr.modeling_deepseekv2 as md
+
+    log: list = []
+
+    def boom(model, dev):
+        raise AssertionError("CPU는 융합 경로를 쓰지 않으므로 프리빌드 금지")
+
+    monkeypatch.setattr(md, "prebuild_fused_moe", boom)
+    engine = _engine(monkeypatch, "cpu")
+    monkeypatch.setattr(engine, "_release_device_cache", lambda: log.append("release"))
+    engine._place_model(_PlacementModel(log))
+    assert log == ["eval", ("to", "cpu"), "release"]

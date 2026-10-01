@@ -82,7 +82,9 @@ docker tag ghcr.io/chedrian07/pdf-ocr-translator:0.1.0-cpu-amd64 \
 ```
 
 번역·Q&A를 활성화하려면 실행 명령에 `--env-file .env`를 추가합니다. `.env`의
-설정 예시는 아래 한국어 번역·페이지 Q&A 절을 참조하세요. CPU Unlimited-OCR을
+설정 예시는 아래 한국어 번역·페이지 Q&A 절을 참조하세요. `docker run --env-file`은
+따옴표와 줄 끝 주석을 값에 그대로 넣으므로 `KEY=값` 형식으로만 적습니다
+(`.env.example`은 설명을 별도 줄에 둡니다). CPU Unlimited-OCR을
 사용하려면 `OCR_ENGINE=unlimited`로 바꿉니다. CUDA·sidecar 배포는 아래
 소스 빌드용 Compose 프로필을 사용합니다.
 
@@ -116,6 +118,11 @@ docker compose --profile paddle up -d --build paddleocr-vl ocr-paddle  # → htt
 - 한국어 번역·페이지 Q&A를 쓰려면 `cp .env.example .env` 후 키를 설정합니다 — 번역은
   `OPENAI_API_KEY`, Q&A는 **별도의** `LLM_OPENAI_API_KEY`입니다(`.env.example`에서
   주석 처리돼 있으니 `#`을 지우고 값을 넣으세요). 아래 §한국어 번역 · §페이지 Q&A 참조.
+- backend 서비스(`ocr-cpu`·`ocr-cuda`·`ocr-ovis`·`ocr-paddle`)는 잡 저장소(`ocr-data`
+  볼륨)를 공유하므로 **한 번에 하나만** 뜹니다. 두 번째 backend는 실행 중인 잡을
+  망가뜨리지 않도록 기동을 거부하니, 스택을 바꿀 때는 먼저 `docker compose stop ocr-cpu`
+  처럼 떠 있는 backend를 멈추세요. 로컬(uv) 실행도 같은 `DATA_DIR`로 서버를 둘 띄우거나
+  `--workers`를 2 이상으로 줄 수 없습니다.
 
 Docker 없이 로컬(uv)로 바로 시작할 수도 있습니다:
 

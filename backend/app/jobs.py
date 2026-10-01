@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import queue
+import re
 import shutil
 import threading
 import time
@@ -32,6 +33,8 @@ _EVENT_QUEUE_MAX = 2000
 _TOKEN_HISTORY_MAX_CHARS = 8 * 1024 * 1024
 # 아직 워커 큐에 제출되지 않은(업로드 중) 잡의 정렬 키 — 제출된 잡보다 항상 뒤.
 _UNSUBMITTED_SEQ = float("inf")
+# JobStore.create가 만드는 잡 디렉터리 이름 — 재시작 정리가 이 형식만 건드린다.
+_JOB_DIR_NAME = re.compile(r"^j_[0-9a-f]{12}$")
 
 
 def _now_iso() -> str:
@@ -224,6 +227,10 @@ class JobStore:
             self._jobs.pop(job_id, None)
 
     def delete_dir(self, job: Job) -> None:
+        # 삭제 표식을 먼저 남긴다 — DELETE뿐 아니라 TTL GC도 이 경로라, 진행 중이던
+        # 내보내기 빌더·facsimile 렌더가 끝난 뒤 parents=True로 되살린 디렉터리를
+        # 스스로 치울 근거가 된다(pipeline/derived._discard_if_deleted).
+        job.delete_requested = True
         shutil.rmtree(job.dir, ignore_errors=True)
         self.remove(job.id)
 
@@ -276,6 +283,14 @@ class JobStore:
         for d in sorted(self.jobs_dir.iterdir()):
             meta_path = d / _META_NAME
             if not meta_path.is_file():
+                # meta.json 없는 잡 디렉터리 = 고아다. create()는 mkdir 직후 meta를
+                # 쓰므로 업로드 중인 잡과 구분되고, 기동 시점에는 단일 소유 락
+                # (owner_lock)으로 다른 백엔드가 만드는 중일 수도 없다. 삭제·GC 직후
+                # 끝난 빌더가 되살린 디렉터리(export PDF만 든 것)가 여기 걸린다 —
+                # 목록·GC 어디에도 없어 영구히 남던 것. 잡 ID 형식만 건드린다.
+                if _JOB_DIR_NAME.match(d.name) and d.is_dir() and not d.is_symlink():
+                    logger.info("meta.json 없는 고아 잡 디렉터리 정리: %s", d.name)
+                    shutil.rmtree(d, ignore_errors=True)
                 continue
             try:
                 m = json.loads(meta_path.read_text(encoding="utf-8"))

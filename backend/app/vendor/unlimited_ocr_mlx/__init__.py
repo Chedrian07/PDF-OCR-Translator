@@ -26,7 +26,9 @@ from .postprocess import (  # noqa: F401
 )
 from .processing import OCRInputs, prepare_multi, prepare_single  # noqa: F401
 
-# mlx 의존 심볼 → 모듈
+# mlx 의존 심볼 → 모듈. 하위 모듈 이름은 내보내는 이름과 겹치면 안 된다 — 하위 모듈이
+# 임포트되는 순간 패키지 속성이 그 모듈로 덮여 지연 조회(__getattr__)를 건너뛴다
+# (그래서 generate → generation.py, infer → inference.py).
 _LAZY = {
     "load": ".loader",
     "build_model": ".loader",
@@ -37,12 +39,13 @@ _LAZY = {
     "DTYPES": ".loader",
     "SUPPORTED_QUANT_BITS": ".loader",
     "Model": ".model",
-    "generate": ".generate",
-    "GenerationResult": ".generate",
+    "generate": ".generation",
+    "GenerationResult": ".generation",
     "NoRepeatNgramProcessor": ".ngram",
-    "infer": ".infer",
-    "infer_multi": ".infer",
-    "InferResult": ".infer",
+    "infer": ".inference",
+    "infer_multi": ".inference",
+    "InferResult": ".inference",
+    "warmup": ".inference",
 }
 
 __all__ = [

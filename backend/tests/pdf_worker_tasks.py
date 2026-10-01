@@ -130,3 +130,9 @@ def temp_dir_then_sleep(report_path, seconds: float = 30) -> str:
     Path(report_path).write_text(made, encoding="utf-8")
     time.sleep(seconds)
     return made
+
+
+def env_names() -> list[str]:
+    import os
+
+    return sorted(os.environ)

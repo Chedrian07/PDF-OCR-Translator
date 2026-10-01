@@ -1,4 +1,5 @@
-"""Localight에서 이식한 LLM 프로바이더 계층 — OpenAI Responses/Chat + 로컬 Ollama.
+"""Localight에서 이식한 LLM 프로바이더 계층 — OpenAI Responses/Chat + 로컬 Ollama
++ 루프백 OpenAI 호환 서버(local-openai: oMLX·LM Studio·mlx_lm.server 등).
 
 httpx만 사용하는 자립 모듈(app.* 임포트 없음). 테스트는 transport 주입으로
 httpx.MockTransport를 꽂는다 (tests/test_llm_providers.py가 계약을 고정).
@@ -12,17 +13,28 @@ httpx.MockTransport를 꽂는다 (tests/test_llm_providers.py가 계약을 고�
   * :cloud/remote_host 모델은 models() 필터링 + generate() 재검증으로 이중 차단.
   * OpenAI model은 LLM_OPENAI_*_MODELS 허용목록(+기본 모델)에 없으면 요청 전에 거절.
   * 원시 chain-of-thought는 절대 노출하지 않는다 — Responses의 summary_text만 표면화.
+  * local-openai는 루프백·host.docker.internal 전용(validate.local_openai_url)이고 전용
+    키(LLM_LOCAL_OPENAI_API_KEY)만 쓴다 — 번역 키·Q&A OpenAI 키를 재사용하지 않는다.
+    thinking 여부는 chat_template_kwargs.enable_thinking으로 전달하고(MLX 서버는
+    reasoning 필드를 읽지 않는다), reasoning/reasoning_content는 버린다.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
 import httpx
 
 
-ProviderId = Literal["openai-responses", "openai-chat", "ollama"]
+ProviderId = Literal["openai-responses", "openai-chat", "ollama", "local-openai"]
+# POST /qa가 받는 공급자 id의 단일 출처 — api.py의 허용 목록이 이 값을 쓰게 한다.
+QA_PROVIDER_IDS: tuple[str, ...] = ("openai-responses", "openai-chat", "ollama", "local-openai")
+_REMOTE_PROVIDERS = frozenset({"openai-responses", "openai-chat"})
+# 로컬 서버 기본 생성 상한 — mlx_lm.server 기본(--max-tokens 512)은 답변을 자른다.
+LOCAL_MAX_TOKENS = 8192
+_THINK_OPEN_RE = re.compile(r"^\s*<think>")
 ReasoningEffort = Literal[
     "default", "none", "minimal", "low", "medium", "high", "xhigh", "max"
 ]
@@ -51,7 +63,7 @@ class GenerationResult:
 
     @property
     def remote(self) -> bool:
-        return self.provider.startswith("openai-")
+        return self.provider in _REMOTE_PROVIDERS
 
 
 def _api_error(response: httpx.Response) -> str:
@@ -329,6 +341,139 @@ class OllamaClient:
         )
 
 
+def _strip_think(text: str) -> str:
+    """사고 흔적 제거 — 마지막 '</think>' 뒤만 본문, 닫히지 않은 선두 '<think>'는 본문 없음."""
+    if "</think>" in text:
+        return text.rsplit("</think>", 1)[1]
+    if _THINK_OPEN_RE.match(text):
+        return ""
+    return text
+
+
+class LocalOpenAIClient:
+    """루프백 OpenAI 호환 서버용 Chat Completions 클라이언트 (provider id: local-openai).
+
+    Apple Silicon에서 번역은 로컬 MLX 서버로 돌리면서 Q&A만 유료 api.openai.com 키나
+    별도 Ollama가 필요하던 공백을 메운다(mlx-integration-11, infra-docs-15). 주소는
+    validate.local_openai_url이 루프백·host.docker.internal로 제한하고, 모델은
+    LLM_LOCAL_OPENAI_MODEL(S) 허용목록 밖이면 요청 전에 거절한다.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        default_model: str,
+        models: tuple[str, ...] = (),
+        api_key: str = "",
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.default_model = default_model.strip()
+        self.models = tuple(m for m in models if m)
+        self.api_key = api_key.strip()
+        self.transport = transport
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.default_model)
+
+    def allowed_models(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(m for m in (*self.models, self.default_model) if m))
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+
+    async def available(self) -> bool:
+        """서버가 떠 있는가 — GET /models 200. 네트워크 오류는 False(카탈로그가 죽지 않게)."""
+        if not self.configured:
+            return False
+        try:
+            async with httpx.AsyncClient(
+                timeout=2.5, transport=self.transport, headers=self._headers(),
+            ) as client:
+                response = await client.get(f"{self.base_url}/models")
+        except (httpx.HTTPError, OSError):
+            return False
+        return response.status_code == 200
+
+    async def generate(
+        self,
+        *,
+        model: str | None,
+        system: str,
+        prompt: str,
+        reasoning_effort: ReasoningEffort,
+        reasoning_summary: ReasoningSummary,
+        thinking: bool,
+    ) -> GenerationResult:
+        del reasoning_summary  # 로컬 서버는 안전한 요약을 주지 않는다 — 원시 사고는 비노출
+        if not self.configured:
+            raise LlmError(
+                "LLM_LOCAL_OPENAI_BASE_URL and LLM_LOCAL_OPENAI_MODEL are not configured."
+            )
+        selected_model = model or self.default_model
+        allowed = self.allowed_models()
+        if selected_model not in allowed:
+            raise LlmError(
+                f"'{selected_model}' is not an allowed local-openai model. "
+                f"Allowed: {', '.join(allowed)}."
+            )
+        payload: dict[str, Any] = {
+            "model": selected_model,
+            # 로컬 채팅 템플릿은 'developer' 롤을 모를 수 있다 — system을 쓴다.
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            "stream": False,
+            "max_tokens": LOCAL_MAX_TOKENS,
+            # mlx_lm은 Qwen 계열에 thinking을 기본 주입하고 reasoning 필드는 읽지 않는다 —
+            # 끄든 켜든 템플릿 인자로 명시한다(oMLX는 모델별 설정보다 이 값이 우선).
+            "chat_template_kwargs": {"enable_thinking": bool(thinking)},
+        }
+        if thinking and reasoning_effort not in ("default", "none"):
+            payload["reasoning_effort"] = reasoning_effort
+        try:
+            async with httpx.AsyncClient(
+                timeout=600, transport=self.transport, headers=self._headers(),
+            ) as client:
+                response = await client.post(f"{self.base_url}/chat/completions", json=payload)
+                response.raise_for_status()
+        except httpx.ConnectError as exc:
+            raise LlmError(
+                f"Local OpenAI-compatible server is not running at {self.base_url}."
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise LlmError(
+                f"Local OpenAI-compatible server rejected the request: {_api_error(exc.response)}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise LlmError(f"Local OpenAI-compatible request failed: {exc}") from exc
+
+        data = response.json()
+        message = (data.get("choices") or [{}])[0].get("message") or {}
+        raw = message.get("content") or ""
+        if isinstance(raw, list):
+            raw = "".join(
+                str(part.get("text", "")) for part in raw
+                if isinstance(part, dict) and part.get("text")
+            )
+        # reasoning·reasoning_content 필드는 읽지 않는다 — 원시 chain-of-thought 비노출
+        content = _strip_think(str(raw)).strip()
+        if not content:
+            raise LlmError("local-openai returned an empty response")
+        return GenerationResult(
+            content=content,
+            model=str(data.get("model") or selected_model),
+            provider="local-openai",
+            reasoning_effort=reasoning_effort,
+            thinking_requested=thinking,
+            reasoning_summary=None,
+            usage=data.get("usage") or {},
+        )
+
+
 class LlmRouter:
     def __init__(
         self,
@@ -337,16 +482,31 @@ class LlmRouter:
         ollama: OllamaClient,
         default_provider: ProviderId,
         default_reasoning_effort: ReasoningEffort,
+        local_openai: LocalOpenAIClient | None = None,
     ) -> None:
         self.openai = openai
         self.ollama = ollama
+        self.local_openai = local_openai
         self.default_provider = default_provider
         self.default_reasoning_effort = default_reasoning_effort
 
     def default_model(self, provider: ProviderId) -> str:
         if provider.startswith("openai-"):
             return self.openai.default_model(provider)
+        if provider == "local-openai":
+            return self.local_openai.default_model if self.local_openai else ""
         return self.ollama.default_model
+
+    def configured(self, provider: str) -> bool:
+        """네트워크 호출 없이 판정 가능한 구성 여부 (health의 qa_available용).
+
+        ollama는 데몬 기동 여부를 동기로 알 수 없어 True — 실시간 가용성은 providers().
+        """
+        if provider.startswith("openai-"):
+            return self.openai.configured
+        if provider == "local-openai":
+            return self.local_openai is not None and self.local_openai.configured
+        return provider == "ollama"
 
     async def providers(self) -> dict[str, Any]:
         local_models = await self.ollama.models()
@@ -381,7 +541,22 @@ class LlmRouter:
                     "models": [model.name for model in local_models],
                     "default_model": self.ollama.default_model,
                 },
+                # 구성됐을 때만 광고한다 — 미구성 배포의 선택지를 늘리지 않는다.
+                *([await self._local_openai_entry()] if self.configured("local-openai") else []),
             ],
+        }
+
+    async def _local_openai_entry(self) -> dict[str, Any]:
+        local = self.local_openai
+        assert local is not None
+        return {
+            "id": "local-openai",
+            "label": "Local OpenAI-compatible (MLX)",
+            "available": await local.available(),
+            "remote": False,
+            "supports_reasoning_summary": False,
+            "models": list(local.allowed_models()),
+            "default_model": local.default_model,
         }
 
     async def _generate(
@@ -408,6 +583,19 @@ class LlmRouter:
             )
         if selected_provider == "ollama":
             return await self.ollama.generate(
+                model=model,
+                system=system,
+                prompt=prompt,
+                reasoning_effort=reasoning_effort,
+                reasoning_summary=reasoning_summary,
+                thinking=thinking,
+            )
+        if selected_provider == "local-openai":
+            if self.local_openai is None:
+                raise LlmError(
+                    "LLM_LOCAL_OPENAI_BASE_URL and LLM_LOCAL_OPENAI_MODEL are not configured."
+                )
+            return await self.local_openai.generate(
                 model=model,
                 system=system,
                 prompt=prompt,

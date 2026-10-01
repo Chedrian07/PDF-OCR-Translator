@@ -25,6 +25,27 @@ MAX_PAGE_SIDE_PT = 5400
 # 균일 축소에 영향 없다 (layout.py/_pct, pdf_fonts.py 참조).
 MAX_RENDER_PIXELS = 50_000_000
 
+# Pillow 압축 폭탄 상한을 렌더 상한에 맞춘다. 앱이 PIL로 여는 이미지는 전부 이 모듈이
+# 만든 페이지 PNG(MAX_RENDER_PIXELS 이하 — 축소 시 반올림으로 수천 px 넘을 수 있어
+# 5% 여유)와 거기서 자른 그림뿐이다. Pillow 기본값(약 8,950만 px, 2배에서 오류)이면
+# 조작된 이미지 헤더나 모델이 낸 거대한 crop 좌표(벤더 draw_bounding_boxes는 좌표를
+# 검증하지 않는다)가 수백 MB를 할당한 뒤에야 막힌다 — 상한을 넘으면 경고, 2배를 넘으면
+# DecompressionBombError로 할당 전에 끊긴다. 페이지 렌더가 늘 이 모듈을 거치므로
+# 엔진(벤더 크롭 포함)이 이미지를 열기 전에 적용된다.
+PIL_MAX_IMAGE_PIXELS = MAX_RENDER_PIXELS + MAX_RENDER_PIXELS // 20
+
+
+def _bound_pil_decompression() -> None:
+    """프로세스 전역 Pillow 상한을 낮춘다(이미 더 낮게 잡혀 있으면 그대로 둔다)."""
+    from PIL import Image
+
+    current = Image.MAX_IMAGE_PIXELS
+    if current is None or current > PIL_MAX_IMAGE_PIXELS:
+        Image.MAX_IMAGE_PIXELS = PIL_MAX_IMAGE_PIXELS
+
+
+_bound_pil_decompression()
+
 # OCR fallback에서 한 페이지의 숨은/중복 텍스트 레이어가 결과 파일을 폭증시키지
 # 못하게 하는 독립 상한. 정상 논문/문서 페이지의 텍스트는 이보다 훨씬 작다.
 MAX_EMBEDDED_TEXT_CHARS = 100_000

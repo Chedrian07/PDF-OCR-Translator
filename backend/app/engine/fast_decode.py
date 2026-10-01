@@ -50,7 +50,17 @@ from __future__ import annotations
 import logging
 import os
 
+from .objc_pool import autorelease_pool
+
 logger = logging.getLogger(__name__)
+
+
+def _needs_autorelease_pool(input_ids) -> bool:
+    """MPS 입력이면 디코드 스텝마다 ObjC 오토릴리스 풀을 비운다 (objc_pool 참조).
+
+    잡 워커는 끝나지 않는 스레드라, 풀 없이 돌면 스텝마다 autorelease된 커맨드
+    버퍼·동기화 객체가 영구히 쌓인다(실측 생성 토큰당 ~25KB). CPU/CUDA는 대상이 없다."""
+    return getattr(getattr(input_ids, "device", None), "type", None) == "mps"
 
 
 def _cuda_graphs_enabled() -> bool:
@@ -154,7 +164,8 @@ def _greedy_decode_body(model, gen_kwargs: dict, block: int):
         "position_ids": torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0),
     }
     if streamer is not None:
-        streamer.put(input_ids.cpu())  # skip_prompt 스트리머의 프롬프트 소비 (HF와 동일)
+        with autorelease_pool(_needs_autorelease_pool(input_ids)):  # MPS D2H 복사 객체 회수
+            streamer.put(input_ids.cpu())  # skip_prompt 스트리머의 프롬프트 소비 (HF와 동일)
 
     # [U2] CUDA Graph 경로 — 조건 만족 시 캡처+리플레이 (실패해도 내부에서 eager 마무리).
     # 경로 선택은 호출(청크)당 1회 로깅 — env 조합에 따른 조용한 eager 강등(실측 3.3x
@@ -173,32 +184,36 @@ def _greedy_decode_body(model, gen_kwargs: dict, block: int):
     finished_at = None  # EOS 포함 절단 위치 (prompt+생성 기준 절대 인덱스)
     pending = 0         # 아직 호스트로 내리지 않은 신규 토큰 수
     stopped = False
+    # MPS: 스텝(프리필 포함)마다 오토릴리스 풀을 비운다 — 풀 push/pop은 ~1µs라
+    # 토큰당 수~수십 ms인 스텝에 비해 무시할 수준이고, 출력·동기화 cadence는 불변.
+    use_pool = _needs_autorelease_pool(input_ids)
 
     while input_ids.shape[1] < max_length and finished_at is None and not stopped:
-        model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs)
-        out = model(**model_inputs, return_dict=True)
-        logits = out.logits[:, -1, :]
-        for proc in processors:
-            logits = proc(input_ids, logits)
-        next_tok = logits.argmax(dim=-1, keepdim=True)  # 디바이스에 상주 — 동기화 없음
-        input_ids = torch.cat([input_ids, next_tok], dim=-1)
-        model_kwargs["past_key_values"] = out.past_key_values
-        # 다음 스텝 위치 — 매번 새 텐서를 만든다 (P19 rotary 캐시가 id(position_ids)로
-        # 스텝을 식별하므로 in-place 증가는 금지)
-        model_kwargs["position_ids"] = model_kwargs["position_ids"][:, -1:] + 1
-        pending += 1
+        with autorelease_pool(use_pool):
+            model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            out = model(**model_inputs, return_dict=True)
+            logits = out.logits[:, -1, :]
+            for proc in processors:
+                logits = proc(input_ids, logits)
+            next_tok = logits.argmax(dim=-1, keepdim=True)  # 디바이스에 상주 — 동기화 없음
+            input_ids = torch.cat([input_ids, next_tok], dim=-1)
+            model_kwargs["past_key_values"] = out.past_key_values
+            # 다음 스텝 위치 — 매번 새 텐서를 만든다 (P19 rotary 캐시가 id(position_ids)로
+            # 스텝을 식별하므로 in-place 증가는 금지)
+            model_kwargs["position_ids"] = model_kwargs["position_ids"][:, -1:] + 1
+            pending += 1
 
-        if pending >= block or input_ids.shape[1] >= max_length:
-            new = input_ids[0, -pending:].tolist()  # ← 블록당 단 1회의 디바이스 동기화
-            if eos_id is not None and eos_id in new:
-                cut = new.index(eos_id) + 1  # EOS 포함 (HF generate와 동일)
-                finished_at = input_ids.shape[1] - pending + cut
-                new = new[:cut]
-            if streamer is not None and new:
-                streamer.put(torch.tensor([new]))
-            pending = 0
-            if finished_at is None and criteria:
-                stopped = any(bool(c(input_ids, None)) for c in criteria)
+            if pending >= block or input_ids.shape[1] >= max_length:
+                new = input_ids[0, -pending:].tolist()  # ← 블록당 단 1회의 디바이스 동기화
+                if eos_id is not None and eos_id in new:
+                    cut = new.index(eos_id) + 1  # EOS 포함 (HF generate와 동일)
+                    finished_at = input_ids.shape[1] - pending + cut
+                    new = new[:cut]
+                if streamer is not None and new:
+                    streamer.put(torch.tensor([new]))
+                pending = 0
+                if finished_at is None and criteria:
+                    stopped = any(bool(c(input_ids, None)) for c in criteria)
 
     if pending:  # 방어적 잔여 flush (정상 흐름에선 위 블록이 항상 소진)
         new = input_ids[0, -pending:].tolist()

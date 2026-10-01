@@ -274,6 +274,23 @@ born-digital PDF에서는 PyMuPDF가 뽑는 텍스트가 **공짜 정답**이다
 - **재시작 시 잔여물 정리**: `load_existing`이 중단된 잡을 복원해 상태를 바꿀 때
   `work/`를 함께 지운다 — runner의 `finally`가 돌지 못하고 죽은 잡은 다시 실행되지
   않아 어느 경로에서도 정리되지 않았다.
+- **잡 저장소 단일 소유자 락** (`owner_lock.py`): 위 정리는 "이 프로세스가 유일한
+  소유자"일 때만 안전하다. 같은 `{DATA_DIR}/jobs`를 쓰는 두 번째 백엔드의
+  `load_existing`은 먼저 뜬 쪽에서 **실행 중인** 잡을 error로 덮고 `work/`를 지웠다
+  (`make dev` 중의 `make test`, 같은 `ocr-data`를 쓰는 compose backend 동시 기동,
+  `--workers N`·`WEB_CONCURRENCY`). 그래서 `create_app()`이 `load_existing` **전에**
+  `{DATA_DIR}/jobs/.owner.lock`에 배타 `flock`을 비차단으로 잡고 앱 수명 동안 쥔다.
+  살아 있는 다른 소유자(다른 프로세스, 또는 같은 프로세스의 아직 살아 있는 앱)가
+  있으면 디렉터리를 짚는 `JobsDirInUseError`로 기동을 거부한다. lifespan 종료·앱 조립
+  실패 시 즉시 놓고, 버려진 앱은 수거될 때 놓는다(충돌 시 `gc.collect()` 후 1회 재시도).
+  프로세스가 죽으면 커널이 회수하므로 stale 락 정리는 없다. 락 파일은 지우지 않는다
+  (쥔 채 지우면 다음 소유자가 새 inode를 잠가 공존한다). `fcntl`이 없거나 flock을
+  지원하지 않는 파일시스템에서는 경고 후 보호 없이 진행한다.
+  **같은 DATA_DIR에는 백엔드 프로세스가 하나만** 뜬다(§8).
+- **`app` 지연 생성**: `app.main`의 `app`은 PEP 562 지연 속성이다 — `uvicorn
+  app.main:app`·`from app.main import app`이 처음 찾을 때만 기본 앱을 만든다.
+  모듈 import만으로는 `.env`를 읽거나 `DATA_DIR`을 건드리지 않는다(예전에는 pytest
+  수집만으로 개발 서버의 실행 중 잡이 error로 덮였다).
 - **sidecar 재시작/모델 재로드 대기**: sidecar 엔진은 페이지 요청이 `SidecarUnavailableError`
   (HTTP 503·연결 끊김)로 실패하면 health 캐시를 무효화하고 `wait_until_ready()`로
   컨테이너 복귀를 기다린 뒤 **그 페이지만 1회 재시도**한다. 기다리지 않으면 재기동 +
@@ -691,33 +708,33 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
 | `OCR_DTYPE` | `auto` | `auto`(cuda→bf16, metal→bf16 또는 fp32 폴백, cpu→fp32)\|`bfloat16`\|`float16`\|`float32` |
 | `OCR_ENGINE` | `unlimited` | `unlimited`\|`fake`\|`textlayer`(§16)\|`ovisocr2`\|`paddleocr_vl` (sidecar 둘은 `OCR_SIDECAR_URL` 필수) |
 | `OCR_SIDECAR_URL` | (없음) | sidecar 엔진의 base URL — compose 프로필(ovis/paddle)이 자동 설정 |
-| `OCR_SIDECAR_CONNECT_TIMEOUT_S` | `10` | sidecar 연결 타임아웃(초) |
-| `OCR_SIDECAR_READ_TIMEOUT_S` | `600` | 페이지 1장 추론 대기 상한(초) |
-| `OCR_SIDECAR_HEALTH_TIMEOUT_S` | `5` | sidecar health 대기(초) |
+| `OCR_SIDECAR_CONNECT_TIMEOUT_S` | `10` | sidecar 연결 타임아웃(초) — 유한한 양수 |
+| `OCR_SIDECAR_READ_TIMEOUT_S` | `600` | 페이지 1장 추론 대기 상한(초) — 유한한 양수 |
+| `OCR_SIDECAR_HEALTH_TIMEOUT_S` | `5` | sidecar health 대기(초) — 유한한 양수 |
 | `OCR_SIDECAR_MAX_RESPONSE_MB` | `20` | 응답 크기 상한 (response bomb 방어) |
 | `OCR_SIDECAR_RETRIES` | `1` | 연결 수립 실패 재시도 횟수 (그 외 재시도는 runner 몫) |
 | `OCR_REMOTE_PAGE_CONCURRENCY` | `1` | sidecar 페이지 동시 요청 수 = sidecar 엔진의 청크 크기 (16GB 단일 GPU는 1 권장) |
-| `OCR_SIDECAR_MODEL_WAIT_S` | `900` | 잡이 sidecar 모델 준비를 기다리는 상한(초) — 최초 기동 창에 업로드해도 실패 대신 대기(취소 가능) |
+| `OCR_SIDECAR_MODEL_WAIT_S` | `900` | 잡이 sidecar 모델 준비를 기다리는 상한(초) — 최초 기동 창에 업로드해도 실패 대신 대기(취소 가능). 음수는 0으로 보정 |
 | `MODEL_ID` | `baidu/Unlimited-OCR` | HF 모델 ID |
 | `MODEL_REVISION` | `ee63731b…` | HF revision 고정 (README의 검증 커밋) |
 | `PRELOAD_MODEL` | `1` | 기동 시 모델 로드 (0이면 첫 잡에서 lazy) |
-| `DATA_DIR` | `data` (Docker `/data`) | 잡 저장소 루트 (`{DATA_DIR}/jobs`). config.py 기본은 상대 경로 `data`, Dockerfile ENV가 `/data`로 덮는다 |
+| `DATA_DIR` | `data` (Docker `/data`) | 잡 저장소 루트 (`{DATA_DIR}/jobs`). config.py 기본은 상대 경로 `data`, Dockerfile ENV가 `/data`로 덮는다. 백엔드 프로세스 하나만 소유한다 — `{DATA_DIR}/jobs/.owner.lock` (§2 단일 소유자 락) |
 | `HF_HOME` | `/data/hf` | HF 캐시 (Dockerfile ENV + compose 볼륨) |
-| `RENDER_DPI` | `200` | 요청별 `dpi`로 오버라이드 가능 |
-| `PAGES_PER_CHUNK` | `8` | infer_multi 청크 크기 |
-| `MAX_PAGES` | `200` | 페이지 상한 |
-| `MAX_UPLOAD_MB` | `100` | 업로드 상한 |
-| `MAX_LENGTH` | `32768` | 생성 총 길이 상한 |
+| `RENDER_DPI` | `200` | 요청별 `dpi`로 오버라이드 가능. 72–400 (요청별 `dpi` 검증과 같은 범위) |
+| `PAGES_PER_CHUNK` | `8` | infer_multi 청크 크기 (1 이상) |
+| `MAX_PAGES` | `200` | 페이지 상한 (1 이상) |
+| `MAX_UPLOAD_MB` | `100` | 업로드 상한 (1 이상) |
+| `MAX_LENGTH` | `32768` | 생성 총 길이 상한 (1 이상) |
 | `MAX_PAGE_OUTPUT_CHARS` | `16384` | `<PAGE>` 기준 페이지별 decoded 출력 문자 hard limit (single에도 동일 적용, 0 이하=비활성) |
 | `MAX_PAGE_OUTPUT_TOKENS` | `6144` | 페이지별 생성 토큰 hard limit (fast decode는 최대 한 block만큼 정지 지연, 0 이하=비활성) |
-| `PAGE_SEPARATOR` | `\n\n---\n\n` | 병합 시 페이지 구분자 |
+| `PAGE_SEPARATOR` | `\n\n---\n\n` | 병합 시 페이지 구분자. 백슬래시 이스케이프(`\n`·`\t`·`\uXXXX`)를 해석하고 한글 등 비ASCII는 그대로 보존 |
 | `OCR_CPU_THREADS` | `0` | CPU 백엔드 torch 스레드 수 (0=torch 기본) |
 | `OCR_FAST_DECODE` | `1` | 커스텀 그리디 디코드 루프(cpu/cuda/mps 공용, 호스트 동기화 블록 배칭). `0`이면 HF generate 폴백 |
-| `OCR_DECODE_BLOCK` | `8` | fast decode의 동기화 배칭 크기(토큰) — EOS를 블록 경계에서 확인 |
+| `OCR_DECODE_BLOCK` | `8` | fast decode의 동기화 배칭 크기(토큰, 1 이상) — EOS를 블록 경계에서 확인 |
 | `OCR_MOE_FAST` | (미설정) | MoE 단일 토큰 디코드 패스트패스 강제 on/off (`1`/`0`). 미설정 시 **MPS에서만 on** — 벤더 P18, 결과 비트 동일 |
 | `OCR_MOE_FUSED` | (미설정) | CUDA MoE 융합 디코드(벤더 P17, 기본 **CUDA에서 on**) 킬스위치 — `0`이면 legacy 경로 완전 복원 |
 | `OCR_NGRAM_HOST` | (미설정) | `1`이면 GPU/MPS에서도 no-repeat-ngram 배닝을 호스트(C++/파이썬) 티어로 강제 (절연 레버, `native_ops.py`) |
-| `FAKE_DELAY` | `0.02` | FakeEngine 페이지당 지연(초) — 테스트/데모 전용 |
+| `FAKE_DELAY` | `0.02` | FakeEngine 페이지당 지연(초, 0 이상) — 테스트/데모 전용 |
 | `FRONTEND_DIR` | (미설정) | 정적 프론트엔드 경로 오버라이드 — 미설정이면 리포 상대 경로에서 탐색 |
 | `OPENAI_BASE_URL` | (없음) | 번역 프로바이더 base URL. bare origin(`https://host`)이면 `/v1`을 자동 보완하고, 명시 경로는 그대로 사용. 미설정 시 번역 기능만 비활성(503) |
 | `OPENAI_API_KEY` | (없음) | **번역 전용** 프로바이더 API 키 (로컬 서버는 생략 가능). Q&A는 이 키를 쓰지 않는다 → `LLM_OPENAI_API_KEY` |
@@ -749,7 +766,7 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
 | `ALLOWED_HOSTS` | config.py `localhost,127.0.0.1` / **compose `*`** | Host 헤더 화이트리스트(콤마 구분) — DNS rebinding 방어, 포트는 비교 시 무시. compose는 외부 노출 기본과 정합을 위해 `*`(모든 Host 허용)을 넘긴다 (§14) |
 | `OCR_CPU_MEM_LIMIT` / `OCR_CUDA_MEM_LIMIT` / `OCR_WEB_MEM_LIMIT` | `24g` / `16g` / `8g` | (compose) backend 서비스별 메모리 상한 (§8) |
 | `OVIS_MEM_LIMIT` / `PADDLE_MEM_LIMIT` | `24g` / `24g` | (compose) sidecar 컨테이너 메모리 상한 |
-| `JOB_TTL_DAYS` | `0` | 터미널 잡(done/error/canceled) 자동 GC 보존 일수 — `0`=비활성(기본, opt-in). 시작 시 1회 + 6시간 주기 (§15) |
+| `JOB_TTL_DAYS` | `0` | 터미널 잡(done/error/canceled) 자동 GC 보존 일수(0 이상) — `0`=비활성(기본, opt-in). 시작 시 1회 + 6시간 주기 (§15) |
 | `OCR_LANGUAGES` | `eng+kor` | (textlayer) Tesseract 언어 조합 — `tesseract -l` 인자 (§16) |
 | `NATIVE_TEXT_THRESHOLD` | `120` | (textlayer) 텍스트 레이어를 신뢰할 페이지당 최소 영숫자 수 — 미만이면 Tesseract 폴백 (§16) |
 | `LLM_PROVIDER` | `openai-responses` | (Q&A) 기본 LLM 공급자: `openai-responses`\|`openai-chat`\|`ollama` (§17) |
@@ -763,6 +780,24 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | (Q&A) 로컬 Ollama 주소 — 루프백·`host.docker.internal`·`ollama`만 허용, 그 외 기동 시 즉시 실패 (§17.3). compose 컨테이너 기본값은 `http://host.docker.internal:11434` |
 | `OLLAMA_MODEL` | `qwen3:8b` | (Q&A) 기본 로컬 Ollama 모델 (`:cloud`/`remote_host` 모델은 차단) |
 | `PDF_EXPORT_FONT` | (빈 값) | 번역 PDF 내보내기용 한글 폰트 파일 경로 — 비우면 시스템 폰트 → 내장 CJK 폴백 (§5 /pdf) |
+
+- **기동 시 검증**: 숫자 노브는 `Settings.from_env()`에서 검증한다. 정수·숫자가 아니거나
+  위 표의 범위 밖이면(NaN·무한대 포함) 변수명과 값을 담은 `ValueError`로 **기동 시**
+  실패한다 — 예전에는 기동은 되고 나중에 모든 업로드·페이지가 실패해 요청 쪽 문제로
+  보였다(`RENDER_DPI=600` → dpi 없는 업로드 전부 400, sidecar 타임아웃 `0` → 전 페이지
+  실패). 빈 값은 미설정과 같다(compose가 선택 키를 빈 문자열로 넘긴다). 예외: 남용 방어
+  4종(`QA_*`·`TRANSLATE_RATE_LIMIT_PER_MIN`·`TRANSLATE_MAX_ACTIVE`)은 오타를 경고 후
+  기본값으로 강등한다 — 운영 중 방어 설정 실수가 기동 실패·500이 되면 안 된다.
+- **로컬 `.env` 로딩** (`load_dotenv_file`): 로컬(uv) 실행은 `.env`를 읽어 줄 주체가 없어
+  `Settings.from_env()`가 직접 읽는다. 실행 cwd → 저장소 루트 순서로 처음 찾은 `.env`
+  **하나만** 읽고, 이미 설정된 환경변수(셸·compose 주입)는 덮지 않는다. 저장소 밖
+  상위 디렉터리는 보지 않는다(무관한 프로젝트의 키를 채택하지 않게). 파싱은
+  python-dotenv로 docker compose와 같은 규칙이다 — 따옴표 없는 값은 '공백+`#`'부터
+  주석, 따옴표 안의 `#`은 값, `export ` 접두사·CRLF·BOM 허용. ⚠ `KEY=   # 설명`처럼
+  값 없이 주석만 두면 compose처럼 주석이 값이 되므로 `.env.example`은 설명을 별도
+  줄에 둔다(어느 줄을 주석 해제해도 유효한 값). 읽은 경로는 INFO로 남기고 값은
+  남기지 않는다. `DISABLE_DOTENV=1`이면 자동 탐색을 끈다 — pytest(conftest)와 E2E
+  하네스가 개발자의 실키를 프로세스에 주입하지 않게 쓰는 스위치다(운영 노브 아님).
 
 ## 8. docker-compose
 
@@ -783,7 +818,11 @@ CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스�
   (compose가 컨테이너로 전달한다). 자세한 내용은 §14 · README §보안 · SECURITY.md.
 - **공유 볼륨**: `hf-cache`(모델 가중치 ~6.7GB, 최초 1회 다운로드)와
   `ocr-data`(잡 결과)를 **네 backend 서비스가 모두 공유**한다 — 엔진(스택)을 바꿔도
-  잡 이력이 남는다. 과거의 `ocr-ovis-data`/`ocr-paddle-data`는 더 이상 참조되지 않으며,
+  잡 이력이 남는다. ⚠ 그래서 backend는 **한 번에 하나만** 뜬다: 두 번째 backend는
+  잡 저장소 단일 소유자 락(§2)에 막혀 기동을 거부하고(`다른 백엔드가 이미 이 잡
+  디렉터리를 사용 중입니다`), `restart: unless-stopped`로 재시작을 반복한다. 스택을
+  바꿀 때는 먼저 떠 있는 backend를 `docker compose stop ocr-cpu`처럼 멈춘다.
+  과거의 `ocr-ovis-data`/`ocr-paddle-data`는 더 이상 참조되지 않으며,
   그 안의 잡을 살리려면 한 번만 `ocr-data`로 복사한 뒤 볼륨을 지운다(compose 주석에 절차 있음).
 - ⚠ **볼륨 명령에는 프로젝트 접두사가 필요하다**: compose 볼륨의 실제 이름은
   `<PROJECT>_ocr-data`처럼 접두사가 붙는다(PROJECT 기본값 = 이 디렉터리 이름,

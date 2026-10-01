@@ -11,7 +11,7 @@ translate-llm-13·infra-docs-7·mlx-integration-8). 레지스트리가 코드보
 import re
 from pathlib import Path
 
-from test_ci_ops_contracts import _env_keys_read_by_code
+from test_ci_ops_contracts import NOT_OPERATOR_KNOBS, _env_keys_read_by_code
 
 from app import config
 
@@ -90,3 +90,21 @@ def test_categories_do_not_overlap_and_the_registry_is_not_scanned_as_reads():
     assert not config._HARNESS_ENV_KEYS & _env_keys_read_by_code()
     assert "REASONING_EFFORT" not in _env_keys_read_by_code()
     assert "REASONING_EFFORT" not in config.KNOWN_ENV_KEYS
+
+
+# 앱이 다른 도구(torch)에 넘기려고 setdefault하는 키 — 운영자 노브가 아니다(ARCHITECTURE에 문서화)
+_TOOL_OWNED_KEYS = frozenset({"PYTORCH_ENABLE_MPS_FALLBACK"})
+
+
+def test_keys_read_directly_anywhere_in_the_app_are_documented_in_env_example():
+    """CI 스캐너(ENV_SOURCE_FILES)는 다섯 파일만 본다 — 그 밖(vendor·native_ops·engine)에서
+    os.environ으로 읽는 노브도 .env.example에 있어야 운영자가 존재를 안다. OCR_SDPA·
+    OCR_NGRAM_HOST가 코드·compose·ARCHITECTURE에는 있는데 .env.example에만 빠져 있었다."""
+    text = (REPO / ".env.example").read_text(encoding="utf-8")
+    direct = _direct_env_reads()
+    assert {"OCR_SDPA", "OCR_NGRAM_HOST"} <= direct
+    missing = sorted(
+        key for key in direct - NOT_OPERATOR_KNOBS - _TOOL_OWNED_KEYS
+        if not re.search(rf"\b{key}\b", text)
+    )
+    assert not missing, f".env.example에 없는 노브(앱이 직접 읽음): {missing}"

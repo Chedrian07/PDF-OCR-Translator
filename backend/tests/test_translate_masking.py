@@ -556,3 +556,20 @@ def test_번역을_다루는_원문이어도_사과_거부문은_잡는다():
     assert untranslated_reason(src, "죄송합니다, 번역할 수 없습니다.", {}) == "refusal"
     plain = "The accuracy improved on the benchmark dataset that we evaluated."
     assert untranslated_reason(plain, "이 텍스트는 번역할 수 없습니다.", {}) == "refusal"
+
+
+def test_출력_맨앞의_원문_헤더_한_줄만_걷어낸다():
+    """실측(mlx_lm, Qwen3.5-0.8B): '[번역할 원문]\\n' + 정상 번역 → 종전 scaffold 거부."""
+    from app.translate.masking import untranslated_reason
+
+    src = "The code is available at https://github.com/example/repo and in Table 2."
+    masked, mapping = mask(src)
+    raw = '[번역할 원문]\n코드는 <u1 v="https://gith"/> 와 <f2 v="Table 2"/> 에서 제공된다.'
+    clean, n = sanitize_translation(raw)
+    restored, missing, dup = unmask(clean, mapping, masked)
+    assert n == 1 and not missing and not dup
+    assert untranslated_reason(src, restored, mapping) == ""
+    # 다른 스캐폴딩 echo·본문 중간의 헤더는 그대로 남겨 게이트가 거부한다
+    echo = "[용어집 — 반드시 이 역어 사용]\n- learning rate → 학습률\n\n[번역할 원문]\n번역"
+    assert sanitize_translation(echo) == (echo, 0)
+    assert sanitize_translation("앞 [번역할 원문]\n뒤")[1] == 0

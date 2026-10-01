@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import {
   BUSY_RETRY_MAX, busyRetryDelay, busyWaitMessage, langFetchVerdict,
 } from '../js/core.js';
-import { busyRetryClock, fetchTextWithBusyRetry } from '../js/api.js';
+import { POLL_TIMEOUT_MS, apiGet, busyRetryClock, fetchTextWithBusyRetry } from '../js/api.js';
 import { el, state } from '../js/state.js';
 import { loadDocLayout, loadMarkdown, loadPreview } from '../js/tabs.js';
 import { loadReader } from '../js/reader.js';
@@ -321,4 +321,22 @@ test('리더 개요: 일시 실패는 캐시하지 않고, 404만 빈 개요로 
   await loadReader();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(state.readerOutline.orig, []);
+});
+
+/* ---------------- apiGet 시간 제한 (폴링 직렬화의 짝) ---------------- */
+
+test('apiGet: timeoutMs가 있으면 시간 제한 신호를 붙이고, 응답이 없으면 실패한다', async (t) => {
+  const seen = [];
+  t.mock.method(globalThis, 'fetch', (url, init) => {
+    seen.push(init && init.signal);
+    if (!init || !init.signal) return Promise.resolve(response(200, '{"ok":true}'));
+    return new Promise((_, reject) => {
+      init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+    });
+  });
+  assert.deepEqual(await apiGet('/api/jobs'), { ok: true });
+  assert.equal(seen[0], undefined, '시간 제한이 없으면 신호도 없다(기존 호출부 그대로)');
+  await assert.rejects(apiGet('/api/jobs', { timeoutMs: 30 }), (err) => err && err.name === 'TimeoutError');
+  assert.ok(seen[1], '폴링 호출은 시간 제한 신호를 붙인다');
+  assert.ok(POLL_TIMEOUT_MS >= 10_000 && POLL_TIMEOUT_MS <= 60_000);
 });

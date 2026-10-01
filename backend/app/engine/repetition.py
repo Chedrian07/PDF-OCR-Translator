@@ -47,6 +47,17 @@ _INCOMPLETE_LAYOUT_BLOCK = re.compile(
 )
 _COUNTER = re.compile(r"#\s*(\d{1,7})\s*\.")
 _PAGE_MARKER = "<PAGE>"
+# 페이지 문자 예산에서 빼는 마크업 — 레이아웃 블록(라벨·좌표)과 HTML 표 태그.
+# 정상 표 페이지는 원문의 대부분이 마크업이라(fidelity.py 실측 p18: 12,716자 중
+# 12,427자가 <table> 마크업) 원문 길이로 세면 토큰 상한보다 먼저 문자 상한에 걸렸다.
+_BUDGET_MARKUP = re.compile(
+    r"<\|(?:ref|det)\|>.*?<\|/(?:ref|det)\|>"
+    r"|</?(?:table|thead|tbody|tfoot|tr|td|th)\b[^<>]*>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_LAYOUT_OPENERS = (("<|ref|>", "<|/ref|>"), ("<|det|>", "<|/det|>"))
+# 델타 경계에서 쪼개진 마크업을 닫힐 때까지 보류하는 최대 길이 — 넘으면 내용으로 센다
+_MARKUP_HOLD_CHARS = 512
 
 
 class SemanticRepetitionDetector:
@@ -89,6 +100,7 @@ class SemanticRepetitionDetector:
 
         self._pending_line = ""
         self._marker_tail = ""
+        self._markup_tail = ""
         self._template: str | None = None
         self._rolling = ""
         self._rolling_since_check = 0
@@ -139,9 +151,51 @@ class SemanticRepetitionDetector:
                 tail = self._marker_tail
                 self._marker_tail = ""
                 self._consume(tail)
+            if self._markup_tail and not self.detected:
+                # 끝까지 닫히지 않은 마크업 조각은 내용으로 센다(보수적)
+                held = self._markup_tail
+                self._markup_tail = ""
+                self._add_page_chars(len(held))
             self._finish_line()
             self._check_rolling(force=True)
         return self.detected
+
+    @staticmethod
+    def _pending_markup(text: str) -> int:
+        """끝에서 아직 닫히지 않은 마크업(태그·레이아웃 블록)의 길이 — 보류 대상."""
+        hold = 0
+        for opener, closer in _LAYOUT_OPENERS:
+            start = text.rfind(opener)
+            if start >= 0 and text.find(closer, start) < 0:
+                hold = max(hold, len(text) - start)
+        start = text.rfind("<")
+        if start >= 0 and text.find(">", start) < 0:
+            hold = max(hold, len(text) - start)
+        return hold if hold <= _MARKUP_HOLD_CHARS else 0
+
+    def _budget_chars(self, content: str) -> int:
+        """페이지 문자 예산에 셀 '내용' 문자 수 — 레이아웃 블록·HTML 표 태그는 빼고 센다.
+
+        태그·블록이 델타 경계에서 쪼개지면 닫힐 때까지 잠깐 보류해(최대
+        _MARKUP_HOLD_CHARS) 마크업 조각이 내용으로 새지 않게 한다. 마크업만 반복하는
+        폭주는 토큰 예산(feed_tokens)이 그대로 막는다 — 토큰 상한이 하드 리밋이다."""
+        data = self._markup_tail + content
+        hold = self._pending_markup(data)
+        self._markup_tail = data[len(data) - hold:] if hold else ""
+        if hold:
+            data = data[: len(data) - hold]
+        return len(_BUDGET_MARKUP.sub("", data))
+
+    def _add_page_chars(self, amount: int) -> None:
+        self.page_chars += amount
+        if (
+            not self.detected
+            and self.max_page_chars is not None
+            and self.page_chars > self.max_page_chars
+        ):
+            self._trip_page_limit(
+                "page_char_limit", self.page_chars, "문자", self.max_page_chars
+            )
 
     @staticmethod
     def _partial_marker_suffix(text: str) -> int:
@@ -154,7 +208,7 @@ class SemanticRepetitionDetector:
     def _consume(self, content: str) -> None:
         if not content or self.detected:
             return
-        self.page_chars += len(content)
+        budget_chars = self._budget_chars(content)
         self._rolling = (self._rolling + content)[-_ROLLING_BUFFER_CHARS:]
         self._rolling_since_check += len(content)
 
@@ -167,14 +221,8 @@ class SemanticRepetitionDetector:
                 return
 
         self._check_rolling()
-        if (
-            not self.detected
-            and self.max_page_chars is not None
-            and self.page_chars > self.max_page_chars
-        ):
-            self._trip_page_limit(
-                "page_char_limit", self.page_chars, "문자", self.max_page_chars
-            )
+        if not self.detected:
+            self._add_page_chars(budget_chars)
 
     def _finish_line(self) -> None:
         if self._pending_line and not self.detected:
@@ -329,6 +377,7 @@ class SemanticRepetitionDetector:
             return
         self.page_chars = 0
         self.page_tokens = 0
+        self._markup_tail = ""
         self._pending_line = ""
         self._rolling = ""
         self._rolling_since_check = 0

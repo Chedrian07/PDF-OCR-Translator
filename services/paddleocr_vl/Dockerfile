@@ -9,24 +9,33 @@
 # 재현 가능한 자체 빌드를 기본으로 한다 (docs/PADDLEOCR_VL_BLACKWELL_5070TI.md).
 #
 # 요구: 호스트 NVIDIA driver가 CUDA 12.9+ 지원, nvidia container toolkit.
+# 대상 플랫폼: linux/amd64 (requirements.lock의 paddlepaddle-gpu 휠이 x86_64 전용).
 # HF 토큰은 빌드 레이어에 넣지 않는다 — compose가 runtime env로만 전달.
 
-FROM python:3.12-slim-bookworm
+# 베이스는 digest로 고정한다 — 같은 태그를 다시 빌드해도 OS 레이어가 바뀌지 않는다.
+# 갱신: `docker buildx imagetools inspect python:3.12-slim-bookworm`의 Digest로 교체한다
+# (backend/Dockerfile과 같은 값을 쓴다). 고정만 하면 OS 보안 패치가 멈추므로 아래
+# apt-get upgrade와 반드시 함께 간다.
+FROM python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
 
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         libgomp1 libglib2.0-0 libgl1 curl ccache \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv/paddleocr_vl
 
-# 1) PaddlePaddle GPU (공식 cu129 인덱스, 버전 고정 — latest 금지)
-RUN pip install --no-cache-dir paddlepaddle-gpu==3.3.1 \
-    -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
-
-# 2) PaddleOCR + sidecar 의존성 (PyPI, 버전 고정)
+# PaddlePaddle GPU + PaddleOCR + sidecar 의존성 — 전이 의존성까지 해시로 고정한 실제
+# 잠금(requirements.lock, 원천은 requirements.in)에서만 설치한다:
+#   --require-hashes : 해시가 다른 아티팩트는 설치 실패(미러·CDN 변조 차단)
+#   --no-deps        : lock 밖 패키지를 끌어오지 않는다(누락은 import 오류로 즉시 드러남)
+#   --only-binary    : 빌드 시점 소스 빌드 금지(빌드 의존성은 해시 검증 밖이다)
+# paddlepaddle-gpu는 PyPI에 없는 cu129 빌드라 lock이 공식 CDN 휠 URL을 직접 고정한다.
+# pip 캐시 마운트: lock 한 줄만 바뀌어도 ~6GB(paddle·CUDA 휠)를 다시 받지 않게 한다.
 COPY requirements.lock ./
-RUN pip install --no-cache-dir -r requirements.lock
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --require-hashes --no-deps --only-binary :all: -r requirements.lock
 
 COPY app ./app
 

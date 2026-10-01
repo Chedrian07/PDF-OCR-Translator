@@ -1715,15 +1715,76 @@ def _write_export_report(job_dir: Path, lang: str, result: PdfExportResult) -> N
         report_tmp.unlink(missing_ok=True)
 
 
+# ── 빌드 격리: export 풀 워커에서 실행 ─────────────────────────────────────
+# 빌드는 페이지마다 벡터·텍스트 분석·리댁션·저장을 하는 수십 초짜리 MuPDF 작업이다. 서버
+# 프로세스 안에서 돌리면 GIL을 쥐어 같은 프로세스의 OCR 디코드가 31.7→1.0 tok/s로 굶고
+# (감사 gap1-metal-real-e2e-2·concurrency-2), 빌드 스레드 N개는 코어 하나를 나눠 쓸 뿐이며
+# (가속비 1.00 — concurrency-3·pdf-export-9), 손상 PDF의 MuPDF 크래시가 서버를 죽인다.
+# 그래서 export 풀(PDF_EXPORT_MAX_CONCURRENT개)의 워커에서 돌리고 결과(리포트)만 받는다.
+# 잡 락·캐시 판정은 호출부(derived)가 부모 프로세스에서 그대로 쥔다.
+
+
+def _sweep_build_leftovers(directory: Path, patterns: tuple[str, ...]) -> None:
+    """종료당한 빌드 워커는 finally를 못 돌린다 — 원자적 교체용 임시 파일을 부모가 지운다.
+    같은 잡의 빌드는 잡 락으로 직렬이라 진행 중인 다른 빌드의 파일을 지우지 않는다."""
+    for pattern in patterns:
+        try:
+            leftovers = list(directory.glob(pattern))
+        except OSError:
+            return
+        for leftover in leftovers:
+            leftover.unlink(missing_ok=True)
+
+
+def _run_isolated_build(
+    target: str, args: tuple, *, what: str, leftovers: tuple[Path, tuple[str, ...]],
+):
+    """빌드 작업을 export 풀 워커에서 — 상한 초과·워커 사망·옮길 수 없는 예외는 PdfExportError."""
+    from .. import pdf_worker
+
+    timeout = pdf_worker.export_build_timeout()
+    try:
+        return pdf_worker.run(target, args, pool=pdf_worker.POOL_EXPORT, timeout=timeout)
+    except pdf_worker.PdfWorkerTimeout as error:
+        _sweep_build_leftovers(*leftovers)
+        limit = f"{timeout:g}초" if timeout else "상한"
+        raise PdfExportError(
+            f"{what}이 시간 상한({limit})을 넘어 중단했습니다 — 지나치게 크거나 복잡한 "
+            "PDF입니다 (PDF_EXPORT_BUILD_TIMEOUT_S)"
+        ) from error
+    except pdf_worker.PdfWorkerCrashed as error:
+        _sweep_build_leftovers(*leftovers)
+        raise PdfExportError(
+            f"{what} 중 처리 프로세스가 비정상 종료했습니다 — 손상되었거나 처리할 수 없는 "
+            "PDF입니다"
+        ) from error
+    except pdf_worker.PdfWorkerRemoteError as error:
+        raise PdfExportError(f"{what}에 실패했습니다 ({error.type_name})") from error
+
+
 def build_translated_pdf(
     job_dir: Path, lang: str, *, fontfile: str = "",
 ) -> PdfExportResult:
     """source.pdf + layout.json + layout.{lang}.json → export.{lang}.pdf (원자적 교체).
 
-    실패는 전부 PdfExportError(사용자에게 그대로 보여 줄 수 있는 문구)로 낸다. 예전에는
-    fitz.open만 감싸 페이지 조판·저장 중의 MuPDF·조판 예외가 그대로 새어 /pdf·/page가
-    문구 없는 500을 내고 예열 스레드가 traceback을 남겼다(호출부 derived._call_builder는
-    MuPDF 예외만 정규화한다). 원래 예외는 서버 로그와 예외 사슬(__cause__)에 남긴다.
+    export 풀 워커에서 실행한다(위 '빌드 격리' — 시간 상한 PDF_EXPORT_BUILD_TIMEOUT_S).
+    실패는 전부 PdfExportError(사용자에게 그대로 보여 줄 수 있는 문구)로 낸다.
+    """
+    return _run_isolated_build(
+        "app.pipeline.pdf_export.build:translated_pdf_local",
+        (job_dir, lang, fontfile),
+        what="번역 PDF 생성",
+        leftovers=(job_dir, (f".export.{lang}.*.tmp",)),
+    )
+
+
+def translated_pdf_local(job_dir: Path, lang: str, fontfile: str = "") -> PdfExportResult:
+    """(PDF 워커) build_translated_pdf의 본체.
+
+    실패는 전부 PdfExportError로 낸다. 예전에는 fitz.open만 감싸 페이지 조판·저장 중의
+    MuPDF·조판 예외가 그대로 새어 /pdf·/page가 문구 없는 500을 내고 예열 스레드가
+    traceback을 남겼다(호출부 derived._call_builder는 MuPDF 예외만 정규화한다). 원래 예외는
+    로그와 예외 사슬(__cause__)에 남긴다.
     """
     try:
         return _build_translated_pdf(job_dir, lang, fontfile=fontfile)
@@ -1838,8 +1899,18 @@ def build_dual_pdf(source_pdf: Path, translated_pdf: Path, out: Path) -> Path:
     각 출력 페이지는 왼쪽에 원본, 오른쪽에 같은 번호의 번역 페이지를 원래 크기로
     배치한다. ``show_pdf_page``를 써서 래스터화하지 않으므로 텍스트 선택·벡터
     그림·원본 해상도를 보존한다. 두 입력의 페이지 수가 다르면 잘못 짝지은 대조본을
-    만들지 않고 명시적으로 실패한다.
+    만들지 않고 명시적으로 실패한다. export 풀 워커에서 실행한다(위 '빌드 격리').
     """
+    return _run_isolated_build(
+        "app.pipeline.pdf_export.build:dual_pdf_local",
+        (source_pdf, translated_pdf, out),
+        what="원문·번역 대조 PDF 생성",
+        leftovers=(out.parent, (f".{out.stem}.*.tmp",)),
+    )
+
+
+def dual_pdf_local(source_pdf: Path, translated_pdf: Path, out: Path) -> Path:
+    """(PDF 워커) build_dual_pdf의 본체."""
     for path, message in (
         (source_pdf, "원본 PDF가 없습니다"),
         (translated_pdf, "번역 PDF가 없습니다 — 먼저 번역 PDF를 생성하세요"),

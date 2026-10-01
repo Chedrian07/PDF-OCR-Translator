@@ -90,8 +90,8 @@ SwitchGLU 소배치 가속·오프로드 경로.
 | 1쪽 멀티 cap 384 (bf16) | 토큰 ids가 스파이크 수정 bf16 실행과 384/384 동일, MPS bf16 레퍼런스와 첫 분기 122(스파이크와 같음). TTFT 0.14 s(콜드 0.61 s), 디코드 304–308 tok/s(경합 시 266–281), 피크 8.26 GB |
 | 8쪽 청크 (bf16, 무제한) | 8366토큰, 출력이 스파이크 `p8_mlx_fix_bf16.md`와 **완전 동일**(문자 유사도 1.0000). 30.4–31.6 s = 3.80–3.95 s/쪽, 276–288 tok/s, 피크 8.27 GB, `<PAGE>` 8, det 100, 텍스트층 재현율 0.9748(MPS 0.9748) |
 | 단일 gundam 1쪽 (12타일, P=1517) | bf16 3.1 s(TTFT 0.65 s, 291 tok/s)·fp32 5.0 s, 둘 다 675토큰. torch CPU fp32 앱 경로(19.6 s)와 처리된 마크다운·raw_pages·파일 집합이 **동일** |
-| 워밍업 `warmup()` | 0.48 s(두 모드) 뒤 멀티 1쪽 TTFT 0.144 s·gundam 12타일 TTFT 0.62 s (워밍업 없는 첫 실행 0.61 s) |
-| fp32 로짓 vs torch CPU fp32 | 멀티(+16토큰) 1.43e-5, gundam(2x1 타일) 7.2e-5, gundam 1쪽 전체 6.9e-5 — 모두 top-5 동일 |
+| 워밍업 `warmup()` | 0.48 s(두 모드) 뒤 멀티 1쪽 TTFT 0.144 s·gundam 12타일 TTFT 0.62 s (워밍업 없이 첫 멀티 실행은 TTFT 0.61 s) |
+| fp32 로짓 vs torch CPU fp32 | 멀티(+16토큰) 1.43e-5, gundam(2x1 타일) 7.2e-5, gundam 1쪽 전체 6.9e-5 — 모두 top-5 동일. gundam 1쪽 링 캐시 디코드 12스텝(프리필 포함 13개 로짓) 상대오차 1.0e-5–6.9e-5, 매 스텝 argmax 동일 |
 
 opt-in 실가중치 테스트: `OCR_MLX_REAL_TESTS=1`(tests/test_mlx_model_parity.py — bf16 그리디
 첫 64토큰 고정, torch CPU fp32 로짓 비교).

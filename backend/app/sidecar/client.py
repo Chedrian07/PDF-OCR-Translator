@@ -87,7 +87,12 @@ class SidecarTimeoutError(SidecarUnavailableError):
     """읽기 응답 시간 초과 — provider는 살아서 그 페이지를 계속 추론 중일 수 있다.
 
     다른 unavailable 오류와 달리 **같은 페이지의 즉시 재요청은 GPU 중복 추론**이라
-    엔진의 복귀-대기 재시도 경로에서 제외한다 (상위 runner의 청크 재시도만 담당)."""
+    엔진의 복귀-대기 재시도 경로에서 제외한다. runner의 1회 재시도도 하지 않는다
+    (`retry_same_page=False`): sidecar는 끊긴 요청의 추론도 끝까지 하고 추론을
+    직렬화하므로, 즉시 보낸 재요청은 버려진 추론 뒤에 줄을 서 다시 타임아웃이 난다
+    (페이지당 2배 시간 + GPU 중복 점유). 곧바로 페이지 격리(텍스트 레이어 폴백)로 간다."""
+
+    retry_same_page = False
 
 
 class SidecarProtocolError(SidecarError):
@@ -139,22 +144,24 @@ class SidecarClient:
 
     def health(self) -> SidecarHealth:
         url = f"{self.base_url}/health"
+        # 연결과 **본문 읽기**를 같은 매핑 아래 둔다 — 재기동 중인 sidecar가 응답 도중
+        # 끊으면 iter_content가 ChunkedEncodingError·ConnectionError를 내는데, 매핑하지
+        # 않으면 준비 대기(transient 판정)를 그대로 통과해 잡이 '모델 로드 실패'로 끝난다.
         try:
             resp = self._get_session().get(
                 url, timeout=(self.connect_timeout_s, self.health_timeout_s), stream=True
             )
+            with resp:
+                body = self._read_capped(resp, _HEALTH_MAX_BYTES)
+                status = resp.status_code
         except requests.exceptions.Timeout as e:
             raise SidecarUnavailableError("sidecar health 응답 시간 초과") from e
         except requests.exceptions.RequestException as e:
             raise SidecarUnavailableError(
                 f"sidecar({self.base_url})에 연결할 수 없습니다 — 컨테이너 기동/프로필을 확인하세요"
             ) from e
-        with resp:
-            body = self._read_capped(resp, _HEALTH_MAX_BYTES)
-            if resp.status_code != 200:
-                raise SidecarUnavailableError(
-                    f"sidecar health가 HTTP {resp.status_code}를 반환했습니다"
-                )
+        if status != 200:
+            raise SidecarUnavailableError(f"sidecar health가 HTTP {status}를 반환했습니다")
         data = self._parse_json(body, context="health")
         try:
             h = SidecarHealth.model_validate(data)

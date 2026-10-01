@@ -481,8 +481,12 @@ def _plan_text_block(
     old = _plain_text(source_raw)
     # 번역문의 마크다운 표기를 걷어내고, 원문이 한 문단이면 문단 구조도 맞춘다 —
     # 둘 다 지면에 그대로 찍히거나(마커) 높이를 부풀려 블록을 통째로 버리게 한다.
+    # 원문을 함께 넘겨 원문에 실제로 있던 목록·`>`·`*`/`__` 표기는 지우지 않는다.
     new = _plain_text(
-        strip_markdown(match_paragraph_shape(source_raw, str(tb.get("content") or "")))
+        strip_markdown(
+            match_paragraph_shape(source_raw, str(tb.get("content") or "")),
+            source_raw,
+        )
     )
     if block_type == "title":
         new = _restore_title_prefix(old, new)

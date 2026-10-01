@@ -103,9 +103,13 @@ def layout_has_text_blocks(pages) -> bool:
     return False
 
 
-@functools.lru_cache(maxsize=64)
+@functools.lru_cache(maxsize=1024)
 def _usable_layout_file(path: str, mtime_ns: int, size: int) -> bool:
-    """(경로, mtime, 크기)별 판정 캐시 — 요청마다 layout 전체를 재파싱하지 않는다."""
+    """(경로, mtime, 크기)별 판정 캐시 — 요청마다 layout 전체를 재파싱하지 않는다.
+
+    잡 목록(GET /api/jobs — 5초 주기 폴링, 한 쪽 최대 500건)도 잡마다 has_layout을 이
+    판정으로 낸다. 캐시가 목록보다 작으면 같은 순서로 도는 폴링이 LRU를 매번 전부
+    밀어내 모든 layout.json을 다시 파싱한다 — 한 쪽 상한보다 넉넉히 둔다(항목은 수백 B)."""
     try:
         pages = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):

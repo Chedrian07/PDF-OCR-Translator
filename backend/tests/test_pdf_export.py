@@ -536,6 +536,49 @@ def test_참고문헌_중복scheme_url은_미세교정으로_한번만_남는다
     assert uris == ["https://example.test/paper"], uris
 
 
+def test_참고문헌_Tulu_미세교정은_폰트에_없는_글리프를_찍지_않는다(tmp_path):
+    """`T\\"ulu 3:`로 깨진 bib 교정이 serif 폰트에 없는 'ü'를 그대로 찍어 tofu를 만들던 회귀.
+
+    AppleMyungjo처럼 'ü'가 없는 폰트에서는 다른 번역문과 같은 이식성 보정으로
+    'Tulu 3:'을 찍고, 글리프가 있는 폰트(Noto CJK)는 'Tülu 3:'을 그대로 찍는다.
+    어느 쪽이든 추출 텍스트에 U+0000이 섞이면 안 된다.
+    """
+    import fitz
+
+    fontfile, _name = _resolve_font("")
+    if fontfile is None:
+        pytest.skip("파일 기반 한글 폰트가 없다")
+    job_dir = tmp_path / "tulu-job"
+    job_dir.mkdir()
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((60, 100), "T", fontsize=9, fontname="tiro")
+    page.insert_text((65.5, 100), "\\", fontsize=9, fontname="cour")
+    page.insert_text((71, 100), '"ulu 3:', fontsize=9, fontname="tiro")
+    # 실제 bib처럼 뒤 제목은 다른 글꼴(이탤릭) span이다.
+    page.insert_text((100, 100), "Open frontiers", fontsize=9, fontname="tiit")
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+
+    content = 'T\\"ulu 3: Open frontiers'
+    original = [{"page": 1, "width": 595, "height": 842, "blocks": [{
+        "type": "ref_text",
+        "bbox": [round(58 / 595 * 999), round(88 / 842 * 999),
+                 round(300 / 595 * 999), round(104 / 842 * 999)],
+        "content": content,
+        "fs": 9 / 595 * 100,
+    }]}]
+    (job_dir / "layout.json").write_text(json.dumps(original), encoding="utf-8")
+    (job_dir / "layout.ko.json").write_text(json.dumps(original), encoding="utf-8")
+
+    result = build_translated_pdf(job_dir, "ko", fontfile=fontfile)
+    text = _pdf_text(result.path.read_bytes())
+    expected = _portable_text_for_font("Tülu 3:", fontfile)
+    assert expected in text, text
+    assert "\x00" not in text, repr(text)
+    assert "Open frontiers" in text, text
+
+
 def test_build_redaction_includes_source_glyphs_past_ocr_bbox(tmp_path):
     """OCR bbox 밖으로 조금 나온 긴 원문 span 꼬리도 번역문 옆에 남기지 않는다."""
     import fitz

@@ -505,10 +505,7 @@ def _plan_single_line(
     축소하는 문제가 있다. 줄바꿈이 필요 없고 가로 폭이 맞는 경우에는 폰트 메트릭으로
     baseline을 계산해 `insert_text()` 경로를 사용한다.
     """
-    # insert_text()의 origin은 회전 전 PDF 좌표지만 표시 bbox는 회전 좌표다.
-    # 여기서 단순 baseline을 계산하면 90/270도 페이지의 끝 글자가 재단된다.
-    # 회전 페이지는 실제 textbox dry-run과 동일한 조판 경로만 사용한다.
-    if page.rotation != 0 or not text or "\n" in text:
+    if not text or "\n" in text:
         return None
     fitz = quiet_fitz()
     try:
@@ -522,8 +519,26 @@ def _plan_single_line(
         return None
     capacity_box = +vertical
     capacity_box.include_rect(working)
+    # 계획 사각형은 비회전 PDF 좌표지만 줄은 **화면(표시) 공간**에서 가로로 놓인다.
+    # 회전 페이지에서 비회전 좌표로 baseline을 계산하면 90/270도 페이지의 끝 글자가
+    # 재단되므로, 줄 기하는 표시 공간에서 계산하고 결과(origin·잉크)만 비회전 좌표로
+    # 되돌린다. insert_text(origin, rotate=page.rotation)가 그 점에서 화면상 가로로
+    # 쓴다. 예전에는 회전 페이지에서 이 경로를 통째로 꺼서, 얕은 OCR 상자의 모든
+    # 줄이 textbox 경로의 최후 수단 축소(≈0.7배)로 떨어졌다. 회전 0이면 항등 변환이다.
+    to_display = page.rotation_matrix
+    to_page = page.derotation_matrix
+
+    def _shown(value):
+        out = value * to_display
+        out.normalize()
+        return out
+
+    vertical = _shown(vertical)
+    working_page = working
+    working = _shown(working)
     if _text_exceeds_box_capacity(
-        text, capacity_box, font, fontname, fontfile, base_pt, scales, (None,), 0,
+        text, _shown(capacity_box), font, fontname, fontfile, base_pt, scales,
+        (None,), 0,
     ):
         return None
     avoid = avoid_rects or []
@@ -590,18 +605,22 @@ def _plan_single_line(
         )
         if bold:
             ink += (-0.5, -0.5, 0.5, 0.5)
+        # 충돌 판정·예약은 다른 계획들과 같은 비회전 좌표로 한다.
+        ink = ink * to_page
+        ink.normalize()
         if _ink_collides(ink, avoid):
             continue
+        origin = fitz.Point(x, baseline) * to_page
         return _TextFitPlan(
-            +working,
+            +working_page,
             size,
             False,
             align,
             bold,
             None,
-            (float(x), float(baseline)),
+            (float(origin.x), float(origin.y)),
             ink,
-            (float(x), float(baseline)),
+            (float(origin.x), float(origin.y)),
         )
     return None
 

@@ -1,9 +1,14 @@
-import { createGroundState } from './core.js';
+import { JOB_LIST_PAGE, createGroundState } from './core.js';
 
 /* ============================ State ============================ */
 
 export const state = {
   jobs: [],
+  // 사이드바 목록 창 — 최신 jobListLimit개를 5초마다 다시 받는다('더 보기'가 한 쪽씩 늘린다).
+  jobListLimit: JOB_LIST_PAGE,
+  jobsHasMore: false,       // 서버가 창 뒤에 잡이 더 있다고 했는가 (구버전 서버는 false)
+  jobsTotal: null,          // 전체 잡 수 (모르면 null)
+  jobsLoadingMore: false,   // '더 보기' 요청 중 — 연타·중복 요청 방지
   currentJobId: null,
   displayedStatus: null,
   displayedPhase: null,   // 마지막 진행 phase — loading→render 전이에서 라이브 뷰 오픈 판정
@@ -183,6 +188,7 @@ export const EL_IDS = {
   dpiInput: 'dpi-input',
   jobList: 'job-list',
   jobListEmpty: 'job-list-empty',
+  jobListMore: 'job-list-more',
   emptyState: 'empty-state',
   jobView: 'job-view',
   jobChip: 'job-status-chip',

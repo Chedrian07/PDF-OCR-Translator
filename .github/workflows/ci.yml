@@ -15,6 +15,10 @@ on:
     - cron: "0 18 * * *"
   workflow_dispatch:
 
+# 액션은 전부 전체 커밋 SHA로 고정하고 버전은 주석으로 남긴다 — 태그는 다른 커밋으로
+# 다시 밀릴 수 있다(2025 tj-actions/changed-files 유형). 갱신은 Dependabot이 PR로 연다
+# (.github/dependabot.yml). checkout은 persist-credentials: false — 이후 단계가 토큰을
+# .git/config에서 읽을 수 없게 한다(CI는 push하지 않는다).
 permissions:
   contents: read
 
@@ -25,8 +29,10 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -43,7 +49,7 @@ jobs:
       # --with로 임시 설치한다(설정은 backend/pyproject.toml [tool.coverage.*]).
       - name: pytest (+ coverage)
         run: uv run --locked --with pytest-cov pytest --cov --cov-report=term --cov-report=xml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: backend-coverage
@@ -62,8 +68,10 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -94,8 +102,10 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -109,8 +119,10 @@ jobs:
   frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
       # 의존성 설치 불필요 — 빌드 스텝/외부 의존성 없는 정적 프론트엔드.
@@ -123,8 +135,10 @@ jobs:
       run:
         working-directory: native
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
       # native/README.md의 단독 테스트 절차 그대로. 빌드 체인(scikit-build-core·
       # pybind11·ninja)은 PEP 517 격리 빌드로 자동 해결, cmake·C++17은 러너 기본 제공.
       - name: Build (pybind11 C++)
@@ -146,8 +160,10 @@ jobs:
       run:
         working-directory: services/${{ matrix.svc }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
       - name: pytest (파서/어댑터)
         run: |
           uv venv --python 3.12 .venv
@@ -165,8 +181,10 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -181,7 +199,7 @@ jobs:
       # --work: 리포 밖(RUNNER_TEMP)에 두어 산출물이 작업 트리를 오염시키지 않게.
       - name: verify-e2e (실 PDF 6페이지 · 업로드→OCR→번역→PDF→뷰어→보안→결함주입)
         run: .venv/bin/python ../scripts/verify_e2e.py --pages 6 --work "$RUNNER_TEMP/verify-e2e"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: verify-e2e-artifacts
@@ -200,8 +218,10 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -212,7 +232,7 @@ jobs:
       # backend 잡과 동일 이유 — 한국어 PDF 내보내기 검증에 CJK 폰트가 필요하다.
       - name: Install CJK fonts
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
       - name: Install playwright chromium
@@ -221,7 +241,7 @@ jobs:
       - name: mock full-flow E2E
         run: npm run test:e2e-mock
         working-directory: frontend
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: e2e-mock-shots

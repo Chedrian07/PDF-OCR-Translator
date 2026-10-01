@@ -28,6 +28,7 @@ from fastapi.responses import (
 
 from . import native_ops
 from .config import RENDER_DPI_MAX, RENDER_DPI_MIN
+from .jobs import SubscriberLimitError
 from .pipeline import artifacts, derived
 from .pipeline.derived import PdfExportBusyError
 from .pipeline.pdf import probe_pdf, render_pdf_pages
@@ -618,6 +619,21 @@ def _sse_poll(q: queue.Queue):
         return None
 
 
+# 구독자 상한(jobs.EventBroker)에 닿았을 때 — 재시도 대상(503 + Retry-After)이다.
+# EventSource는 200이 아닌 응답이면 재연결하지 않으므로 프런트는 폴링으로 넘어간다.
+_SSE_BUSY_RETRY_AFTER_S = 5
+_SSE_BUSY_RETRY = f"retry: {_SSE_BUSY_RETRY_AFTER_S * 1000}\n\n"
+
+
+def _require_sse_room(broker, channel: str) -> None:
+    if not broker.has_room(channel):
+        raise HTTPException(
+            503,
+            "실시간 스트림 연결이 너무 많습니다 — 잠시 후 다시 시도하세요",
+            headers={"Retry-After": str(_SSE_BUSY_RETRY_AFTER_S)},
+        )
+
+
 def _sse_should_stop(request: Request) -> bool:
     """SSE 루프를 끝낼 때인가 — 서버 정상 종료가 시작됐으면 참(main.ShutdownSignal).
 
@@ -633,11 +649,17 @@ async def job_events(request: Request, job_id: str) -> StreamingResponse:
     job = _get_job(request, job_id)
     broker = _state(request).broker
     store = _state(request).store
+    _require_sse_room(broker, job_id)
 
     async def gen():
         # 구독 등록과 이전 토큰 스냅샷을 원자적으로 수행 — 업로드 응답과
         # EventSource 연결 사이, 또는 자동 재연결 동안 생성된 출력도 복구한다.
-        q, replay, replay_truncated = broker.subscribe_with_replay(job_id)
+        try:
+            q, replay, replay_truncated = broker.subscribe_with_replay(job_id)
+        except SubscriberLimitError:
+            # 위 판정 뒤 경합으로 상한에 닿았다 — 이벤트 없이 닫고 재연결을 늦춘다.
+            yield _SSE_BUSY_RETRY
+            return
         try:
             yield "retry: 3000\n\n"
             # 접속 시 스냅샷
@@ -1681,6 +1703,7 @@ async def translate_events(request: Request, job_id: str, lang: str = "ko") -> S
         raise HTTPException(404, "번역 상태가 없습니다")
     broker = st.broker
     channel = _translate_channel(job_id, lang)
+    _require_sse_room(broker, channel)
 
     def _done_data() -> dict:
         return {
@@ -1694,7 +1717,11 @@ async def translate_events(request: Request, job_id: str, lang: str = "ko") -> S
         # 구독 먼저, 그 다음 스냅샷 재조회 — job_events와 같은 순서라 구독~완료 사이 이벤트를
         # 놓치지 않는다 (엔진이 state를 먼저 쓰고 스레드가 이후 done/error를 발행하므로,
         # 스냅샷이 running이면 종료 이벤트는 아직 큐로 들어온다).
-        q = broker.subscribe(channel)
+        try:
+            q = broker.subscribe(channel)
+        except SubscriberLimitError:
+            yield _SSE_BUSY_RETRY
+            return
         try:
             yield "retry: 3000\n\n"
             state = _stale_adjusted_state(request, job, lang) or {"status": "none"}

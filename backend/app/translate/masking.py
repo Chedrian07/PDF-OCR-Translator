@@ -58,6 +58,16 @@ _TOKEN_RE = re.compile(
 # 복원·잔여 검사에 쓰는 플레이스홀더 인식 패턴 (id 접두 = 종류 코드)
 _PLACEHOLDER_RE = re.compile(r"<[mkgucft]\d+\b[^>]*>")
 _RESIDUAL_RE = re.compile(r"<[mkgucft]\d+")
+# 관용 복원 — 한 번의 스캔으로 모든 id를 찾는다. `<m1>`, `< m1 />`, 속성 변형(값 바뀜·
+# 작은따옴표·따옴표 없음) 허용. 단 속성은 `이름=값` 꼴만 받는다 — 원문 산문의 `i<k1; i++)`
+# 이나 `<k1 and x>`가 다음 플레이스홀더의 '>'까지 삼키거나 플레이스홀더로 오인되지 않게.
+_PH_ATTRS = r"(?:\s+[A-Za-z_-]+\s*=\s*(?:\"[^\"<>]*\"|'[^'<>]*'|[^\s\"'<>/]+))*"
+_ANY_PLACEHOLDER_RE = re.compile(r"<\s*([mkgucft]\d+)\b(" + _PH_ATTRS + r")\s*/?\s*>")
+# 모델이 XML 습관으로 만든 쌍 태그 — 빈 쌍(`<m2 v="L"></m2>`)은 자기 닫힘과 같다.
+_EMPTY_PAIR_RE = re.compile(
+    r"<\s*([mkgucft]\d+)\b(" + _PH_ATTRS + r")\s*/?\s*>\s*<\s*/\s*\1\s*>"
+)
+_CLOSE_TAG_RE = re.compile(r"<\s*/\s*[mkgucft]\d+\s*>")
 
 
 def _preview(s: str) -> str:
@@ -116,26 +126,47 @@ def _lenient_re(pid: str) -> re.Pattern:
     return re.compile(r"<\s*" + re.escape(pid) + r"\b[^>]*?/?\s*>")
 
 
-def unmask(translated: str, mapping: dict[str, str]) -> tuple[str, list[str], list[str]]:
+def unmask(
+    translated: str, mapping: dict[str, str], masked_src: str = "",
+) -> tuple[str, list[str], list[str]]:
     """플레이스홀더를 원문으로 복원. (복원문, missing_ids, dup_ids) 반환.
 
     각 id는 정확히 1회 등장이 정상 — 0회는 missing, 2회 이상은 dup(전부 복원하되
-    실패로 보고). 복원 후에도 남은 `<m1`류 잔여물이 있으면 dup에 추가한다.
+    실패로 보고). 모델 출력에 남은 `<m1`류 잔여물·닫는 태그(`</m2>`)·모르는 id도
+    dup에 넣는다.
+
+    **모델 출력을 한 번만 스캔한다**(translate-llm-9). 종전에는 id마다 복원된 텍스트를
+    다시 훑어서, 원문 코드·수식에 `i<k1`·`$0<t1$` 같은 문자열이 있으면 완벽한 번역도
+    dup으로 영구 실패했고, 원문의 `x<c2>y`가 뒤 id 자리를 차지해 빠진 인용을 놓쳤다.
+    masked_src를 주면 원문 산문에 원래 있던 `<t1`류 문자열은 잔여로 세지 않는다.
     """
-    missing: list[str] = []
-    dup: list[str] = []
-    out = translated
-    for pid, original in mapping.items():
-        pat = _lenient_re(pid)
-        n = len(pat.findall(out))
-        if n == 0:
-            missing.append(pid)
-        elif n >= 2:
-            dup.append(pid)
-        # 개수와 무관하게 전부 복원 (lambda로 원문의 백슬래시·그룹참조를 리터럴 취급)
-        out = pat.sub(lambda _m, _o=original: _o, out)
-    for m in _RESIDUAL_RE.finditer(out):
-        dup.append(m.group())
+    counts = dict.fromkeys(mapping, 0)
+    unknown: list[str] = []
+    # 빈 쌍 태그는 자기 닫힘 하나로 접는다. 내용이 든 쌍은 닫는 태그가 남아 dup이 된다
+    # — 종전에는 '</f1>'·'Figure 2그림 2'가 그대로 산출물에 박혔다(translate-llm-10).
+    text = _EMPTY_PAIR_RE.sub(r"<\1\2/>", translated)
+
+    def _restore(m: re.Match) -> str:
+        pid = m.group(1)
+        if pid not in counts:
+            unknown.append(m.group(0))
+            return m.group(0)
+        counts[pid] += 1
+        return mapping[pid]  # 함수 치환 — 원문의 백슬래시·그룹참조를 리터럴로 둔다
+
+    out = _ANY_PLACEHOLDER_RE.sub(_restore, text)
+    missing = [pid for pid, n in counts.items() if n == 0]
+    dup = [pid for pid, n in counts.items() if n >= 2]
+    dup.extend(unknown)
+    leftover = _ANY_PLACEHOLDER_RE.sub(" ", text)
+    expected = _ANY_PLACEHOLDER_RE.sub(" ", masked_src)
+    for pattern in (_RESIDUAL_RE, _CLOSE_TAG_RE):
+        allowed = pattern.findall(expected)
+        for found in pattern.findall(leftover):
+            if found in allowed:
+                allowed.remove(found)  # 원문 산문에 원래 있던 문자열
+            else:
+                dup.append(found)
     return out, missing, dup
 
 

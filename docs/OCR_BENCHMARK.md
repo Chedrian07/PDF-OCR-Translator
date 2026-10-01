@@ -10,6 +10,21 @@ Markdown 문자 수/표·수식·figure 수/warning 수/실패 페이지 수/pea
 ground truth 제공 시에만 normalized edit distance·CER·구조 일치도·figure IoU 추가.
 **GT 없이 정확도 점수를 만들지 않는다** — 구조 집계는 존재 확인용이다.
 
+**시간 측정 방식 (2026-10 변경)** — 예전 벤치마크는 잡 상태를 **2초 간격**으로 폴링한
+벽시계였다. 몇 초 안에 끝나는 짧은 문서는 2초 단위로 양자화돼 엔진 사이 속도비가 수 배까지
+틀릴 수 있었고(아래 2026-07-20 표의 Ovis 1.1 s/page가 그 값이다), 스택을 막 띄운 직후의
+첫 문서는 vLLM 컴파일 시간을 포함했다. 지금은:
+
+- 측정 전에 health의 `model_loaded`를 기다리고(`--model-wait`, 기본 1800초),
+  endpoint마다 첫 PDF로 `--warmup N`번(기본 1, 0=끔) 돌리고 기록하지 않는다 — 콜드
+  스타트(모델 준비·컴파일)를 결과에서 뺀다.
+- 0.25초 간격으로 폴링해 `running` 관측 → 완료 관측을 **처리 시간**(`process_s`)으로 잰다.
+  `s/page`(`avg_page_s`)는 이 처리 시간을 페이지 수로 나눈 값이다.
+- 새 열: `upload_s`(업로드) · `queue_s`(대기열) · `process_s`(처리) ·
+  `timing_resolution_s`(폴링 간격 = 오차 상한). 업로드·대기를 포함한 벽시계는 `total_s`로
+  따로 남는다. 서버 쪽 잡 시각은 meta·`GET /api/jobs/{id}`의 `started_at`·`finished_at`
+  (UTC ISO, 초 단위)으로도 볼 수 있다.
+
 ### 실측 (2026-07-20, RTX 5070 Ti 16GB · WSL2 · driver 591.86)
 
 `scripts/benchmark_ocr_engines.py`로 **동일 입력·동일 절차**로 순차 측정한 결과다
@@ -31,7 +46,13 @@ uv run python ../scripts/make_sample_pdf.py <dir>/ko-report.pdf --korean  # 한�
 **⚠ 콜드 스타트를 시간에서 반드시 분리할 것**: OvisOCR2의 **첫 요청**은 vLLM
 그래프 컴파일 때문에 2페이지에 40~43초가 걸린다(실측 42.8s). 위 표는 그 이후의
 정상 상태 수치다 — 컨테이너를 새로 띄운 직후 한 번 측정하고 "20초/페이지"라고
-적으면 20배 틀린 값이 된다(이 문서의 초판이 그 오류를 냈다).
+적으면 20배 틀린 값이 된다(이 문서의 초판이 그 오류를 냈다). 지금은 `--warmup`이
+이 첫 요청을 기록에서 뺀다.
+
+**⚠ 위 표는 2초 폴링 시절 값이다**: 전체 시간이 2~12초인 1~2쪽 문서라 `total(s)`·
+`s/page`의 해상도가 ±2초다. 특히 Ovis의 1.1 s/page는 폴링 간격보다 작은 값이라 믿을 수
+없다 — 처리 속도 비교는 아래 25쪽 실문서 결과(Ovis 3.3 s/p, Paddle 17.6 s/p)를 쓰고,
+GPU 호스트에서 새 측정 방식으로 다시 잰다.
 
 ### 한국어 텍스트 정확도 (같은 입력, 실측 출력 대조)
 
@@ -71,13 +92,83 @@ Paddle, 길고 밀집한 영문 문서는 Ovis가 유리하다는 앞의 결론�
 > 실측 출력 대조로 확인). 정량 정확도가 필요하면 정답 md를 만들어
 > `--ground-truth`로 측정할 것.
 
+## Apple Silicon 실측 — Unlimited-OCR (MLX · torch MPS)
+
+**환경**: Apple M4 Max(16코어, 128 GB) · macOS · mlx 0.32.3 · torch 2.10.0 · bf16 ·
+고정 스냅샷 `ee63731b`, 입력은 `sample/2504.19874v1.pdf`(25쪽 2단 논문)와 그 앞 16쪽,
+200 dpi. 2026-10 개선 작업 중 측정했고 **상당수는 다른 작업이 GPU·CPU를 함께 쓰던
+때의 값**이다(아래 '조건' 열). 정식 기준선은 Phase 4에서 순차로 다시 잰다 — 이 절과
+README의 요약표를 함께 갱신할 것.
+
+### MLX 엔진 (`OCR_DEVICE=auto`/`mlx`, Apple Silicon 기본)
+
+| 측정 | 결과 | 조건 |
+|---|---|---|
+| 8쪽 청크 1개 (벤더 수준, 무제한 생성) | 30.4–31.6 s = **3.80–3.95 s/쪽**, 276–288 tok/s, 8,366토큰, 피크 8.27 GB | 다른 레인이 GPU 사용 중 |
+| 25쪽 문서 (8/8/8/1쪽 청크) | **97.9 s = 3.92 s/쪽**, 청크 뒤 활성 메모리 6.67 GB로 복귀 | 〃 |
+| 앱 파이프라인 16쪽 (청크 2개) | 청크 30.15 s·33.42 s = **3.97 s/쪽**, 290 tok/s, 청크당 TTFT 1.01 s, 잡 전체 71.2 s(렌더·충실도 게이트·병합 포함 **4.45 s/쪽**) | GPU 단독 |
+| 앱 파이프라인 16쪽, 8비트(`OCR_MLX_QUANT_BITS=8`) | 청크 20.76 s·23.1 s = **2.74 s/쪽**, 430 tok/s, 잡 전체 49.7 s | GPU 단독 |
+| 8쪽 청크, 8비트 (벤더 수준) | 21.5 s = 2.69 s/쪽, 413 tok/s, 파라미터 3.92 GB·피크 5.52 GB | 다른 레인이 GPU 사용 중 |
+| 단독 1쪽 (gundam 12타일, 프롬프트 1,517토큰) | bf16 3.1 s (TTFT 0.65 s, 291 tok/s) · fp32 5.0 s | 〃 |
+| per_page 잡 (그림 4쪽) | `run_single` 쪽당 2.8–4.9 s, 298 tok/s | GPU 단독 |
+| 1쪽 멀티 (캡 384토큰) | TTFT 0.14 s, 304–308 tok/s (다른 레인과 경합 시 266–281) | — |
+| 모델 준비 | 로드 1.4–1.6 s + 워밍업 0.45–0.48 s, 웜 2.2 s · 외장 볼륨 콜드 8.9 s | — |
+| 파라미터 메모리 | bf16 6.67 GB · 8비트 3.92 GB | — |
+| 생성 중 취소 | `cancel` 후 27 ms 안에 반환(부분 출력 저장 포함) | — |
+| MAX_LENGTH 잘림 복구 | 4쪽 청크를 `MAX_LENGTH=4000`으로 잘라 앞 3쪽 유지 + 단독 1회, 15.3 s | — |
+| 연속 잡 5회 (8쪽 실가중치, 한 프로세스) | RSS 로드 후 2,302 MB → 2,627/2,629/2,645/2,645/2,647 MB, phys_footprint 6,979 → 7,300–7,321 MB, MLX 활성 메모리 6,363 MB 고정, 피크 ≈7.9 GB, 잡당 28–35 s (첫 잡만 워밍업 +≈325 MB) | — |
+
+- **품질**: 텍스트 레이어 재현율 0.9748로 torch MPS와 같다(8쪽 청크). 8비트도 0.9748,
+  bf16 대비 문자 유사도 0.9995. 앱 16쪽의 충실도 평균은 bf16 0.908 · 8비트 0.906.
+  4비트는 arXiv 번호 2504를 2304로 읽어 지원하지 않는다.
+- **토큰 동일성**: MLX bf16은 torch MPS bf16과 토큰 단위로 같지 않다(1쪽 첫 분기 122번째
+  토큰 — MPS의 fp16과 bf16끼리도 같은 지점에서 갈린다). 회귀 판정은 토큰 일치가 아니라
+  유사도·재현율로 한다. fp32에서는 torch CPU와 로짓 상대오차 1e-5 수준으로 맞는다
+  (`backend/app/vendor/unlimited_ocr_mlx/PROVENANCE.md`).
+
+### PyMuPDF 프로세스 격리의 효과 (MLX bf16, 16쪽 = 8쪽 청크 2개)
+
+번역 PDF 빌드가 같은 서버에서 동시에 돌 때 OCR 디코드 속도(같은 문서·같은 머신):
+
+| 실행 | 디코드 tok/s (청크 1 / 청크 2) | OCR 시간 |
+|---|---|---|
+| 워커 프로세스, 빌드 없음 | 289.2 / 288.9 | 65.8 s |
+| 워커 프로세스, OCR 내내 빌드 실행(56.7 s·51.3 s 두 건) | 291.0 / 290.8 | 64.7 s |
+| 예전 방식(서버 프로세스 안, `PDF_WORKER_MODE=inline`), 같은 빌드 | 70.1 / 69.1 | 275.6 s |
+
+inline 실행은 TTFT도 1.02 s → 2.60 s로 늘었다. MuPDF 호출이 GIL을 쥔 채 돌아 디코드
+루프가 토큰마다 GIL을 기다린 것이다(ARCHITECTURE §18).
+
+### torch MPS 폴백 (`make dev-metal`, `OCR_DEVICE=metal`)
+
+벤더 P17(융합 MoE 기본)·P20(eager int 링 슬롯)·정적 ngram 창·ObjC 오토릴리스 풀 적용
+전후, 같은 입력에서 출력 토큰 동일. 다른 레인이 머신을 쓰던 중(load average 3–6.6)이라
+보수적인 값이다:
+
+| 측정 | 적용 전 | 적용 후 |
+|---|---|---|
+| 1쪽 캡 384토큰 (웜) | 42.5–44.9 tok/s | **91.3–96.2 tok/s** |
+| 1쪽 무제한 (801토큰) | 35.4 tok/s | 105.8 tok/s |
+| 8쪽 청크 캡 320토큰 | 32.6–34.6 tok/s | 84.5–89.6 tok/s |
+| 8쪽 청크 무제한 | 34.0 s/쪽 (272 s) | **9.8 s/쪽** (78.1 s, 112 tok/s) |
+| 웜 384토큰 실행당 RSS 증가 | +9.5–12.9 MB | +0.0–3.5 MB |
+| 첫 실행 RSS 증가 | +1,405 MB | +290 MB |
+| 로드 직후 드라이버 메모리 · 첫 실행 피크 | 7,280 MB · 12.2 GB | 7,112 MB · 12.0 GB |
+
+- 웜 실행 뒤 `torch.mps.driver_allocated_memory`에 보이는 +1.6 GB는 Metal 내부의 회수
+  가능 캐시라 phys_footprint에 잡히지 않고 늘지 않는다.
+- `OCR_FAST_DECODE=0`(HF generate 폴백)은 토큰 동일, 웜 61 tok/s.
+- `OCR_SDPA=1`(P16 옵트인)은 M4 Max에서 15–28% 빠르지만 출력이 비트 동일하지 않다 —
+  기본은 eager.
+- 같은 8쪽 청크를 MLX는 3.8–3.95 s/쪽에 처리한다 — Apple Silicon 기본이 MLX인 이유다.
+
 ## 확정 엔진 요약
 
 | | Unlimited-OCR (유지) | OvisOCR2 | PaddleOCR-VL-1.6 |
 |---|---|---|---|
 | 모델 | baidu/Unlimited-OCR 3.3B MoE | ATH-MaaS/OvisOCR2 0.9B | PaddlePaddle/PaddleOCR-VL-1.6 0.9B |
 | 라이선스 | MIT | Apache-2.0 | Apache-2.0 |
-| 실행 | in-process torch | vLLM 0.22.1 sidecar | paddle 3.3.1 sidecar |
+| 실행 | in-process torch(CPU·CUDA·MPS) · in-process MLX(Apple Silicon) | vLLM 0.22.1 sidecar | paddle 3.3.1 sidecar |
 | 강점 | 멀티페이지 문맥·토큰 스트리밍 | 페이지 정밀 파싱·figure bbox | 한국어·layout 블록·읽기 순서 |
 | layout | full (그라운딩 토큰) | figure_only | full (블록+순서) |
 | 16GB 적합성 | 검증됨 (~7GB) | 여유 큼 (util 0.80) | 여유 큼 |
@@ -94,4 +185,5 @@ Paddle, 길고 밀집한 영문 문서는 Ovis가 유리하다는 앞의 결론�
 공통 결론: 네 후보 모두 "공식 Blackwell 지원 + 한국어 근거 + 16GB 여유"를 동시에
 만족하지 못한다. OvisOCR2(페이지 파싱·figure)와 PaddleOCR-VL-1.6(한국어·layout)의
 역할을 명백히 대체하는 후보가 없어 구현 범위에 추가하지 않았다.
-"지원 완료"로 표기된 엔진은 fake/unlimited/ovisocr2/paddleocr_vl 4종뿐이다.
+"지원 완료"로 표기된 엔진은 fake/unlimited/textlayer/ovisocr2/paddleocr_vl 5종뿐이다
+(unlimited는 torch 구현과 Apple Silicon용 MLX 구현 두 가지 — `OCR_DEVICE`로 고른다).

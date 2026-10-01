@@ -365,3 +365,64 @@ def test_canceled_job_keeps_the_warnings_it_accumulated(tmp_path):
     assert any("플레이스홀더" in w for w in job.warnings)
     meta = json.loads((job.dir / "meta.json").read_text(encoding="utf-8"))
     assert meta["warnings"] == job.warnings
+
+
+class _DeviceTensor:
+    """실패 시도의 KV·활성화 텐서 대역 — 살아 있는지 weakref로 본다."""
+
+
+class TensorPinningEngine(FakeEngine):
+    """run_multi 프레임 지역 변수에 '텐서'를 쥔 채 실패하는 엔진.
+
+    retry_alive[k]: k번째 호출 시점에 그 이전 실패 시도들의 텐서가 살아 있었는가.
+    """
+
+    def __init__(self, fail_calls):
+        super().__init__(delay=0.0)
+        self.fail_calls = set(fail_calls)
+        self.calls = 0
+        self.refs: list = []
+        self.retry_alive: list[bool] = []
+
+    def run_multi(self, image_paths, out_dir, sink, cancel):
+        import weakref
+
+        self.calls += 1
+        self.retry_alive.append(any(r() is not None for r in self.refs))
+        tensor = _DeviceTensor()  # noqa: F841 — 프레임 지역 변수로 붙잡히는 것이 핵심
+        self.refs.append(weakref.ref(tensor))
+        if self.calls in self.fail_calls:
+            raise RuntimeError("MPS backend out of memory (모의)")
+        return super().run_multi(image_paths, out_dir, sink, cancel)
+
+
+def test_failed_attempt_tensors_are_released_before_the_retry(tmp_path):
+    """예외 객체를 보관하면 traceback → 실패 프레임 → 텐서가 살아 있어, 재시도 직전의
+    캐시 해제가 아무것도 돌려받지 못하고 같은 OOM이 재발한다(순환 GC 전까지 유지)."""
+    import gc
+
+    engine = TensorPinningEngine(fail_calls={1})
+    gc.disable()  # 순환 GC에 기대지 않는다 — 참조를 직접 끊어야 한다
+    try:
+        job = _run_job(tmp_path, engine, pages=2, pages_per_chunk=2)
+    finally:
+        gc.enable()
+
+    assert job.status == "done"
+    assert engine.calls == 2
+    assert engine.retry_alive == [False, False], "재시도 시점에 실패 시도의 텐서가 살아 있다"
+
+
+def test_final_chunk_errors_do_not_pin_tensors_after_the_job(tmp_path):
+    import gc
+
+    engine = TensorPinningEngine(fail_calls={1, 2, 3, 4})
+    gc.disable()
+    try:
+        job = _run_job(tmp_path, engine, pages=2, pages_per_chunk=2, embedded_text=False)
+        alive = [r() is not None for r in engine.refs]
+    finally:
+        gc.enable()
+
+    assert job.status == "error" and "모든 청크" in job.error
+    assert not any(alive), alive

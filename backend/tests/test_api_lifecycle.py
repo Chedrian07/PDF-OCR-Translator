@@ -121,6 +121,29 @@ def test_deleting_a_running_job_cleans_up_and_keeps_the_worker(slow_client, samp
     assert client.app.state.worker.is_alive()
 
 
+def test_deleting_a_running_job_tells_its_subscribers_it_was_deleted(slow_client, sample_pdf):
+    """실행 중 잡 DELETE도 대기 잡 DELETE와 같은 종료 이벤트({deleted:true})를 받는다 — 예전에는
+    러너가 canceled만 보내 다른 탭이 곧 지워질 부분 결과 화면을 그리고 404만 받았다."""
+    client = slow_client
+    broker = client.app.state.broker
+    running = _upload(client, sample_pdf)
+    _wait_status(client, running, "running")
+    subscriber = broker.subscribe(running)
+    try:
+        assert client.delete(f"/api/jobs/{running}").status_code == 204
+        deadline = time.monotonic() + 15
+        while True:  # progress·token 등을 지나 첫 종료 이벤트까지
+            event, data = subscriber.get(timeout=max(0.1, deadline - time.monotonic()))
+            if event in ("done", "error"):
+                break
+    finally:
+        broker.unsubscribe(running, subscriber)
+    assert (event, data) == (
+        "error", {"message": "삭제된 작업입니다", "canceled": True, "deleted": True},
+    )
+    assert client.app.state.worker.is_alive()
+
+
 def test_sse_stream_closes_when_its_job_vanishes_without_an_event(client):
     """방어: 종료 이벤트 없이 잡이 사라져도(삭제 경합) 스트림이 ping만 받으며 남지 않는다."""
     from starlette.requests import Request

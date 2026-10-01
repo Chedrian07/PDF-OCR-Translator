@@ -77,6 +77,11 @@ def __getattr__(name: str):
     return value
 
 
+# 설치 안내 — 엔진의 MLX_INSTALL_HINT(app/engine/unlimited_mlx.py)와 같은 문구여야 한다.
+# uv sync는 고른 extra만 남기므로 mlx만 고르면 torch(MPS 폴백)가 지워진다 — metal도 함께.
+_INSTALL_HINT = "cd backend && uv sync --extra metal --extra mlx (= make setup-mlx)"
+
+
 def mlx_status() -> tuple[bool, str]:
     """(사용 가능, 사유). macOS arm64 + mlx 임포트 + Metal 장치가 모두 있어야 True."""
     if sys.platform != "darwin" or platform.machine() != "arm64":
@@ -84,7 +89,9 @@ def mlx_status() -> tuple[bool, str]:
     try:
         import mlx.core as mx
     except Exception as e:  # noqa: BLE001 - ImportError 외 휠 로드 실패도 사유로
-        return False, f"mlx를 임포트할 수 없습니다 ({type(e).__name__}: {e}) — `uv sync --extra mlx`"
+        return False, (
+            f"mlx를 임포트할 수 없습니다 ({type(e).__name__}: {e}) — `{_INSTALL_HINT}`로 설치하세요"
+        )
     try:
         if not mx.metal.is_available():
             return False, "Metal 장치를 사용할 수 없습니다"

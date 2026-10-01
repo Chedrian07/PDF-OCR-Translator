@@ -202,6 +202,8 @@ class PaddleModel:
           load_error는 비운다 — status=error+미로드는 backend가 잡을 즉시 실패시킨다.
         - 연속 실패 임계: 오탐일 수 있어 파이프라인은 유지하고 load_error(웨지 신고)만
           세운다. 다음 성공이 자동으로 복구한다(OvisOCR2 sidecar와 같은 규칙)."""
+        if self.restart_required:
+            return  # 이미 재시작 대기 — 뒤따른 실패로 웨지 신고(status=error)를 세우면 backend가 잡을 실패시킨다
         self._infer_failures += 1
         if is_engine_dead(e, _CUDA_FATAL_MARKERS):
             self._pipeline = None
@@ -224,7 +226,11 @@ class PaddleModel:
             self.load_error = None  # 웨지 오탐 자동 복구 (로드 시점 오류는 건드리지 않음)
 
     def _predict_in_owner(self, image_path: str, kwargs: dict) -> dict:
-        results = list(self._pipeline.predict(image_path, **kwargs))
+        # 실행기 큐에서 기다리는 사이 앞 요청이 CUDA 고착을 판정해 파이프라인을 버렸을 수 있다
+        pipeline = self._pipeline
+        if pipeline is None:
+            raise RuntimeError("파이프라인이 로드되지 않았습니다")
+        results = list(pipeline.predict(image_path, **kwargs))
         if not results:
             raise RuntimeError("파이프라인이 빈 결과를 반환했습니다")
         data = results[0].json  # PaddleX Result: numpy → 파이썬 기본형 dict

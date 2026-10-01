@@ -1408,21 +1408,6 @@ class DeepseekV2FlashAttention2(DeepseekV2Attention):
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────
-# [vendor patch P20] 링 KV 슬롯 상태 — 캐시 객체(past_kv)에 두 표현 중 **정확히 하나**만 둔다.
-#  · 기본(eager — CPU/MPS 전 구간, CUDA eager): ``past_kv._ring_pos`` {layer: int}
-#    + 슬라이스 ``copy_``. 슬롯 계산이 호스트 int라 커널이 없다.
-#  · CUDA Graph 모드: ``past_kv._ring_pos_t`` {layer: 0-dim int64 디바이스 텐서}
-#    + ``index_copy_``·``add_().remainder_()`` — 캡처 안에서 슬롯 인덱싱·갱신이 재생돼야
-#    한다(파이썬 int 갱신은 캡처에 기록되지 않아 리플레이가 같은 슬롯만 덮어씀).
-#    app/engine/fast_decode.py 그래프 경로가 캡처 직전 ring_slots_to_tensor로 들어가고,
-#    실패 폴백(eager 재개) 직전 ring_slots_to_int로 되돌린다.
-# 두 경로의 저장 값은 동일하다(같은 슬롯에 같은 K/V). 분리 이유는 MPS 실측(M4 Max,
-# torch 2.10): index_copy_가 KV 길이에 비례하는 비용(KV 2317에서 663µs/호출, 토큰당
-# 24회 = 15.9ms)이라 기본 8쪽 청크 디코드가 34 tok/s로 떨어졌다. 슬라이스 copy_는 ~6µs.
-# ─────────────────────────────────────────────────────────────────────────
-
-
 def _sdpa_enabled(device_type, env_value=None):
     """[vendor patch P16] SDPA 사용 정책 — 기본은 CUDA 전용, MPS/CPU는 원본 eager(fp32 softmax).
 
@@ -1439,6 +1424,21 @@ def _sdpa_enabled(device_type, env_value=None):
     if value in ("0", "false", "no", "off"):
         return False
     return device_type == "cuda"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# [vendor patch P20] 링 KV 슬롯 상태 — 캐시 객체(past_kv)에 두 표현 중 **정확히 하나**만 둔다.
+#  · 기본(eager — CPU/MPS 전 구간, CUDA eager): ``past_kv._ring_pos`` {layer: int}
+#    + 슬라이스 ``copy_``. 슬롯 계산이 호스트 int라 커널이 없다.
+#  · CUDA Graph 모드: ``past_kv._ring_pos_t`` {layer: 0-dim int64 디바이스 텐서}
+#    + ``index_copy_``·``add_().remainder_()`` — 캡처 안에서 슬롯 인덱싱·갱신이 재생돼야
+#    한다(파이썬 int 갱신은 캡처에 기록되지 않아 리플레이가 같은 슬롯만 덮어씀).
+#    app/engine/fast_decode.py 그래프 경로가 캡처 직전 ring_slots_to_tensor로 들어가고,
+#    실패 폴백(eager 재개) 직전 ring_slots_to_int로 되돌린다.
+# 두 경로의 저장 값은 동일하다(같은 슬롯에 같은 K/V). 분리 이유는 MPS 실측(M4 Max,
+# torch 2.10): index_copy_가 KV 길이에 비례하는 비용(KV 2317에서 663µs/호출, 토큰당
+# 24회 = 15.9ms)이라 기본 8쪽 청크 디코드가 34 tok/s로 떨어졌다. 슬라이스 copy_는 ~6µs.
+# ─────────────────────────────────────────────────────────────────────────
 
 
 def _layer_keys(cache, layer_idx):

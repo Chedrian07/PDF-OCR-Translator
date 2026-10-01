@@ -56,7 +56,21 @@ router = APIRouter(prefix="/api")
 
 _ALLOWED_FILE_DIRS = ("pages", "images", "layout", "rendered")
 _UPLOAD_CHUNK = 1024 * 1024
-_PREVIEW_MAX_BYTES = 2_000_000
+# /render-preview 본문 상한. 라이브 미리보기는 확정 페이지 하나·미확정 꼬리 하나씩
+# 보낸다(페이지당 decoded 상한 16,384자 — 한글이어도 48KiB 안). 예전 2MB 상한은
+# 인증 없는 요청 한 건에 렌더 수십 초(수식 정규식 2차 비용 — render.py 쪽 수정과
+# 별개로)를 허용했다. 256KiB면 실사용에 넉넉하고 한 건의 렌더 비용 상한이 1/8이 된다
+# (실측: 일반 마크다운 256KiB ≈ 0.28s). main.py의 미들웨어 상한과 같은 값이어야 한다.
+_PREVIEW_MAX_BYTES = 256 * 1024
+# 미리보기 남용 방어 — 요청 수가 아니라 **크기에 비례**해 매긴다. 라이브 미리보기는
+# 600ms마다 작은 꼬리를, 재연결 때는 확정 페이지 전부를 연달아 보내 정상 사용도 요청
+# 수가 많다. 16KiB(페이지 하나 분량)마다 1단위, 잡·IP 키마다 분당 600단위(≈9.4MiB):
+# 실사용 최악(꼬리 48KiB × 100회/분 ≈ 300단위)은 통과하고, 상한 크기 본문을
+# 쏟아붓는 클라이언트는 분당 37건에서 막힌다. 동시 렌더 수도 묶어 스레드풀·GIL을
+# 한 클라이언트가 독점하지 못하게 한다. 초과분은 429 + Retry-After.
+_PREVIEW_COST_UNIT = 16 * 1024
+_PREVIEW_UNITS_PER_MIN = 600
+_PREVIEW_MAX_CONCURRENT = 4
 
 # 파생 산출물 보장 로직(잡 단위 락·facsimile 검증 메모·내보내기 빌드)은
 # pipeline/derived.py가 소유한다. 아래는 라우트와 회귀 테스트가 예전 이름으로
@@ -220,7 +234,8 @@ def _client_key(request: Request) -> str:
 def _abuse_guard(st, name: str) -> _AbuseGuard:
     """앱 상태에 가드를 지연 생성한다 — 라우트 계층이 소유하므로 앱 팩토리는 불변.
     상한은 Settings(QA_RATE_LIMIT_PER_MIN·QA_MAX_CONCURRENT·
-    TRANSLATE_RATE_LIMIT_PER_MIN·TRANSLATE_MAX_ACTIVE, 0 이하면 해당 상한 비활성)."""
+    TRANSLATE_RATE_LIMIT_PER_MIN·TRANSLATE_MAX_ACTIVE, 0 이하면 해당 상한 비활성).
+    미리보기(preview)는 운영 노브가 아니라 모듈 상수다(크기 비례 단위 — 위 설명)."""
     guards = getattr(st, "abuse_guards", None)
     if guards is None:
         with _GUARD_INIT_LOCK:
@@ -232,6 +247,7 @@ def _abuse_guard(st, name: str) -> _AbuseGuard:
                     "translate": _AbuseGuard(
                         cfg.translate_rate_limit_per_min, cfg.translate_max_active
                     ),
+                    "preview": _AbuseGuard(_PREVIEW_UNITS_PER_MIN, _PREVIEW_MAX_CONCURRENT),
                 }
                 st.abuse_guards = guards
     return guards[name]
@@ -1800,7 +1816,10 @@ async def job_qa(request: Request, job_id: str, body: AskRequest) -> dict:
 @router.post("/jobs/{job_id}/render-preview")
 async def render_preview(request: Request, job_id: str) -> HTMLResponse:
     """클라이언트가 보낸 (정리된) 마크다운을 안전 렌더 — 라이브 미리보기용.
-    /html과 동일한 렌더러라 XSS 이스케이프·표 복원·이미지 URL 재작성이 적용된다."""
+    /html과 동일한 렌더러라 XSS 이스케이프·표 복원·이미지 URL 재작성이 적용된다.
+
+    404 잡 없음 / 413 본문 256KiB 초과 / 429 레이트리밋·동시 렌더 상한(Retry-After)."""
+    st = _state(request)
     job = _get_job(request, job_id)
     # 스트리밍 수신하며 상한을 먼저 검사 — 전체를 메모리에 적재한 뒤 검사하면
     # 상한 초과 본문도 일단 다 받게 되어 상한의 의미가 없다.
@@ -1809,11 +1828,17 @@ async def render_preview(request: Request, job_id: str) -> HTMLResponse:
     async for chunk in request.stream():
         size += len(chunk)
         if size > _PREVIEW_MAX_BYTES:
-            raise HTTPException(413, "미리보기 본문이 너무 큽니다 (2MB 초과)")
+            raise HTTPException(413, "미리보기 본문이 너무 큽니다 (256KiB 초과)")
         chunks.append(chunk)
+    # 인증 없는 렌더 엔드포인트의 비용 상한 — 잡·IP 키를 원자적으로, 크기에 비례해 매긴다.
+    guard = _abuse_guard(st, "preview")
+    guard.check_rate(
+        (f"preview:job:{job_id}", f"preview:ip:{_client_key(request)}"),
+        cost=max(1, -(-size // _PREVIEW_COST_UNIT)),
+    )
     text = b"".join(chunks).decode("utf-8", "replace")
 
-    # 렌더(2MB에 ~0.2초)는 async 핸들러의 이벤트 루프를 막지 않게 오프로드.
+    # 렌더(256KiB에 ~0.3초)는 async 핸들러의 이벤트 루프를 막지 않게 오프로드.
     # 공유 _md(markdown-it) 인스턴스는 렌더 시 상태 변이가 없어(파스 상태는
     # 호출별 StateCore) 스레드 안전 — sync 핸들러(/html 등)가 이미 스레드풀에서
     # 동시 사용 중인 기존 불변식이다.
@@ -1822,7 +1847,17 @@ async def render_preview(request: Request, job_id: str) -> HTMLResponse:
             text, f"/api/jobs/{job_id}/files", figure_boxes=_load_figure_boxes(job)
         )
 
-    return HTMLResponse(await anyio.to_thread.run_sync(_render))
+    if not guard.acquire():
+        raise HTTPException(
+            429,
+            "동시에 처리 중인 미리보기가 너무 많습니다 — 잠시 후 다시 시도하세요",
+            headers={"Retry-After": "1"},
+        )
+    try:
+        html = await anyio.to_thread.run_sync(_render)
+    finally:
+        guard.release()
+    return HTMLResponse(html)
 
 
 @router.delete("/jobs/{job_id}", status_code=204)

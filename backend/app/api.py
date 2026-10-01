@@ -1426,10 +1426,14 @@ def job_viewer_manifest(
             "alignment": source_layout.is_file() and target_layout.is_file(),
             "outline": target_layout.is_file(),
         },
+        # 품질 상태는 실제 품질 저하(warnings)로만 정한다. 처리 경위·안내(notices — 페이지
+        # 단위 엔진 안내, 페이지별 재처리로 복구됨, 충실도 재처리 채택·측정 한계)까지 세면
+        # 복구에 성공한 잡과 sidecar 엔진의 모든 잡이 'degraded'가 된다.
         "quality": {
             "state": "degraded" if warnings else "ok",
             "warning_count": len(warnings),
             "warnings": warnings[:20],
+            "notice_count": len(job.notices),
         },
         "links": {
             "source_page_template": f"/api/jobs/{job.id}/page/{{page}}?revision={revision}",

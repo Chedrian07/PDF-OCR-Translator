@@ -675,8 +675,21 @@ class Worker(threading.Thread):
     def stop(self) -> None:
         self._queue.put(None)
 
+    def _drains_objc_pool_per_job(self) -> bool:
+        """잡마다 ObjC 오토릴리스 풀로 감쌀지 — 실제 디바이스가 Metal(torch MPS)일 때만.
+
+        이 워커는 끝나지 않는 스레드라 런루프의 풀이 없다. 엔진은 생성 구간을, 디코드
+        루프는 스텝을 각각 감싸지만 그 바깥(재시도 전 캐시 반환·충실도 재처리 사이 등)에서
+        autorelease된 MPS 임시 객체는 회수 지점이 없어 프로세스 수명 내내 쌓인다
+        (objc_pool 참조). 잡 단위 풀이 마지막 회수 지점이다. engine.device는 registry가
+        auto를 풀어 둔 실제 디바이스다(settings.device는 'auto'일 수 있다).
+        MLX는 켜지 않는다 — 실측(M4 Max, 8쪽 실가중치 잡 5회 연속, 한 프로세스): RSS
+        2627→2629→2645→2645→2647MB, MLX 활성 메모리 6363MB 고정으로 잡별 누적이 없다."""
+        return getattr(self.engine, "device", "") == "metal"
+
     def run(self) -> None:
         from .engine.base import JobCanceled
+        from .engine.objc_pool import autorelease_pool
         from .pipeline.runner import execute_job
 
         while True:
@@ -743,7 +756,10 @@ class Worker(threading.Thread):
                     self.store.save(job)
                     self.broker.publish(job_id, "error", {"message": job.error})
                     continue
-                execute_job(job, self.store, self.broker, self.engine, self._settings_for(job), cancel)
+                with autorelease_pool(self._drains_objc_pool_per_job()):
+                    execute_job(
+                        job, self.store, self.broker, self.engine, self._settings_for(job), cancel,
+                    )
             except Exception:  # noqa: BLE001 — 워커 스레드 영구 정지 방지
                 logger.exception("잡 처리 중 예기치 못한 오류: %s", job_id)
                 # 메모리 상 running으로 남으면 DELETE도 거부돼(api의 running 가드)

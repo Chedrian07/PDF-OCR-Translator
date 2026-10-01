@@ -83,13 +83,33 @@ def upload_pdf(base_url: str, pdf_path: Path, mode: str = "multi", timeout: floa
     return resp["job_id"]
 
 
-def wait_job(base_url: str, job_id: str, timeout_s: float) -> dict:
+# 잡 상태 폴링 간격(초) = 시간 측정 해상도. 예전 2초 고정 폴링은 짧은 문서의 처리 시간을
+# 2초 단위로 뭉갰다 — OvisOCR2 '1.1s/p'(2쪽 2.2초)는 업로드 + 폴링 한 번 간격 그 자체였다.
+POLL_INTERVAL_S = 0.25
+
+
+def wait_job(base_url: str, job_id: str, timeout_s: float,
+             poll_s: float = POLL_INTERVAL_S) -> dict:
+    """잡이 터미널 상태가 될 때까지 폴링한다.
+
+    반환 dict의 `_timing`에 처음 queued가 아닌 상태를 본 시각(running_seen)과 터미널
+    상태를 본 시각(finished_seen)을 time.monotonic() 값으로 남긴다 — 둘의 차가 큐 대기와
+    업로드를 뺀 서버 처리 시간이다(오차 ≤ poll_s)."""
     deadline = time.monotonic() + timeout_s
+    running_seen: float | None = None
     while time.monotonic() < deadline:
         body = http_json(f"{base_url}/api/jobs/{job_id}")
+        now = time.monotonic()
+        if running_seen is None and body["status"] != "queued":
+            running_seen = now
         if body["status"] in ("done", "error", "canceled"):
+            body["_timing"] = {
+                "running_seen": running_seen if running_seen is not None else now,
+                "finished_seen": now,
+                "poll_s": poll_s,
+            }
             return body
-        time.sleep(2.0)
+        time.sleep(poll_s)
     raise SmokeError(f"잡이 {timeout_s:.0f}s 안에 끝나지 않았습니다 (job={job_id})")
 
 

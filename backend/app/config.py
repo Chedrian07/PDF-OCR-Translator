@@ -23,8 +23,14 @@ def load_dotenv_file(path: Path | None = None) -> None:
     503("프로바이더 미설정")으로 떨어졌다 — CPU/CUDA/Metal 범용성 결함 수정.
     파서는 KEY=VALUE 한 줄 형식만 지원하고 주석(#)·빈 줄을 건너뛰며,
     compose와 동일하게 값 양끝 따옴표를 벗긴다.
+
+    `DISABLE_DOTENV`가 참 값(1/true/yes/on)이면 **자동 탐색**(path 미지정)을 끈다 —
+    테스트·E2E 하네스가 개발자의 실제 .env(실키)를 프로세스 환경에 주입하지 않게
+    하는 스위치다. path를 명시한 호출은 이 스위치와 무관하게 그 파일을 읽는다.
     """
     if path is None:
+        if _env_bool("DISABLE_DOTENV", False):
+            return
         config_path = Path(__file__).resolve()
         # 실행 cwd → 정본 final/ → 융합 워크스페이스 루트 순서. 사용자가 비밀을
         # 프로젝트 루트에 둘 수도 있고 final/.env에 둘 수도 있으므로 둘 다 지원하되,

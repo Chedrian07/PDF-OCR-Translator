@@ -116,6 +116,22 @@ def test_release는_멱등이고_놓은_뒤_바로_다시_잡을_수_있다(tmp_
     again.release()
 
 
+def test_다른_uid가_만든_쓰기_불가_락_파일로도_보호한다(tmp_path):
+    """root로 돈 컨테이너 등이 남긴 0444 락 파일 — flock은 읽기 전용 fd로도 잡힌다."""
+    lock_file = tmp_path / LOCK_FILE_NAME
+    lock_file.touch()
+    lock_file.chmod(0o444)
+
+    lock = acquire_jobs_dir_lock(tmp_path)
+    try:
+        assert lock.held
+        with pytest.raises(JobsDirInUseError):
+            acquire_jobs_dir_lock(tmp_path)
+    finally:
+        lock.release()
+        lock_file.chmod(0o644)
+
+
 def test_fcntl이_없는_플랫폼은_보호_없이_기존_동작(settings, monkeypatch):
     monkeypatch.setattr(owner_lock_mod, "fcntl", None)
 

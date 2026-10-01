@@ -347,3 +347,34 @@ def test_startup_gc_disabled_by_default(settings):
         time.sleep(0.3)
         assert old.dir.exists()
         assert client.get(f"/api/jobs/{old.id}").status_code == 200
+
+
+# ── 삭제·GC와 겹친 빌더가 되살린 고아 (concurrency-8) ────────────────────────
+
+
+def test_delete_dir_marks_the_job_for_inflight_builders(tmp_path):
+    """DELETE뿐 아니라 TTL GC도 delete_dir를 지난다 — 진행 중 내보내기 빌더가 끝난 뒤
+    되살린 디렉터리를 스스로 치우는 근거(delete_requested)가 여기서 생긴다."""
+    store = JobStore(tmp_path / "jobs")
+    job = _make_job(store, "done", age_days=10)
+    assert job.delete_requested is False
+    assert store.gc_expired(7) == 1
+    assert job.delete_requested is True
+
+
+def test_restart_sweeps_orphan_job_dirs_without_meta(tmp_path):
+    """meta.json 없는 잡 디렉터리(삭제 직후 끝난 빌더가 되살린 것)는 목록·GC 어디에도
+    없어 영구히 남았다 — 재시작 때 잡 ID 형식인 것만 정리한다."""
+    store = JobStore(tmp_path / "jobs")
+    kept = _make_job(store, "done")
+    orphan = store.jobs_dir / "j_0123456789ab"
+    orphan.mkdir()
+    (orphan / "export.ko.dual.pdf").write_bytes(b"%PDF-1.4 dual")
+    foreign = store.jobs_dir / "lost+found"          # 잡이 아닌 디렉터리는 건드리지 않는다
+    foreign.mkdir()
+
+    revived = JobStore(store.jobs_dir)
+    revived.load_existing()
+    assert not orphan.exists()
+    assert foreign.is_dir()
+    assert revived.get(kept.id) is not None and kept.dir.is_dir()

@@ -12,7 +12,7 @@
 import { chromium } from 'playwright';
 import { mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BASE = process.env.E2E_BASE_URL || 'http://127.0.0.1:8000';
@@ -625,6 +625,49 @@ const freshContext = (options = {}) => browser.newContext({ viewport: { width: 1
     await page.evaluate(() => !document.querySelector('#job-list .ji-del.armed')));
 }
 
+// (b2) '더 보기': 최신 50건 뒤의 기록을 before 커서로 이어 받는다 — 서버가 has_more를 알려야
+//      버튼이 보인다(api-jobs-7). 이 하네스의 잡은 몇 개뿐이라 목록 API를 51건짜리 가짜 목록으로
+//      대신한다(api.list_jobs와 같은 limit·before·has_more·total 규칙).
+{
+  const moreCtx = await freshContext();
+  const fakeJobs = Array.from({ length: 51 }, (_, i) => ({
+    job_id: `e2e-list-${String(i).padStart(2, '0')}`, filename: `list-${i}.pdf`, status: 'done',
+    created_at: new Date(Date.UTC(2026, 0, 1) - i * 60_000).toISOString(),
+  }));
+  const listCalls = [];
+  await moreCtx.route((url) => url.pathname === '/api/jobs', async (route) => {
+    if (route.request().method() !== 'GET') { await route.continue(); return; }
+    const url = new URL(route.request().url());
+    listCalls.push(url.search);
+    const limit = Number(url.searchParams.get('limit') || 50);
+    const before = url.searchParams.get('before');
+    const rest = before ? fakeJobs.slice(fakeJobs.findIndex((j) => j.job_id === before) + 1) : fakeJobs;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      jobs: rest.slice(0, limit), has_more: rest.length > limit, total: fakeJobs.length,
+    }) });
+  });
+  const morePage = await moreCtx.newPage();
+  await morePage.goto(BASE, { waitUntil: 'networkidle' });
+  await morePage.waitForSelector('#job-list-more:not([hidden])', { timeout: 10_000 }).catch(() => {});
+  const beforeMore = await morePage.evaluate(() => ({
+    label: document.getElementById('job-list-more')?.textContent || '',
+    rows: document.querySelectorAll('#job-list .job-item').length,
+  }));
+  await morePage.click('#job-list-more', { timeout: 10_000 }).catch(() => {});
+  await morePage.waitForSelector('#job-list [data-job-id="e2e-list-50"]', { timeout: 10_000 }).catch(() => {});
+  const afterMore = await morePage.evaluate(() => ({
+    rows: document.querySelectorAll('#job-list .job-item').length,
+    last: document.querySelector('#job-list .job-item:last-child')?.dataset.jobId || '',
+    hidden: document.getElementById('job-list-more')?.hidden,
+  }));
+  check("작업 목록 '더 보기': before 커서로 다음 쪽을 이어 붙이고 끝이면 버튼을 숨긴다",
+    beforeMore.label === '더 보기 (50/51)' && beforeMore.rows === 50
+      && afterMore.rows === 51 && afterMore.last === 'e2e-list-50' && afterMore.hidden === true
+      && listCalls.includes('?limit=50&before=e2e-list-49'),
+    JSON.stringify({ beforeMore, afterMore, listCalls }));
+  await moreCtx.close();
+}
+
 // (c) 잡 품질 경고: '주의 N건' 칩 → 펼침 목록, 'N페이지'는 리더 이동 링크, 목록 줄 표시(frontend-2).
 {
   const warnCtx = await freshContext();
@@ -876,6 +919,17 @@ if (VERIFY_MOCK_LLM) {
     await route.continue();
   };
   await page.route('**/api/jobs/*/translate', translateRoute);
+  // 번역 참고 사항: translate/state가 report.json의 warnings를 함께 준다(p2-w1). 실서버 응답에
+  // 문장 하나를 덧붙여 결과 화면의 흐린 접이식 목록을 확인한다(번역이 끝난 state에만).
+  const E2E_TRANSLATE_NOTE = 'E2E 참고: 기존 캐시 0건 적중 — 유닛 전량을 새로 번역했습니다';
+  const stateRoute = async (route) => {
+    const res = await route.fetch();
+    const data = await res.json().catch(() => null);
+    if (!data || data.status !== 'done') { await route.fulfill({ response: res }); return; }
+    const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+    await route.fulfill({ response: res, json: { ...data, warnings: [...warnings, E2E_TRANSLATE_NOTE] } });
+  };
+  await page.route('**/api/jobs/*/translate/state*', stateRoute);
   let available = false;
   const healthRoute = (route) => route.fulfill({
     status: 200, contentType: 'application/json',
@@ -927,6 +981,27 @@ if (VERIFY_MOCK_LLM) {
   check('mock 번역: 원문 유지/건너뜀 요약을 사용자에게 노출',
     !keptSummary.hidden && keptSummary.text.length > 0 && keptSummary.title.includes('문단'),
     JSON.stringify(keptSummary));
+  await page.waitForFunction(() => !document.getElementById('translate-warnings')?.hidden,
+    null, { timeout: 15_000 }).catch(() => {});
+  const translateNotes = await page.evaluate(() => {
+    const box = document.getElementById('translate-warnings');
+    const visibleBefore = !!box && !box.hidden && box.getBoundingClientRect().height > 0;
+    const openBefore = !!box && box.open;
+    document.getElementById('translate-warnings-summary')?.click(); // 펼친다
+    const items = [...document.querySelectorAll('#translate-warnings-list li')].map((li) => li.textContent);
+    return {
+      visibleBefore, openBefore, open: !!box && box.open, items,
+      summary: document.getElementById('translate-warnings-summary')?.textContent || '',
+      color: items.length ? getComputedStyle(document.querySelector('#translate-warnings-list li')).color : '',
+      title: document.getElementById('translate-summary')?.title || '',
+    };
+  });
+  check('번역 참고 사항: translate/state warnings가 번역 요약 아래 흐린 접이식 목록으로 보인다',
+    translateNotes.visibleBefore && !translateNotes.openBefore && translateNotes.open
+      && translateNotes.items.includes(E2E_TRANSLATE_NOTE) && /번역 참고 사항 \d+건/.test(translateNotes.summary)
+      && translateNotes.title.includes('번역 참고 사항'),
+    JSON.stringify(translateNotes));
+  await page.unroute('**/api/jobs/*/translate/state*', stateRoute);
   check('mock 번역: 한국어 HTML 버튼 노출', await page.evaluate(() => {
     const link = document.getElementById('dl-doc-ko');
     return !link.hidden && link.getAttribute('href')?.includes('lang=ko')
@@ -1021,7 +1096,69 @@ if (VERIFY_MOCK_LLM) {
     htmlDownload.suggestedFilename().endsWith('.ko.html'));
   check('mock 한국어 HTML: lang·한글 번역 본문 포함',
     htmlText.includes('<html lang="ko">') && /[가-힣]/.test(htmlText));
+  // 내려받은 standalone HTML은 서버 CSP 헤더 없이 디스크에서 열린다 — 파일 안의 meta CSP가
+  // 바깥 출처를 막고도 수식(KaTeX·data: 폰트)과 페이지 이미지(data:)는 그대로 그려야 한다.
+  if (htmlPath) {
+    // download.path()는 확장자 없는 임시 파일이라 file://로 열면 평문으로 보인다 — .html로 남긴다.
+    const standalonePath = path.join(OUT, 'standalone.ko.html');
+    await htmlDownload.saveAs(standalonePath);
+    const fileCtx = await freshContext();
+    const filePage = await fileCtx.newPage();
+    const fileHits = [];
+    filePage.on('requestfinished', (r) => { if (!/^(file|data):/.test(r.url())) fileHits.push(r.url()); });
+    await filePage.addInitScript(() => {
+      window.__cspViolations = [];
+      document.addEventListener('securitypolicyviolation', (e) => {
+        window.__cspViolations.push(`${e.violatedDirective} ${e.blockedURI}`);
+      });
+    });
+    await filePage.goto(pathToFileURL(standalonePath).href, { waitUntil: 'load' });
+    const standalone = await filePage.evaluate(async () => {
+      const imgs = [...document.images];
+      await Promise.all(imgs.map((img) => img.decode().catch(() => {})));
+      const before = window.__cspViolations.slice();
+      const beacon = new Image();
+      beacon.src = 'http://127.0.0.1:9/e2e-standalone-beacon.png';
+      document.body.appendChild(beacon);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return {
+        csp: document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.content || '',
+        referrer: document.querySelector('meta[name="referrer"]')?.content || '',
+        katex: document.querySelectorAll('.katex').length,
+        math: document.querySelectorAll('.math-inline,.math-display').length,
+        imgs: imgs.length,
+        loaded: imgs.filter((img) => img.complete && img.naturalWidth > 0).length,
+        before,
+        after: window.__cspViolations.slice(before.length),
+      };
+    });
+    check('standalone HTML: meta CSP 아래에서도 수식·페이지 이미지를 그대로 그린다',
+      /default-src 'none'/.test(standalone.csp) && standalone.referrer === 'no-referrer'
+        && standalone.math > 0 && standalone.katex >= standalone.math
+        && standalone.imgs > 0 && standalone.loaded === standalone.imgs && standalone.before.length === 0,
+      JSON.stringify(standalone));
+    check('standalone HTML: 본문에 끼어든 바깥 이미지는 CSP가 막고 요청도 나가지 않는다',
+      standalone.after.some((v) => v.startsWith('img-src') && v.includes('e2e-standalone-beacon'))
+        && fileHits.length === 0,
+      JSON.stringify({ after: standalone.after, fileHits }));
+    await fileCtx.close();
+  }
 
+  // PDF 생성 리포트: 헤더에는 숫자만 실린다 — 원문 보존 사유·스캔 원문 지움·주의 문장은 같은
+  // 빌드의 JSON 리포트(GET /pdf/report, p2-w1)에서 온다. report.py report() 모양 그대로 돌려준다.
+  const pdfReportRoute = (route) => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({
+      job_id: jobId, lang: 'ko', format_version: 10, replaced: 9, kept: 4, relocated: 0,
+      table_cells_replaced: 0, listing_lines_replaced: 2, raster_blocks_erased: 3,
+      specialist_kept: {}, kept_reasons: { listing_line_unaligned: 3, unchanged: 1 }, warning_count: 2,
+      warnings: [
+        'p1: 블록 2의 원문이 이미지 픽셀이라 지우지 못함 — 번역이 이미지 속 글자와 겹쳐 보일 수 있음',
+        'p2: 블록 1의 3줄 교체 생략(원문 줄 위치 정렬 실패) — 그 줄만 원문 보존',
+      ],
+    }),
+  });
+  await page.route('**/api/jobs/*/pdf/report*', pdfReportRoute);
   const downloadPromise = page.waitForEvent('download');
   await page.click('#dl-pdf');
   const download = await downloadPromise;
@@ -1031,6 +1168,26 @@ if (VERIFY_MOCK_LLM) {
   check('mock PDF: 실제 PDF 바이트', first === '%PDF-');
   check('mock PDF: 생성 리포트 토스트', await page.evaluate(() =>
     (document.getElementById('toast')?.textContent || '').includes('PDF 생성 완료')));
+  await page.waitForFunction(() => !document.getElementById('pdf-report')?.hidden,
+    null, { timeout: 10_000 }).catch(() => {});
+  const pdfReport = await page.evaluate(() => {
+    document.getElementById('pdf-report-summary')?.click();
+    return {
+      hidden: document.getElementById('pdf-report')?.hidden,
+      summary: document.getElementById('pdf-report-summary')?.textContent || '',
+      items: [...document.querySelectorAll('#pdf-report-list li')].map((li) => li.textContent),
+      warn: document.querySelectorAll('#pdf-report-list li.is-warn').length,
+      toast: document.getElementById('toast')?.textContent || '',
+    };
+  });
+  check('PDF 생성 리포트: 스캔 원문 지움·줄 정렬 실패 보존·새 주의 문장을 보인다',
+    pdfReport.hidden === false && pdfReport.summary.includes('주의 2건') && pdfReport.warn === 2
+      && pdfReport.items.some((t) => t.includes('스캔(이미지) 원문 3개 블록'))
+      && pdfReport.items.some((t) => t.includes('원문 줄 위치 정렬 실패(그 줄만 원문) 3'))
+      && pdfReport.items.some((t) => t.startsWith('1페이지:') && t.includes('이미지 픽셀이라 지우지 못함'))
+      && pdfReport.toast.includes('스캔 원문 3개 블록 지움'),
+    JSON.stringify(pdfReport));
+  await page.unroute('**/api/jobs/*/pdf/report*', pdfReportRoute);
 
   await page.click('button[data-tab="qa"]');
   await page.waitForFunction(() => document.getElementById('qa-provider')?.value === 'openai-responses');

@@ -1362,7 +1362,10 @@ def test_click_during_warm_build_waits_for_it_instead_of_503(tmp_path, monkeypat
     """
     from app.pipeline import derived
 
-    monkeypatch.setenv("PDF_EXPORT_MAX_CONCURRENT", "1")
+    # 상한 2 = 예열 몫 1 + 클릭 몫 1. 상한 1이면 클릭 몫을 남길 여유가 없어 예열이
+    # 아예 빌드하지 않는다(derived._warm_slot_reservation) — 그러면 이 테스트가
+    # 지키려는 '예열 빌드를 기다리는 클릭' 상황 자체가 생기지 않는다.
+    monkeypatch.setenv("PDF_EXPORT_MAX_CONCURRENT", "2")
     monkeypatch.setenv("PDF_EXPORT_QUEUE_TIMEOUT_S", "0.2")   # 일반 대기열은 짧게
     monkeypatch.setenv("PDF_EXPORT_WARM_WAIT_S", "30")        # 예열 대기는 넉넉히
     derived._PDF_EXPORT_SLOTS = None                          # 상한 재적용

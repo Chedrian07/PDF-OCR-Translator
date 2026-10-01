@@ -109,18 +109,42 @@ class _SlidingWindowLimiter:
 
     def hit(self, key: str) -> float | None:
         """허용되면 None, 상한 초과면 Retry-After(초)를 돌려준다."""
+        return self.hit_many((key,))
+
+    def hit_many(self, keys, cost: int = 1) -> float | None:
+        """여러 키를 **원자적으로** 판정한다 — 하나라도 넘치면 어느 키에도 기록하지 않는다.
+
+        예전에는 키마다 차례로 hit()해서, IP 키에서 거절된 요청도 앞서 통과한 잡 키에
+        이미 기록됐다. 자기 IP 한도를 다 쓴 클라이언트 하나가 429를 받으면서도 모든
+        잡의 버킷을 매분 채워, 다른 사용자의 번역·Q&A까지 429로 막을 수 있었다.
+        cost는 이 요청이 차지하는 몫(기본 1) — 크기에 비례해 매기는 라우트가 쓴다.
+        허용되면 None, 넘치면 가장 긴 Retry-After(초).
+        """
         if self.limit <= 0:
             return None
         now = time.monotonic()
         with self._lock:
             if len(self._hits) > _RATE_KEYS_MAX:
                 self._prune(now)
-            hits = [t for t in self._hits.get(key, ()) if now - t < self.window]
-            if len(hits) >= self.limit:
+            current = {
+                key: [t for t in self._hits.get(key, ()) if now - t < self.window]
+                for key in dict.fromkeys(keys)
+            }
+            retry = 0.0
+            for key, hits in current.items():
                 self._hits[key] = hits
-                return max(1.0, self.window - (now - hits[0]))
-            hits.append(now)
-            self._hits[key] = hits
+                over = len(hits) + cost - self.limit
+                if over > 0:
+                    # cost가 상한보다 크면 창을 다 비워도 못 들어온다 — 창 길이를 알린다
+                    wait = (
+                        self.window - (now - hits[over - 1])
+                        if over <= len(hits) else self.window
+                    )
+                    retry = max(retry, wait)
+            if retry > 0:
+                return max(1.0, retry)
+            for key, hits in current.items():
+                hits.extend([now] * cost)
             return None
 
     def _prune(self, now: float) -> None:
@@ -138,15 +162,14 @@ class _AbuseGuard:
             threading.BoundedSemaphore(max_concurrent) if max_concurrent > 0 else None
         )
 
-    def check_rate(self, keys) -> None:
-        for key in keys:
-            retry = self.limiter.hit(key)
-            if retry is not None:
-                raise HTTPException(
-                    429,
-                    "요청이 너무 잦습니다 — 잠시 후 다시 시도하세요",
-                    headers={"Retry-After": str(max(1, int(retry)))},
-                )
+    def check_rate(self, keys, cost: int = 1) -> None:
+        retry = self.limiter.hit_many(keys, cost)
+        if retry is not None:
+            raise HTTPException(
+                429,
+                "요청이 너무 잦습니다 — 잠시 후 다시 시도하세요",
+                headers={"Retry-After": str(max(1, int(retry)))},
+            )
 
     def acquire(self) -> bool:
         return True if self._slots is None else self._slots.acquire(blocking=False)

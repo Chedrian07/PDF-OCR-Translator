@@ -213,8 +213,9 @@ def test_mps_static_ngram_matches_reference():
     for n, w, length in cases:
         vocab = 6 if n < 6 else 24
         seq = [rng.randrange(vocab) for _ in range(length)]
-        if length > 40:
-            seq[length // 3: length // 3 + n - 1] = seq[-(n - 1):] if n > 1 else seq[length // 3: length // 3]
+        if length > 40 and n > 1:  # 현재 (n-1)-프리픽스를 창 안에 심어 밴이 실제로 생기게
+            start = length // 3
+            seq[start:start + n - 1] = seq[-(n - 1):]
         proc = TorchSlidingWindowNoRepeatNgram(n, w, static_shape=True)
         scores = proc(torch.tensor([seq], device="mps"), torch.zeros(1, vocab, device="mps")).cpu()
         got = sorted(i for i in range(vocab) if scores[0, i] == float("-inf"))

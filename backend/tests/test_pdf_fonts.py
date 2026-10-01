@@ -239,3 +239,68 @@ def test_enrich_detects_centered_and_justified_blocks(tmp_path):
     assert enrich_layout_fonts(p, pages) is True
     assert pages[0]["blocks"][0].get("align") == "center"
     assert pages[0]["blocks"][1].get("align") == "justify"
+
+
+def _display_bbox(page, rect) -> list[int]:
+    """표시(회전 반영) 공간 pt 사각형 → det와 같은 0–999 좌표."""
+    width, height = page.rect.width, page.rect.height
+    return [
+        round(rect.x0 / width * 999), round(rect.y0 / height * 999),
+        round(rect.x1 / width * 999), round(rect.y1 / height * 999),
+    ]
+
+
+def test_enrich_rotated_page_compares_in_display_space(tmp_path):
+    """/Rotate 90 페이지: det bbox(표시 공간)와 span(비회전 공간)을 같은 좌표계에서 비교한다.
+
+    예전에는 두 공간을 섞어 회전 페이지의 모든 블록에서 fs·정렬이 빠지고, 화면에서
+    가로로 읽히는 줄을 세로쓰기로 오판해 번역 PDF가 그 블록을 원문으로 남기거나
+    최후 수단 크기(≈0.7배)로 찍었다. 화면에서 세로인 여백 스탬프는 여전히 세로다.
+    """
+    import fitz
+
+    from app.pipeline.pdf_fonts import ENRICH_VERSION
+
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.set_rotation(90)
+    lines = [
+        (fitz.Point(60, 80), "Table 3 reports accuracy across all evaluated datasets."),
+        (fitz.Point(60, 120), "Our approach consistently outperforms the strongest baseline."),
+    ]
+    blocks = []
+    for point, text in lines:
+        # 표시 공간의 점을 비회전 좌표로 옮기고 페이지 회전만큼 돌려 쓰면 화면에서 똑바로 보인다.
+        page.insert_text(point * page.derotation_matrix, text, fontsize=10, fontname="tiro", rotate=90)
+        width = fitz.get_text_length(text, "tiro", 10)
+        shown = fitz.Rect(point.x - 1, point.y - 10, point.x + width + 1, point.y + 3)
+        blocks.append({"type": "text", "bbox": _display_bbox(page, shown), "content": text})
+    # 화면에서 아래→위로 읽히는 여백 스탬프(arXiv 식별자): 비회전 공간에서는 180° 진행.
+    stamp_origin = fitz.Point(30, 560)
+    page.insert_text(
+        stamp_origin * page.derotation_matrix, "arXiv:2504.19874v1 [cs.CL] 28 Apr 2025",
+        fontsize=9, fontname="tiro", rotate=180,
+    )
+    stamp = fitz.Rect(18, 330, 34, 565)
+    blocks.append({"type": "text", "bbox": _display_bbox(page, stamp), "content": "arXiv:2504.19874v1"})
+    pdf = tmp_path / "rotated.pdf"
+    doc.save(pdf)
+    doc.close()
+
+    pages = [{"page": 1, "blocks": blocks}]
+    assert enrich_layout_fonts(pdf, pages) is True
+    body, second, margin = pages[0]["blocks"]
+    for block in (body, second):
+        # cqw는 **표시** 폭(842pt)의 1% 단위다.
+        assert abs(block["fs"] - 10 / 842 * 100) < 0.1, block
+        assert block.get("font_style") == "serif", block
+        assert "vertical" not in block, block
+    assert margin.get("vertical") == "up", margin
+    assert pages[0]["fonts_v"] == ENRICH_VERSION
+
+
+def test_enrich_version_was_bumped_for_rotated_page_fix():
+    """회전 페이지 메타가 바뀌었으므로 기존 잡도 다시 백필되도록 버전을 올렸다."""
+    from app.pipeline.pdf_fonts import ENRICH_VERSION
+
+    assert ENRICH_VERSION >= 6

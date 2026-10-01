@@ -6,6 +6,8 @@ raw HTML은 비활성(html=False)이라 OCR 결과에 악성 태그가 섞여도
 - 수식: 모델의 `\\( … \\)` / `\\[ … \\]`(실측 형태, 아래 참조)를 $-델리미터로
   정규화한 뒤 dollarmath로 파싱하고, tex를 **이스케이프한** `.math-inline` /
   `.math-display` 요소로 출력 — 최종 타이포셋은 클라이언트 KaTeX가 수행한다.
+- 그림: 잡이 만든 `images/…` 상대 참조와 인라인 `data:` 래스터만 <img>로 낸다.
+  본문에 실린 외부·내부망 주소는 자동으로 불러오지 않는 링크로 낮춘다(`_render_image`).
 
 정규화는 렌더 레이어에서만 일어난다. result.md(다운로드 소스)는 모델 원본
 LaTeX 델리미터를 그대로 유지한다 (포터빌리티 계약, ARCHITECTURE.md 전역 제약).
@@ -28,12 +30,38 @@ def _render_math_block(self, tokens, idx, options, env) -> str:
     return f'<div class="math-display">{escapeHtml(tokens[idx].content)}</div>'
 
 
+# 자동으로 불러와도 되는 그림 주소: 잡이 만든 그림(`images/<파일명>`, 렌더 끝에서 잡
+# 파일 URL로 재작성된다)과 인라인 data: 래스터뿐이다. 마크다운 본문은 OCR 모델이나
+# PDF 텍스트 레이어(보이지 않는 텍스트 포함)가 그대로 옮겨 적은 **비신뢰 입력**이라,
+# `![](https://tracker/…)`·`![](//host/…)`·`![](http://192.168.0.1/…)`를 <img>로 두면
+# 문서를 여는 순간 브라우저가 클릭 없이 제3자·내부망으로 요청을 보낸다(열람 사실·IP·
+# Referer 유출, 내부망 GET 유도). `/api/…` 같은 같은 출처 절대 경로도 비싼 GET(PDF
+# 빌드 등)을 유발할 수 있어 막는다. 막힌 그림은 클릭해야 열리는 링크로만 남긴다.
+_SAFE_IMAGE_SRC = re.compile(
+    r"images/[A-Za-z0-9_-][A-Za-z0-9._-]*\Z|(?i:data:image/(?:png|jpeg|gif|webp);)"
+)
+
+
+def _render_image(self, tokens, idx, options, env) -> str:
+    token = tokens[idx]
+    src = str(token.attrGet("src") or "")
+    if _SAFE_IMAGE_SRC.match(src):
+        return self.image(tokens, idx, options, env)
+    alt = self.renderInlineAsText(token.children or [], options, env).strip()
+    label = escapeHtml(alt) if alt else "이미지"
+    return (
+        f'<a class="blocked-image" href="{escapeHtml(src)}" '
+        f'rel="noopener noreferrer nofollow">[외부 이미지 — 자동으로 불러오지 않음: {label}]</a>'
+    )
+
+
 _md = MarkdownIt("commonmark", {"html": False, "linkify": False, "typographer": False})
 _md.enable(["table", "strikethrough"])
 # allow_space=True: 모델이 `\( [10, 30] \)`처럼 공백을 끼워 넣는 실측 케이스 허용
 _md.use(dollarmath_plugin, allow_space=True, double_inline=False)
 _md.add_render_rule("math_inline", _render_math_inline)
 _md.add_render_rule("math_block", _render_math_block)
+_md.add_render_rule("image", _render_image)
 
 # 표 구조 태그만 복원한다. 여는 태그의 **임의 속성**(border/style/class/onclick 등)은
 # 전부 버리고 colspan/rowspan(숫자)만 유지한다 — OvisOCR2처럼 모델이 `<table border="1">`

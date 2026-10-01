@@ -515,3 +515,136 @@ def test_keep_leading_pages_drops_truncated_and_unstarted_artifacts(tmp_path):
     assert json.loads((c / "raw_pages.json").read_text(encoding="utf-8"))["pages"] == [
         "r0", "r1", "",
     ]
+
+
+# ── 정합: 표·수식·그림 페이지, 갭 채우기, 약한 근거 ─────────────────────────
+
+
+def test_assign_slots_fills_single_gaps_monotonically():
+    from app.pipeline.merge import assign_slots
+
+    assert assign_slots([0, None, 2], 3) == [0, 1, 2]           # 가운데 한 칸
+    assert assign_slots([None, 1, 2], 3) == [0, 1, 2]           # 앞 끝
+    assert assign_slots([0, 1, None], 3) == [0, 1, 2]           # 뒤 끝
+    assert assign_slots([0, None, None, 3], 4) == [0, 1, 2, 3]  # 같은 수의 연속 갭
+    # 미매칭 수와 빈 슬롯 수가 다르면 앞 매칭 페이지에 붙는다(내용 손실 없음)
+    assert assign_slots([0, None, 1], 2) == [0, 0, 1]
+
+
+def test_assign_slots_uses_scores_to_attach_a_split_half_forward():
+    """둘로 쪼개진 페이지의 앞 절반(미매칭)은 점수가 더 높은 다음 페이지에 붙는다."""
+    from app.pipeline.merge import assign_slots
+
+    scores = {(1, 0): 0.0, (1, 1): 0.25}  # 모델 1은 슬롯 1(다음)과 더 닮았다
+    got = assign_slots([0, None, 1], 2, score=lambda k, s: scores.get((k, s), 0.0))
+    assert got == [0, 1, 1]
+    # 단조성: 앞쪽 미매칭이 뒤로 가면 그 뒤의 미매칭도 뒤로 간다
+    scores = {(1, 1): 0.3, (2, 0): 0.9}
+    got = assign_slots([0, None, None, 1], 2, score=lambda k, s: scores.get((k, s), 0.0))
+    assert got in ([0, 0, 0, 1], [0, 0, 1, 1], [0, 1, 1, 1])
+    assert got == sorted(got)
+
+
+def _pdf_with_pages(path, page_lines):
+    import fitz
+
+    doc = fitz.open()
+    for lines in page_lines:
+        page = doc.new_page(width=595, height=842)
+        y = 72
+        for line in lines:
+            page.insert_text((60, y), line, fontsize=10)
+            y += 16
+    doc.save(str(path))
+    doc.close()
+
+
+_PROSE = [
+    "The quick survey of vector quantization methods covers scalar and product codes.",
+    "We evaluate distortion rates on synthetic and real embedding datasets carefully.",
+    "Results show the online algorithm matches the information theoretic lower bound.",
+    "Further analysis considers inner product estimation and nearest neighbour search.",
+] * 3
+
+
+def test_table_page_is_aligned_after_markup_is_stripped(tmp_path):
+    """표 페이지의 `<table><tr><td>`가 정규화에 남아 프로브가 실패하면, 표 페이지가 앞
+    페이지에 붙고 제자리가 빈다(마커가 하나 더 나온 청크 — 위치 기반이었으면 맞았다)."""
+    job = tmp_path / "job"
+    job.mkdir()
+    cells = [("Method", "Bits", "Recall"), ("TurboQuant", "3.5", "0.997"),
+             ("KIVI", "3", "0.981"), ("SnapKV", "16", "0.858"), ("PolarQuant", "3.9", "0.995")]
+    table_lines = ["   ".join(row) for row in cells] * 3
+    _pdf_with_pages(job / "source.pdf", [
+        ["PAGE ONE " + line for line in _PROSE],
+        table_lines,
+        ["PAGE THREE " + line for line in _PROSE],
+    ])
+    table_md = "<table>" + "".join(
+        "<tr>" + "".join(f"<td>{c}</td>" for c in row) + "</tr>" for row in cells * 3
+    ) + "</table>"
+    third = " ".join("PAGE THREE " + line for line in _PROSE)
+    model = [
+        " ".join("PAGE ONE " + line for line in _PROSE),
+        table_md,
+        third[: len(third) // 2],
+        third[len(third) // 2 :],
+    ]
+    m = IncrementalMerger(job, SEP)
+    c = _mk_multi_chunk(job, "chunk_00", 3)
+    m.add_chunk(ChunkResult(c, 1, 3, "<PAGE>\n" + "\n<PAGE>\n".join(model)))
+
+    assert "PAGE ONE" in m.pages_md[0] and "TurboQuant" not in m.pages_md[0]
+    assert "TurboQuant" in m.pages_md[1]
+    assert m.pages_md[2].count("PAGE THREE") == len(_PROSE)
+
+
+def test_latex_formula_page_is_aligned_to_its_glyph_text(tmp_path):
+    job = tmp_path / "job"
+    job.mkdir()
+    glyph = [f"For vector x{i} with ∥x∥2 = 1 the bound E[⟨y, x˜⟩] ≤ √3π · 1/4b holds "
+             f"for every index {i} in the sequence" for i in range(12)]
+    latex = " ".join(
+        rf"For vector \(x_{{{i}}}\) with \(\|x\|_{{2}} = 1\) the bound "
+        rf"\(\mathbb{{E}}[\langle y, \tilde{{x}} \rangle] \leq \sqrt{{3}}\pi \cdot 1/4^{{b}}\) "
+        f"holds for every index {i} in the sequence" for i in range(12)
+    )
+    _pdf_with_pages(job / "source.pdf", [
+        ["PAGE ONE " + line for line in _PROSE], glyph, ["PAGE THREE " + line for line in _PROSE],
+    ])
+    m = IncrementalMerger(job, SEP)
+    c = _mk_multi_chunk(job, "chunk_00", 3)
+    # 모델이 3쪽을 건너뛰었다(마커 2개) — 수식 페이지가 매칭돼야 1·2쪽이 제자리다
+    m.add_chunk(ChunkResult(
+        c, 1, 3,
+        "<PAGE>\n" + " ".join("PAGE ONE " + line for line in _PROSE) + "\n<PAGE>\n" + latex,
+    ))
+    assert "PAGE ONE" in m.pages_md[0]
+    assert "holds for every index" in m.pages_md[1]
+    assert m.pages_md[2] == ""
+
+
+def test_weak_alignment_evidence_falls_back_to_positional_placement(tmp_path):
+    """대조가 거의 맞지 않으면(텍스트 레이어가 모델 출력과 다른 문서) 근거 없는
+    재배치 대신 위치 기반으로 둔다."""
+    job = tmp_path / "job"
+    job.mkdir()
+    _pdf_with_pages(job / "source.pdf", [
+        ["PAGE ONE " + line for line in _PROSE],
+        ["unrelated text layer number two " * 3] * 8,
+        ["unrelated text layer number three " * 3] * 8,
+        ["unrelated text layer number four " * 3] * 8,
+    ])
+    model = [
+        "completely different transcription alpha " * 10,
+        "completely different transcription beta " * 10,
+        " ".join("PAGE ONE " + line for line in _PROSE),   # 1/3만 매칭(물리 1쪽)
+    ]
+    m = IncrementalMerger(job, SEP)
+    c = _mk_multi_chunk(job, "chunk_00", 4)
+    m.add_chunk(ChunkResult(c, 1, 4, "<PAGE>\n" + "\n<PAGE>\n".join(model)))
+
+    # 위치 기반: 모델 순서 그대로, 모자란 끝 페이지는 빈 페이지
+    assert "alpha" in m.pages_md[0] and "beta" in m.pages_md[1]
+    assert "PAGE ONE" in m.pages_md[2] and m.pages_md[3] == ""
+    assert any("빈 페이지로 보정" in w for w in m.warnings), m.warnings

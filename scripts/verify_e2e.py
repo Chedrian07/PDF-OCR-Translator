@@ -517,7 +517,11 @@ def wait_http(url: str, timeout: float = 90) -> bool:
 #   3) 프록시 — 하네스 트래픽은 전부 루프백이다. 프록시가 끼면 목 호출이 밖으로 샌다.
 # PATH·HOME·LANG·TMPDIR·라이브러리 경로 같은 실행 환경 자체는 남긴다.
 ENV_EXAMPLE = REPO / ".env.example"
-_UNDOCUMENTED_APP_KEYS = frozenset({"DATA_DIR", "FRONTEND_DIR", "FAKE_DELAY", "DISABLE_DOTENV"})
+# PDF_WORKER_MODE: 셸·테스트 세션(conftest는 inline)의 값이 새면 하네스가 PyMuPDF 격리를 끈 채
+# 검증한다 — 하네스는 늘 운영 기본값(process)으로 돈다.
+_UNDOCUMENTED_APP_KEYS = frozenset(
+    {"DATA_DIR", "FRONTEND_DIR", "FAKE_DELAY", "DISABLE_DOTENV", "PDF_WORKER_MODE"}
+)
 _ENV_EXAMPLE_KEY_RE = re.compile(r"^#? ?([A-Z][A-Z0-9_]*)=", re.MULTILINE)
 _SECRETISH_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)$|SECRET", re.IGNORECASE)
 _PROVIDER_PREFIX_RE = re.compile(

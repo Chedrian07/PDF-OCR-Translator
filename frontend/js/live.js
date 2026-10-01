@@ -7,7 +7,7 @@ import {
   truncateRawToPage,
 } from './core.js';
 import { el, state } from './state.js';
-import { h, typesetMath } from './ui.js';
+import { h, sanitizeImageSources, typesetMath } from './ui.js';
 import { postPreviewRender } from './api.js';
 
 /* ============================ Live state ============================ */
@@ -457,6 +457,9 @@ export function appendPreviewFragment(html, withSep) {
   if (withSep) nodes.push(h('hr'));
   const tpl = document.createElement('template');
   tpl.innerHTML = html;
+  // <template> 안은 inert라 아직 아무것도 요청하지 않았다 — 붙이기 전에 외부 이미지를
+  // 막는다. 업로드 직후 라이브 미리보기가 숨은 추적 이미지를 여는 경로다(frontend-3).
+  sanitizeImageSources(tpl.content);
   nodes.push(...tpl.content.childNodes);
   for (const n of nodes) {
     el.livePreview.appendChild(n);

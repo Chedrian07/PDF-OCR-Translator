@@ -71,6 +71,7 @@ ENV_SOURCE_FILES = (
     "backend/app/config.py",            # Settings.from_env (대부분의 노브)
     "backend/app/api.py",               # TRUSTED_PROXY_HOPS
     "backend/app/pipeline/derived.py",  # PDF_EXPORT_MAX_CONCURRENT/_QUEUE_TIMEOUT_S
+    "backend/app/pipeline/pdf_worker.py",  # PDF 워커 시간·메모리 상한, 업로드 게이트
     "backend/app/translate/types.py",   # TranslateConfig.from_env
 )
 _ENV_KEY_RE = re.compile(r'"([A-Z][A-Z0-9_]{3,})"')
@@ -81,6 +82,9 @@ NOT_OPERATOR_KNOBS = {
     "FRONTEND_DIR", # 이미지 안 경로 — 리포 상대 탐색이 기본
     "FAKE_DELAY",   # FakeEngine 전용(테스트/데모)
     "DISABLE_DOTENV",  # 테스트·하네스 격리 스위치 — 컨테이너에는 .env 자체가 없다
+    # 테스트·디버깅 스위치 — inline은 PyMuPDF 격리(시간 상한·프로세스 분리)를 끈다.
+    # 운영 노브로 광고하지 않는다(conftest가 테스트 세션에서 켠다).
+    "PDF_WORKER_MODE",
 }
 
 # 소비처가 일부 스택에만 있는 키 → 그 서비스에만 둔다 (§8: 전부에 복붙하면

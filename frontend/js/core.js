@@ -1145,6 +1145,33 @@ export function healthCapabilities(d) {
   };
 }
 
+// health 응답의 운영 상태 요약 (순수 — tests/에서 검증).
+//  · loadError: 프리로드가 실패해 모델이 없다(model_load_error). '로딩 중'과 구분해야
+//    사용자가 끝없이 기다리지 않는다.
+//  · workerDead: 워커 스레드가 죽었다(worker_alive=false) — 잡이 영원히 queued로 남는다.
+// 필드가 없는 구버전 서버는 전부 정상으로 본다(fail-open).
+export function healthStatus(d) {
+  const data = d && typeof d === 'object' ? d : {};
+  const raw = typeof data.model_load_error === 'string' ? data.model_load_error.trim() : '';
+  const loadError = data.model_loaded === false && raw ? raw.slice(0, 300) : '';
+  return {
+    loading: data.model_loaded === false && !loadError,
+    loadError,
+    workerDead: data.worker_alive === false,
+  };
+}
+
+// 다음 health 조회까지의 지연. 정상이어도 주기적으로 다시 물어 sidecar·워커의 사후 장애를
+// 배지로 띄운다. 로딩·장애·연결 실패 중에는 더 자주 묻는다.
+export const HEALTH_POLL_FAST_MS = 10_000;
+export const HEALTH_POLL_SLOW_MS = 30_000;
+export function healthPollDelay(d, failed = false) {
+  if (failed) return HEALTH_POLL_FAST_MS;
+  const st = healthStatus(d);
+  if (st.loading || st.loadError || st.workerDead || providerIssue(d)) return HEALTH_POLL_FAST_MS;
+  return HEALTH_POLL_SLOW_MS;
+}
+
 // sidecar provider 장애 요약 (순수). 문제 없으면 null.
 // 메인 앱 health가 200이어도 provider가 죽어 있으면 사용자에게 알린다.
 export function providerIssue(d) {

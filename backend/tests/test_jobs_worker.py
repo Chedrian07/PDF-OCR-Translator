@@ -4,6 +4,8 @@
   스레드라 엔진·디코드 루프 바깥에서 autorelease된 객체의 마지막 회수 지점이다.
   MLX는 실측(8쪽 실가중치 잡 5회 연속: RSS 2627→2629→2645→2645→2647MB, MLX 활성 메모리
   6363MB 고정)에서 잡별 증가가 없어 풀을 켜지 않는다. CPU·CUDA에는 비울 객체가 없다.
+- 잡은 실행 시작·종료 시각(started_at/finished_at)을 meta와 API 응답에 남긴다. 모르는
+  시각(대기 중 취소의 시작, 재시작으로 중단된 잡의 종료, 구버전 meta)은 null이다.
 """
 
 import contextlib
@@ -150,3 +152,77 @@ def test_worker_keeps_running_after_a_job_fails_inside_the_pool(tmp_path, monkey
         worker.join(timeout=10)
     assert [j.status for j in jobs] == ["error", "error"]  # 첫 잡의 실패 뒤에도 다음 잡을 받았다
     assert spy.entries == [True, True] and spy.depth == 0
+
+
+# ── 실행 시작·종료 시각(started_at/finished_at) ─────────────────────────────
+
+
+def test_finished_jobs_record_start_and_finish_times(tmp_path):
+    import json
+    from datetime import datetime
+
+    engine = FakeEngine(delay=0.0)
+    store = JobStore(tmp_path / "jobs")
+    settings = Settings(engine="fake", device="cpu", data_dir=tmp_path / "data")
+    worker = Worker(store, EventBroker(), engine, settings, {})
+    job = store.create("doc.pdf", "multi", dpi=72)
+    (job.dir / "source.pdf").write_bytes(make_pdf_bytes(pages=2, with_image=False))
+    assert (job.started_at, job.finished_at) == (None, None)
+    engine.load()
+    worker.start()
+    try:
+        worker.submit(job)
+        deadline = time.monotonic() + 30
+        while job.status != "done":
+            assert time.monotonic() < deadline, job.status
+            time.sleep(0.02)
+    finally:
+        worker.stop()
+        worker.join(timeout=10)
+
+    started = datetime.fromisoformat(job.started_at)
+    finished = datetime.fromisoformat(job.finished_at)
+    assert datetime.fromisoformat(job.created_at) <= started <= finished
+    meta = json.loads((job.dir / "meta.json").read_text(encoding="utf-8"))
+    assert (meta["started_at"], meta["finished_at"]) == (job.started_at, job.finished_at)
+    body = job.to_dict()
+    assert (body["started_at"], body["finished_at"]) == (job.started_at, job.finished_at)
+
+    restored = JobStore(tmp_path / "jobs")
+    restored.load_existing()
+    again = restored.get(job.id)
+    assert (again.started_at, again.finished_at) == (job.started_at, job.finished_at)
+
+
+def test_jobs_canceled_before_starting_have_no_start_time(tmp_path):
+    store = JobStore(tmp_path / "jobs")
+    job = store.create("doc.pdf", "multi", dpi=72)
+    assert store.try_cancel_queued(job, "사용자에 의해 취소되었습니다")
+    assert job.status == "canceled"
+    assert job.started_at is None and job.finished_at is not None
+
+
+def test_interrupted_and_legacy_jobs_leave_unknown_times_empty(tmp_path):
+    """재시작으로 중단된 잡은 실제로 멈춘 시각을 모른다 — 재시작 시각을 적으면 처리 시간이
+    서버가 내려가 있던 시간만큼 부풀려 보인다. 구버전 meta에는 두 필드가 없다."""
+    import json
+
+    store = JobStore(tmp_path / "jobs")
+    running = store.create("doc.pdf", "multi", dpi=72)
+    running.mark_running()
+    store.save(running)
+    legacy_dir = tmp_path / "jobs" / "j_0123456789ab"
+    legacy_dir.mkdir()
+    (legacy_dir / "meta.json").write_text(json.dumps({
+        "id": "j_0123456789ab", "filename": "old.pdf", "mode": "multi", "dpi": 72,
+        "status": "done", "created_at": "2026-09-01T00:00:00+00:00",
+    }), encoding="utf-8")
+
+    restored = JobStore(tmp_path / "jobs")
+    restored.load_existing()
+    interrupted = restored.get(running.id)
+    assert interrupted.status == "error"
+    assert interrupted.started_at == running.started_at and interrupted.finished_at is None
+    legacy = restored.get("j_0123456789ab")
+    assert (legacy.started_at, legacy.finished_at) == (None, None)
+    assert legacy.to_dict()["started_at"] is None

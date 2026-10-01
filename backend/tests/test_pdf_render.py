@@ -638,3 +638,17 @@ def test_model_html_tables_restored_safely():
     assert "<img" not in html                           # img 등 다른 태그는 그대로 이스케이프
     assert "onerror" in html and "&lt;img" in html
     assert '<table onclick' not in html                 # 속성 붙은 table은 복원 안 함
+
+
+def test_page_texts_treat_a_quarantined_page_as_empty(tmp_path):
+    """앞서 시간 상한을 넘은 페이지는 기다리지 않고 빈 원문으로 둔다 — 같은 청크의 나머지
+    페이지 정합까지 포기하지 않는다. 새로 실패한 페이지만 정합 전체를 끈다(None)."""
+    from app.pipeline import pdf_worker
+    from app.pipeline.pdf import page_plain_texts
+
+    pdf = _write_pdf(tmp_path, pages=3, with_image=False)
+    pdf_worker.quarantine(pdf, 1)
+    texts = page_plain_texts(pdf, [0, 1, 2])
+    assert texts is not None and texts[1] == ""
+    assert "Sample page 1" in texts[0] and "Sample page 3" in texts[2]
+    assert page_plain_texts(tmp_path / "missing.pdf", [0]) is None

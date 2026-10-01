@@ -1,7 +1,7 @@
 import {
   READER_ALIGNMENT_COOLDOWN_MS, READER_DEFAULT_RATIO, READER_FOCUS_RATIO, READER_HYDRATE_RADIUS,
   READER_KEEP_RADIUS, READER_SYNC_KEY, READER_SYNC_QUIET_MS, READER_ZOOM_KEY, READER_ZOOM_MAX,
-  READER_ZOOM_MIN, readerPosKey,
+  READER_ZOOM_MIN, katexOptions, readerPosKey,
 } from './constants.js';
 import {
   alignmentBatchPlan, alignmentFailureIsPermanent, blockAtFraction, clampReaderPage,
@@ -709,10 +709,7 @@ export function mathTextNodes(text) {
     span.textContent = part.value;
     if (window.katex) {
       try {
-        window.katex.render(part.value, span, {
-          displayMode: !!part.display,
-          throwOnError: false,
-        });
+        window.katex.render(part.value, span, katexOptions(part.display));
       } catch (_) { span.textContent = part.value; }
     }
     nodes.push(span);

@@ -22,6 +22,7 @@ from typing import Callable
 
 import re
 
+from ..pipeline import artifacts
 from . import prompts
 from .client import OpenAICompatClient
 from .flight import SingleFlight
@@ -872,10 +873,14 @@ class _TranslationRun:
         if layout_path.is_file():
             try:
                 loaded = json.loads(layout_path.read_text(encoding="utf-8"))
-                if isinstance(loaded, list):
-                    self.layout_pages = loaded
             except Exception:
-                self.layout_pages = None
+                loaded = None
+            # 텍스트 블록이 있는 layout만 쓴다(artifacts.has_usable_layout과 같은 기준).
+            # image 블록뿐인 옛 figure_only 잡의 layout은 번역할 유닛이 없는데도 layout.{lang}
+            # .json을 만들어 그 잡이 좌표 내보내기 대상처럼 보이게 했다 — 레이아웃 없는 잡과
+            # 똑같이 result.md만 번역한다.
+            if isinstance(loaded, list) and artifacts.layout_has_text_blocks(loaded):
+                self.layout_pages = loaded
 
     def _select_units(self) -> None:
         # 유닛 분리 — md(문서 순서) + layout

@@ -427,7 +427,8 @@ class Settings:
     max_pages: int = 200
     max_upload_mb: int = 100
     max_length: int = 32768
-    max_page_output_chars: int | None = 16_384  # 페이지별 decoded 문자 hard limit (env 0 이하=비활성)
+    # 페이지별 출력 내용 문자 hard limit — 레이아웃 태그·HTML 표 태그 제외 (env 0 이하=비활성)
+    max_page_output_chars: int | None = 16_384
     max_page_output_tokens: int | None = 6_144  # 페이지별 생성 토큰 hard limit (env 0 이하=비활성)
     page_separator: str = "\n\n---\n\n"
     cpu_threads: int = 0                # 0=torch 기본값 (CPU 백엔드 전용)

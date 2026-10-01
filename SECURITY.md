@@ -45,6 +45,30 @@ GitHub's private vulnerability reporting or another agreed private channel.
   service, so set them in `.env` to tighten the caps for container deployments too
   (`backend/tests/test_ci_ops_contracts.py` keeps that wiring from regressing).
 
+## Supply chain and image scanning
+
+- CI (`dependency-audit` job) runs `pip-audit` on the backend `uv.lock` (the same CPU set
+  the image ships) and on both sidecar locks. The release workflow refuses to push an
+  image while `trivy` reports a HIGH or CRITICAL vulnerability that has a fix.
+- Accepted advisories are listed with a reason and a review date: pip-audit IDs in
+  `.github/workflows/ci.yml`, image-scan IDs in `.github/trivyignore.yaml`. They all come
+  from the model-card pins (`transformers==4.57.1`, `torch==2.10.0`) and cover code paths
+  the application does not use. The lists expire on 2027-04-01; after that the gates fail
+  until someone reviews them again.
+- Base images are pinned by digest and rebuilt with `apt-get upgrade`. The PaddleOCR-VL
+  sidecar installs a fully pinned, hash-checked lock; the OvisOCR2 sidecar overlays a
+  hash-checked web layer on its digest-pinned vLLM base. GitHub Actions are pinned to full
+  commit SHAs. Dependabot proposes backend, action and base-image updates weekly.
+
+## Container hardening
+
+Every Compose service runs as uid 1000 with `no-new-privileges` and `cap_drop: [ALL]`.
+The CPU-image backends (`ocr-cpu`, `ocr-ovis`, `ocr-paddle`) also run with a read-only
+root filesystem — the `/data` volume and a `/tmp` tmpfs are the only writable paths — and
+a process limit, and the application code inside the image is root-owned and read-only.
+`ocr-cuda` and the GPU sidecars do not use a read-only root filesystem yet; that needs to
+be validated on a GPU host first.
+
 ## Secret response
 
 If a secret is committed, revoke or rotate it first. Removing it from a later commit is

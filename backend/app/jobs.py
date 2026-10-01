@@ -201,6 +201,24 @@ class JobStore:
             jobs = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
         return jobs[:limit]
 
+    def page(self, limit: int = 50, before: str | None = None) -> tuple[list[Job], bool, int]:
+        """최신순 목록의 한 쪽 — (잡들, 뒤에 더 있는가, 전체 수).
+
+        예전 목록은 최신 50건 고정이라 51번째부터의 잡은 UI에서 보이지도 지워지지도
+        않았다(TTL 기본 0 — 디스크만 계속 는다). before(잡 ID)를 주면 그 잡 **다음**
+        부터 이어 준다. 순서는 list()와 같다(created_at 내림차순, 같은 초는 생성 순서).
+        커서 잡이 없으면(그 사이 삭제) KeyError — 처음부터 다시 받으면 된다."""
+        with self._lock:
+            jobs = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
+        total = len(jobs)
+        if before is not None:
+            ids = [job.id for job in jobs]
+            try:
+                jobs = jobs[ids.index(before) + 1:]
+            except ValueError:
+                raise KeyError(before) from None
+        return jobs[:limit], len(jobs) > limit, total
+
     def queue_position(self, job: Job) -> int | None:
         """queued 잡의 대기열 위치(1-base): 워커 큐 제출 순서 기준.
 

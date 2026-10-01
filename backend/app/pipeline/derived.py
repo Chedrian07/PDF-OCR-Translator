@@ -82,6 +82,9 @@ _PDF_EXPORT_WARM_WAIT_DEFAULT = 180.0
 _PDF_EXPORT_SLOTS: threading.BoundedSemaphore | None = None
 _PDF_EXPORT_SLOTS_SIZE = 0
 _PDF_EXPORT_SLOTS_GUARD = threading.Lock()
+# 예열 전용 슬롯(전역 상한 N 중 N-1개) — _warm_build_slots 참조.
+_WARM_SLOTS: threading.BoundedSemaphore | None = None
+_WARM_SLOTS_SIZE = 0
 
 
 class PdfExportBusyError(Exception):
@@ -243,19 +246,61 @@ def _pdf_export_slots() -> threading.BoundedSemaphore | None:
         return _PDF_EXPORT_SLOTS
 
 
+def _warm_build_slots() -> threading.BoundedSemaphore | None:
+    """예열 전용 슬롯 — 전역 상한 N 중 N-1개까지만. None이면 예열이 빌드할 여유가 없다.
+
+    전역 상한이 0 이하(비활성)일 때는 불리지 않는다(export_build_slot이 먼저 빠진다).
+    """
+    global _WARM_SLOTS, _WARM_SLOTS_SIZE
+    size = _env_int(PDF_EXPORT_MAX_CONCURRENT_ENV, _PDF_EXPORT_MAX_CONCURRENT_DEFAULT) - 1
+    with _PDF_EXPORT_SLOTS_GUARD:
+        if size <= 0:
+            _WARM_SLOTS = None
+            _WARM_SLOTS_SIZE = 0
+            return None
+        if _WARM_SLOTS is None or _WARM_SLOTS_SIZE != size:
+            _WARM_SLOTS = threading.BoundedSemaphore(size)
+            _WARM_SLOTS_SIZE = size
+        return _WARM_SLOTS
+
+
+@contextlib.contextmanager
+def _warm_slot_reservation():
+    """예열 스레드면 예열 전용 슬롯을 먼저(대기 없이) 잡는다 — 사용자 요청 몫 예약.
+
+    예열의 예산 0은 슬롯 **획득**에만 적용되고, 한 번 잡은 슬롯은 빌드가 끝날 때까지
+    쥔다. 그래서 예열 둘이 상한(기본 2)을 다 채우면 아무도 누르지 않은 백그라운드
+    작업 때문에 다른 잡의 진짜 클릭이 30s 뒤 503을 받았다(재현). 예열은 N-1개까지만
+    쓰게 해 최소 1개는 항상 클릭 몫으로 남긴다. N=1이면 남길 여유가 없으므로 예열은
+    빌드하지 않는다 — 첫 클릭이 직접 만든다.
+    """
+    if not getattr(_EXPORT_WAIT, "warm", False):
+        yield
+        return
+    warm_slots = _warm_build_slots()
+    if warm_slots is None or not warm_slots.acquire(blocking=False):
+        raise _busy_error()
+    try:
+        yield
+    finally:
+        with contextlib.suppress(ValueError):
+            warm_slots.release()
+
+
 @contextlib.contextmanager
 def export_build_slot():
     """빌드 한 건 분량의 전역 슬롯을 잡는다 (캐시 적중 경로에서는 잡지 않는다).
 
     잡 단위 락을 **쥔 채로만** 슬롯을 기다린다. 슬롯 보유자는 자기 잡 락만 쥐고
-    있고 다른 잡 락을 기다리지 않으므로 순환 대기가 생기지 않는다.
+    있고 다른 잡 락을 기다리지 않으므로 순환 대기가 생기지 않는다. 예열 스레드는
+    그 전에 예열 전용 슬롯부터 잡는다(_warm_slot_reservation — 예열끼리만 경합).
     """
     slots = _pdf_export_slots()
     if slots is None:
         yield
         return
     # 예산을 body 전체에 걸쳐 열어 둔다 — 중첩된 획득(래스터 슬롯 등)이 같은 상한을 쓴다.
-    with export_wait_budget():
+    with export_wait_budget(), _warm_slot_reservation():
         if not _acquire_within_budget(slots.acquire):
             raise _busy_error()
         try:

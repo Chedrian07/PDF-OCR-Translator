@@ -154,3 +154,20 @@ def test_sse_stream_closes_when_its_job_vanishes_without_an_event(client):
     assert time.monotonic() - started < 5
     assert chunks[0] == "retry: 3000\n\n" and chunks[1].startswith("event: progress")
     store.delete_dir(job)
+
+
+# ── F1-6: 재시작 시 시작하지 못한 대기 잡을 다시 제출한다 ─────────────────────────
+def test_restart_resubmits_queued_jobs_that_never_started(settings, sample_pdf):
+    """첫 앱은 워커를 띄우지 않아(lifespan 없음) 업로드가 대기열에만 들어간다 — 그 상태로
+    '재시작'하면 같은 잡이 오류가 아니라 대기열로 돌아와 처리된다."""
+    from app.main import create_app
+
+    first = create_app(settings)
+    jid = _upload(TestClient(first), sample_pdf)
+    assert first.state.store.get(jid).status == "queued"
+    first.state.owner_lock.release()                   # 프로세스 종료 = 소유 락 회수
+
+    with TestClient(create_app(settings)) as client:
+        body = wait_done(client, jid, timeout=30)
+        assert body["status"] == "done", body
+        assert body["error"] is None

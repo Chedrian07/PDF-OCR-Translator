@@ -390,7 +390,7 @@
                   <div id="reader-content" class="markdown-body reader-content" tabindex="0"
                        role="region" aria-labelledby="reader-rail-title"></div>
                   <details class="reader-tools-wrap">
-                    <summary>선택 문장 도구</summary>
+                    <summary>선택 문장 도구 <span id="reader-notes-badge" class="reader-notes-badge" hidden></span></summary>
                     <div class="reader-tool-grid">
                       <button id="reader-summary" class="reader-tool" type="button">페이지 요약</button>
                       <button id="reader-explain" class="reader-tool" type="button" disabled>선택 설명</button>
@@ -398,6 +398,18 @@
                       <button id="reader-cite" class="reader-tool" type="button" disabled>인용 저장</button>
                     </div>
                     <p id="reader-selection" class="reader-selection">오른쪽 텍스트에서 문장을 선택하세요.</p>
+                    <!-- 저장한 인용·하이라이트 — 잡별로 이 브라우저(localStorage)에만 남는다 (JS가 채움) -->
+                    <section class="reader-notes" aria-labelledby="reader-notes-title">
+                      <div class="reader-notes-head">
+                        <strong id="reader-notes-title">저장한 인용·하이라이트</strong>
+                        <span class="reader-notes-actions">
+                          <button id="reader-notes-copy" class="btn btn-small" type="button" disabled>Markdown 복사</button>
+                          <button id="reader-notes-export" class="btn btn-small" type="button" disabled>내보내기</button>
+                        </span>
+                      </div>
+                      <ol id="reader-notes-list" class="reader-notes-list"></ol>
+                      <p id="reader-notes-empty" class="reader-notes-empty muted">아직 저장한 항목이 없습니다 — 문장을 선택한 뒤 [하이라이트]나 [인용 저장]을 누르세요. 이 브라우저에만 저장됩니다.</p>
+                    </section>
                   </details>
                 </aside>
               </div>

@@ -134,23 +134,80 @@ def _run_job(
     return job
 
 
-def test_failed_chunk_becomes_placeholder_and_job_done(tmp_path):
-    """청크1이 재시도까지 실패해도 잡은 done — 해당 페이지들은 플레이스홀더,
-    warnings가 meta.json에 남고 나머지 청크는 정상 병합된다."""
+def test_failed_multi_chunk_is_reprocessed_page_by_page(tmp_path):
+    """청크1의 multi가 재시도까지 실패해도 청크 전체를 플레이스홀더로 확정하지 않는다
+    — 페이지별 single로 다시 처리한다(8쪽 prefill OOM은 1쪽씩이면 대개 통과한다).
+
+    예전 기대값(1–2쪽 플레이스홀더)은 감사에서 결함으로 확인된 동작이었다: 같은
+    실패가 per_page 모드에서는 복구되는데 multi(업로드 기본값)에서만 내용이 사라졌다."""
     engine = FlakyEngine(fail_calls={1, 2})  # 청크1: 최초 + 재시도 모두 실패
     job = _run_job(tmp_path, engine)
 
     assert job.status == "done"
-    assert engine.calls == 3  # 청크1 ×2 + 청크2 ×1
+    assert engine.calls == 5  # 청크1 multi ×2 + single ×2(1·2쪽) + 청크2 multi ×1
     md = (job.dir / "result.md").read_text(encoding="utf-8")
-    assert md.count(FAILED_MARK) == 2  # 1–2페이지 플레이스홀더
-    assert "![](images/p0003_0.jpg)" in md and "![](images/p0004_0.jpg)" in md
+    assert FAILED_MARK not in md
+    for page in range(1, 5):
+        assert f"![](images/p{page:04d}_0.jpg)" in md
     assert len(md.split("\n\n---\n\n")) == 4  # 글로벌 페이지 수 정합 유지
     assert len(job.warnings) == 1
-    assert "1–2페이지" in job.warnings[0] and "플레이스홀더" in job.warnings[0]
+    assert "1–2페이지" in job.warnings[0] and "페이지별 재처리" in job.warnings[0]
     meta = json.loads((job.dir / "meta.json").read_text(encoding="utf-8"))
     assert meta["status"] == "done"
     assert meta["warnings"] == job.warnings
+
+
+class PageFailingEngine(FakeEngine):
+    """multi는 늘 실패하고, single은 지정 페이지에서만 결정적으로 실패하는 엔진."""
+
+    def __init__(self, fail_single_pages=()):
+        super().__init__(delay=0.0)
+        self.fail_single_pages = set(fail_single_pages)
+        self.multi_calls = 0
+        self.single_calls: dict[int, int] = {}
+
+    def run_multi(self, image_paths, out_dir, sink, cancel):
+        self.multi_calls += 1
+        raise RuntimeError("MPS backend out of memory (모의 8쪽 prefill)")
+
+    def run_single(self, image_path, out_dir, sink, cancel):
+        page = int(Path(image_path).stem.rsplit("_", 1)[-1])
+        self.single_calls[page] = self.single_calls.get(page, 0) + 1
+        if page in self.fail_single_pages:
+            raise RuntimeError(f"{page}페이지 모의 벤더 예외")
+        return super().run_single(image_path, out_dir, sink, cancel)
+
+
+def test_one_deterministically_failing_page_does_not_take_its_chunk_down(tmp_path):
+    """한 페이지만 결정적으로 실패하면 그 페이지만 텍스트 레이어로 복구되고 나머지는
+    OCR 결과를 지킨다 — 4쪽 단일 청크 문서가 잡 전체 error로 끝나던 회귀 방지."""
+    engine = PageFailingEngine(fail_single_pages={3})
+    job = _run_job(tmp_path, engine, pages=4, pages_per_chunk=4)
+
+    assert job.status == "done"
+    assert engine.multi_calls == 2
+    assert engine.single_calls == {1: 1, 2: 1, 3: 2, 4: 1}
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert FAILED_MARK not in md
+    for page in (1, 2, 4):
+        assert f"![](images/p{page:04d}_0.jpg)" in md
+    assert "Sample page 3" in md and "PDF 내장 텍스트 레이어" in md
+    assert any("텍스트 레이어로 복구" in w for w in job.warnings)
+
+
+def test_single_page_multi_chunk_tries_the_text_layer_first(tmp_path):
+    """1쪽 청크(sidecar 엔진의 기본 구성)는 재시도까지 실패하면 플레이스홀더 대신
+    텍스트 레이어부터 시도한다 — 무거운 페이지가 타임아웃을 두 번 내면 텍스트
+    레이어가 있는데도 빈 페이지가 됐다."""
+    engine = FlakyEngine(fail_calls={1, 2})
+    job = _run_job(tmp_path, engine, pages=2, pages_per_chunk=1)
+
+    assert job.status == "done"
+    assert engine.calls == 3  # 1쪽 ×2(실패) + 2쪽 ×1 — 같은 페이지를 또 OCR하지 않는다
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert FAILED_MARK not in md
+    assert "Sample page 1" in md and "PDF 내장 텍스트 레이어" in md
+    assert "![](images/p0002_0.jpg)" in md
 
 
 def test_retry_recovers_without_placeholder(tmp_path):
@@ -169,13 +226,15 @@ def test_retry_recovers_without_placeholder(tmp_path):
 
 
 def test_all_chunks_failed_is_error(tmp_path):
-    """전 청크 실패면 부분 성공이 없으므로 기존대로 status=error."""
+    """복구할 길이 하나도 없으면(페이지별 single도 실패, 텍스트 레이어 없음) 부분
+    성공이 없으므로 기존대로 status=error."""
     engine = FlakyEngine(fail_all=True)
-    job = _run_job(tmp_path, engine)
+    job = _run_job(tmp_path, engine, embedded_text=False)
 
     assert job.status == "error"
     assert "모든 청크" in job.error
-    assert engine.calls == 4  # 청크 2개 × (최초 + 재시도)
+    # 청크 2개 × (multi 최초 + 재시도 + 페이지 2쪽 × single 최초·재시도)
+    assert engine.calls == 12
 
 
 def test_job_canceled_is_not_swallowed(tmp_path):
@@ -362,7 +421,7 @@ def test_canceled_job_keeps_the_warnings_it_accumulated(tmp_path):
 
     assert job.status == "canceled"
     assert job.warnings, "취소 전에 쌓인 경고가 사라졌다"
-    assert any("플레이스홀더" in w for w in job.warnings)
+    assert any("페이지별 재처리" in w for w in job.warnings)
     meta = json.loads((job.dir / "meta.json").read_text(encoding="utf-8"))
     assert meta["warnings"] == job.warnings
 
@@ -384,7 +443,7 @@ class TensorPinningEngine(FakeEngine):
         self.refs: list = []
         self.retry_alive: list[bool] = []
 
-    def run_multi(self, image_paths, out_dir, sink, cancel):
+    def _attempt(self):
         import weakref
 
         self.calls += 1
@@ -393,7 +452,14 @@ class TensorPinningEngine(FakeEngine):
         self.refs.append(weakref.ref(tensor))
         if self.calls in self.fail_calls:
             raise RuntimeError("MPS backend out of memory (모의)")
+
+    def run_multi(self, image_paths, out_dir, sink, cancel):
+        self._attempt()
         return super().run_multi(image_paths, out_dir, sink, cancel)
+
+    def run_single(self, image_path, out_dir, sink, cancel):
+        self._attempt()
+        return super().run_single(image_path, out_dir, sink, cancel)
 
 
 def test_failed_attempt_tensors_are_released_before_the_retry(tmp_path):
@@ -416,7 +482,7 @@ def test_failed_attempt_tensors_are_released_before_the_retry(tmp_path):
 def test_final_chunk_errors_do_not_pin_tensors_after_the_job(tmp_path):
     import gc
 
-    engine = TensorPinningEngine(fail_calls={1, 2, 3, 4})
+    engine = TensorPinningEngine(fail_calls=set(range(1, 7)))  # multi ×2 + single 2쪽 ×2
     gc.disable()
     try:
         job = _run_job(tmp_path, engine, pages=2, pages_per_chunk=2, embedded_text=False)
@@ -426,3 +492,148 @@ def test_final_chunk_errors_do_not_pin_tensors_after_the_job(tmp_path):
 
     assert job.status == "error" and "모든 청크" in job.error
     assert not any(alive), alive
+
+
+# ── MAX_LENGTH 도달(OutputLimitError) ────────────────────────────────────
+
+
+class OutputLimitEngine(FakeEngine):
+    """첫 multi 호출이 MAX_LENGTH에서 잘리는 엔진.
+
+    complete_pages쪽까지는 끝까지 생성하고 그다음 페이지 중간에서 잘린다. 산출물
+    (크롭·오버레이·raw_pages.json)은 잘린 페이지 것까지 out_dir에 남긴다 — 벤더가
+    생성이 끝난 뒤 save_results를 하는 것과 같다. attach_partial이면 엔진 계약대로
+    OutputLimitError.partial_output에 run_multi 형식의 잘린 출력을 싣는다.
+    """
+
+    def __init__(self, complete_pages: int, *, attach_partial: bool = True):
+        super().__init__(delay=0.0)
+        self.complete_pages = complete_pages
+        self.attach_partial = attach_partial
+        self.multi_calls = 0
+        self.single_calls: dict[int, int] = {}
+
+    def run_multi(self, image_paths, out_dir, sink, cancel):
+        from app.engine.base import OutputLimitError
+        from app.pipeline.merge import split_pages
+
+        self.multi_calls += 1
+        if self.multi_calls > 1:
+            return super().run_multi(image_paths, out_dir, sink, cancel)
+        full = super().run_multi(image_paths[: self.complete_pages + 1], out_dir, sink, cancel)
+        pages = split_pages(full)
+        pages[-1] = pages[-1][: len(pages[-1]) // 3]  # 마지막 페이지는 중간에서 잘렸다
+        error = OutputLimitError("생성이 총 길이 상한(MAX_LENGTH=32768)에 도달해 출력이 잘림")
+        if self.attach_partial:
+            error.partial_output = "<PAGE>\n" + "\n<PAGE>\n".join(pages)
+        raise error
+
+    def run_single(self, image_path, out_dir, sink, cancel):
+        page = int(Path(image_path).stem.rsplit("_", 1)[-1])
+        self.single_calls[page] = self.single_calls.get(page, 0) + 1
+        return super().run_single(image_path, out_dir, sink, cancel) + "\n\nSINGLE-RUN"
+
+
+def _run_job_events(tmp_path, engine, *, pages, pages_per_chunk, mode="multi"):
+    import queue
+
+    store = JobStore(tmp_path / "jobs")
+    broker = EventBroker()
+    job = store.create("doc.pdf", mode, dpi=72)
+    (job.dir / "source.pdf").write_bytes(make_pdf_bytes(pages=pages, with_image=False))
+    settings = Settings(
+        engine="fake", device="cpu", data_dir=tmp_path / "data",
+        preload_model=False, fake_delay=0.0, pages_per_chunk=pages_per_chunk,
+    )
+    q = broker.subscribe(job.id)
+    engine.load()
+    execute_job(job, store, broker, engine, settings, threading.Event())
+    events = []
+    while True:
+        try:
+            events.append(q.get_nowait())
+        except queue.Empty:
+            break
+    return job, events
+
+
+def test_output_limit_keeps_completed_pages_and_reprocesses_the_rest(tmp_path):
+    """MAX_LENGTH에서 잘린 8쪽 청크를 통째로 다시 돌리지 않는다 — 끝까지 생성된 앞
+    페이지는 multi 결과를 지키고, 잘린 페이지부터만 페이지별로 다시 처리한다."""
+    from tests.test_fidelity_gate import client_view
+
+    engine = OutputLimitEngine(complete_pages=2)
+    job, events = _run_job_events(tmp_path, engine, pages=4, pages_per_chunk=4)
+
+    assert job.status == "done"
+    assert engine.multi_calls == 1           # 잘린 청크를 같은 multi로 다시 돌리지 않는다
+    assert engine.single_calls == {3: 1, 4: 1}
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    segments = md.split("\n\n---\n\n")
+    assert len(segments) == 4
+    assert "SINGLE-RUN" not in segments[0] and "SINGLE-RUN" not in segments[1]
+    assert "SINGLE-RUN" in segments[2] and "SINGLE-RUN" in segments[3]
+    for page in range(1, 5):
+        assert f"![](images/p{page:04d}_0.jpg)" in segments[page - 1]
+    # 잘린 페이지의 multi 크롭이 마지막 보존 페이지로 접혀 들어가지 않는다
+    assert not list((job.dir / "images").glob("p0002_x*"))
+    layout = json.loads((job.dir / "layout.json").read_text(encoding="utf-8"))
+    assert [p["page"] for p in layout] == [1, 2, 3, 4]
+    assert any("MAX_LENGTH 도달" in w and "앞 2쪽은 유지" in w for w in job.warnings), job.warnings
+    # 라이브 스트림도 페이지당 세그먼트 하나 — 잘린 페이지 출력은 물려졌다
+    assert client_view(events).count("<PAGE>") == 4
+
+
+def test_output_limit_without_partial_output_reprocesses_every_page(tmp_path):
+    engine = OutputLimitEngine(complete_pages=2, attach_partial=False)
+    job, _events = _run_job_events(tmp_path, engine, pages=4, pages_per_chunk=4)
+
+    assert job.status == "done"
+    assert engine.single_calls == {1: 1, 2: 1, 3: 1, 4: 1}
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert md.count("SINGLE-RUN") == 4
+    assert any("MAX_LENGTH 도달" in w for w in job.warnings), job.warnings
+
+
+def test_output_limit_in_per_page_mode_names_the_cause(tmp_path):
+    """single 호출이 MAX_LENGTH에 닿아도 잘린 출력을 채택하지 않고 텍스트 레이어로
+    복구하며, 경고에 원인(MAX_LENGTH 도달)을 밝힌다."""
+    from app.engine.base import OutputLimitError
+
+    class SingleLimitEngine(FakeEngine):
+        def run_single(self, image_path, out_dir, sink, cancel):
+            raise OutputLimitError("생성이 MAX_LENGTH에 도달해 출력이 잘림")
+
+    job = _run_job(tmp_path, SingleLimitEngine(delay=0.0), pages=1, mode="per_page")
+
+    assert job.status == "done"
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert "Sample page 1" in md and "PDF 내장 텍스트 레이어" in md
+    assert any("MAX_LENGTH 도달" in w and "텍스트 레이어로 복구" in w for w in job.warnings)
+
+
+def test_max_length_smaller_than_chunk_budget_is_logged(tmp_path, caplog):
+    import logging
+
+    store = JobStore(tmp_path / "jobs")
+    broker = EventBroker()
+    job = store.create("doc.pdf", "multi", dpi=72)
+    (job.dir / "source.pdf").write_bytes(make_pdf_bytes(pages=2, with_image=False))
+    settings = Settings(
+        engine="fake", device="cpu", data_dir=tmp_path / "data", preload_model=False,
+        fake_delay=0.0, pages_per_chunk=8, max_length=32768, max_page_output_tokens=6144,
+    )
+    engine = FakeEngine(delay=0.0)
+    engine.load()
+    with caplog.at_level(logging.WARNING, logger="app.pipeline.runner"):
+        execute_job(job, store, broker, engine, settings, threading.Event())
+    assert job.status == "done"
+    assert any("MAX_LENGTH(32768)" in r.message and "8쪽" in r.message for r in caplog.records)
+
+    caplog.clear()
+    job2 = store.create("doc.pdf", "multi", dpi=72)
+    (job2.dir / "source.pdf").write_bytes(make_pdf_bytes(pages=2, with_image=False))
+    settings.max_length = 8 * 6144 + 4096
+    with caplog.at_level(logging.WARNING, logger="app.pipeline.runner"):
+        execute_job(job2, store, broker, engine, settings, threading.Event())
+    assert not any("MAX_LENGTH(" in r.message for r in caplog.records)

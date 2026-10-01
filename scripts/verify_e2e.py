@@ -10,7 +10,8 @@ scripts/smoke_e2e.sh 는 업로드→OCR→markdown/zip 에서 끝난다. 이 �
 
 산출물(서버 로그·내보낸 PDF 등)은 기본으로 리포의 tmp/verify-e2e/ 에 남는다
 (.gitignore 대상). `--work DIR` 로 옮길 수 있다. 포트는 매 실행마다 비어 있는
-포트를 잡으므로 개발 서버(8000)와 충돌하지 않는다.
+포트를 잡으므로 개발 서버(8000)와 충돌하지 않는다. 정해진 포트 범위 안에서만 띄워야
+하면 `--mock-port`·`--api-port` 로 고정한다(단계마다 같은 포트를 다시 쓴다).
 
 ⚠ **작업 디렉터리는 포트와 달리 자동으로 갈라지지 않는다.** api.log·data-main·
 fault-* 는 전부 고정 이름이고 각 단계가 시작할 때 rmtree 한다. 같은 --work 로 두
@@ -234,6 +235,135 @@ def dropped_translation_pages(
         if pdf < lay * retention:
             bad.append((idx + 1, round(lay, 2), round(pdf, 2)))
     return bad
+
+
+# ─────────────── D-1: 같은 유닛 이중 번역 (번역 계획 대비 호출 수) ───────────────
+
+DEFAULT_PAGE_SEPARATOR = "\n\n---\n\n"
+_SECOND_PASS_LOG_RE = re.compile(r"layout으로 덮이지 않는 지연 md 유닛 (\d+)개 2차 번역")
+
+
+def _fully_covered(src: str, covered: set[str]) -> bool:
+    """md 유닛이 layout 번역으로 완전히 덮이는가 — 유닛 전체가 블록 하나와 같거나(여러 줄
+    블록 포함) 비어 있지 않은 모든 줄이 단일 줄 블록과 같다(엔진의 지연 규칙)."""
+    if src.strip() in covered:
+        return True
+    lines = [ln.strip() for ln in src.split("\n") if ln.strip()]
+    return bool(lines) and all(ln in covered for ln in lines)
+
+
+def d1_unit_plan(
+    md_text: str,
+    source_pages: list | None,
+    page_separator: str = DEFAULT_PAGE_SEPARATOR,
+    translated_pages: list | None = None,
+    kept_original=(),
+) -> tuple[dict[str, int], set[str], int]:
+    """번역 엔진이 마스킹 원문별로 보낼 수 있는 LLM 호출 수를 산출물에서 **독립적으로** 센다.
+
+    엔진(app/translate/engine.py)의 내부 상태를 읽지 않고 같은 재료(app.translate.segment의
+    split_markdown·layout_units·layout_line_sources(multiline=True)와 should_skip)로 계획을
+    다시 세운다 — 엔진의 유닛 선별이 틀리면 여기서 드러난다.
+      * 1차 대상: md·layout 유닛 중 건너뛰지 않는 것. 단 layout 번역으로 **완전히 덮이는**
+        md 유닛은 지연된다(그 layout 블록의 번역을 쓴다).
+      * 2차 대상: 지연된 md 유닛 중 최종 layout 번역 매핑으로 덮이지 않는 것(그 블록이 번역에
+        실패·축퇴한 경우) — layout.{lang}.json(translated_pages)과 report.json의
+        kept_original로 재현한다. translated_pages가 없으면(번역 전 계획) 2차 패스는 없다.
+    같은 원문이 위치(직전 문맥)가 다른 여러 유닛이면 캐시 키가 달라 각자 호출된다 — 그래서
+    '중복 0'이 아니라 '원문별 유닛 수 이하'를 본다(25쪽 실측: 정당한 동일 원문 21종).
+    반환: (마스킹 원문 → 허용 호출 수, 모든 유닛의 마스킹 원문, 2차 대상 유닛 수).
+    """
+    from app.translate.masking import mask, should_skip
+    from app.translate.segment import (
+        layout_line_map,
+        layout_line_sources,
+        layout_units,
+        map_unit_lines,
+        split_markdown,
+    )
+
+    md_units = split_markdown(md_text, page_separator)
+    lay_units = layout_units(source_pages) if source_pages else []
+    targets = []
+    preserved: set[str] = set()   # 번역하지 않기로 한 layout 블록 — 원문 그대로가 정답이다
+    for u in (*md_units, *lay_units):
+        if u.skip_reason or should_skip(u.src):
+            if u.id.startswith("lay:"):
+                preserved.add(u.id)
+        else:
+            targets.append(u)
+    deferred = []
+    if source_pages is not None and lay_units:
+        target_ids = {u.id for u in targets}
+        final_srcs = {u.src.strip() for u in lay_units
+                      if u.id in preserved or u.id in target_ids}
+        covered = layout_line_sources(source_pages, multiline=True) & final_srcs
+        deferred = [u for u in targets
+                    if u.id.startswith("md:") and _fully_covered(u.src, covered)]
+    deferred_ids = {u.id for u in deferred}
+    first = [u for u in targets if u.id not in deferred_ids]
+    pending = []
+    if deferred and translated_pages is not None:
+        lay_targets = {u.id for u in targets if u.id.startswith("lay:")}
+        final_ids = (lay_targets - set(kept_original)) | preserved
+        mapping = layout_line_map(source_pages, translated_pages, final_ids)
+        pending = [u for u in deferred if map_unit_lines(u.src, mapping) is None]
+    allowed: dict[str, int] = {}
+    for u in (*first, *pending):
+        text = mask(u.src)[0]
+        allowed[text] = allowed.get(text, 0) + 1
+    known = {mask(u.src)[0] for u in (*md_units, *lay_units)}
+    return allowed, known, len(pending)
+
+
+def d1_findings(
+    by_text: dict[str, int], allowed: dict[str, int], known: set[str],
+) -> tuple[dict[str, tuple[int, int]], dict[str, int], int]:
+    """목의 원문별 호출 수 → (계획 초과 {원문: (호출, 허용)}, 계획 밖 유닛 원문 {원문: 호출},
+    유닛 원문이 아닌 호출 수 — 용어집·repair 프롬프트·분할 반쪽)."""
+    over: dict[str, tuple[int, int]] = {}
+    unplanned: dict[str, int] = {}
+    other = 0
+    for text, n in by_text.items():
+        if text in allowed:
+            if n > allowed[text]:
+                over[text] = (n, allowed[text])
+        elif text in known:
+            unplanned[text] = n   # 덮여 지연됐거나 건너뛴 유닛인데 1차에서 호출됐다
+        else:
+            other += n
+    return over, unplanned, other
+
+
+def _read_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _job_sources(jd: Path) -> tuple[str, list | None, str]:
+    """잡의 번역 원천 — (result.md, layout.json 페이지 또는 None, 잡에 고정된 페이지 구분자)."""
+    meta = _read_json(jd / "meta.json") or {}
+    layout = _read_json(jd / "layout.json")
+    return (
+        (jd / "result.md").read_text(encoding="utf-8"),
+        layout if isinstance(layout, list) else None,
+        meta.get("page_separator") or DEFAULT_PAGE_SEPARATOR,
+    )
+
+
+def d1_plan_for_job(jd: Path, lang: str) -> tuple[dict[str, int], set[str], int]:
+    """잡 디렉터리의 산출물(result.md·layout.json·layout.{lang}.json·report.json·meta.json)로
+    d1_unit_plan을 돌린다."""
+    md_text, layout, separator = _job_sources(jd)
+    report = _read_json(jd / "translations" / lang / "report.json") or {}
+    translated = _read_json(jd / f"layout.{lang}.json")
+    return d1_unit_plan(
+        md_text, layout, separator,
+        layout_pages(translated) if translated is not None else None,
+        report.get("kept_original") or (),
+    )
 
 
 def kept_reason_summary(report: dict) -> dict[str, int]:
@@ -525,6 +655,29 @@ def verify_ocr(job_id: str, job: dict, data_dir: Path, expect_pages: int) -> Pat
     return jd
 
 
+def verify_d1(jd: Path, stats: dict, lang: str = "ko") -> None:
+    """D-1(같은 유닛 이중 번역) — 목의 원문별 호출 수를 하네스가 다시 세운 번역 계획과 대조.
+
+    예전 단언은 '동일 원문 중복 호출 0'이었다. 같은 원문이 위치(직전 문맥)가 다른 여러
+    유닛이면 캐시 키가 달라 각자 번역되는 것이 정상이라, 25쪽 실행에서 정당한 중복 21종으로
+    늘 실패했다. 이제 원문별 허용 수(그 원문을 가진 번역 대상 유닛 수 + 2차 패스)와 비교한다.
+    """
+    calls = stats["calls"]
+    allowed, known, pending = d1_plan_for_job(jd, lang)
+    over, unplanned, other = d1_findings(stats["by_text"], allowed, known)
+    shared = sum(1 for n in allowed.values() if n > 1)
+    log_text = (WORK / "api.log").read_text(errors="replace") if (WORK / "api.log").is_file() else ""
+    logged = sum(int(n) for n in _SECOND_PASS_LOG_RE.findall(log_text))
+    info(f"LLM 호출 {calls}회 — 번역 대상 원문 {len(allowed)}종(위치가 다른 같은 원문 {shared}종), "
+         f"2차 패스 {pending}개, 유닛 밖 호출(용어집·repair·분할) {other}회")
+    check("D-1: 하네스가 다시 센 2차 패스 유닛 수 == 엔진 로그", pending == logged,
+          f"하네스 {pending} / 로그 {logged}")
+    check("D-1: 원문별 LLM 호출 수가 번역 계획(그 원문의 유닛 수) 이하 — 같은 유닛 이중 번역 없음",
+          not over, f"초과 {len(over)}종 (예: {[(t[:60], n) for t, n in list(over.items())[:2]]})")
+    check("D-1: layout으로 덮여 지연됐거나 건너뛴 유닛은 1차에서 호출되지 않음", not unplanned,
+          f"계획 밖 {len(unplanned)}종 (예: {[(t[:60], n) for t, n in list(unplanned.items())[:2]]})")
+
+
 def verify_translation(job_id: str, jd: Path, expect_pages: int) -> None:
     print("\n[3] 번역 파이프라인")
     req("GET", f"{MOCK}/__reset")
@@ -534,24 +687,7 @@ def verify_translation(job_id: str, jd: Path, expect_pages: int) -> None:
     check("번역 state=done", st.get("status") == "done", json.dumps(st, ensure_ascii=False)[:300])
 
     _, stats, _ = req("GET", f"{MOCK}/__stats")
-    calls = stats["calls"]
-    dupes = {k: v for k, v in stats["by_text"].items() if v > 1}
-    # D-1은 문서 모양에 따라 분기한다. reconcile이 성공하면 md 유닛 번역이 폐기되므로
-    # md 유닛은 애초에 1차에서 빠져야 하고(중복 0), 폴백이면 md 번역이 실제로
-    # result.ko.md에 쓰이므로 중복은 낭비가 아니다. 로그로 어느 분기인지 판정한다.
-    log_text = (WORK / "api.log").read_text(errors="replace") if (WORK / "api.log").is_file() else ""
-    fell_back = "reconcile 폴백" in log_text
-    info(f"LLM 호출 {calls}회, 동일 원문 중복 {len(dupes)}종, reconcile={'폴백' if fell_back else '성공'}")
-    if fell_back:
-        deferred_logged = "지연 md 유닛" in log_text
-        check("D-1(폴백 분기): 지연된 md 유닛이 2차 패스로 실제 번역됨", deferred_logged,
-              "2차 패스 로그 확인됨" if deferred_logged else "폴백인데 2차 패스 로그가 없음")
-        check("D-1(폴백 분기): 중복 번역분이 result.ko.md에 실제로 반영됨 (낭비 아님)",
-              (jd / "result.ko.md").is_file()
-              and sum("가" <= c <= "힣" for c in (jd / "result.ko.md").read_text()) > 200)
-    else:
-        check("D-1(성공 분기): 동일 원문에 대한 중복 LLM 호출 없음", len(dupes) == 0,
-              f"중복 {len(dupes)}종 (예: {list(dupes)[:1]})")
+    verify_d1(jd, stats)
 
     ko = jd / "result.ko.md"
     check("result.ko.md 생성", ko.is_file())
@@ -1011,11 +1147,25 @@ def main() -> int:
     ap.add_argument("--work", default=str(REPO / "tmp" / "verify-e2e"),
                     help="산출물/서버 로그 디렉터리 (기본 <repo>/tmp/verify-e2e). "
                          "동시 실행하려면 실행마다 다른 값을 줘야 한다 — 배타 락이 걸린다")
+    ap.add_argument("--mock-port", type=int, default=0,
+                    help="목 LLM 포트 (기본 0 = 빈 포트 자동)")
+    ap.add_argument("--api-port", type=int, default=0,
+                    help="하네스 백엔드 포트 (기본 0 = 빈 포트 자동)")
     args = ap.parse_args()
+    for name in ("mock_port", "api_port"):
+        if not 0 <= getattr(args, name) <= 65535:
+            ap.error(f"--{name.replace('_', '-')}는 0–65535여야 합니다")
+    if args.mock_port and args.mock_port == args.api_port:
+        ap.error("--mock-port와 --api-port는 달라야 합니다")
 
     WORK = Path(args.work).resolve()
-    MOCK_PORT = _free_port()
-    API_PORT = _free_port()
+    MOCK_PORT = args.mock_port or _free_port()
+    API_PORT = args.api_port or _free_port()
+    while API_PORT == MOCK_PORT:  # 자동 선택이 다른 포트와 겹친 드문 경우 — 자동 쪽만 다시 고른다
+        if args.api_port:
+            MOCK_PORT = _free_port()  # 둘 다 고정이면 위에서 거부했다
+        else:
+            API_PORT = _free_port()
     BASE = f"http://127.0.0.1:{API_PORT}"
     MOCK = f"http://127.0.0.1:{MOCK_PORT}"
 

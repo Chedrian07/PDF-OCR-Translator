@@ -13,18 +13,28 @@ effort 테이블(types.REASONING_MAX_TOKENS)로도 드물게 잘릴 수 있다.
 단위 거부)를 던진다 — 종전처럼 잘린 출력을 돌려주면 플레이스홀더 없는 산문은 래더에
 들어가지도 않고 문단 끝이 빠진 채 채택·캐시됐다(probe:MLX-02). 반복 루프·과도한
 길이처럼 재시도해도 같은 결과가 뻔하면 2배 재시도 자체를 생략한다(probe:MLX-05).
+
+스트리밍(TRANSLATE_STREAM, auto = chat 모드): SSE로 받으면 read timeout이 '토큰 사이
+정지 시간'이 되어 느리지만 진행 중인 생성은 끊기지 않는다. HTTP 왕복은 헬퍼 스레드에서
+돌고 호출 스레드는 0.1초마다 취소를 본다 — 취소되면 즉시 반환하고 소켓을 끊어, 서버
+(mlx_lm 등)가 다음 토큰 쓰기에서 끊김을 보고 생성을 멈춘다. 비스트리밍 요청은 서버가
+끝까지 생성한 뒤에야 끊김을 알 수 있다(고아 생성, probe:MLX-04). 응답 본문은
+TRANSLATE_MAX_RESPONSE_MB를 넘으면 읽기를 멈춘다(라이브러리 버전과 무관한 상한).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import socket
 import threading
 import time
 from collections.abc import Callable
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
+from urllib3.exceptions import ReadTimeoutError
 
 from .masking import is_degenerate_repetition
 from .types import (
@@ -32,6 +42,7 @@ from .types import (
     TranslateConfig,
     TranslateEmptyOutput,
     TranslateOutputTruncated,
+    TranslateTimeout,
     TranslateUnitRejected,
 )
 
@@ -57,6 +68,16 @@ _MAX_BACKOFF_S = 30.0
 
 # 잘린 출력이 '쓸 수 없을 만큼 길다'고 보는 최소 길이(문자) — _hopeless_truncation 참조.
 _OVERLONG_MIN_CHARS = 2000
+
+# 응답 정지(ReadTimeout) 재시도 상한 — 재시도는 같은 긴 생성의 반복이고 비스트리밍
+# 서버는 끊긴 요청도 끝까지 생성한다(실측: 4회 중복, 고아 32,768토큰). 최대 1회.
+_MAX_TIMEOUT_RETRIES = 1
+# 헬퍼 스레드의 HTTP 왕복을 기다리는 동안 취소를 관측하는 주기(초)
+_CANCEL_POLL_S = 0.1
+# 비스트리밍 본문 수신 조각 크기
+_BODY_CHUNK = 64 * 1024
+# auto 스트리밍을 서버가 거부했다고 보는 상태코드 — 같은 요청을 비스트리밍으로 1회 시도
+_STREAM_REJECTED = frozenset({400, 415, 422})
 
 # thinking 출력 표기 — 여는 태그는 선두에서만 의미가 있다(템플릿이 프롬프트 끝에
 # `<think>`를 미리 넣는 Qwen3 계열은 content가 여는 태그 없이 '…</think>답'으로 온다).
@@ -120,6 +141,8 @@ class OpenAICompatClient:
         self._mode_lock = threading.Lock()  # _latched/_mode_flight 상태만 짧게 보호
         self._mode_flight: _ModeFlight | None = None
         self.api_mode_used = "" if cfg.api_mode == "auto" else cfg.api_mode
+        # auto 스트리밍 래치 — None=미확인, True=스트림 성공, False=서버가 거부해 비스트리밍
+        self._stream_ok: bool | None = None
 
     def set_cancel_check(self, check: Callable[[], bool] | None) -> None:
         """엔진의 cancel+abort predicate를 주입한다 (사용자 제공 client와 호환용 선택 API)."""
@@ -155,7 +178,11 @@ class OpenAICompatClient:
 
     # ── 전송 심(seam) — 테스트는 이 메서드만 몽키패치 ──────────────────
     def _post(self, path: str, payload: dict) -> tuple[int, dict | str, dict]:
-        """(status, body(json이면 dict 아니면 str), headers) 반환."""
+        """(status, body(json이면 dict 아니면 str), headers) 반환.
+
+        payload["stream"]이 참이면 SSE를 받아 비스트리밍과 같은 모양의 dict로 조립한다
+        (choices[0].message.content·finish_reason·usage) — 파서와 테스트가 한 모양만 본다.
+        """
         url = _endpoint_url(self.base_url, path)
         headers = {"Content-Type": "application/json"}
         if self.cfg.api_key:
@@ -171,19 +198,121 @@ class OpenAICompatClient:
         try:
             # acquire 직후 cancel과의 마지막 경쟁창도 닫고 나서만 네트워크로 나간다.
             self._raise_if_cancelled()
-            resp = self.session.post(
-                url, json=payload, headers=headers,
-                # (connect, read) — min은 timeout_s를 10초 미만으로 줄인 설정을 존중한다.
-                timeout=(min(_CONNECT_TIMEOUT_S, self.cfg.timeout_s), self.cfg.timeout_s),
-            )
+            return self._exchange(url, payload, headers)
         finally:
             if semaphore is not None and acquired:
                 semaphore.release()
+
+    def _exchange(self, url: str, payload: dict, headers: dict) -> tuple[int, dict | str, dict]:
+        """HTTP 왕복 1회. 취소 관측자가 있으면 헬퍼 스레드에서 돌리고 0.1초마다 취소를 본다.
+
+        종전에는 session.post가 응답 끝까지(최대 TRANSLATE_TIMEOUT_S=180s) 워커를 붙잡아
+        취소·잡 삭제가 그만큼 늦었고 번역 슬롯도 점유됐다(concurrency-10). 취소되면
+        결과를 버리고 즉시 _RequestCancelled를 던지며, 소켓을 끊어 서버 생성도 멈춘다.
+        """
+        check = self._cancel_check
+        abort = threading.Event()
+        box: dict = {}
+        if check is None:
+            return self._transfer(url, payload, headers, abort, box)
+        done = threading.Event()
+
+        def _run() -> None:
+            try:
+                box["result"] = self._transfer(url, payload, headers, abort, box)
+            except BaseException as exc:  # noqa: BLE001 — 호출 스레드로 전달
+                box["error"] = exc
+            finally:
+                done.set()
+
+        threading.Thread(target=_run, daemon=True, name="translate-http").start()
+        while not done.wait(_CANCEL_POLL_S):
+            if check():
+                abort.set()
+                _shutdown_socket(box.get("resp"))
+                raise _RequestCancelled("번역 요청이 취소되었습니다")
+        if "error" in box:
+            raise box["error"]
+        return box["result"]
+
+    def _transfer(
+        self, url: str, payload: dict, headers: dict, abort: threading.Event, box: dict,
+    ) -> tuple[int, dict | str, dict]:
+        """실제 POST + 본문 수신(스트리밍이면 SSE 조립). 응답 크기 상한을 강제한다."""
+        resp = self.session.post(
+            url, json=payload, headers=headers, stream=True,
+            # (connect, read) — min은 timeout_s를 10초 미만으로 줄인 설정을 존중한다.
+            # stream=True라 read는 '바이트 사이 정지 시간' 상한이다.
+            timeout=(min(_CONNECT_TIMEOUT_S, self.cfg.timeout_s), self.cfg.timeout_s),
+        )
+        box["resp"] = resp
         try:
-            body: dict | str = resp.json()
-        except ValueError:
-            body = resp.text
-        return resp.status_code, body, dict(resp.headers)
+            if abort.is_set():  # 헤더가 오기 전에 취소됐다 — 서버에 끊김을 알린다
+                raise _RequestCancelled("번역 요청이 취소되었습니다")
+            status = resp.status_code
+            hdrs = dict(resp.headers)
+            ctype = str(hdrs.get("Content-Type") or hdrs.get("content-type") or "").lower()
+            if status == 200 and payload.get("stream") and "text/event-stream" in ctype:
+                return status, self._read_sse(resp, abort), hdrs
+            return status, _decode_body(self._read_body(resp, hdrs, abort)), hdrs
+        except requests.exceptions.ConnectionError as exc:
+            # stream=True 본문 수신 중 read timeout은 requests가 ConnectionError로 감싼다 —
+            # 응답 정지와 연결 끊김을 구분해야 재시도 정책·안내가 맞는다.
+            if _is_read_timeout(exc):
+                raise requests.exceptions.ReadTimeout(str(exc)) from exc
+            raise
+        finally:
+            resp.close()
+
+    def _cap_bytes(self) -> int:
+        return self.cfg.max_response_mb * 1024 * 1024
+
+    def _too_large(self) -> TranslateAPIError:
+        return TranslateAPIError(
+            f"번역 API 응답이 상한({self.cfg.max_response_mb}MB)을 넘어 읽기를 중단했습니다 — "
+            "게이트웨이 이상이 아니라면 TRANSLATE_MAX_RESPONSE_MB를 올리세요"
+        )
+
+    def _read_body(self, resp, hdrs: dict, abort: threading.Event) -> bytes:
+        cap = self._cap_bytes()
+        declared = str(hdrs.get("Content-Length") or hdrs.get("content-length") or "")
+        if declared.isdigit() and int(declared) > cap:
+            raise self._too_large()
+        buf = bytearray()
+        for chunk in resp.iter_content(_BODY_CHUNK):
+            if abort.is_set():
+                raise _RequestCancelled("번역 요청이 취소되었습니다")
+            buf += chunk
+            if len(buf) > cap:
+                raise self._too_large()
+        return bytes(buf)
+
+    def _read_sse(self, resp, abort: threading.Event) -> dict:
+        """SSE(chat.completion.chunk) 스트림을 비스트리밍 응답 모양의 dict로 조립한다."""
+        cap = self._cap_bytes()
+        acc = _StreamAccumulator()
+        received = 0
+        pending = b""
+        for chunk in resp.iter_content(chunk_size=None):
+            if abort.is_set():
+                raise _RequestCancelled("번역 요청이 취소되었습니다")
+            if not chunk:
+                continue
+            received += len(chunk)
+            if received > cap:
+                raise self._too_large()
+            pending += chunk
+            *lines, pending = pending.split(b"\n")
+            for line in lines:
+                if acc.feed(line.rstrip(b"\r")):
+                    return acc.body()
+        acc.feed(pending.rstrip(b"\r"))
+        acc.feed(b"")  # 마지막 이벤트 경계
+        if not acc.complete:
+            raise requests.exceptions.ChunkedEncodingError(
+                "번역 API 스트림이 완료 신호 없이 끊겼습니다"
+            )
+        return acc.body()
 
     # ── 공개 API ───────────────────────────────────────────────────
     def complete(self, system: str, user: str, *, max_tokens: int) -> str:
@@ -298,7 +427,15 @@ class OpenAICompatClient:
 
     # ── 내부 ────────────────────────────────────────────────────────
 
-    def _build_payload(self, mode: str, system: str, user: str, max_tokens: int) -> dict:
+    def _use_stream(self, mode: str) -> bool:
+        """이 요청을 SSE로 받을까 — responses 모드는 비스트리밍(이벤트 형식이 다르다)."""
+        if mode != "chat" or self.cfg.stream == "off":
+            return False
+        return self.cfg.stream == "on" or self._stream_ok is not False
+
+    def _build_payload(
+        self, mode: str, system: str, user: str, max_tokens: int, *, stream: bool = False,
+    ) -> dict:
         cfg = self.cfg
         temp_ok = cfg.temperature != "none"
         if mode == "responses":
@@ -321,6 +458,11 @@ class OpenAICompatClient:
                 p["max_tokens"] = max_tokens
             elif cfg.max_tokens_param == "max_completion_tokens":
                 p["max_completion_tokens"] = max_tokens
+            if stream:
+                # include_usage: 마지막 청크에 usage를 싣는다(OpenAI·vLLM·mlx_lm 공통).
+                # mlx_lm은 stream_options가 있으면 include_usage 키를 반드시 읽는다.
+                p["stream"] = True
+                p["stream_options"] = {"include_usage": True}
         _apply_reasoning(p, mode, cfg.reasoning, cfg.effective_reasoning_style)
         _merge_extra_body(p, cfg.extra_body_dict)
         return p
@@ -329,14 +471,34 @@ class OpenAICompatClient:
         self, mode: str, system: str, user: str, max_tokens: int, allow_fallback: bool
     ) -> tuple[str, bool]:
         path = "responses" if mode == "responses" else "chat/completions"
-        payload = self._build_payload(mode, system, user, max_tokens)
+        payload = self._build_payload(
+            mode, system, user, max_tokens, stream=self._use_stream(mode),
+        )
         attempt = 0
+        timeouts = 0
+        stream_probe = False  # auto 스트리밍이 거부돼 같은 요청을 비스트리밍으로 재시도 중
         while True:
             self._raise_if_cancelled()
             try:
                 status, body, headers = self._post(path, payload)
             except _RequestCancelled:
                 raise
+            except requests.exceptions.ReadTimeout as e:
+                # 응답 정지 — 스트리밍이면 토큰 사이, 비스트리밍이면 대기열+생성 전체가
+                # timeout_s를 넘었다. 재시도는 같은 긴 생성의 반복이라 최대 1회만 한다.
+                if timeouts < min(_MAX_TIMEOUT_RETRIES, self.cfg.max_retries):
+                    timeouts += 1
+                    wait = self._backoff({}, attempt)
+                    logger.warning(
+                        "번역 API 응답 시간 초과(%gs) — %.1fs 후 재시도 (%d/%d)",
+                        self.cfg.timeout_s, wait, timeouts, _MAX_TIMEOUT_RETRIES,
+                    )
+                    self._wait_or_cancel(wait)
+                    continue
+                raise TranslateTimeout(
+                    f"번역 API 응답 시간 초과 — {self.cfg.timeout_s:g}초 동안 응답이 없었습니다"
+                    " (TRANSLATE_TIMEOUT_S, 서버 대기열·생성 속도 확인)"
+                ) from e
             except requests.RequestException as e:
                 # ConnectionError·Timeout뿐 아니라 본문 수신 중 끊김(ChunkedEncodingError·
                 # ContentDecodingError 등 RequestException 계열, ConnectionError 비상속)도
@@ -354,7 +516,26 @@ class OpenAICompatClient:
                 raise TranslateAPIError(f"번역 API 연결 실패: {e}") from e
 
             if status == 200:
-                return self._parse(mode, body)
+                result = self._parse(mode, body)
+                if stream_probe:
+                    self._stream_ok = False
+                    logger.warning(
+                        "번역 API가 스트리밍 요청을 거부했습니다 — 이 잡은 비스트리밍으로 진행합니다"
+                        " (TRANSLATE_STREAM=0으로 고정 가능)"
+                    )
+                elif payload.get("stream"):
+                    self._stream_ok = True
+                return result
+            if (
+                payload.get("stream") and self.cfg.stream == "auto"
+                and self._stream_ok is None and status in _STREAM_REJECTED
+            ):
+                # 스트리밍(stream_options 등)을 모르는 엄격한 서버일 수 있다 — 같은 요청을
+                # 비스트리밍으로 1회 보내 보고, 그게 성공하면 이 클라이언트는 비스트리밍으로
+                # 래치한다. 비스트리밍도 같은 오류면 원래 오류 처리로 간다(유닛 거부 등).
+                payload = self._build_payload(mode, system, user, max_tokens, stream=False)
+                stream_probe = True
+                continue
             if allow_fallback and status in _FALLBACK:
                 raise _NeedsFallback()
             if status in (401, 403):
@@ -419,6 +600,117 @@ class OpenAICompatClient:
             # 사고만 내고 끝났거나 빈 문자열 — 같은 프롬프트(온도 0)면 같은 결과라 유닛 단위.
             raise TranslateEmptyOutput("번역 API가 빈 응답을 반환했습니다")
         return text, truncated
+
+
+class _StreamAccumulator:
+    """chat.completion.chunk SSE 이벤트를 모아 비스트리밍 응답 모양으로 만든다.
+
+    delta.content만 본문으로 잇고 reasoning/reasoning_content는 길이만 센다(사고 과정은
+    번역문이 아니다). 스트림 중간의 {"error": …}는 서버 오류로 올린다.
+    """
+
+    def __init__(self) -> None:
+        self.data: list[bytes] = []
+        self.parts: list[str] = []
+        self.reasoning_chars = 0
+        self.finish_reason: str | None = None
+        self.usage: dict | None = None
+        self.done = False
+
+    @property
+    def complete(self) -> bool:
+        return self.done or self.finish_reason is not None
+
+    def feed(self, line: bytes) -> bool:
+        """SSE 한 줄을 먹인다. [DONE]을 만나면 True(더 읽을 필요 없음)."""
+        if not line:
+            self._dispatch()
+            return self.done
+        if line.startswith(b":"):
+            return False  # 주석 — mlx_lm의 prefill keepalive 등
+        name, _, value = line.partition(b":")
+        if name == b"data":
+            self.data.append(value[1:] if value.startswith(b" ") else value)
+        return False
+
+    def _dispatch(self) -> None:
+        if not self.data:
+            return
+        text = b"\n".join(self.data).decode("utf-8", "replace").strip()
+        self.data = []
+        if text == "[DONE]":
+            self.done = True
+            return
+        try:
+            event = json.loads(text)
+        except ValueError as e:
+            raise TranslateAPIError(f"번역 API 스트림 파싱 실패: {text[:200]}") from e
+        if not isinstance(event, dict):
+            return
+        if event.get("error"):
+            raise TranslateAPIError(f"번역 API 스트림 오류: {_body_preview(event)}")
+        if isinstance(event.get("usage"), dict):
+            self.usage = event["usage"]
+        for choice in event.get("choices") or []:
+            if not isinstance(choice, dict) or choice.get("index", 0) != 0:
+                continue
+            delta = choice.get("delta") or choice.get("message") or {}
+            if isinstance(delta, dict):
+                content = delta.get("content")
+                if content:
+                    self.parts.append(_content_text(content))
+                for key in ("reasoning_content", "reasoning"):
+                    if isinstance(delta.get(key), str):
+                        self.reasoning_chars += len(delta[key])
+            if choice.get("finish_reason"):
+                self.finish_reason = choice["finish_reason"]
+
+    def body(self) -> dict:
+        return {
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "".join(self.parts)},
+                "finish_reason": self.finish_reason,
+            }],
+            "usage": self.usage or {},
+            "stream_stats": {"reasoning_chars": self.reasoning_chars},
+        }
+
+
+def _decode_body(raw: bytes) -> dict | str:
+    """비스트리밍 본문 — JSON이면 파싱 결과, 아니면 텍스트(오류 미리보기용)."""
+    text = raw.decode("utf-8", "replace")
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
+def _is_read_timeout(exc: BaseException) -> bool:
+    """requests가 ConnectionError로 감싼 urllib3 ReadTimeoutError인가."""
+    inner = exc.args[0] if exc.args else None
+    return isinstance(inner, ReadTimeoutError) or "Read timed out" in str(exc)
+
+
+def _shutdown_socket(resp) -> None:
+    """진행 중인 응답의 소켓을 끊는다 — 서버는 다음 토큰 쓰기에서 끊김을 보고 생성을 멈춘다.
+
+    다른 스레드가 recv에 막혀 있어도 shutdown(SHUT_RDWR)은 즉시 깨운다(close만으로는
+    리눅스에서 깨지 않는다). 연결 반납(close)은 읽던 헬퍼 스레드가 finally에서 한다 —
+    여기서 반납하면 다른 워커가 아직 읽히는 중인 연결을 재사용할 수 있다.
+    urllib3 내부 속성에 기대므로 찾지 못하면 조용히 넘어간다(헬퍼가 다음 청크에서 끊는다).
+    """
+    raw = getattr(resp, "raw", None)
+    sock = getattr(getattr(raw, "_connection", None), "sock", None)
+    if sock is None:
+        fp = getattr(getattr(raw, "_fp", None), "fp", None)
+        sock = getattr(getattr(fp, "raw", None), "_sock", None)
+    if sock is None:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
 
 
 def _hopeless_truncation(text: str, user: str) -> str:

@@ -728,3 +728,61 @@ def test_translate_state_write_does_not_recreate_a_deleted_job_dir(tmp_path):
     with pytest.raises(OSError):
         api_mod._write_translate_state(job, "ko", {"status": "error"})
     assert not job.dir.exists()
+
+
+# ── api-jobs-15 · concurrency-7: archive.zip은 내용 지문으로 판정한다 ─────────────
+def _zip_names(data: bytes) -> set[str]:
+    import io
+    import zipfile
+
+    return set(zipfile.ZipFile(io.BytesIO(data)).namelist())
+
+
+def test_archive_built_across_a_translation_finish_is_not_served_stale(
+    client, sample_pdf, monkeypatch,
+):
+    """번역이 끝나기 직전에 시작된 zip 빌드가 무효화(unlink) 뒤에 옛 zip을 써 넣으면,
+    존재 여부만 보던 캐시가 다음 번역 전까지 번역본 없는 zip을 계속 내보냈다(재현)."""
+    import zipfile
+
+    from app.pipeline import artifacts
+
+    jid = _upload(client, sample_pdf).json()["job_id"]
+    assert wait_done(client, jid)["status"] == "done"
+    job_dir = client.app.state.store.get(jid).dir
+    real_write = zipfile.ZipFile.write
+    finished = []
+
+    def _write_while_translation_finishes(self, filename, arcname=None, *args, **kwargs):
+        if str(arcname).startswith("images/") and not finished:
+            finished.append(1)
+            # _run_translate_thread가 하는 그대로: 번역본 기록 → 캐시 무효화
+            (job_dir / "result.ko.md").write_text("# 번역본", encoding="utf-8")
+            artifacts.archive(job_dir).unlink(missing_ok=True)
+        return real_write(self, filename, arcname, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", _write_while_translation_finishes)
+    first = client.get(f"/api/jobs/{jid}/archive")
+    assert first.status_code == 200
+    assert "result.ko.md" in _zip_names(first.content)    # 빌드 중 바뀐 입력 → 같은 요청에서 재빌드
+    monkeypatch.undo()
+    second = client.get(f"/api/jobs/{jid}/archive")
+    assert "result.ko.md" in _zip_names(second.content)
+
+
+def test_archive_is_reused_until_its_contents_change(client, sample_pdf):
+    from app.pipeline import artifacts
+
+    jid = _upload(client, sample_pdf).json()["job_id"]
+    assert wait_done(client, jid)["status"] == "done"
+    job_dir = client.app.state.store.get(jid).dir
+    first = client.get(f"/api/jobs/{jid}/archive")
+    zip_path = artifacts.archive(job_dir)
+    built = zip_path.stat()
+    assert client.get(f"/api/jobs/{jid}/archive").content == first.content
+    assert zip_path.stat().st_ino == built.st_ino         # 캐시 적중 — 다시 만들지 않는다
+
+    # 무효화 없이(외부 수정·누락된 무효화) 내용만 바뀌어도 지문이 달라 다시 만든다
+    (job_dir / "result.ko.md").write_text("# 늦게 도착한 번역본", encoding="utf-8")
+    third = client.get(f"/api/jobs/{jid}/archive")
+    assert "result.ko.md" in _zip_names(third.content)

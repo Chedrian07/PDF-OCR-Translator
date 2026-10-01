@@ -1534,3 +1534,59 @@ def test_성공_이후_응답_정지는_유닛_단위로_강등돼_분할로_복
     _res2, report2, out2 = _run_md(other, replace(cfg, concurrency=1), md, stuck)
     assert report2["kept_reasons"] == {"timeout": 1}
     assert _LONG_PARA in out2
+
+
+# ── 축퇴 스윕의 패스 간 기억 (Phase-0 replay: 2차 패스 짧은 지연 유닛 유출) ──────
+
+def test_1차에서_축퇴로_판정된_출력은_2차_패스에서도_축퇴다(tmp_path, cfg):
+    """replay(/tmp/pdfocr-deps/replay, MuPDF 1.27 OCR 산출물)의 축소판.
+
+    1차 패스에서 layout 유닛 5개가 같은 캔드 응답을 받아 축퇴로 지워진다. 그 뒤 2차
+    패스에서 지연됐던 짧은 md 유닛 2개('Abstract'·'Keywords')가 같은 응답을 받는데,
+    종전 스윕은 2차 결과만 보고 '원문 2종'이라 통과시켜 result.ko.md로 샜다.
+    """
+    canned = "요약"
+
+    class Canned(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            return canned
+
+    longs = [
+        "The proposed quantizer compresses every vector with a random rotation first.",
+        "We then apply an optimal scalar quantizer independently to each coordinate.",
+        "Experiments on large language models confirm the theoretical distortion bound.",
+        "The method is data oblivious and therefore suitable for online applications.",
+    ]
+    md = "\n\n".join(["Abstract", "Keywords", *longs]) + "\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    lay = _layout_of(["Abstract", "Keywords", "Introduction", "Related Work", "Conclusion"])
+    (tmp_path / "layout.json").write_text(json.dumps(lay, ensure_ascii=False), encoding="utf-8")
+
+    res = run_translation(tmp_path, "ko", cfg, client=Canned())
+
+    out = (tmp_path / "result.ko.md").read_text(encoding="utf-8")
+    assert canned not in out, "2차 패스의 캔드 응답이 산출물에 실리면 안 된다"
+    assert {"md:0:0", "md:0:1"} <= set(res.kept_original)
+    report = _report(tmp_path)
+    assert report["kept_reasons"]["degenerate-output"] == 7     # 1차 lay 5 + 2차 md 2
+    cache = json.loads((tmp_path / "translations/ko/units.json").read_text(encoding="utf-8"))
+    assert canned not in cache.values()
+
+
+def test_같은_라벨의_표기_변형이_같은_번역으로_수렴하는_것은_축퇴가_아니다(tmp_path, cfg):
+    """대소문자·복수형만 다른 짧은 라벨 3종이 같은 정답으로 수렴하면 정상이다 —
+    종전에는 축퇴로 원문 유지되고 캐시가 지워져 매 실행 재과금됐다(translate-llm-15)."""
+    labels = ["Training epoch", "Training epochs", "training epoch"]
+
+    class Labeler(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            return "" if _marker(user) is None else "학습 에포크"
+
+    res, report, out = _run_md(tmp_path, cfg, "\n\n".join(labels) + "\n", Labeler())
+    assert res.kept_original == [] and "degenerate-output" not in report["kept_reasons"]
+    assert out.count("학습 에포크") == 3
+    again = Labeler()
+    run_translation(tmp_path, "ko", cfg, client=again)
+    assert again.calls == 0                                  # 캐시가 지워지지 않았다

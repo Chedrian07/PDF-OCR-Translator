@@ -201,26 +201,63 @@ def _clamp_bbox(
     return (x1, y1, x2, y2)
 
 
-def _keep_first_figure_placeholders(markdown: str, valid: set[int]) -> tuple[str, int]:
-    """살아남은 image 블록 index당 첫 `[[FIGURE:n]]`만 남기고 나머지를 제거.
+# 리터럴로 되돌린 placeholder — 렌더하면 `[[FIGURE:n]]` 글자 그대로 보이지만 placeholder
+# 정규식에는 걸리지 않는다. `\[`로 이스케이프하면 렌더러가 디스플레이 수식(`\[ … \]`)으로
+# 읽으므로 문자 참조를 쓴다.
+_LITERAL_PLACEHOLDER = "&#91;&#91;FIGURE:{}]]"
+
+
+def _resolve_figure_placeholders(markdown: str, valid: set[int]) -> tuple[str, int, int]:
+    """살아남은 image 블록 index마다 **실제 그림 자리**인 `[[FIGURE:n]]` 하나만 남긴다.
 
     `[[FIGURE:n]]`은 앱이 소유한 참조 문법이다(`<PAGE>`와 동일). 문서 본문에 이
-    문자열이 리터럴로 실려 있으면 모델이 그대로 옮겨 적고, materializer가 실제
-    crop을 그 위치에 붙여 figure가 납치·중복 삽입된다. 반환: (정화된 markdown, 제거 수).
+    문자열이 리터럴로 실려 있으면 모델이 그대로 옮겨 적어 같은 index가 두 번 나온다.
+    예전에는 index마다 **첫** 것을 남겼는데, 리터럴이 그림보다 앞에 있으면 그 리터럴이
+    살아남아 그림이 문장 한가운데로 옮겨 붙고(위치 납치) 리터럴 글자는 사라졌다.
+
+    sidecar는 그림을 블록 단위로 넣으므로 실제 자리는 대개 **한 줄을 혼자 차지**한다.
+    그런 occurrence를 우선 남기고(없으면 첫 것), 나머지는 글자 그대로 보이는 리터럴로
+    되돌린다(본문 보존). 대응 crop이 없는 index는 제거한다(정화로 버려진 그림의 잔여).
+    sidecar도 원문의 리터럴을 미리 이스케이프해야 한다(이 판정은 방어선이다).
+    반환: (정화된 markdown, 제거 수, 리터럴로 되돌린 수).
     """
-    used: set[int] = set()
-    dropped = 0
+    matches = list(FIGURE_PLACEHOLDER_RE.finditer(markdown))
+    if not matches:
+        return markdown, 0, 0
 
-    def _repl(m) -> str:
-        nonlocal dropped
+    def _standalone(m: re.Match) -> bool:
+        line_start = markdown.rfind("\n", 0, m.start()) + 1
+        line_end = markdown.find("\n", m.end())
+        line = markdown[line_start : len(markdown) if line_end == -1 else line_end]
+        return line.strip() == m.group(0)
+
+    # index → (남길 match의 시작 위치, 한 줄을 혼자 차지하는가) — 첫 occurrence를 기본으로
+    # 하되, 뒤에 혼자 선 occurrence가 나오면(앞의 것이 문장 속이면) 그쪽으로 바꾼다.
+    keep: dict[int, tuple[int, bool]] = {}
+    for m in matches:
         idx = int(m.group(1))
-        if idx in valid and idx not in used:
-            used.add(idx)
-            return m.group(0)
-        dropped += 1
-        return ""
-
-    return FIGURE_PLACEHOLDER_RE.sub(_repl, markdown), dropped
+        if idx not in valid:
+            continue
+        alone = _standalone(m)
+        current = keep.get(idx)
+        if current is None or (alone and not current[1]):
+            keep[idx] = (m.start(), alone)
+    dropped = literalized = 0
+    out: list[str] = []
+    pos = 0
+    for m in matches:
+        out.append(markdown[pos : m.start()])
+        idx = int(m.group(1))
+        if idx not in valid:
+            dropped += 1
+        elif keep[idx][0] == m.start():
+            out.append(m.group(0))
+        else:
+            literalized += 1
+            out.append(_LITERAL_PLACEHOLDER.format(idx))
+        pos = m.end()
+    out.append(markdown[pos:])
+    return "".join(out), dropped, literalized
 
 
 def sanitize_page(page: PageResult) -> tuple[PageResult, list[str]]:
@@ -285,11 +322,17 @@ def sanitize_page(page: PageResult) -> tuple[PageResult, list[str]]:
             order=b.order, figure_index=figure_index, confidence=b.confidence,
         ))
 
-    markdown, dropped_placeholders = _keep_first_figure_placeholders(markdown, seen_figures)
+    markdown, dropped_placeholders, literal_placeholders = _resolve_figure_placeholders(
+        markdown, seen_figures
+    )
     if dropped_placeholders:
         warnings.append(
-            f"본문의 잉여 figure placeholder {dropped_placeholders}개 제거 "
-            "(대응 crop이 없거나 중복 — figure 위치 납치 방지)"
+            f"대응 figure가 없는 placeholder {dropped_placeholders}개 제거"
+        )
+    if literal_placeholders:
+        warnings.append(
+            f"같은 figure를 가리키는 placeholder {literal_placeholders}개를 본문 리터럴로 "
+            "남김 (실제 그림 자리 하나만 연결 — figure 위치 납치 방지)"
         )
 
     page_warnings = [str(w)[:500] for w in page.warnings[:MAX_WARNINGS]]

@@ -47,6 +47,7 @@ def test_dotenv_자동탐색은_정본보다_워크스페이스_루트까지_확
     (project / ".env").write_text("OPENAI_MODEL=workspace-model\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path / "project" / "final" / "backend")
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("DISABLE_DOTENV", raising=False)  # conftest의 격리 스위치 해제
     monkeypatch.setattr(config_module, "__file__", str(fake_config))
 
     load_dotenv_file()

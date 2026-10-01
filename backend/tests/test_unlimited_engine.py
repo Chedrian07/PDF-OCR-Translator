@@ -5,6 +5,9 @@
   (audit gap1-metal-real-e2e-1). CPU/CUDA는 풀을 켜지 않는다.
 - cuda/mps 로드는 P17 융합 MoE 스택을 디바이스 이동 **전에** 만든다 — expert별
   디바이스 버퍼·지연 재스택 단편화를 없앤다(audit MPS-2).
+- 프로덕션 배선: 엔진 → generate_fn(벤더 P15) → fast_greedy_decode(OCR_FAST_DECODE=1)
+  또는 HF generate(=0). 어느 쪽이든 EOS 없이 MAX_LENGTH에 닿으면 OutputLimitError로
+  올려 runner의 페이지별 복구를 태운다(audit decode-correctness-1, tests-baseline-4).
 """
 
 import contextlib
@@ -175,3 +178,196 @@ def test_place_model_on_cpu_keeps_legacy_expert_weights(monkeypatch):
     monkeypatch.setattr(engine, "_release_device_cache", lambda: log.append("release"))
     engine._place_model(_PlacementModel(log))
     assert log == ["eval", ("to", "cpu"), "release"]
+
+
+# ── 프로덕션 디코드 배선 + 길이 상한(OutputLimitError) ──
+
+EOS_ID = 9
+
+
+class _PieceTokenizer:
+    """토큰 id → 고정 조각 텍스트 (EOS는 '<eos>')."""
+
+    eos_token_id = EOS_ID
+
+    def decode(self, token_ids, **kwargs):
+        if hasattr(token_ids, "tolist"):
+            token_ids = token_ids.tolist()
+        return "".join("<eos>" if int(t) == EOS_ID else f"t{int(t)} " for t in token_ids)
+
+
+class _ChainDecoder:
+    """(마지막 토큰+1) % 8을 내는 결정적 디코더. eos_after 스텝을 넘기면 EOS.
+
+    fast_greedy_decode용 prepare_inputs/forward와, HF generate 폴백을 흉내 내는
+    generate()(스트리머·중단 기준·max_length 계약 동일)를 함께 제공한다."""
+
+    def __init__(self, eos_after=None, on_step=None):
+        import torch
+
+        self.torch = torch
+        self.eos_after = eos_after
+        self.on_step = on_step
+        self.steps = 0
+
+    def _next(self, last: int) -> int:
+        self.steps += 1
+        if self.on_step is not None:
+            self.on_step(self.steps)
+        if self.eos_after is not None and self.steps > self.eos_after:
+            return EOS_ID
+        return (last + 1) % 8
+
+    def prepare_inputs_for_generation(self, input_ids, **kw):
+        return {"input_ids": input_ids[:, -1:]}
+
+    def __call__(self, input_ids=None, return_dict=True, **kw):
+        from types import SimpleNamespace
+
+        logits = self.torch.full((1, input_ids.shape[1], 16), -10.0)
+        logits[0, -1, self._next(int(input_ids[0, -1]))] = 10.0
+        return SimpleNamespace(logits=logits, past_key_values=None)
+
+    def generate(self, **kw):
+        ids = kw["input_ids"]
+        streamer = kw.get("streamer")
+        if streamer is not None:
+            streamer.put(ids)
+        while ids.shape[1] < kw["max_length"]:
+            tok = self._next(int(ids[0, -1]))
+            ids = self.torch.cat([ids, self.torch.tensor([[tok]])], dim=-1)
+            if streamer is not None:
+                streamer.put(self.torch.tensor([tok]))
+            if tok == kw.get("eos_token_id"):
+                break
+            if any(bool(c(ids, None)) for c in kw.get("stopping_criteria") or []):
+                break
+        if streamer is not None:
+            streamer.end()
+        return ids
+
+
+class _VendorLikeModel:
+    """벤더 infer/infer_multi의 P15 계약만 흉내 낸다: gen_kwargs를 만들고
+    generate_fn(self, gen_kwargs)을 부른다(generate_fn이 없으면 실패)."""
+
+    def __init__(self, decoder: _ChainDecoder) -> None:
+        self.decoder = decoder
+        self.gen_kwargs: list[dict] = []
+
+    def _run(self, kwargs) -> int:
+        import torch
+
+        gen_kwargs = {
+            "input_ids": torch.tensor([[0, 1]]),
+            "eos_token_id": EOS_ID,
+            "max_length": kwargs["max_length"],
+            "do_sample": False,
+            "streamer": kwargs["streamer"],
+            "stopping_criteria": kwargs["stopping_criteria"],
+            "logits_processor": kwargs["logits_processor"],
+        }
+        self.gen_kwargs.append(gen_kwargs)
+        out = kwargs["generate_fn"](self.decoder, gen_kwargs)
+        return int(out.shape[1])
+
+    def infer_multi(self, tokenizer, **kwargs):
+        return "<PAGE>\nchunk", self._run(kwargs)
+
+    def infer(self, tokenizer, **kwargs):
+        self._run(kwargs)
+        return "page"
+
+
+def _decode_engine(monkeypatch, decoder, **overrides):
+    overrides.setdefault("max_length", 12)
+    engine = _engine(monkeypatch, "cpu", **overrides)
+    engine._tokenizer = _PieceTokenizer()
+    model = _VendorLikeModel(decoder)
+    engine._model = model
+    return engine, model
+
+
+def test_fast_decode_wiring_passes_decode_block_and_streams(tmp_path, monkeypatch):
+    """OCR_FAST_DECODE=1: 엔진이 generate_fn으로 fast_greedy_decode를 주입하고
+    OCR_DECODE_BLOCK을 그대로 넘기며, 생성 텍스트가 sink로 흐른다."""
+    import app.engine.fast_decode as fd
+
+    blocks: list[int] = []
+    real = fd.fast_greedy_decode
+
+    def spy(model, gen_kwargs, block=8):
+        blocks.append(block)
+        return real(model, gen_kwargs, block=block)
+
+    monkeypatch.setattr(fd, "fast_greedy_decode", spy)
+    engine, _ = _decode_engine(monkeypatch, _ChainDecoder(eos_after=4), decode_block=3)
+    sink = _Sink()
+    out = engine.run_multi([Path("p.png")], tmp_path / "m", sink, threading.Event())
+
+    assert out == "<PAGE>\nchunk"
+    assert blocks == [3]
+    assert sink.text.startswith("t2 t3 t4 t5 ")  # 프롬프트(0,1) 뒤 체인, EOS 포함 flush
+
+
+@pytest.mark.parametrize("fast_decode", [True, False])
+def test_length_cap_raises_output_limit_error_after_flush(tmp_path, monkeypatch, fast_decode):
+    """EOS 없이 MAX_LENGTH에 닿으면 잘린 출력 — OutputLimitError(RepetitiveOutputError
+    하위)로 runner의 페이지별 복구 경로를 태운다. 스트림은 이미 flush돼 있다."""
+    from app.engine.base import OutputLimitError, RepetitiveOutputError
+
+    engine, model = _decode_engine(monkeypatch, _ChainDecoder(eos_after=None), fast_decode=fast_decode)
+    sink = _Sink()
+    with pytest.raises(OutputLimitError, match="MAX_LENGTH=12") as info:
+        engine.run_multi([Path("p.png")], tmp_path / "m", sink, threading.Event())
+    assert isinstance(info.value, RepetitiveOutputError)
+    assert sink.text.count("t") == 12 - 2  # 상한까지 생성된 10토큰이 전부 스트림됨
+
+    engine2, _ = _decode_engine(monkeypatch, _ChainDecoder(eos_after=None), fast_decode=fast_decode)
+    with pytest.raises(OutputLimitError):
+        engine2.run_single(Path("p.png"), tmp_path / "s", _Sink(), threading.Event())
+
+
+@pytest.mark.parametrize("fast_decode", [True, False])
+def test_eos_before_cap_is_a_normal_result(tmp_path, monkeypatch, fast_decode):
+    engine, _ = _decode_engine(monkeypatch, _ChainDecoder(eos_after=3), fast_decode=fast_decode)
+    assert engine.run_single(Path("p.png"), tmp_path / "s", _Sink(), threading.Event()) == "page"
+
+
+def test_cancel_takes_precedence_over_length_cap(tmp_path, monkeypatch):
+    """상한에 닿은 같은 블록에서 사용자가 취소했다면 취소가 우선 — 부분 출력 반환."""
+    cancel = threading.Event()
+
+    def on_step(step: int) -> None:
+        if step >= 10:
+            cancel.set()
+
+    engine, _ = _decode_engine(monkeypatch, _ChainDecoder(eos_after=None, on_step=on_step))
+    out = engine.run_multi([Path("p.png")], tmp_path / "m", _Sink(), cancel)
+    assert out == "<PAGE>\nchunk"
+    assert cancel.is_set()
+
+
+def test_page_token_budget_still_wins_over_length_cap(tmp_path, monkeypatch):
+    """페이지 토큰 예산이 먼저 차면 반복/상한 감지(RepetitiveOutputError)로 멈춘다 —
+    실제 디코드 경로(스트리머 feed_tokens)로 예산 연동을 검증한다."""
+    from app.engine.base import OutputLimitError, RepetitiveOutputError
+
+    engine, _ = _decode_engine(
+        monkeypatch, _ChainDecoder(eos_after=None), max_length=40, max_page_output_tokens=5
+    )
+    with pytest.raises(RepetitiveOutputError, match="토큰 상한") as info:
+        engine.run_multi([Path("p.png")], tmp_path / "m", _Sink(), threading.Event())
+    assert not isinstance(info.value, OutputLimitError)
+
+
+def test_vendor_entry_points_keep_generate_fn_hook():
+    """벤더 P15 계약: infer/infer_multi가 generate_fn(기본 None)을 받는다 — 재동기화로
+    훅이 사라지면 엔진 주입이 조용히 무시되고 HF generate로 강등된다."""
+    import inspect
+
+    from app.vendor.unlimited_ocr.modeling_unlimitedocr import UnlimitedOCRForCausalLM
+
+    for name in ("infer", "infer_multi"):
+        param = inspect.signature(getattr(UnlimitedOCRForCausalLM, name)).parameters.get("generate_fn")
+        assert param is not None and param.default is None, name

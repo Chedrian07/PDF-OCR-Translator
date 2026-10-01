@@ -5,9 +5,10 @@
   디코더에서만 켜진다.
 - 산출물: 반환 마크다운 = result.md, 파일 이름·배치가 torch 규약(engine/base.py)과 같다.
 - 취소는 토큰 1개 안에 멈추고 부분 출력을 돌려준다. 반복·페이지 예산은 RepetitiveOutputError,
-  MAX_LENGTH 잘림은 OutputLimitError(runner의 페이지 단위 복구 대상).
+  MAX_LENGTH 잘림은 OutputLimitError(runner의 페이지 단위 복구 대상) — multi는 잘린 출력을
+  partial_output으로 실어 끝까지 생성된 앞 페이지를 살린다.
 - load()는 동시 호출에도 한 번만 돌고, 로드한 스레드와 다른 스레드에서 실행해도 결과가 같다.
-- create_app → 업로드 → done까지 이 엔진으로 돈다(잘림 → 페이지 단위 복구 포함).
+- create_app → 업로드 → done까지 이 엔진으로 돈다(잘림 → 앞 페이지 유지·페이지 단위 복구 포함).
 
 모델은 두 가지다: 토큰을 대본대로 내는 가짜 모델(내용·파일·취소 검사)과 작은 무작위 가중치
 MLX 모델(실제 비전·프리필·링 캐시 디코드 경로). 토크나이저는 이 파일에서 만드는 바이트 단위
@@ -517,6 +518,30 @@ def test_output_limit_raises_output_limit_error_for_page_recovery(monkeypatch, t
     gen = eng.last_generation
     assert gen.hit_max_length and gen.prompt_length + len(gen.token_ids) == eng._settings.max_length
     assert EOS not in gen.token_ids
+    # 잘린 출력은 run_multi 형식(= 저장된 result.md)으로 실려 runner가 앞 페이지를 살릴 수 있다
+    partial = info.value.partial_output
+    assert partial == (tmp_path / "out" / "result.md").read_text(encoding="utf-8")
+    assert partial.startswith("<PAGE>\n")
+    words = ("alpha", "beta", "gamma", "delta", "kappa", "omega", "sigma", "theta", "zeta")
+    assert any(word in partial for word in words)
+    assert not any(word in str(info.value) for word in words)  # 문서 내용은 메시지에 없다
+
+
+@needs_mlx
+def test_single_output_limit_carries_no_partial_output(monkeypatch, tmp_path, tok):
+    """single은 한 쪽이라 살릴 앞 페이지가 없다 — partial_output 없이 페이지 복구로 간다."""
+    from app.engine.unlimited import SINGLE_PROMPT
+    from app.vendor.unlimited_ocr_mlx import prepare_single
+
+    image = _page_images(tmp_path, 1)[0]
+    prompt_len = prepare_single(tok, SINGLE_PROMPT, str(image), base_size=1024,
+                                image_size=640, crop_mode=True).prompt_length
+    model = ScriptedModel(single=lambda: endless_text(marker=False))
+    eng = _engine(monkeypatch, model, tok, max_length=prompt_len + 100)
+    with pytest.raises(OutputLimitError) as info:
+        eng.run_single(image, tmp_path / "out", RecSink(), threading.Event())
+    assert eng.last_generation.hit_max_length
+    assert info.value.partial_output is None
 
 
 @needs_mlx
@@ -849,3 +874,29 @@ def test_pipeline_recovers_a_truncated_chunk_page_by_page(mlx_app):
     ), job["warnings"]
     assert md.count("Single page body recovered alone.") == 2
     assert "alpha" not in md and "omega" not in md  # 잘린 multi 출력은 채택하지 않았다
+
+
+@needs_mlx
+def test_pipeline_keeps_the_completed_pages_of_a_truncated_chunk(mlx_app):
+    """multi가 2쪽 중간에서 잘리면 끝까지 생성된 1쪽은 multi 결과를 지키고 2쪽만 다시
+    처리한다 — 엔진이 OutputLimitError.partial_output에 잘린 출력을 싣기 때문이다.
+    (예전에는 실어 주지 않아 청크 전체를 페이지별로 다시 돌렸다.)"""
+    from conftest import make_pdf_bytes
+
+    # 충실도 게이트는 끈다 — 대본 본문이 원본 PDF 텍스트와 달라 1쪽을 재처리하게 된다
+    client, model, settings = mlx_app(max_length=1100, ocr_fidelity_threshold=0.0)
+    model._multi = lambda pages: page_text(0) + endless_text()
+    with client:
+        job = _upload_and_wait(client, make_pdf_bytes(pages=2))
+        md = client.get(f"/api/jobs/{job['job_id']}/markdown").text
+    assert job["status"] == "done", job
+    assert [m for m, _ in model.prompts] == ["multi", "single"]  # 2쪽만 단독 재처리
+    page1, page2 = md.split("\n\n---\n\n")
+    assert "Heading 1" in page1 and "Body 1 한글 中文 😀 text." in page1
+    assert "![](images/p0001_0.jpg)" in page1  # 살린 페이지의 multi 크롭도 그대로 병합됐다
+    assert page2.strip() == "![](images/p0002_0.jpg)\n\nSingle page body recovered alone."
+    assert "alpha" not in md and "omega" not in md  # 잘린 2쪽 multi 출력은 버렸다
+    messages = job["warnings"] + job.get("notices", [])
+    assert any("MAX_LENGTH 도달" in m and "앞 1쪽은 유지" in m for m in messages), messages
+    layout = json.loads((settings.jobs_dir / job["job_id"] / "layout.json").read_text(encoding="utf-8"))
+    assert [p["page"] for p in layout] == [1, 2]

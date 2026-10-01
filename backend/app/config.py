@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import difflib
 import logging
 import math
 import os
+import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,7 +41,116 @@ def _find_dotenv() -> Path | None:
     return None
 
 
-def load_dotenv_file(path: Path | None = None) -> None:
+# ── 알려진 env 키 레지스트리 ───────────────────────────────────────────────
+# .env의 모르는 키를 알리기 위한 목록이다(load_dotenv_file). 예: 루트 .env의
+# REASONING_EFFORT는 어떤 코드도 읽지 않아, 번역 reasoning을 껐다고 믿은 설정이 조용히
+# 무시됐다(감사 translate-llm-13·infra-docs-7·mlx-integration-8).
+# 키 이름을 하나씩 따옴표로 감싸지 않고 공백 구분 블록으로 둔다 — tests/test_ci_ops_contracts의
+# env 키 스캐너는 이 파일의 "KEY" 문자열을 '코드가 읽는 키'로 세므로, 레지스트리가 읽기로
+# 잘못 집계되면 하네스 키까지 .env.example·compose 스레딩을 요구받는다.
+# tests/test_config_env_registry.py가 코드·.env.example·compose·하네스와 양방향으로 대조한다.
+
+# 앱 코드가 읽는 운영 키 (config·translate/types·api·derived·엔진·벤더·native_ops)
+_APP_ENV_KEYS = frozenset("""
+    OCR_DEVICE OCR_DTYPE OCR_MLX_QUANT_BITS OCR_ENGINE MODEL_ID MODEL_REVISION PRELOAD_MODEL
+    DATA_DIR FRONTEND_DIR RENDER_DPI PAGES_PER_CHUNK MAX_PAGES MAX_UPLOAD_MB MAX_LENGTH
+    MAX_PAGE_OUTPUT_CHARS MAX_PAGE_OUTPUT_TOKENS PAGE_SEPARATOR JOB_TTL_DAYS ALLOWED_HOSTS
+    OCR_FIDELITY_THRESHOLD OCR_FIDELITY_MAX_RETRY_RATIO OCR_CPU_THREADS OCR_FAST_DECODE
+    OCR_DECODE_BLOCK OCR_CUDA_GRAPHS OCR_MOE_FUSED OCR_MOE_FAST OCR_SDPA OCR_NGRAM_HOST
+    PYTORCH_ENABLE_MPS_FALLBACK FAKE_DELAY DISABLE_DOTENV
+    OCR_SIDECAR_URL OCR_SIDECAR_CONNECT_TIMEOUT_S OCR_SIDECAR_READ_TIMEOUT_S
+    OCR_SIDECAR_HEALTH_TIMEOUT_S OCR_SIDECAR_MAX_RESPONSE_MB OCR_SIDECAR_RETRIES
+    OCR_SIDECAR_MODEL_WAIT_S OCR_REMOTE_PAGE_CONCURRENCY OCR_LANGUAGES NATIVE_TEXT_THRESHOLD
+    OPENAI_BASE_URL OPENAI_API_KEY OPENAI_MODEL TRANSLATE_MODEL TRANSLATE_API_MODE
+    TRANSLATE_CONCURRENCY TRANSLATE_GLOBAL_CONCURRENCY TRANSLATE_TIMEOUT_S TRANSLATE_STREAM
+    TRANSLATE_MAX_RESPONSE_MB TRANSLATE_MAX_RETRIES TRANSLATE_TEMPERATURE
+    TRANSLATE_MAX_TOKENS_PARAM TRANSLATE_REASONING TRANSLATE_REASONING_STYLE
+    TRANSLATE_EXTRA_BODY TRANSLATE_CONTEXT
+    LLM_PROVIDER LLM_REASONING_EFFORT LLM_OPENAI_API_KEY LLM_OPENAI_BASE_URL
+    LLM_OPENAI_RESPONSES_MODELS LLM_OPENAI_CHAT_MODELS LLM_OPENAI_RESPONSES_MODEL
+    LLM_OPENAI_CHAT_MODEL LLM_LOCAL_OPENAI_BASE_URL LLM_LOCAL_OPENAI_MODEL
+    LLM_LOCAL_OPENAI_MODELS LLM_LOCAL_OPENAI_API_KEY OLLAMA_BASE_URL OLLAMA_MODEL
+    QA_RATE_LIMIT_PER_MIN QA_MAX_CONCURRENT TRANSLATE_RATE_LIMIT_PER_MIN TRANSLATE_MAX_ACTIVE
+    TRUSTED_PROXY_HOPS TRUSTED_PROXY_IPS
+    PDF_EXPORT_FONT PDF_EXPORT_MAX_CONCURRENT PDF_EXPORT_QUEUE_TIMEOUT_S PDF_EXPORT_WARM_WAIT_S
+""".split())
+# docker compose가 같은 .env에서 읽는 배포 키 (sidecar 이미지 설정·메모리 상한·바인딩)
+_DEPLOY_ENV_KEYS = frozenset("""
+    BIND_HOST GPU_DEVICE HF_TOKEN CUDA_LAUNCH_BLOCKING
+    OCR_CPU_MEM_LIMIT OCR_CUDA_MEM_LIMIT OCR_WEB_MEM_LIMIT OVIS_MEM_LIMIT PADDLE_MEM_LIMIT
+    OVIS_MODEL_ID OVIS_MODEL_REVISION OVIS_DTYPE OVIS_GPU_MEMORY_UTILIZATION OVIS_MAX_MODEL_LEN
+    OVIS_MAX_OUTPUT_TOKENS OVIS_MAX_NUM_SEQS OVIS_MIN_PIXELS OVIS_MAX_PIXELS
+    OVIS_GDN_PREFILL_BACKEND OVIS_MAX_UPLOAD_MB
+    PADDLEOCR_MODEL_ID PADDLEOCR_MODEL_REVISION PADDLEOCR_DEVICE PADDLEOCR_MIN_PIXELS
+    PADDLEOCR_MAX_PIXELS PADDLEOCR_MAX_UPLOAD_MB
+""".split())
+# 문서화된 테스트·하네스 스위치 (opt-in 실기기 테스트·E2E·모의 LLM)
+_HARNESS_ENV_KEYS = frozenset("""
+    OCR_MPS_TESTS OCR_MLX_REAL_TESTS E2E_MOCK_PORT E2E_BACKEND_PORT E2E_BASE_URL E2E_PDF
+    E2E_TIMEOUT_S E2E_VERIFY_MOCK_LLM MOCK_STREAM_DELAY_S MOCK_STREAM_CHUNK MOCK_FINISH
+    MOCK_REASONING_CHARS MOCK_TRANSLATE_RATIO FAULT
+""".split())
+KNOWN_ENV_KEYS: frozenset[str] = _APP_ENV_KEYS | _DEPLOY_ENV_KEYS | _HARNESS_ENV_KEYS
+
+# 다른 도구가 읽는 키 — 같은 .env에 두는 일이 흔하다(HF 캐시·torch·프록시·compose). 경고하지 않는다.
+_FOREIGN_ENV_PREFIXES = tuple("""
+    HF_ HUGGINGFACE_ HUGGING_FACE_ TRANSFORMERS_ TOKENIZERS_ TORCH_ PYTORCH_ CUDA_ NVIDIA_
+    NCCL_ OMP_ MKL_ OPENBLAS_ KMP_ COMPOSE_ DOCKER_ BUILDKIT_ UV_ PIP_ PYTHON LC_ SSL_
+""".split())
+_FOREIGN_ENV_KEYS = frozenset("""
+    TZ LANG LANGUAGE HOME PATH USER SHELL TERM TMPDIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE
+    HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY
+""".split())
+# 흔한 혼동의 명시 안내 — difflib가 엉뚱한 키를 고르는 경우(OPENAI_API_BASE → OPENAI_API_KEY)나
+# 뜻이 둘로 갈리는 경우. 키를 dict(...) 키워드로 적는 것도 위와 같은 이유(스캐너)다.
+_ENV_KEY_HINTS = dict(
+    REASONING_EFFORT=(
+        "번역은 TRANSLATE_REASONING(off|low|medium|high|xhigh — max 없음), "
+        "Q&A는 LLM_REASONING_EFFORT(max 허용)를 쓰세요"
+    ),
+    OPENAI_API_BASE="번역 엔드포인트 주소는 OPENAI_BASE_URL입니다",
+)
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+# 이미 로그로 남긴 안내(키마다 문구가 하나다 — 프로세스 단위). from_env가 다시 불려도
+# 같은 WARNING을 반복하지 않는다(반환값·health에는 매번 실린다).
+_LOGGED_DOTENV_WARNINGS: set[str] = set()
+_LOGGED_LOCK = threading.Lock()
+_MAX_CONFIG_WARNINGS = 20
+
+
+def _is_foreign_env_key(key: str) -> bool:
+    upper = key.upper()
+    return upper in _FOREIGN_ENV_KEYS or upper.startswith(_FOREIGN_ENV_PREFIXES)
+
+
+def _unknown_key_warning(key: str) -> str:
+    """모르는 .env 키 → 짧은 한국어 안내 (키 이름만 — 값은 절대 담지 않는다)."""
+    head = f"{key}: 이 앱이 읽지 않는 .env 키"
+    hint = _ENV_KEY_HINTS.get(key)
+    if hint:
+        return f"{head} — {hint}"
+    close = difflib.get_close_matches(key, sorted(KNOWN_ENV_KEYS), n=2, cutoff=0.75)
+    if close:
+        return f"{head} — {' 또는 '.join(close)}의 오타인가요?"
+    return f"{head} (다른 도구용이면 무시해도 됩니다)"
+
+
+def unknown_dotenv_key_warnings(values: dict[str, str | None]) -> list[str]:
+    """dotenv_values 결과에서 이 앱이 모르는 키의 안내문 목록(키 이름 순서 그대로).
+
+    값이 없는 줄('=' 없는 줄 — 붙여 넣다 남은 토큰일 수 있다)과 환경변수 이름 꼴이 아닌
+    키는 보지 않는다 — 안내가 로그·/api/health로 나가므로 비밀이 섞일 여지를 두지 않는다."""
+    out: list[str] = []
+    for key, value in values.items():
+        if value is None or not _ENV_NAME.fullmatch(key or ""):
+            continue
+        if key in KNOWN_ENV_KEYS or _is_foreign_env_key(key):
+            continue
+        out.append(_unknown_key_warning(key))
+    return out[:_MAX_CONFIG_WARNINGS]
+
+
+def load_dotenv_file(path: Path | None = None) -> list[str]:
     """로컬 실행용 .env 주입 — **이미 설정된 키는 건드리지 않는다**.
 
     docker-compose는 .env를 읽어 environment로 넘기지만(그 값이 우선 유지됨),
@@ -59,13 +171,19 @@ def load_dotenv_file(path: Path | None = None) -> None:
     (1/true/yes/on)이면 자동 탐색을 끈다 — 테스트·E2E 하네스가 개발자의 실제
     .env(실키)를 프로세스 환경에 주입하지 않게 하는 스위치다. path를 명시한
     호출은 이 스위치와 무관하게 그 파일을 읽는다.
+
+    반환: 이 앱이 읽지 않는 키의 안내문 목록(KNOWN_ENV_KEYS 밖이면서 다른 도구의 키도
+    아닌 것 — 키 이름과 오타 후보·별칭 안내만, 값은 담지 않는다). 키마다 프로세스에서 한
+    번만 WARNING으로 남기고, Settings.config_warnings → /api/health의 config_warnings로
+    보인다. 예전에는 모르는 키를 경고 없이 환경에 넣어 오타·다른 이름의 설정이 조용히
+    무시됐다(REASONING_EFFORT — 번역은 TRANSLATE_REASONING을 읽는다).
     """
     if path is None:
         if _env_bool("DISABLE_DOTENV", False):
-            return
+            return []
         path = _find_dotenv()
     if path is None or not path.is_file():
-        return
+        return []
     # utf-8-sig: 편집기가 붙인 BOM이 첫 키 이름에 섞이지 않게 한다
     values = dotenv_values(path, encoding="utf-8-sig")
     applied = kept = 0
@@ -80,6 +198,13 @@ def load_dotenv_file(path: Path | None = None) -> None:
     logger.info(
         ".env 로드: %s (새로 적용 %d개, 이미 설정돼 유지 %d개)", path, applied, kept,
     )
+    warnings = unknown_dotenv_key_warnings(values)
+    with _LOGGED_LOCK:
+        fresh = [w for w in warnings if w not in _LOGGED_DOTENV_WARNINGS]
+        _LOGGED_DOTENV_WARNINGS.update(fresh)
+    for warning in fresh:
+        logger.warning(".env 설정 확인 (%s): %s", path.name, warning)
+    return warnings
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -358,10 +483,15 @@ class Settings:
     qa_max_concurrent: int = 4           # 동시에 처리 중인 Q&A 수
     translate_rate_limit_per_min: int = 12   # 잡·IP 단위 번역 시작 요청 수/분
     translate_max_active: int = 4            # 동시에 도는 번역 스레드 수
+    # .env의 모르는 키 안내(load_dotenv_file) — /api/health의 config_warnings로 보인다.
+    # 직접 생성(테스트·스크립트)은 .env를 읽지 않으므로 빈 값이다.
+    config_warnings: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> "Settings":
-        load_dotenv_file()  # 로컬 실행(Metal 등)에서도 .env의 번역/OCR 설정이 잡히게
+        # 로컬 실행(Metal 등)에서도 .env의 번역/OCR 설정이 잡히게 — 모르는 키 안내는 health로.
+        # (None을 돌려주는 대역 — 예전 시그니처 — 도 받는다)
+        dotenv_warnings = tuple(load_dotenv_file() or ())
         frontend = os.environ.get("FRONTEND_DIR")
         # 미설정(빈 값 포함) = auto: unlimited 엔진이 mlx → cuda → metal → cpu 중 쓸 수 있는
         # 첫 디바이스를 고른다(registry.resolve_auto_device). compose는 backend 서비스마다
@@ -450,6 +580,7 @@ class Settings:
             qa_max_concurrent=_env_int_or_warn("QA_MAX_CONCURRENT", 4),
             translate_rate_limit_per_min=_env_int_or_warn("TRANSLATE_RATE_LIMIT_PER_MIN", 12),
             translate_max_active=_env_int_or_warn("TRANSLATE_MAX_ACTIVE", 4),
+            config_warnings=dotenv_warnings,
         )
 
     @property

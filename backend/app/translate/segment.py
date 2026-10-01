@@ -247,8 +247,8 @@ def apply_layout(
 def _layout_line_candidates(source_pages: list) -> list[tuple[int, int, str]]:
     """reconcile이 줄 매핑 후보로 삼는 layout 블록들 → [(페이지 idx, 블록 idx, 원문)].
 
-    필터는 reconcile_markdown_with_layout과 **같은 규칙**이다: ref_text 제외,
-    단일 줄·비어있지 않은 content만. 번역문 쪽 조건은 여기서 알 수 없으므로 뺀다.
+    필터: ref_text 제외, 단일 줄·비어있지 않은 content만. 번역문 쪽 조건은 여기서
+    알 수 없으므로 뺀다.
     """
     out: list[tuple[int, int, str]] = []
     if not isinstance(source_pages, list):
@@ -268,11 +268,10 @@ def _layout_line_candidates(source_pages: list) -> list[tuple[int, int, str]]:
 
 
 def layout_line_sources(source_pages: list) -> set[str]:
-    """reconcile이 성공하면 layout 번역으로 덮어쓸 수 있는 md 원문 줄 집합.
+    """layout 번역으로 md 줄을 덮을 수 있는 원문 줄 집합 (엔진의 md 유닛 지연 판단용).
 
-    엔진이 md 유닛 1차 번역을 미루는(deferred) 판단에만 쓴다. 같은 원문이 여러
-    블록에 등장하면 번역이 상충할 수 있어(reconcile도 그때 매핑에서 뺀다)
-    보수적으로 제외한다.
+    같은 원문이 여러 블록에 등장하면 번역이 상충할 수 있어(layout_line_map도 그때
+    매핑하지 않는다) 보수적으로 제외한다.
     """
     seen: dict[str, int] = {}
     for _page_idx, _block_idx, source in _layout_line_candidates(source_pages):
@@ -280,33 +279,31 @@ def layout_line_sources(source_pages: list) -> set[str]:
     return {source for source, n in seen.items() if n == 1}
 
 
-def reconcile_markdown_with_layout(
-    md_text: str,
-    assembled: str,
+def layout_line_map(
     source_pages: list,
     translated_pages: list,
-    page_separator: str,
-    *,
-    min_coverage: float = 0.7,
-) -> str:
-    """레이아웃과 Markdown의 동일 원문 줄을 하나의 번역으로 맞춘다.
+    final_ids: set[str] | None = None,
+) -> dict[str, str]:
+    """md 원문 한 줄 → layout 번역 한 줄 매핑 (layout을 단일 기준으로 쓰기 위한 재료).
 
-    OCR merge 결과는 보통 각 layout 블록을 result.md의 한 줄로도 기록한다. 이때
-    Markdown 유닛과 layout 유닛을 각각 LLM에 보내면 같은 문장이 서로 다르게 번역돼
-    PDF·개요·읽기 텍스트가 어색하게 갈라질 수 있다. 원문 한 줄과 layout 블록이
-    정확히 대응하고, 같은 원문이 항상 같은 번역으로 귀결될 때 layout 번역을 단일
-    기준으로 사용한다.
+    OCR merge 결과는 보통 각 layout 블록을 result.md의 한 줄로도 기록한다. md 유닛과
+    layout 유닛을 따로 번역하면 같은 문장이 PDF와 Markdown에서 다르게 번역되므로,
+    원문 한 줄과 layout 블록이 정확히 대응하면 layout 번역을 그대로 쓴다.
 
-    대응률이 낮은 비정형 Markdown은 기존 assembled 결과를 그대로 반환한다. 복수
-    줄 블록·중복 원문의 상충 번역·ref_text는 보수적으로 매핑에서 제외한다.
+    final_ids가 주어지면 그 lay 유닛(번역 성공 또는 의도적 보존)의 블록만 쓴다 —
+    번역에 실패해 원문이 남은 블록이 md 줄을 영어 그대로 '매핑'하지 않게 한다.
+    복수 줄 블록·같은 원문의 상충 번역·ref_text는 매핑하지 않는다.
     """
     if not isinstance(source_pages, list) or not isinstance(translated_pages, list):
-        return assembled
-
+        return {}
     candidates: dict[str, set[str]] = {}
     for page_idx, block_idx, source in _layout_line_candidates(source_pages):
         if page_idx >= len(translated_pages):
             continue
+        if final_ids is not None:
+            pno = source_pages[page_idx].get("page")
+            if f"lay:{pno}:{block_idx}" not in final_ids:
+                continue
         translated_page = translated_pages[page_idx]
         translated_blocks = (
             translated_page.get("blocks", []) if isinstance(translated_page, dict) else []
@@ -320,38 +317,30 @@ def reconcile_markdown_with_layout(
         if not translated or "\n" in translated:
             continue
         candidates.setdefault(source, set()).add(translated)
+    return {source: next(iter(values)) for source, values in candidates.items() if len(values) == 1}
 
-    mapping = {
-        source: next(iter(values))
-        for source, values in candidates.items()
-        if len(values) == 1
-    }
-    if not mapping:
-        return assembled
 
-    lines = md_text.splitlines(keepends=True)
-    eligible = 0
-    matched = 0
+def map_unit_lines(src: str, mapping: dict[str, str]) -> str | None:
+    """md 유닛의 비어 있지 않은 **모든** 줄이 매핑에 있으면 줄별 치환 결과, 아니면 None.
+
+    reconcile을 유닛 단위로 한다(translate-llm-1). 종전 줄 단위 reconcile은 원문 줄로
+    출력을 다시 만들어 매핑되지 않은 줄(여러 줄 블록·상충 중복·수식 정의 줄)을 영어로
+    남기고, 1차에서 번역한 md 유닛 결과는 통째로 버렸다. 이제 한 줄이라도 매핑이
+    없으면 그 유닛은 자기 번역(md 유닛 번역)을 쓴다. 줄 앞뒤 공백은 보존한다.
+    """
+    lines = src.split("\n")
     out: list[str] = []
-    separator_line = page_separator.strip()
+    mapped_any = False
     for line in lines:
-        ending = "\n" if line.endswith("\n") else ""
-        body = line[:-1] if ending else line
-        stripped = body.strip()
-        if stripped and stripped != separator_line:
-            eligible += 1
-        translated = mapping.get(stripped)
-        if translated is None:
+        stripped = line.strip()
+        if not stripped:
             out.append(line)
             continue
-        matched += 1
-        leading = body[:len(body) - len(body.lstrip())]
-        trailing = body[len(body.rstrip()):]
-        out.append(f"{leading}{translated}{trailing}{ending}")
-
-    if eligible <= 0 or matched / eligible < min_coverage:
-        return assembled
-    reconciled = "".join(out)
-    if page_separator and len(reconciled.split(page_separator)) != len(md_text.split(page_separator)):
-        return assembled
-    return reconciled
+        translated = mapping.get(stripped)
+        if translated is None:
+            return None
+        mapped_any = True
+        leading = line[:len(line) - len(line.lstrip())]
+        trailing = line[len(line.rstrip()):]
+        out.append(f"{leading}{translated}{trailing}")
+    return "\n".join(out) if mapped_any else None

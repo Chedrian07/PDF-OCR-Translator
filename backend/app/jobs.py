@@ -68,6 +68,11 @@ class Job:
     # submit()되므로 생성 순서와 어긋날 수 있다 — queue_position이 이 값을 쓴다.
     # 아직 제출 전(업로드 중)이면 None.
     submit_seq: int | None = None
+    # 업로드·검증(probe)을 마치고 워커 큐에 제출됐는가 — meta.json에 기록된다.
+    # create()가 업로드 본문을 받기 **전에** queued meta를 쓰므로, 재시작 시 '대기열에
+    # 들어갔지만 시작하지 못한 잡'(다시 제출해도 안전)과 '업로드 도중 죽은 잡'(부분
+    # source.pdf)을 이 표식으로 가른다. 구버전 meta에는 없다(=False, 예전처럼 오류 처리).
+    submitted: bool = False
     # 워커가 큐에서 꺼내 실행을 맡았는가(런타임 전용). 상태는 모델 로딩 대기 동안
     # 여전히 queued라, '아직 아무도 맡지 않은 대기 잡'만 API가 즉시 취소할 수 있도록
     # 상태와 별도로 둔다 — JobStore.claim/try_cancel_queued가 같은 락에서 판정한다.
@@ -147,6 +152,7 @@ class Job:
             "model_id": self.model_id,
             "model_revision": self.model_revision,
             "provider": self.provider,
+            "submitted": self.submitted,
         }
 
 
@@ -209,10 +215,18 @@ class JobStore:
         return None
 
     def mark_submitted(self, job: Job) -> None:
-        """워커 큐 제출 순번을 부여한다 — queue_position이 실제 처리 순서를 반영하게."""
+        """워커 큐 제출 순번을 부여한다 — queue_position이 실제 처리 순서를 반영하게.
+
+        제출 표식(submitted)도 meta.json에 남긴다 — 재시작 때 다시 제출할 근거다.
+        기록 실패가 제출 자체를 막지는 않는다(잃는 것은 재시작 후 자동 재제출뿐이다)."""
         with self._lock:
             self._submit_seq += 1
             job.submit_seq = self._submit_seq
+            job.submitted = True
+        try:
+            self.save(job)
+        except OSError:
+            logger.warning("제출 표식 기록 실패 — 재시작 시 다시 제출되지 않습니다: %s", job.id)
 
     def claim(self, job: Job) -> bool:
         """워커가 대기 잡의 실행을 맡는다 — 이미 취소됐거나(맡을 것 없음) 맡았으면 False.
@@ -305,10 +319,17 @@ class JobStore:
             removed += 1
         return removed
 
-    def load_existing(self) -> None:
-        """서버 재시작 시 디스크의 잡 복원. 실행 중이던 잡은 오류로 마킹."""
+    def load_existing(self) -> list[Job]:
+        """서버 재시작 시 디스크의 잡 복원. 실행 중이던 잡은 오류로 마킹한다.
+
+        업로드·검증을 마치고 대기열에 들어갔지만(submitted) 시작하지 못한 queued 잡은
+        대기 상태 그대로 두고 생성 순서로 돌려준다 — 호출자(앱 조립)가 워커에 다시
+        제출한다. 예전에는 이런 잡까지 '서버 재시작으로 중단' 오류로 확정해, 긴 잡 뒤에
+        줄 세워 둔 PDF를 재시작(이미지 갱신·make dev 리로드)마다 다시 올려야 했다.
+        제출 표식이 없는(업로드 도중 죽은) 잡은 원본이 부분일 수 있어 예전처럼 오류다."""
+        restored: list[Job] = []
         if not self.jobs_dir.is_dir():
-            return
+            return restored
         for d in sorted(self.jobs_dir.iterdir()):
             meta_path = d / _META_NAME
             if not meta_path.is_file():
@@ -332,7 +353,13 @@ class JobStore:
                     # 구버전 meta.json에는 없는 필드 — 없으면 None으로 안전 복원
                     engine=m.get("engine"), model_id=m.get("model_id"),
                     model_revision=m.get("model_revision"), provider=m.get("provider"),
+                    submitted=bool(m.get("submitted")),
                 )
+                if job.status == "queued" and job.submitted and _source_intact(d):
+                    with self._lock:
+                        self._jobs[job.id] = job
+                    restored.append(job)
+                    continue
                 changed = job.status in ("queued", "running")
                 if changed:
                     job.status = "error"
@@ -349,6 +376,19 @@ class JobStore:
                     self.save(job)
             except Exception:
                 logger.exception("잡 메타 복원 실패: %s", d)
+        return sorted(restored, key=lambda job: (job.created_at, job.id))
+
+
+def _source_intact(job_dir: Path) -> bool:
+    """제출된 잡의 원본이 아직 PDF로 보이는가 — 다시 제출해도 될 최소 확인.
+
+    원본은 업로드 때 probe를 통과한 뒤로 바뀌지 않는다. 그 사이 사라졌거나(외부 정리)
+    잘렸다면(디스크 장애) 재실행하지 않고 예전처럼 오류로 마감한다."""
+    try:
+        with (job_dir / "source.pdf").open("rb") as f:
+            return f.read(5) == b"%PDF-"
+    except OSError:
+        return False
 
 
 class EventBroker:

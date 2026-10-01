@@ -290,6 +290,45 @@ def _chunked(items: list[Path], size: int) -> list[list[Path]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
+# multi 프롬프트 길이 = 쪽당 이미지 토큰(1024px 전역 뷰: (16+1)×16+1 = 273) × 쪽 수 + 텍스트
+# 5토큰(BOS + "Multi page parsing."). 실토크나이저로 1·2·4·8쪽 = 278·551·1097·2189 실측.
+_MULTI_IMAGE_TOKENS_PER_PAGE = 273
+_MULTI_PROMPT_TEXT_TOKENS = 5
+
+
+def chunk_length_budget_note(settings: "Settings", engine: OCREngine) -> str | None:
+    """multi 청크의 최악 길이가 MAX_LENGTH를 넘는 설정이면 기동 시 1회 남길 안내문.
+
+    최악 길이 = 쪽 수 × (MAX_PAGE_OUTPUT_TOKENS + 쪽당 이미지 토큰) + 프롬프트 텍스트.
+    배포 기본값(MAX_LENGTH 32,768 < 8쪽 × (6,144 + 273) + 5 = 51,341)에서 늘 참이라,
+    예전처럼 잡마다 WARNING으로 내면 모든 multi 잡이 경고로 시작했다. 넘쳐도 잃는 것은
+    없다 — 잘린 청크는 끝까지 생성된 앞 페이지를 지키고 잘린 페이지부터 페이지별로 다시
+    처리한다(시간만 더 든다). 그래서 설정 안내로 한 번만 알린다. MAX_LENGTH를 쓰는
+    생성 엔진(unlimited: torch·MLX)이 토큰을 스트리밍하는 multi 청크에만 해당한다 —
+    아니면 None."""
+    caps = engine.capabilities()
+    if engine.name != "unlimited" or not caps.supports_multi_page:
+        return None
+    if caps.stream_granularity != "token":
+        return None
+    pages = max(1, caps.preferred_chunk_size or settings.pages_per_chunk)
+    page_tokens = settings.max_page_output_tokens or 0
+    if pages <= 1 or not page_tokens:
+        return None
+    worst = pages * (page_tokens + _MULTI_IMAGE_TOKENS_PER_PAGE) + _MULTI_PROMPT_TEXT_TOKENS
+    if worst <= settings.max_length:
+        return None
+    return (
+        f"참고: MAX_LENGTH={settings.max_length:,}는 {pages}쪽 청크의 최악 길이 "
+        f"{worst:,}토큰({pages}쪽 × (MAX_PAGE_OUTPUT_TOKENS {page_tokens:,} + 이미지 "
+        f"{_MULTI_IMAGE_TOKENS_PER_PAGE}) + 프롬프트 {_MULTI_PROMPT_TEXT_TOKENS})보다 작습니다. "
+        "출력이 아주 긴 청크는 꼬리 페이지가 MAX_LENGTH에서 잘리지만, 끝까지 생성된 앞 "
+        "페이지는 그대로 쓰고 잘린 페이지부터 페이지별로 다시 처리하므로 내용은 빠지지 "
+        "않습니다(시간만 더 듭니다). 재처리를 줄이려면 MAX_LENGTH를 늘리거나 "
+        "PAGES_PER_CHUNK를 줄이세요."
+    )
+
+
 _FAILED_PAGE_MD = "> ⚠️ 이 페이지는 변환에 실패했습니다"
 
 
@@ -449,23 +488,9 @@ def execute_job(
             # Unlimited는 None → 기존 PAGES_PER_CHUNK.
             chunk_size = caps.preferred_chunk_size or settings.pages_per_chunk
         chunk_size = max(1, chunk_size)
-        page_tokens = settings.max_page_output_tokens or 0
-        if (
-            chunk_size > 1
-            and caps.stream_granularity == "token"
-            and page_tokens
-            and settings.max_length < chunk_size * page_tokens
-        ):
-            # 청크 하나가 공유하는 총 길이 상한이 '페이지 상한 × 페이지 수'보다 작다 —
-            # 페이지마다 상한 안의 정상 출력이라도 청크 꼬리가 MAX_LENGTH에서 잘린다.
-            # 잘리면 OutputLimitError → 잘린 페이지부터 페이지별 재처리로 복구되지만,
-            # 그만큼 시간을 더 쓰므로 설정 조합을 알린다(프롬프트 길이는 별도로 더 든다).
-            logger.warning(
-                "MAX_LENGTH(%d)가 청크의 최악 생성 예산(%d쪽 × MAX_PAGE_OUTPUT_TOKENS %d = "
-                "%d)보다 작습니다 — 출력이 긴 청크는 꼬리 페이지가 잘려 페이지별로 다시 "
-                "처리됩니다. MAX_LENGTH를 늘리거나 PAGES_PER_CHUNK를 줄이세요.",
-                settings.max_length, chunk_size, page_tokens, chunk_size * page_tokens,
-            )
+        # MAX_LENGTH와 청크 최악 예산의 조합은 설정의 성질이라 잡마다 알리지 않는다 — 기동 시
+        # 1회 안내(chunk_length_budget_note)로 충분하다. 실제로 잘린 청크는 아래 페이지별
+        # 복구가 그 잡의 메시지로 남긴다.
         chunks = _chunked(pages, chunk_size)
         job.progress.update(total_pages=total, total_chunks=len(chunks), current_page=0)
         store.save(job)

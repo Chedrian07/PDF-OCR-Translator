@@ -8,8 +8,8 @@
 #   전환(정지):    docker compose stop ovisocr2 ocr-ovis
 #                  (`--profile … down`은 프로필 없는 ocr-cpu까지 지우므로 전체 정리용으로만)
 
-.PHONY: setup setup-mlx setup-metal setup-native dev dev-metal dev-textlayer test coverage e2e \
-	e2e-mock verify-e2e \
+.PHONY: setup setup-mlx setup-metal setup-native dev dev-metal dev-textlayer test test-mps \
+	test-mlx-real coverage audit e2e e2e-mock verify-e2e \
 	docker-up docker-down docker-up-ollama docker-pull-model docker-down-ollama
 
 setup:            ## backend 의존성 설치 (torch CPU)
@@ -29,22 +29,42 @@ setup-native:     ## C++ 가속 모듈 설치 (선택 — 없어도 순수 파�
 # OCR_DEVICE는 넘기지 않는다 — 미설정이면 코드 기본 auto(mlx → cuda → metal → cpu, 결정은
 # 기동 로그·/api/health)라 Apple Silicon은 MLX를 쓴다. 여기서 값을 박으면 .env의 OCR_DEVICE가
 # 무시된다(.env는 이미 있는 환경변수를 덮지 않는다). 지정: make dev OCR_DEVICE=cpu
+# --timeout-graceful-shutdown 5: 열린 SSE 스트림·keep-alive 연결이 종료(Ctrl+C·--reload 재시작)를
+# 무기한 붙잡지 않게 한다 — Dockerfile의 uvicorn과 같은 값.
 dev:              ## 로컬 개발 서버 — http://127.0.0.1:8000 (디바이스 자동 선택)
-	cd backend && uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+	cd backend && uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 \
+		--timeout-graceful-shutdown 5
 
 dev-metal:        ## torch MPS(Metal) 폴백으로 개발 서버 — MLX와 결과·속도 비교용
-	cd backend && OCR_DEVICE=metal uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+	cd backend && OCR_DEVICE=metal uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 \
+		--timeout-graceful-shutdown 5
 
 dev-textlayer:    ## 모델 다운로드 없이 textlayer 엔진으로 개발 서버
-	cd backend && OCR_ENGINE=textlayer uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+	cd backend && OCR_ENGINE=textlayer uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 \
+		--timeout-graceful-shutdown 5
 
 test:             ## 핵심 로컬 3종 — backend pytest · ruff · frontend (node --test)
 	cd backend && uv run pytest
 	cd backend && uv run --only-group dev ruff check .
 	npm test --prefix frontend
 
+# 기기 의존 opt-in 테스트(기본 스위트에서는 건너뛴다). extra(metal·mlx)와 uv pip로 넣은 C++ 모듈은
+# uv.lock 기본 동기화 밖이라 uv run 대신 venv 인터프리터를 직접 부른다(CI backend-native 잡과 같은
+# 이유). -rs: 조건이 안 맞아 건너뛴 테스트는 사유를 보인다 — 조용한 skip을 통과로 읽지 않게.
+test-mps:         ## Apple Silicon torch MPS 계약 테스트 — torch·macOS 업그레이드 전후에 돌린다
+	cd backend && OCR_MPS_TESTS=1 .venv/bin/python -m pytest -rs tests/test_mps_contract.py tests/test_objc_pool.py
+
+# 고정 스냅샷(MODEL_ID@MODEL_REVISION)을 로컬 HF 캐시(HF_HOME, 기본 ~/.cache/huggingface)에서만
+# 읽는다(local_files_only) — 캐시가 없으면 건너뛴다. make dev를 한 번 띄우면(기본 프리로드)
+# 받아진다. make setup-mlx 필요(torch CPU 로짓과 비교), 수 GB·수십 초.
+test-mlx-real:    ## MLX 실가중치 패리티 테스트 — mlx 업그레이드·MLX 포팅 수정·스냅샷 갱신 전후에 돌린다
+	cd backend && OCR_MLX_REAL_TESTS=1 .venv/bin/python -m pytest -rs tests/test_mlx_model_parity.py
+
 coverage:         ## backend 커버리지 (pytest-cov는 --with로 임시 설치 — uv.lock 무변경)
 	cd backend && uv run --locked --with pytest-cov pytest --cov --cov-report=term
+
+audit:            ## 의존성 취약점 감사 — CI dependency-audit 잡과 같은 pip-audit (네트워크 필요)
+	./scripts/dependency_audit.sh
 
 e2e:              ## 실서버 스모크 (기동된 백엔드 필요 — README §E2E)
 	./scripts/smoke_e2e.sh

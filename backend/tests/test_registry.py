@@ -187,3 +187,125 @@ def test_health_reports_metal(tmp_path):
     with TestClient(create_app(settings)) as c:
         body = c.get("/api/health").json()
     assert body["device"] == "metal"
+
+
+# ── OCR_DEVICE=mlx · auto (Apple Silicon 기본 = MLX, 감사 api-jobs-5·mlx-integration-12) ──
+
+
+def test_valid_devices_include_mlx_and_auto():
+    from app.engine.registry import VALID_DEVICES
+
+    assert {"auto", "cpu", "cuda", "metal", "mlx"} == set(VALID_DEVICES)
+
+
+def test_mlx_device_builds_the_mlx_engine_without_probing(monkeypatch):
+    from app.engine import unlimited_mlx
+    from app.engine.unlimited_mlx import UnlimitedMLXEngine
+
+    def boom():
+        raise AssertionError("명시 mlx는 생성 시점에 가용성을 탐지하지 않는다 (load()에서 검증)")
+
+    monkeypatch.setattr(unlimited_mlx, "mlx_unavailable_reason", boom)
+    eng = build_engine(Settings(engine="unlimited", device="mlx", mlx_quant_bits=8))
+    assert isinstance(eng, UnlimitedMLXEngine)
+    assert (eng.name, eng.device, eng.dtype_name, eng.loaded) == ("unlimited", "mlx", "bfloat16+q8", False)
+
+
+def _stub_probes(monkeypatch, *, mlx: bool, cuda: bool = False, mps: bool = False) -> list[str]:
+    """auto 판정의 하드웨어 탐지를 고정한다 — 호출 기록을 돌려준다."""
+    from app.engine import registry, unlimited_mlx
+
+    calls: list[str] = []
+
+    def mlx_reason():
+        calls.append("mlx")
+        return None if mlx else "mlx를 임포트할 수 없습니다 (테스트)"
+
+    def torch_probe():
+        calls.append("torch")
+        return cuda, mps, ""
+
+    monkeypatch.setattr(unlimited_mlx, "mlx_unavailable_reason", mlx_reason)
+    monkeypatch.setattr(registry, "_torch_accelerators", torch_probe)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "mlx,cuda,mps,expected,torch_device",
+    [
+        (True, True, True, "mlx", None),       # Apple Silicon + mlx: MLX가 1순위 (torch 탐지 생략)
+        (False, True, True, "cuda", "cuda"),
+        (False, False, True, "metal", "mps"),  # mlx 미설치 Mac → torch MPS 폴백
+        (False, False, False, "cpu", "cpu"),   # Linux CPU 이미지(torch CPU 휠)
+    ],
+)
+def test_auto_resolves_mlx_then_cuda_then_metal_then_cpu(
+    monkeypatch, caplog, mlx, cuda, mps, expected, torch_device
+):
+    import logging
+
+    from app.engine.unlimited import UnlimitedEngine
+    from app.engine.unlimited_mlx import UnlimitedMLXEngine
+
+    calls = _stub_probes(monkeypatch, mlx=mlx, cuda=cuda, mps=mps)
+    settings = Settings(engine="unlimited", device="auto", preload_model=False)
+    with caplog.at_level(logging.INFO, logger="app.engine.registry"):
+        eng = build_engine(settings)
+    assert eng.device == expected
+    if expected == "mlx":
+        assert isinstance(eng, UnlimitedMLXEngine) and calls == ["mlx"]
+    else:
+        assert isinstance(eng, UnlimitedEngine) and eng.torch_device == torch_device
+        assert calls == ["mlx", "torch"]
+    assert f"OCR_DEVICE=auto → {expected}" in caplog.text  # 결정을 남긴다
+    assert settings.device == "auto"  # 호출자의 설정은 바꾸지 않는다
+
+
+@pytest.mark.parametrize("engine", ["fake", "textlayer", "ovisocr2"])
+def test_auto_does_not_probe_hardware_for_engines_without_a_local_model(monkeypatch, engine):
+    calls = _stub_probes(monkeypatch, mlx=True, cuda=True, mps=True)
+    eng = build_engine(
+        Settings(engine=engine, device="auto", preload_model=False, sidecar_url="http://ovisocr2:8080")
+    )
+    assert calls == []
+    assert eng.device == {"fake": "cpu", "textlayer": "cpu", "ovisocr2": "cuda"}[engine]
+
+
+def test_auto_on_linux_never_imports_mlx():
+    """Linux(CPU/CUDA 이미지)에서는 플랫폼만 보고 mlx 임포트를 시도조차 하지 않는다."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    code = (
+        "import sys, platform\n"
+        "sys.platform = 'linux'\n"
+        "platform.machine = lambda: 'x86_64'\n"
+        "from app.config import Settings\n"
+        "from app.engine import registry\n"
+        "registry._torch_accelerators = lambda: (False, False, '')\n"
+        "eng = registry.build_engine(Settings(engine='unlimited', device='auto'))\n"
+        "print(eng.device, 'mlx' in sys.modules, 'mlx.core' in sys.modules)\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[1],
+        capture_output=True, text=True, timeout=120, check=True,
+    )
+    assert out.stdout.split() == ["cpu", "False", "False"]
+
+
+@pytest.mark.parametrize("mlx,expected,dtype", [(True, "mlx", "bfloat16"), (False, "metal", "auto")])
+def test_health_reports_the_resolved_device(monkeypatch, tmp_path, mlx, expected, dtype):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    _stub_probes(monkeypatch, mlx=mlx, cuda=False, mps=True)
+    settings = Settings(
+        engine="unlimited", device="auto", preload_model=False,
+        data_dir=tmp_path / "data", frontend_dir=tmp_path / "no-frontend",
+    )
+    with TestClient(create_app(settings)) as c:
+        body = c.get("/api/health").json()
+    assert (body["engine"], body["device"], body["dtype"]) == ("unlimited", expected, dtype)
+    assert body["model_loaded"] is False

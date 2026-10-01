@@ -426,7 +426,12 @@ class SidecarEngine(OCREngine):
     ) -> str:
         self.load()
         out_dir.mkdir(parents=True, exist_ok=True)
-        mat = ChunkMaterializer(out_dir, single=single)
+        # 텍스트 bbox가 없는 엔진(figure_only)은 raw_pages.json을 쓰지 않는다 — 쓰면
+        # image 블록뿐인 layout.json이 생겨 HTML·PDF 내보내기가 OCR 텍스트를 잃는다.
+        mat = ChunkMaterializer(
+            out_dir, single=single,
+            write_raw=self._spec.layout_capability == "full",
+        )
         parts: list[str] = []
 
         concurrency = min(len(image_paths), max(1, self._settings.remote_page_concurrency))

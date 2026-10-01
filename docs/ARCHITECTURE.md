@@ -192,23 +192,89 @@ torch CPU와 로짓 상대오차 1e-5 수준으로 맞으므로, 엔진 간 회�
 ## 4. 처리 파이프라인
 
 ```
-업로드(PDF) ──► JobStore(queued) ──► 워커(단일 스레드)
-  1. render : pymupdf로 페이지별 PNG (RENDER_DPI, 기본 200) → pages/page_%04d.png
-  2. ocr    : PAGES_PER_CHUNK(기본 8)개씩 infer_multi() 호출
+업로드(PDF) ──► 업로드 검증(probe 워커: 페이지 수·크기·작업량 게이트, §18) ──► JobStore(queued)
+            ──► 워커(단일 스레드)
+  1. render : 페이지마다 ocr 워커 프로세스에서 PNG (RENDER_DPI, 기본 200) → pages/page_%04d.png
+              (페이지당 PDF_PAGE_TIMEOUT_S — 넘긴 페이지는 흰 페이지 + 경고, 한 잡에서 3번이면 중단)
+  2. ocr    : PAGES_PER_CHUNK(기본 8)개씩 infer_multi() 호출 (torch·MLX 공통 계약)
               - 각 청크는 work/chunk_%02d/ 를 output_path로 사용
               - 커스텀 streamer가 토큰 델타를 SSE 큐로 전달
               - StoppingCriteria로 취소(cancel), rolling 반복, 페이지별 문자·토큰 상한 지원
+              - 실패·출력 상한(MAX_LENGTH)은 페이지 단위로 복구한다 — 아래 §청크 실패 복구
               - **충실도 게이트**: 청크를 병합한 직후 페이지마다 원본 PDF 텍스트 레이어와
                 대조하고, 임계값(`OCR_FIDELITY_THRESHOLD`, 기본 0.70) 미만이면 **그 페이지만**
                 `infer()`로 다시 돌린다. 아래 §충실도 게이트 참조.
   3. merge  : 청크 산출물 병합
               - <PAGE> 마커 분리 → 페이지 단위 마크다운
+              - 모델 페이지 → 물리 페이지 슬롯 정렬(assign_slots — 놓치거나 쪼갠 페이지 보정)
               - work/chunk_*/images/page_{i}_{k}.jpg → images/p{글로벌페이지:04d}_{k}.jpg 리네임
+                (정렬로 옮겨진 페이지는 p{슬롯}_x{k}_{j}.jpg — 자기 슬롯의 raster에서 다시 크롭)
               - 마크다운 내 ![](images/page_{i}_{k}.jpg) 참조를 새 경로로 재작성
               - result_with_boxes_{i}.jpg → layout/page_{글로벌:04d}.jpg
               - 페이지 사이 PAGE_SEPARATOR(기본 "\n\n---\n\n")로 join → result.md
-  4. done   : meta.json 갱신, SSE done 이벤트
+  4. done   : meta.json 갱신(warnings·notices·finished_at), SSE done 이벤트
 ```
+
+#### 청크 실패 복구와 출력 상한 (`pipeline/runner.py`)
+
+청크는 서로 격리된다 — 한 청크가 죽어도(OOM·벤더 예외·출력 상한) 잡 전체를 죽이지 않는다.
+
+1. **1회 재시도**: 실패한 엔진 호출은 캐시를 비운 뒤 한 번 더 부른다. 예외는 요약 문자열만
+   남기고 traceback 프레임을 놓는다(`_detach`) — 예외를 쥔 채로는 실패한 시도의 KV·활성화
+   텐서가 재시도 내내 남아 같은 OOM이 재발했다. 반복 감지(`RepetitiveOutputError`)와
+   `retry_same_page=False`인 예외(sidecar 읽기 타임아웃·잘린 페이지 — 같은 입력을 곧장 다시
+   보내 봐야 소용없다)는 재시도하지 않는다. 페이지 단위 엔진(sidecar)의 여러 쪽 청크도
+   통째로 다시 보내지 않는다(정상 페이지까지 GPU에서 다시 추론하게 된다).
+2. **여러 쪽 청크 → 페이지별 복구**: 페이지마다 단독 실행(1회 재시도) → PDF 텍스트 레이어 →
+   실패 플레이스홀더. 반복·출력 상한뿐 아니라 일반 예외(8쪽 prefill OOM 등)도 이 길로 온다 —
+   예전에는 재시도까지 실패하면 청크 전 페이지가 플레이스홀더였다.
+3. **1쪽 청크**(per_page 모드, sidecar 기본 구성)는 같은 페이지의 다른 OCR 호출 대신 텍스트
+   레이어부터 쓴다.
+4. **출력 상한(MAX_LENGTH)**: 생성이 총 길이 상한에서 EOS 없이 끝나면 엔진(torch·MLX 모두)이
+   `OutputLimitError(message, partial_output)`를 낸다. `partial_output`은 run_multi 형식의 잘린
+   출력이고(크롭·raw_pages.json은 out_dir에 있다), runner는 **끝까지 생성된 앞 페이지**(마지막
+   세그먼트를 뺀 것)를 그대로 병합하고 잘린 페이지부터만 다시 처리한다
+   (`merge.keep_leading_pages`). 실측(M4 Max, MLX): 4쪽 청크를 `MAX_LENGTH=4000`으로 자르면
+   앞 3쪽 유지 + 단독 1회, 15.3초. 잡 참고 문구는 '<상한 이름> 도달로 출력이 잘려 페이지별
+   재처리(끝까지 생성된 앞 N쪽은 유지)'이고, 상한 이름은 엔진이 `OutputLimitError.limit_label`로
+   알린다(in-process 엔진 `MAX_LENGTH`, sidecar 'sidecar 출력 토큰 상한'). torch에서
+   `OCR_FAST_DECODE=0`이어도 HF generate 래퍼를 주입해 잘림을 판정한다.
+5. **취소된 청크**: 엔진이 취소 시점까지의 부분 출력을 돌려주면 그만큼만 조용히 병합하고
+   경고 1건을 남긴 뒤 끝낸다 — 마커 보정·충실도 게이트를 돌리면 진행률이 청크 끝으로 뛰고
+   엉뚱한 품질 경고가 남았다.
+
+**길이 예산 안내**: multi 청크의 최악 길이는 `쪽 수 × (MAX_PAGE_OUTPUT_TOKENS + 273) + 5`다
+(1024px 전역 뷰의 이미지 토큰 273/쪽 + 프롬프트 텍스트 5토큰 — 실토크나이저로 1·2·4·8쪽 =
+278·551·1097·2189 실측). 기본값은 `8 × (6,144 + 273) + 5 = 51,341 > MAX_LENGTH 32,768`이라
+늘 넘지만 위 4번 덕분에 내용은 빠지지 않는다(시간만 더 든다). 그래서 잡마다 내던 WARNING을
+없애고 **기동 시 INFO 한 번**(`runner.chunk_length_budget_note`)으로 바꿨다 — 재처리를 줄이려면
+`MAX_LENGTH`를 늘리거나 `PAGES_PER_CHUNK`를 줄인다. 토큰을 스트리밍하는 unlimited 엔진의 multi
+청크에만 해당한다. 페이지별 상한은 `MAX_PAGE_OUTPUT_CHARS`(내용 문자만 — `<|ref|>`/`<|det|>`
+레이아웃 태그와 HTML 표 태그는 세지 않는다)와 하드 상한 `MAX_PAGE_OUTPUT_TOKENS`다.
+
+**엔진 계약** (`engine/base.py`): `OutputLimitError(message, partial_output=None)` +
+`limit_label`, `EngineError.retry_same_page`(기본 True), `OCREngine.deterministic_rerun`(기본
+False — textlayer는 True라 충실도 재처리를 하지 않는다), `drain_warnings()`(품질 저하)·
+`drain_notices()`(정보성 메모) 훅.
+
+#### 잡 메시지 — 경고(warnings)와 참고(notices)
+
+meta.json과 `GET /api/jobs`·`/api/jobs/{id}`의 메시지는 두 목록으로 나뉜다:
+
+- **`warnings` = 실제 품질 저하**: 실패 플레이스홀더, 텍스트 레이어 복구, 재처리 뒤에도 기준
+  미달·재처리 실패, 재처리 예산 소진으로 건너뛴 페이지, 게이트 실패, 취소 청크의 부분 병합,
+  마커 보정, 렌더 폴백(흰 페이지), 페이지 경계 불일치, layout 파싱 실패, 엔진 `drain_warnings`.
+- **`notices` = 정보성**: 페이지 단위 엔진 안내, 청크의 페이지별 복구 경위(MAX_LENGTH·반복·
+  청크 실패 — 페이지가 살아나면 손실 없음), 충실도 재처리 '채택'·'측정 한계' 메모, 게이트 회로
+  차단, 시간 상한으로 건너뛴 충실도 검사, 엔진 `drain_notices`(페이지 범위를 붙인다).
+- viewer-manifest의 `quality.state`는 warnings만으로 정한다(`degraded`/`ok`) — 예전에는 복구에
+  성공한 잡과 sidecar 엔진의 모든 잡이 'degraded'였다. `quality.notice_count`가 따로 있다.
+- notices 이전의 옛 meta는 `jobs.LEGACY_NOTICE_MARKERS` 문구로 메모리에서만 갈라 읽고 다시
+  쓰지 않는다. runner의 해당 문구를 바꾸면 이 목록도 함께 고친다(`tests/test_job_notices.py`가
+  실제 runner 출력과 대조한다).
+- 잡 시각: `started_at`·`finished_at`(UTC ISO, 초 단위). `null`은 아직 아님·알 수 없음이다 —
+  대기 중 취소된 잡은 `started_at`이, 서버 재시작으로 중단된 잡은 `finished_at`이 없고(멈춘
+  시각을 모른다), 옛 meta에는 둘 다 없다.
 
 #### result.md 페이지 인덱스 계약 (코드로 강제)
 
@@ -262,6 +328,17 @@ born-digital PDF에서는 PyMuPDF가 뽑는 텍스트가 **공짜 정답**이다
   0.729로 떨어졌다(임계 0.70과 간격 0.029).
 * **정답이 200자 미만이면 판정하지 않는다.** 표지·백지·스캔 PDF는 게이트를 건너뛴다
   (판정 불가는 실패가 아니다).
+* **글자와 숫자만 비교한다.** 정답·후보 모두 NFKC → HTML 태그(화이트리스트) 제거 → LaTeX
+  명령 제거(그리스 문자는 글리프로) → 글자·숫자만 남기고 casefold한다. 정답과 후보에서
+  똑같은 블록을 뺀다(불신하는 수식·그림 블록은 양쪽 모두에서). 목차 점선·글리프 대 LaTeX
+  표기의 오탐이 사라졌다(실측 Metal 출력: 0.465 → 1.000, 0.656 → 0.988 — 정상 페이지 최저가
+  0.656 → 0.978로 올랐고, 통째 유실(0.0)·중복 전사(0.65)는 그대로 잡힌다). 기호·구두점만의
+  부분 손실은 의도적으로 보지 않는다.
+* **믿을 수 없는 텍스트 레이어는 판정하지 않는다** — PUA·U+FFFD·제어 문자가 20% 이상이거나
+  글자·숫자가 30% 미만인 페이지(깨진 폰트 매핑)는 '텍스트 레이어 신뢰 불가'로 판정 불가다.
+* 페이지 그래픽(이미지·벡터 경로)은 페이지당 한 번만 추출한다. 분석은 ocr 워커 프로세스에서
+  페이지 단위 작업으로 돌고(§18), 시간 상한을 넘은 페이지는 그 검사만 건너뛰고 참고를 남긴다.
+  취소는 페이지마다·벡터 경로 4,096개마다 확인한다.
 
 실측 분리 마진(46쪽, 열화 4쪽이 확인된 실행): 열화 최고 **0.494** vs 비열화 최저
 **0.813** → 임계값 0.70이 유효 구간의 가운데다.
@@ -277,11 +354,18 @@ born-digital PDF에서는 PyMuPDF가 뽑는 텍스트가 **공짜 정답**이다
    `_FIDELITY_ACCEPT_MARGIN`(0.05) 이상 개선됐을 때만 `merger.replace_page()`로 채택한다.
    개선되지 않거나 재처리가 터지면 원래 결과를 지킨다 — **게이트는 손해를 끼치면 안 된다.**
 4. 재처리 상한은 문서 페이지 수의 `OCR_FIDELITY_MAX_RETRY_RATIO`(기본 0.2, 최소 2쪽).
-   상한에 걸려 건너뛴 페이지는 경고로 남긴다(조용한 절단 금지).
+   상한에 걸려 건너뛴 페이지는 경고로 남긴다(조용한 절단 금지). 예산은 **통째로 유실된
+   페이지**(OCR 텍스트가 정답의 10% 미만)에 먼저, 그다음 점수가 낮은 순으로 쓴다.
+5. **회로 차단**: 재처리 3번이 하나도 채택되지 않으면 그 문서에서는 부분 열화 재처리를
+   멈춘다(통째 유실 페이지는 계속 재처리). 점수 변화가 0.01 이하면 '측정 한계로 판단'으로
+   적는다 — 품질 문제가 아니므로 채택·측정 한계 메모는 참고(notices)이고, 개선되지 않은
+   기준 미달·재처리 실패만 경고다.
 
 게이트가 **아예 돌지 않는** 조건 — 원리상 도움이 될 수 없거나 해가 되는 경우다:
 
 * `job.mode == "per_page"`, 임계값 ≤ 0, 원본 PDF 부재
+* 결정적 엔진(`OCREngine.deterministic_rerun` — textlayer): 같은 페이지를 다시 돌려도
+  결과가 같아 시간만 쓰고 거짓 '충실도 미달' 경고를 남긴다
 * `layout_capability != "full"` — 텍스트 bbox를 안 주는 엔진(sidecar의 `figure_only`)은
   블록 내용이 비어 **전 페이지가 0.00**으로 나온다. 전량 오탐이다.
 * `not supports_multi_page` 또는 `preferred_chunk_size == 1` — 이미 페이지 단위로 도는
@@ -309,8 +393,23 @@ born-digital PDF에서는 PyMuPDF가 뽑는 텍스트가 **공짜 정답**이다
 
 `layout.json`도 같은 이유로 청크의 **모든** 페이지를 채운다 — raw_pages.json이 없거나
 페이지 수가 모자라면 빈 블록 페이지로 메워 result.md의 페이지와 1:1을 유지한다.
-좌표 데이터를 한 번도 받지 못한 잡(figure_only 엔진)은 아예 `layout.json`을 만들지
-않아 `has_layout=false`로 남는다.
+텍스트 블록을 한 번도 받지 못한 잡은 아예 `layout.json`을 만들지 않는다 — figure_only
+엔진(OvisOCR2)은 `raw_pages.json`도 쓰지 않고(materializer `write_raw`), 전면 스캔을 처리한
+textlayer 잡도 layout이 생기지 않는다. 판정은 파일 존재가 아니라
+`artifacts.has_usable_layout(job_dir, lang)` — **image 아닌 블록이 하나 이상**인 layout만
+좌표 기능에 쓴다(파일 mtime·크기로 캐시, 1024개). 이전 버전이 만든 image 블록뿐인 layout(옛
+OvisOCR2 잡)도 같은 규칙으로 '레이아웃 없음'이다: `has_layout=false`, 좌표 라우트 404,
+`/pdf` 409, `document.html`은 의미 기반 HTML, PDF 예열 생략, 번역은 그 layout을 무시하고
+`layout.{lang}.json`을 쓰지 않는다(§5).
+
+**병합 정렬** (`merge.py`): 모델이 청크 안에서 페이지를 건너뛰거나 하나를 둘로 쪼개면 k번째
+`<PAGE>`가 k번째 물리 페이지가 아니다. 페이지마다 원본 텍스트 레이어와 글자·숫자 정규화로
+대조해 `assign_slots`가 단조 증가로 슬롯을 채우고(남은 페이지는 앞뒤 기준점의 탐침 점수로
+붙인다), 일치가 50% 미만이면 위치 순서대로 둔다. 옮겨진 페이지의 그림은 자기 슬롯의 페이지
+이미지에서 다시 크롭하고(`p{start+slot}_x{k}_{j}.jpg`), 다른 페이지 이미지로 잘린 벤더 크롭과
+오버레이는 버린다 — `replace_page`가 이웃 페이지의 그림을 지우거나 덮지 않는다. 한 페이지의
+그라운딩을 파싱하지 못하면 그 페이지의 layout 블록만 비우고 경고를 남긴 채 마크다운은
+지킨다(다른 페이지는 영향 없음).
 
 - `mode=per_page`일 때는 2단계가 페이지당 `infer()`(gundam) 호출로 대체된다
   (`ngram_window=128`). 이미지 프리픽스는 페이지 디렉터리로 격리 후 동일하게 병합.
@@ -325,7 +424,26 @@ born-digital PDF에서는 PyMuPDF가 뽑는 텍스트가 **공짜 정답**이다
   `FileNotFoundError`는 삭제 경합이라 로그도 남기지 않는다.
 - **재시작 시 잔여물 정리**: `load_existing`이 중단된 잡을 복원해 상태를 바꿀 때
   `work/`를 함께 지운다 — runner의 `finally`가 돌지 못하고 죽은 잡은 다시 실행되지
-  않아 어느 경로에서도 정리되지 않았다.
+  않아 어느 경로에서도 정리되지 않았다. `meta.json` 없는 `j_<12hex>` 디렉터리(업로드
+  도중 죽은 잔해)는 기동 때 지운다.
+- **대기 잡은 재시작을 넘긴다**: 제출된(`submitted`) 대기 잡 중 `source.pdf`가 `%PDF-`로
+  시작하는 것은 재시작 뒤 생성 순서대로 다시 제출한다. 실행 중이던 잡은 크래시 루프를
+  피하려고 종전대로 error로 마감한다(멈춘 시각을 몰라 `finished_at`은 비운다).
+- **페이지 구분자는 잡에 고정**: `meta.json`의 `page_separator`가 그 잡의 `result.md`를
+  조립한 값이다. `/html`·document.html 폴백·Q&A·번역이 모두 이 값으로 페이지를 나누므로
+  `PAGE_SEPARATOR`를 나중에 바꿔도 옛 잡의 페이지 경계가 깨지지 않는다(옛 잡에는 기동 때
+  현재 값을 한 번 고정하고, meta mtime은 보존해 TTL 시계는 그대로다).
+- **워커 진행 관측**: 워커는 실행 중 잡과 그 잡의 마지막 진행 시각(시작·끝, 그 잡 채널의
+  진행·토큰·대기 알림)을 기록한다 → `/api/health`의 `worker_job_id`·
+  `worker_last_progress_at`·`worker_progress_age_s`. 잡이 있는데 경과 초가 계속 늘면 멈춘 것이다.
+  모델 로드 실패는 프리로드든 워커의 잡 시작 로드든 `model_load_error`에 남고, 재시도가
+  성공하면 지워진다.
+- **Metal 메모리**: 실제 디바이스가 `metal`(torch MPS)이면 워커가 잡마다 ObjC 오토릴리스
+  풀로 감싼다(디코드 스텝·생성 구간·재시도 전 캐시 반환도 각각 풀 안). 끝나지 않는 워커
+  스레드에는 런루프 풀이 없어, 풀이 없으면 autorelease된 MPS 임시 객체가 프로세스 수명 내내
+  쌓였다(실측: 384토큰 실행당 RSS +10.6 → 약 1.5 MB). MLX는 감싸지 않는다 — 실측(M4 Max,
+  8쪽 실가중치 잡 5회 연속): RSS 2,627 → 2,647 MB, MLX 활성 메모리 6,363 MB 고정으로 잡별
+  누적이 없었다.
 - **잡 저장소 단일 소유자 락** (`owner_lock.py`): 위 정리는 "이 프로세스가 유일한
   소유자"일 때만 안전하다. 같은 `{DATA_DIR}/jobs`를 쓰는 두 번째 백엔드의
   `load_existing`은 먼저 뜬 쪽에서 **실행 중인** 잡을 error로 덮고 `work/`를 지웠다
@@ -346,9 +464,13 @@ born-digital PDF에서는 PyMuPDF가 뽑는 텍스트가 **공짜 정답**이다
 - **sidecar 재시작/모델 재로드 대기**: sidecar 엔진은 페이지 요청이 `SidecarUnavailableError`
   (HTTP 503·연결 끊김)로 실패하면 health 캐시를 무효화하고 `wait_until_ready()`로
   컨테이너 복귀를 기다린 뒤 **그 페이지만 1회 재시도**한다. 기다리지 않으면 재기동 +
-  모델 로드 시간 동안의 페이지가 전부 플레이스홀더로 확정된다. 반면
-  `SidecarTimeoutError`는 provider가 아직 그 페이지를 추론 중일 수 있어 여기서
-  재요청하지 않고(같은 페이지를 GPU에서 두 번 돌리게 된다) 상위 runner의 청크 재시도에 맡긴다.
+  모델 로드 시간 동안의 페이지가 전부 플레이스홀더로 확정된다. 대기 예산
+  (`OCR_SIDECAR_MODEL_WAIT_S`)은 장애 한 번에 하나다 — 그 장애의 모든 페이지가 같은 데드라인을
+  공유한다. 대기 문구는 health의 `load_retry`·`restarting`으로 첫 로드·로드 재시도·재시작을
+  구분한다(OCR_ENGINE_PROTOCOL.md). 반면 `SidecarTimeoutError`는 provider가 아직 그 페이지를
+  추론 중일 수 있어 다시 보내지 않는다(`retry_same_page=False` — 같은 페이지를 GPU에서 두 번
+  돌리게 된다). runner도 재시도하지 않고 곧바로 페이지 격리(텍스트 레이어 → 플레이스홀더)로
+  넘긴다. 출력 토큰 상한에서 잘린 페이지(`page.truncated`)의 처리도 프로토콜 문서에 있다.
   `loaded`는 **`model_loaded` 축만** 본다. sidecar의 `status` 축은 별개 신호라
   `_check_ready`가 나눠 처리한다: `model_loaded=False`+`status!=ok`는 진짜 로드 실패라
   하드 실패(`EngineError`), `model_loaded=True`+`status!=ok`는 임계 기반 **자가 복구형
@@ -356,24 +478,31 @@ born-digital PDF에서는 PyMuPDF가 뽑는 텍스트가 **공짜 정답**이다
   오탐 1건이 모든 잡을 "모델 로드 실패"로 즉시 마감하고, sidecar는 요청을 못 받아 스스로
   복구할 수도 없다(HEALTHCHECK는 200이라 재시작도 안 걸린다). 진짜 이상이면 parse가
   502로 답해 기존 청크 격리가 받고, 오탐이면 성공 1회로 자동 복구된다.
-- **실패 격리**: 렌더에서 한 페이지가 깨지면 흰색 페이지로 대체하고 계속한다. multi 생성의
-  rolling 반복/페이지 상한 초과는 같은 multi를 재시도하지 않고 즉시 페이지별 single로 격리한다.
-  single에서도 같은 문제가 나거나 일반 오류 재시도까지 실패하면 원본 PDF의 내장 텍스트 레이어를
-  plain-text Markdown으로 복구하고, 텍스트 레이어도 없을 때만 실패 플레이스홀더를 넣는다. 내역은
-  meta.json `warnings`에 남으며 전 청크/전 페이지가 끝내 복구되지 못한 경우만 error, 취소는 그대로
-  전파한다.
+- **실패 격리**: 렌더에서 한 페이지가 깨지거나 페이지 시간 상한(`PDF_PAGE_TIMEOUT_S`)을 넘으면
+  흰색 페이지로 대체하고 경고를 남긴 뒤 계속한다(한 잡에서 렌더 상한 초과가 3번이면 잡을
+  끝낸다 — §18). OCR 실패·출력 상한은 위 §청크 실패 복구의 순서(단독 재처리 → 원본 PDF의 내장
+  텍스트 레이어 → 실패 플레이스홀더)로 메운다. 텍스트 레이어 복구는 읽기 순서 블록마다
+  이스케이프한 문단(코드 블록 아님)이라 렌더 그대로 보이고 번역 대상이 되며, 2단 문서의 두
+  단이 섞이지 않는다(§16). 내역은 meta.json `warnings`·`notices`에 남으며 전 청크/전 페이지가
+  끝내 복구되지 못한 경우만 error, 취소는 그대로 전파한다. 렌더 중 취소는 그 페이지를 그리던
+  워커 프로세스를 바로 끝낸다(예전에는 페이지 사이에서만 확인했다).
 
 ### 잡 디렉터리 레이아웃 (`{DATA_DIR}/jobs/{job_id}/`)
 
 ```
 source.pdf                  # 업로드 원본
-meta.json                   # 상태/진행/파라미터 (재시작 시 복원)
+meta.json                   # 상태/진행/파라미터·warnings·notices·started_at/finished_at·
+                            #   page_separator·submitted (재시작 시 복원)
 pages/page_0001.png ...     # 렌더된 입력 페이지 (1-based)
 work/chunk_00/ ...          # 모델 원시 출력 (실행 중에만 존재 — 터미널 마감 시 자동 삭제, §15)
 result.md                   # 최종 병합 마크다운
+layout.json                 # 페이지별 블록(type/bbox/content) — 텍스트 블록이 있을 때만
 images/p0001_0.jpg ...      # figure 크롭 (글로벌 페이지 번호, 1-based)
 layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 ```
+
+번역·내보내기 산출물(`translations/{lang}/`, `result.{lang}.md`, `layout.{lang}.json`,
+`export.{lang}.*`, `rendered/{lang}/`, `archive.zip`)은 §5·§13에 있다.
 
 ## 5. REST / SSE API 계약 (v1)
 

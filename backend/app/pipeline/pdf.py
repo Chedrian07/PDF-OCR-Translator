@@ -51,6 +51,15 @@ _bound_pil_decompression()
 MAX_EMBEDDED_TEXT_CHARS = 100_000
 _UNSAFE_TEXT_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _EMBEDDED_RECOVERY_NOTE = "> ℹ️ PDF 내장 텍스트 레이어에서 복구한 plain text입니다."
+# 복구 텍스트에서 마크다운으로 해석되는 인라인 문자 — 백슬래시로 글자 그대로 남긴다.
+# 대괄호는 백슬래시로 이스케이프하지 않는다: 렌더러가 `\[ … \]`를 디스플레이 수식으로
+# 바꾸므로(render._MATH_DISPLAY) `[1]`이 수식이 된다. 대괄호가 문제인 경우(그림 `![`,
+# 링크 참조 정의 `[x]: …` — 줄째 사라진다)만 따로 끊는다.
+_MD_INLINE_SPECIALS = re.compile(r"([\\`*_<>|~])")
+_MD_IMAGE_OPEN = re.compile(r"!(?=\[)")
+_MD_LINK_TARGET = re.compile(r"\]\(")
+_MD_LINK_DEFINITION = re.compile(r"^\[(?=[^\]]*\]:)")
+_MD_ORDERED_ITEM = re.compile(r"^(\d{1,9})([.)])(?=\s|$)")
 
 # 렌더 단계 경고의 인계 파일. 렌더는 잡 경고 채널(merge.IncrementalMerger)이
 # 생기기 **전**에 끝나므로, 흰 페이지 대체 같은 품질 저하 사실을 여기에 남겨야
@@ -143,34 +152,80 @@ def probe_pdf(pdf_path: Path, max_pages: int) -> int:
         drain_mupdf_warnings("업로드 검증")
 
 
+def _escape_markdown_line(line: str) -> str:
+    """한 줄을 마크다운 문법이 아니라 **글자 그대로** 렌더되도록 이스케이프한다.
+
+    인라인 문법 문자(`\\` `` ` `` `*` `_` `<` `>` `|` `~`, 그림·링크의 `![`·`](`)는 어디서든,
+    줄 머리에서만 의미가 생기는 블록 문법(`#` 제목, `-`·`+` 목록·구분선, `=` setext 밑줄,
+    `1.`·`1)` 번호 목록, `[x]:` 링크 참조 정의)은 줄 머리에서 끊는다. 이스케이프된
+    `---`는 페이지 구분자로도 해석되지 않고, `\\(`·`\\[`는 수식으로 바뀌지 않는다.
+    """
+    line = _MD_INLINE_SPECIALS.sub(r"\\\1", line.strip())
+    line = _MD_IMAGE_OPEN.sub(r"\\!", line)
+    # 링크·그림 대상 `](`의 여는 괄호는 문자 참조로 — `\(`는 렌더러의 인라인 수식이다
+    line = _MD_LINK_TARGET.sub("]&#40;", line)
+    line = _MD_LINK_DEFINITION.sub("&#91;", line)
+    ordered = _MD_ORDERED_ITEM.match(line)
+    if ordered:
+        return f"{ordered.group(1)}\\{ordered.group(2)}{line[ordered.end():]}"
+    if line[:1] in "#+-=":
+        return "\\" + line
+    return line
+
+
 def extract_embedded_page_markdown(pdf_path: Path, page_number: int) -> str | None:
     """PDF의 1-based 페이지 텍스트 레이어를 안전한 plain-text Markdown으로 추출.
 
-    각 줄을 들여쓴 code block으로 만들어 원문의 ``#``/``<PAGE>``/``---``가
-    Markdown 구조나 파이프라인 페이지 구분자로 해석되지 않게 한다. 스캔 문서처럼
-    유효한 텍스트가 없거나 MuPDF 추출이 실패하면 ``None``을 반환한다.
+    OCR이 최종 실패한 페이지의 복구 경로다. 텍스트 블록을 **읽기 순서**(다단 인식 —
+    reading_order.page_text_blocks)대로 문단 하나씩 내보내고, 줄마다 마크다운 문법을
+    이스케이프해 원문의 ``#``/``---``/``|``가 제목·페이지 구분자·표로 해석되지 않게
+    한다. 예전에는 페이지 전체를 4칸 들여쓴 코드 블록으로 냈는데, 코드 블록은 번역
+    유닛이 되지 않아 복구 페이지가 한국어 번역본·번역 PDF에 영어로 남았고,
+    ``get_text("text", sort=True)``가 같은 높이의 좌·우 단 줄을 한 줄로 섞었다.
+    스캔 문서처럼 유효한 텍스트가 없거나 MuPDF 추출이 실패하면 ``None``을 반환한다.
     """
+    from ..engine.textlayer import sanitize_text
+    from .reading_order import page_text_blocks
+
     fitz = quiet_fitz()
     doc = None
     try:
         doc = fitz.open(str(pdf_path))
         if doc.needs_pass or not 1 <= page_number <= doc.page_count:
             return None
-        text = doc[page_number - 1].get_text("text", sort=True)
-        text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
-        text = _UNSAFE_TEXT_CONTROLS.sub("", text)
-        text = "\n".join(line.rstrip() for line in text.split("\n")).strip()
-        if not text or not any(char.isalnum() for char in text):
+        paragraphs: list[str] = []
+        budget = MAX_EMBEDDED_TEXT_CHARS
+        truncated = False
+        for block in page_text_blocks(doc[page_number - 1], fitz):
+            text = block.text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
+            # `<PAGE>`·`<|…|>`는 파이프라인 제어 문법이라 textlayer 엔진과 같은 정화를 거친다
+            text = sanitize_text(_UNSAFE_TEXT_CONTROLS.sub("", text)).strip()
+            if not text:
+                continue
+            if budget <= 0:
+                truncated = True
+                break
+            if len(text) > budget:
+                text = text[:budget].rstrip()
+                truncated = True
+            budget -= len(text)
+            lines = [_escape_markdown_line(line) for line in text.split("\n")]
+            paragraph = "\n".join(line for line in lines if line)
+            if paragraph:
+                paragraphs.append(paragraph)
+            if truncated:
+                break
+        body = "\n\n".join(paragraphs)
+        if not body or not any(char.isalnum() for char in body):
             return None
-        if len(text) > MAX_EMBEDDED_TEXT_CHARS:
+        if truncated:
             logger.warning(
                 "%d페이지 PDF 텍스트 레이어가 상한(%d자)을 초과해 절단",
                 page_number,
                 MAX_EMBEDDED_TEXT_CHARS,
             )
-            text = text[:MAX_EMBEDDED_TEXT_CHARS].rstrip() + "\n[텍스트 레이어 절단됨]"
-        indented = "\n".join(f"    {line}" if line else "" for line in text.split("\n"))
-        return f"{_EMBEDDED_RECOVERY_NOTE}\n\n{indented}"
+            body += "\n\n(텍스트 레이어 절단됨)"
+        return f"{_EMBEDDED_RECOVERY_NOTE}\n\n{body}"
     except Exception as error:  # noqa: BLE001 — OCR 실패 뒤의 best-effort 복구
         logger.warning(
             "%d페이지 PDF 텍스트 레이어 추출 실패 (%s: %s)",

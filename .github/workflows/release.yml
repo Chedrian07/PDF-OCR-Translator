@@ -38,14 +38,41 @@ jobs:
               assert version == tag[1:], f'{path}: {version} != {tag}'
           assert json.loads(Path('frontend/package.json').read_text())['version'] == tag[1:]
           PY
-      - name: Require successful CI for this exact commit
+      # 커밋과 태그를 함께 push하면(`git push --follow-tags`) 이 잡이 같은 커밋의 CI보다 먼저
+      # 돈다 — 예전에는 '완료된' 성공 CI만 찾고 바로 실패해 담당자가 재실행해야 했다.
+      # 진행 중인(또는 아직 등록되지 않은) CI는 끝날 때까지 기다리고, 성공 없이 모두 끝났을
+      # 때만 멈춘다. CI에는 의존성 감사·이미지 빌드 스모크까지 들어 있다.
+      - name: Wait for a successful CI run on this exact commit
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          passed=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
-            -f head_sha="$GITHUB_SHA" -f status=completed \
-            --jq '.workflow_runs | any(.conclusion == "success" and (.event == "push" or .event == "workflow_dispatch"))')
-          test "$passed" = true || { echo 'Release commit has no successful CI run'; exit 1; }
+          start=$(date +%s)
+          while :; do
+            runs=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+              -f head_sha="$GITHUB_SHA" -f per_page=50 \
+              --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")]')
+            if [ "$(jq 'any(.[]; .status == "completed" and .conclusion == "success")' <<<"$runs")" = true ]; then
+              echo "이 커밋의 CI 성공을 확인했다"
+              exit 0
+            fi
+            total=$(jq 'length' <<<"$runs")
+            pending=$(jq '[.[] | select(.status != "completed")] | length' <<<"$runs")
+            waited=$(( $(date +%s) - start ))
+            if [ "$pending" = 0 ] && [ "$total" -gt 0 ]; then
+              echo "::error::이 커밋에 성공한 CI 실행이 없다(실행 ${total}개 모두 끝남) — CI를 (재)실행한 뒤 릴리스를 다시 돌린다"
+              exit 1
+            fi
+            if [ "$total" = 0 ] && [ "$waited" -ge 600 ]; then
+              echo "::error::이 커밋의 CI 실행이 10분 동안 나타나지 않았다 — 커밋이 main에 push됐는지 확인한다"
+              exit 1
+            fi
+            if [ "$waited" -ge 5400 ]; then
+              echo "::error::CI 완료를 90분 기다렸다 — 상태를 확인한 뒤 릴리스를 다시 돌린다"
+              exit 1
+            fi
+            echo "CI 대기 중 (진행 ${pending}개 · 전체 ${total}개 · ${waited}초 경과) — 30초 뒤 다시 확인"
+            sleep 30
+          done
 
   publish-images:
     needs: verify-release

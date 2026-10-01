@@ -395,7 +395,7 @@ class IncrementalMerger:
         텍스트 레이어가 없는 스캔 PDF면 빈 목록 — 호출자는 기존 위치 기반
         동작으로 안전하게 되돌아간다."""
         try:
-            import fitz
+            import pymupdf as fitz  # 레거시 fitz 임포트는 1.28+에서 stdout 폐지 경고
 
             with fitz.open(self.job_dir / "source.pdf") as doc:
                 texts = []

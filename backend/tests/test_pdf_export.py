@@ -221,14 +221,26 @@ def _unit_job(tmp_path: Path, *, rotate: int = 0, block_type: str = "text",
     job_dir.mkdir()
     doc = fitz.open()
     page = doc.new_page(width=595, height=842)
-    # bbox [100,100,900,300] (0–999) ↔ 표시 공간 (59.5,84.2)–(535.5,252.6)pt
-    page.insert_textbox(fitz.Rect(60, 85, 535, 250), src_text, fontsize=12)
+    if rotate:
+        # 회전 페이지의 원문은 **화면에서 똑바로** 읽히게 넣는다. OCR은 렌더된 화면을
+        # 보고 bbox를 내므로, 표시 공간 bbox [100,100,900,300] 자리에 가로 글자가
+        # 있어야 현실적인 픽스처다(회전 전에 넣은 글자는 화면에서 세로쓰기가 된다).
+        page.set_rotation(rotate)
+        width, height = page.rect.width, page.rect.height
+        shown = fitz.Rect(
+            width * 100 / 999 + 0.5, height * 100 / 999 + 0.5,
+            width * 900 / 999, height * 300 / 999,
+        )
+        inner = shown * page.derotation_matrix
+        inner.normalize()
+        page.insert_textbox(inner, src_text, fontsize=12, rotate=rotate)
+    else:
+        # bbox [100,100,900,300] (0–999) ↔ 표시 공간 (59.5,84.2)–(535.5,252.6)pt
+        page.insert_textbox(fitz.Rect(60, 85, 535, 250), src_text, fontsize=12)
     if with_graphic:
         # 번역 대상 bbox 안에 완전히 포함된 벡터 도형. apply_redactions()의
         # graphics 기본값이면 제거되므로 레이아웃 보존 회귀를 잡아낸다.
         page.draw_rect(fitz.Rect(100, 150, 220, 190), color=(1, 0, 0), width=2)
-    if rotate:
-        page.set_rotation(rotate)
     doc.save(job_dir / "source.pdf")
     doc.close()
 

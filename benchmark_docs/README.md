@@ -47,6 +47,43 @@ figure·각주·페이지 번호를 한 페이지에 담아 한국어 보존을 
 GT가 없으면 벤치마크는 **속도·구조 집계만** 출력한다 — 임의의 "정확도 점수"를
 만들지 않는다.
 
+## 측정 방식과 옵션
+
+| 옵션 | 기본 | 뜻 |
+|---|---|---|
+| `--endpoint NAME=URL` | (필수, 반복 가능) | 측정할 backend — 예: `ovis=http://127.0.0.1:8002` |
+| `--input PATH` | (필수) | PDF 파일 또는 디렉터리 |
+| `--out DIR` | `bench_out` | 결과 디렉터리(`.gitignore`·`.dockerignore` 대상) |
+| `--warmup N` | `1` | endpoint마다 첫 PDF로 N번 돌리고 **기록하지 않는다** — 첫 요청의 모델 준비·vLLM 컴파일(수십 초)을 결과에서 뺀다. `0`=끔 |
+| `--model-wait S` | `1800` | 측정 전 health의 `model_loaded`를 기다리는 상한(초) |
+| `--timeout S` | `1800` | 문서당 대기 상한(초) |
+| `--ground-truth DIR` | (없음) | 아래 §Ground truth |
+
+- 잡 상태를 **0.25초** 간격으로 폴링한다(예전 2초 폴링은 짧은 문서의 s/page를 2초 단위로
+  양자화했다). `s/page`(`avg_page_s`)는 **처리 시간**(`running` 관측 → 완료 관측)을 페이지
+  수로 나눈 값이다.
+- 결과 열(`results.csv`): `total_s`(업로드·대기 포함 벽시계) · `upload_s` · `queue_s` ·
+  `process_s` · `pages_per_s` · `avg_page_s` · `timing_resolution_s`(폴링 간격 = 시간 오차
+  상한) · 구조 집계(`md_chars`·`tables`·`formulas`·`figures`) · `warnings` ·
+  `failed_pages` · `peak_vram_mb`(nvidia-smi가 있을 때만 — Apple Silicon은 빈 값).
+
+## Apple Silicon (로컬 MLX / torch MPS)
+
+GPU 컨테이너 대신 로컬 backend를 띄워 같은 도구로 잰다. 둘 다 :8000을 쓰므로 하나씩:
+
+```bash
+make setup-mlx                     # 처음 한 번 — MLX 엔진 + torch MPS 폴백 + C++ 모듈
+make dev                           # OCR_DEVICE=auto → mlx (기동 로그·/api/health의 device)
+python scripts/benchmark_ocr_engines.py --endpoint mlx=http://127.0.0.1:8000 \
+  --input benchmark_docs/ --out bench_out/
+# 서버를 멈춘 뒤 torch MPS 폴백과 비교:
+make dev-metal
+python scripts/benchmark_ocr_engines.py --endpoint mps=http://127.0.0.1:8000 \
+  --input benchmark_docs/ --out bench_out/
+```
+
+M4 Max 실측값은 [docs/OCR_BENCHMARK.md §Apple Silicon 실측](../docs/OCR_BENCHMARK.md)에 있다.
+
 ## 단일 GPU 실행 순서 (RTX 5070 Ti)
 
 ```bash

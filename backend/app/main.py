@@ -56,8 +56,9 @@ _UPLOAD_PATH = "/api/jobs"
 # 새어 들어온 본문은 라우트의 기존 스트리밍 검사가 413으로 잡는다.
 _MULTIPART_OVERHEAD_BYTES = 64 * 1024
 # /render-preview의 라우트 내부 상한(api._PREVIEW_MAX_BYTES)과 **같은 값** —
-# 미들웨어가 더 빡빡하면 기존 경계값(정확히 2MB) 요청이 회귀로 거절된다.
-_PREVIEW_LIMIT_BYTES = 2_000_000
+# 미들웨어가 더 빡빡하면 경계값(정확히 256KiB) 요청이 회귀로 거절된다. 예전 2MB는
+# 인증 없는 요청 한 건에 수십 초짜리 렌더를 허용했다(감사 security-1).
+_PREVIEW_LIMIT_BYTES = 256 * 1024
 # 표에 없는 본문 있는 요청의 기본 상한. 남은 POST 라우트(cancel/translate/qa)는
 # 전부 작은 JSON이라 64KiB로 충분하다.
 _DEFAULT_BODY_LIMIT_BYTES = 64 * 1024
@@ -102,7 +103,7 @@ class UploadBodyLimitMiddleware:
             (
                 re.compile(r"^/api/jobs/[^/]+/render-preview$"),
                 _PREVIEW_LIMIT_BYTES,
-                "미리보기 본문이 너무 큽니다 (2MB 초과)",
+                "미리보기 본문이 너무 큽니다 (256KiB 초과)",
             ),
         )
         self.default_rule = (

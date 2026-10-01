@@ -9,6 +9,8 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# 액션은 전부 전체 커밋 SHA로 고정하고 버전은 주석으로 남긴다 — 이 워크플로는 GHCR push와
+# 릴리스 자산 업로드 권한을 쓰므로 태그 재지정 공급망 사고의 피해가 가장 크다(ci.yml 머리말).
 permissions:
   contents: read
   actions: read
@@ -17,7 +19,9 @@ jobs:
   verify-release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Validate tag and package versions
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -58,7 +62,9 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Image coordinates
         id: image
         env:
@@ -87,30 +93,8 @@ jobs:
         env:
           IMAGE: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}-cpu-${{ matrix.arch }}
           RELEASE_VERSION: ${{ steps.image.outputs.version }}
-        run: |
-          docker run -d --name release-smoke -p 127.0.0.1:18000:8000 \
-            -e OCR_ENGINE=textlayer -e PRELOAD_MODEL=1 \
-            -e ALLOWED_HOSTS=localhost,127.0.0.1 "$IMAGE"
-          trap 'docker logs release-smoke; docker rm -f release-smoke' EXIT
-          ready=false
-          for attempt in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:18000/api/health -o /tmp/release-health.json; then
-              ready=true
-              break
-            fi
-            sleep 2
-          done
-          test "$ready" = true
-          python3 - <<'PY'
-          import json, os, urllib.request
-          health = json.load(open('/tmp/release-health.json'))
-          assert health['engine'] == 'textlayer' and health['worker_alive']
-          assert health['native_ops'], 'The release image must contain the native module'
-          schema = json.load(urllib.request.urlopen('http://127.0.0.1:18000/openapi.json'))
-          assert schema['info']['version'] == os.environ['RELEASE_VERSION']
-          PY
-          OUT_DIR="$RUNNER_TEMP/release-smoke" TIMEOUT_SECS=120 \
-            ./scripts/smoke_e2e.sh http://127.0.0.1:18000
+          OUT_DIR: ${{ runner.temp }}/release-smoke
+        run: ./scripts/smoke_image.sh "$IMAGE" "$RELEASE_VERSION"
       - name: Export tested image for offline installation
         env:
           IMAGE: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}-cpu-${{ matrix.arch }}
@@ -119,7 +103,7 @@ jobs:
           set -euo pipefail
           docker save "$IMAGE" | gzip > "$RUNNER_TEMP/$ARCHIVE"
           gzip -t "$RUNNER_TEMP/$ARCHIVE"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-image-${{ matrix.arch }}
           path: ${{ runner.temp }}/pdf-ocr-translator-*.tar.gz

@@ -561,12 +561,51 @@ class AddAuxiliaryLoss(torch.autograd.Function):
 
 def _moe_fast_enabled(device_type):
     # [vendor patch P18] 기본은 MPS 전용. OCR_MOE_FAST=1(전 디바이스 강제 on)/0(강제 off).
+    # MPS 디코드(N==1)는 이제 P17 융합 경로가 먼저 받으므로 P18은 OCR_MOE_FUSED=0일 때의
+    # MPS 폴백이다.
     v = os.environ.get("OCR_MOE_FAST", "").strip().lower()
     if v in ("1", "true", "yes", "on"):
         return True
     if v in ("0", "false", "no", "off"):
         return False
     return device_type == "mps"
+
+
+# [vendor patch P17] 융합 디코드를 허용하는 디바이스 — CPU는 legacy moe_infer 그대로.
+_FUSED_DEVICE_TYPES = ("cuda", "mps")
+
+
+def fused_moe_env_enabled():
+    """[vendor patch P17] OCR_MOE_FUSED 킬스위치 — 0/false/no/off면 off, 그 외(미설정 포함) on.
+
+    DeepseekV2MoE._fused_env_enabled·app/engine/fast_decode._moe_fused_enabled와 같은 파싱."""
+    return os.environ.get("OCR_MOE_FUSED", "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def prebuild_fused_moe(model, device):
+    """[vendor patch P17] 로드 시점 1회 — 모든 DeepseekV2MoE(ep_size==1)의 expert gate/up/down
+    weight를 [E, out, in]으로 스택해 ``device``로 **한 번에** 옮기고, 각 expert Linear.weight를
+    그 스택의 뷰로 재지정한다.
+
+    model.to(device) **전에**(가중치가 아직 CPU에 있을 때) 부르면 expert별 디바이스 버퍼가
+    아예 생기지 않는다 — 이후 .to(device)는 이미 그 디바이스에 있는 뷰를 그대로 둔다(스토리지
+    공유 유지). 지연 스택(첫 디코드 때 디바이스에서 재스택)은 MPS에서 개별 expert 버퍼를 놓은
+    힙이 단편화돼 empty_cache 뒤에도 드라이버 메모리 +1.7~3.3GB가 남고 첫 실행 피크가
+    15~16GB였다(M4 Max 실측). 킬스위치(OCR_MOE_FUSED=0)면 아무것도 하지 않는다 — legacy
+    개별 가중치 그대로. 반환: 스택한 MoE 레이어 수."""
+    if not fused_moe_env_enabled():
+        return 0
+    stacked = 0
+    for module in model.modules():
+        if isinstance(module, DeepseekV2MoE) and module.ep_size == 1:
+            module._build_fused_experts(device)
+            stacked += 1
+    return stacked
 
 
 class DeepseekV2MoE(nn.Module):
@@ -633,7 +672,7 @@ class DeepseekV2MoE(nn.Module):
             y = y.to(hidden_states.dtype).view(*orig_shape)
             y = AddAuxiliaryLoss.apply(y, aux_loss)
         else:
-            # [vendor patch P17] 소배치(디코드) & CUDA에서는 융합 경로, 그 외엔 기존 moe_infer.
+            # [vendor patch P17] 디코드(N==1) & CUDA/MPS에서는 융합 경로, 그 외엔 기존 moe_infer.
             if self._should_use_fused(hidden_states, topk_idx):
                 y = self._moe_infer_fused(hidden_states, topk_idx, topk_weight).view(
                     *orig_shape
@@ -647,14 +686,15 @@ class DeepseekV2MoE(nn.Module):
     @torch.no_grad()
     def moe_infer(self, x, topk_ids, topk_weight):
         # [vendor patch P18] 단일 토큰(seq==1) 디코드 패스트패스 — argsort/scatter/cnts
-        # 기계장치와 레이어당 호스트 동기화(tokens_per_expert.cpu())를 제거하고 topk
-        # 전문가만 직접 실행. 전문가 연산과 최종 가중합(view→type→mul_→sum→type)의
-        # 연산 순서가 원본과 동일해 결과 비트 동일. 기본 MPS 전용(디스패치 바운드
-        # 완화), OCR_MOE_FAST=1/0으로 전 디바이스 강제 on/off (P16 게이트 패턴).
-        # P17(CUDA 융합)과 상보 — P17은 가중치를 재스택하지만 여기는 기존 expert
-        # 뷰만 사용해 바이트 파리티를 유지한다.
+        # 라우팅 기계장치를 제거하고 topk 전문가만 직접 실행. 레이어당 호스트 동기화는
+        # **없어지지 않는다**: tokens_per_expert.cpu()가 아래 topk_ids.tolist()로 바뀌었을
+        # 뿐 MoE 레이어마다 1회(토큰당 11회) 남는다 — M4 Max 실측 이득은 1.20x.
+        # 전문가 연산과 최종 가중합(view→type→mul_→sum→type)의 연산 순서가 원본과 동일해
+        # 결과 비트 동일. 기본 MPS 전용, OCR_MOE_FAST=1/0으로 전 디바이스 강제 on/off
+        # (P16 게이트 패턴). MPS 디코드는 P17 융합 경로(동기화 0회)가 먼저 받으므로 이
+        # 경로는 OCR_MOE_FUSED=0일 때의 폴백이다.
         if x.shape[0] == 1 and self.ep_size == 1 and _moe_fast_enabled(x.device.type):
-            ids = topk_ids[0].tolist()  # [K] — 유일한 소형 호스트 읽기
+            ids = topk_ids[0].tolist()  # [K] — 레이어당 1회 호스트 동기화 (D2H)
             outs = torch.cat([self.experts[i](x) for i in ids], dim=0)
             final_out = (
                 outs.view(*topk_ids.shape, -1)
@@ -739,13 +779,14 @@ class DeepseekV2MoE(nn.Module):
         return final_out
 
     # ─────────────────────────────────────────────────────────────────────────
-    # [vendor patch P17] 융합 소배치 추론 경로 — batch-1 디코드 CUDA 활용률 개선.
-    # 실측 배경: RTX 5070 Ti에서 batch-1 디코드 ~13 tok/s, sm 21%.
-    # moe_infer의 병목 = (1) tokens_per_expert.cpu().numpy()로 인한 레이어당 GPU→CPU
-    # 동기화(레이어 ~27개 → 토큰당 ~27회, WSL2 왕복 비용 큼), (2) expert별 파이썬
-    # 루프의 소형 커널 난사(토큰 1개에 6 expert x 3 linear), (3) argsort/scatter/cat
-    # 라우팅 기계장치. 소배치에서는 전 expert 가중치를 스택해 index_select + bmm 3방으로
-    # 융합하고 CPU 동기화를 0회로 만든다. 기본 CUDA·소배치 한정 on, OCR_MOE_FUSED=0 킬스위치.
+    # [vendor patch P17] 융합 디코드 경로 — batch-1 디코드의 레이어당 호스트 동기화 제거.
+    # 실측 배경: RTX 5070 Ti에서 batch-1 디코드 ~13 tok/s, sm 21%. M4 Max(MPS)는 P18의
+    # 레이어당 topk_ids.tolist()(토큰당 11회)가 CPU 시간의 69%였다.
+    # moe_infer의 병목 = (1) tokens_per_expert.cpu().numpy()(P18은 .tolist())로 인한 레이어당
+    # GPU→CPU 동기화, (2) expert별 파이썬 루프의 소형 커널 난사(토큰 1개에 6 expert x
+    # 3 linear), (3) argsort/scatter/cat 라우팅 기계장치. 디코드에서는 전 expert 가중치를
+    # 스택해 index_select + bmm 3방으로 융합하고 CPU 동기화를 0회로 만든다.
+    # 기본 CUDA·MPS 디코드(N==1) 한정 on, OCR_MOE_FUSED=0 킬스위치.
     # ─────────────────────────────────────────────────────────────────────────
 
     def _fused_env_enabled(self):
@@ -753,43 +794,49 @@ class DeepseekV2MoE(nn.Module):
         # "0/false/no/off" 이외 값(미설정 포함)이면 on.
         v = getattr(self, "_fused_env", None)
         if v is None:
-            v = os.environ.get("OCR_MOE_FUSED", "").strip().lower() not in (
-                "0",
-                "false",
-                "no",
-                "off",
-            )
+            v = fused_moe_env_enabled()
             self._fused_env = v
         return v
 
     def _should_use_fused(self, x, topk_ids):
-        # 발동 조건(보수적): 킬스위치 off 아님 · ep_size==1 · CUDA · **디코드(N==1)만**.
+        # 발동 조건(보수적): 킬스위치 off 아님 · ep_size==1 · CUDA/MPS · **디코드(N==1)만**.
         # 하나라도 어긋나면 기존 moe_infer로 (예외가 아니라 정상 분기).
         # N>1(짧은 프리필 조각)은 mm↔bmm 누적 순서차(fp round-off)로 근접 argmax가
         # 뒤집혀 E2E 출력이 갈라진 실측(8p 벤치: 표 colspan 손상 1건 포함) → 제외.
-        # N==1은 expert별 단일행 matmul이라 eager와 bitwise 동일 — 4.4× 가속의
-        # 원천인 토큰 디코드는 전부 N==1이므로 성능 손실 없음.
+        # 수치: N==1이 legacy와 bitwise 동일한 것은 **CPU에서만** 테스트로 고정된다.
+        # CUDA는 재스택만으로 cuBLAS 커널 선택이 바뀌어 legacy와 마지막 비트가 다를 수 있고
+        # (채택 게이트 = 동일 프로세스 결정성 + 구조 지표 등가), MPS는 M4 Max 실측에서
+        # P18 대비 토큰 동일(384/801/8,372토큰)이지만 비트 동일을 보장하지는 않는다.
         if not self._fused_env_enabled():
             return False
         if self.ep_size != 1:
             return False
-        if not x.is_cuda:
+        if x.device.type not in _FUSED_DEVICE_TYPES:
             return False
         return x.shape[0] == 1
 
-    def _build_fused_experts(self):
-        # 지연 초기화(첫 fused 호출 시 1회). 전 expert의 gate/up/down weight를 각각
-        # [E, out, in] 텐서로 스택하고, 각 expert Linear의 .weight를 스택의 뷰로 재지정한다.
-        # 재지정 후 기존 개별 텐서는 참조 해제 → VRAM 중복 없음. 기존 moe_infer 루프도
-        # 뷰(연속 블록이라 F.linear 정상)로 계속 동작. 모델 .to() 이후 디바이스/dtype이
-        # 어긋나면 재구축(스테일 스택으로 인한 조용한 오동작 방지).
+    def _build_fused_experts(self, device=None):
+        # 전 expert의 gate/up/down weight를 각각 [E, out, in] 텐서로 스택하고, 각 expert
+        # Linear의 .weight를 스택의 뷰로 재지정한다. 재지정 후 기존 개별 텐서는 참조
+        # 해제 → 메모리 중복 없음. 기존 moe_infer 루프도 뷰(연속 블록이라 F.linear 정상)로
+        # 계속 동작. 정상 경로는 로드 시점 prebuild_fused_moe(device 지정, 이동 전 CPU
+        # 스택)이고, device=None 호출은 그 밖의 경우(예: 직접 생성한 모듈)의 지연 초기화다.
+        # 모델 .to() 이후 디바이스/dtype이 어긋나면 재구축(스테일 스택 방지).
         w0 = self.experts[0].gate_proj.weight
+        target = w0.device if device is None else torch.device(device)
         fw = getattr(self, "_fused_w", None)
-        if fw is not None and fw[0].device == w0.device and fw[0].dtype == w0.dtype:
+        if (
+            fw is not None
+            and fw[0].dtype == w0.dtype
+            and fw[0].device.type == target.type
+            and (target.index is None or fw[0].device.index == target.index)
+            and fw[0].device == w0.device
+        ):
             return
-        g = torch.stack([e.gate_proj.weight.data for e in self.experts])  # [E, inter, hidden]
-        u = torch.stack([e.up_proj.weight.data for e in self.experts])  # [E, inter, hidden]
-        d = torch.stack([e.down_proj.weight.data for e in self.experts])  # [E, hidden, inter]
+        # .to(target)는 이미 target이면 복사 없이 그대로 — 이동 전(CPU) 스택이면 1회 전송
+        g = torch.stack([e.gate_proj.weight.data for e in self.experts]).to(target)  # [E, inter, hidden]
+        u = torch.stack([e.up_proj.weight.data for e in self.experts]).to(target)  # [E, inter, hidden]
+        d = torch.stack([e.down_proj.weight.data for e in self.experts]).to(target)  # [E, hidden, inter]
         for i, e in enumerate(self.experts):
             e.gate_proj.weight = nn.Parameter(g[i], requires_grad=False)
             e.up_proj.weight = nn.Parameter(u[i], requires_grad=False)

@@ -64,6 +64,9 @@ class _FlowCandidate:
     # 원문 줄·열 좌표에 그대로 조판할 수 있는 세그먼트. 리플로우까지 실패했을
     # 때 줄 단위 부분 회수에 쓴다(전부-아니면-전무를 피하는 마지막 단계).
     listing_segments: tuple[_LineSegment, ...] = ()
+    # 번역이 바뀐 OCR 줄 중 원문 시각 줄에 정렬되지 않아 세그먼트가 되지 못한 줄 수.
+    # 줄 단위로 조판하면 그 줄의 원문은 그대로 남으므로 보존 사유로 세어야 한다.
+    listing_dropped: int = 0
 
 
 @dataclass(frozen=True)

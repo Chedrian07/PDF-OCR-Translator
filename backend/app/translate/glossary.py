@@ -49,6 +49,27 @@ _STOPWORDS = {
 }
 
 
+# 시드 역어가 일반 영어 관용 표현까지 '반드시' 강제하지 않게 하는 용법 가드
+# (translate-llm-17). 매칭은 표면형뿐이라 'Recall that …'이 '재현율', 'attracted
+# considerable attention'이 '어텐션을 받았다'로 강제됐다. 이 구간은 용어 매칭에서 뺀다 —
+# 같은 유닛에 기술 용법이 따로 있으면 그쪽으로 여전히 매칭된다.
+_GENERAL_USE = {
+    "recall": re.compile(
+        r"\brecall(?:s|ed|ing)?\s+(?:that|how|why|what|from)\b"
+        r"|\b(?:we|us|i|to|reader|readers)\s+(?:briefly\s+)?recall\b",
+        re.IGNORECASE,
+    ),
+    "attention": re.compile(
+        r"\b(?:pay|pays|paid|paying|draw|draws|drew|drawn|drawing|attract|attracts|"
+        r"attracted|attracting|receive|receives|received|receiving|gain|gains|gained|"
+        r"gaining|garner|garners|garnered|deserve|deserves|deserved|merit|merits|"
+        r"merited|warrant|warrants|warranted|devote|devotes|devoted|call|calls|called|"
+        r"bring|brings|brought)\b(?:\s+[\w-]+){0,3}?\s+attention\b",
+        re.IGNORECASE,
+    ),
+}
+
+
 def _valid_a_entry(ko: str) -> bool:
     """policy A(원문 유지) 엔트리 형태 검증 — 대문자 2개 미만의 단일 title-case
     일반어(Long, Model, Fine, to-end)를 걸러낸다. 실측: LLM이 문두 대문자
@@ -122,6 +143,13 @@ class Glossary:
             self._re_cache[src] = pat
         return pat
 
+    def _mentions(self, e: GlossaryEntry, scan: str) -> bool:
+        """스캔 텍스트에 용어가 (일반 관용 용법을 뺀 뒤에도) 등장하는가."""
+        guard = _GENERAL_USE.get(e.src)
+        if guard is not None:
+            scan = guard.sub(" ", scan)
+        return bool(self._matcher(e.src).search(scan))
+
     def for_unit(self, text: str, unit_id: str = "") -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
         """이 유닛에 등장하는 (일반 용어쌍 B/C/D, 첫 등장 병기쌍 D)를 반환.
 
@@ -138,7 +166,7 @@ class Glossary:
         for e in self.entries:
             if e.policy == "A":
                 continue
-            if self._matcher(e.src).search(scan):
+            if self._mentions(e, scan):
                 general.append((e.src, e.ko))
                 if e.policy == "D" and unit_id and unit_id in (e.first_unit, e.first_lay):
                     first.append((e.src, e.ko))
@@ -168,12 +196,11 @@ class Glossary:
         for e in self.entries:
             e.first_unit = ""
             e.first_lay = ""
-        pats = [(e, self._matcher(e.src)) for e in self.entries]
         for attr, units in (("first_unit", ordered_units), ("first_lay", lay_units)):
             for unit in units:
                 scan = _strip_tokens(unit.src)
-                for e, pat in pats:
-                    if not getattr(e, attr) and pat.search(scan):
+                for e in self.entries:
+                    if not getattr(e, attr) and self._mentions(e, scan):
                         setattr(e, attr, unit.id)
         return before != [(e.first_unit, e.first_lay) for e in self.entries]
 

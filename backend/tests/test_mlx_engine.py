@@ -841,6 +841,11 @@ def test_pipeline_recovers_a_truncated_chunk_page_by_page(mlx_app):
         md = client.get(f"/api/jobs/{job['job_id']}/markdown").text
     assert job["status"] == "done", job
     assert [m for m, _ in model.prompts] == ["multi", "single", "single"]
-    assert any("출력 상한" in w and "MAX_LENGTH" in w for w in job["warnings"]), job["warnings"]
+    # runner는 잘림(OutputLimitError)을 반복 감지와 구분해 'MAX_LENGTH 도달'로 알리고,
+    # 엔진이 붙인 상세(MAX_LENGTH=1100 …)를 그대로 잇는다
+    assert any(
+        "MAX_LENGTH 도달" in w and "페이지별 재처리" in w and "MAX_LENGTH=1100" in w
+        for w in job["warnings"]
+    ), job["warnings"]
     assert md.count("Single page body recovered alone.") == 2
     assert "alpha" not in md and "omega" not in md  # 잘린 multi 출력은 채택하지 않았다

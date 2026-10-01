@@ -585,6 +585,9 @@ async def create_job(
             "model_revision": caps.model_revision or None,
             "provider": caps.provider,
         },
+        # 이 잡의 result.md를 조립할 구분자를 지금 값으로 고정한다 — 읽는 쪽(/html·
+        # Q&A·번역)이 이후 설정 변경과 무관하게 같은 페이지 경계를 본다.
+        page_separator=settings.page_separator,
     )
     dest = artifacts.source_pdf(job.dir)
     size = 0
@@ -785,6 +788,15 @@ async def job_events(request: Request, job_id: str) -> StreamingResponse:
     )
 
 
+def _job_page_separator(job, settings) -> str:
+    """이 잡의 result.md를 조립한 페이지 구분자 — 잡에 고정된 값, 없으면 현재 설정.
+
+    예전에는 모든 읽기 경로가 현재 PAGE_SEPARATOR를 써서, 값을 바꾸면 기존 잡의
+    /html이 문서 전체를 한 페이지로 렌더하고 Q&A가 '페이지 3은 1-1 범위를 벗어났습니다'
+    또는 엉뚱한 페이지를 근거로 답했다."""
+    return getattr(job, "page_separator", None) or settings.page_separator
+
+
 def _read_markdown(job) -> tuple[str, bool]:
     md_path = artifacts.markdown(job.dir)
     text = md_path.read_text(encoding="utf-8") if md_path.is_file() else ""
@@ -819,7 +831,7 @@ def job_markdown(request: Request, job_id: str, lang: str | None = None) -> Plai
 def job_html(request: Request, job_id: str, lang: str | None = None) -> HTMLResponse:
     job = _get_job(request, job_id)
     base = f"/api/jobs/{job_id}/files"
-    sep = _state(request).settings.page_separator
+    sep = _job_page_separator(job, _state(request).settings)
     if lang is not None:
         _check_lang(lang)
         text = _translated_markdown_or_404(job, lang)
@@ -1032,7 +1044,7 @@ def job_document_download(request: Request, job_id: str, lang: str | None = None
     inner = render_document_html(
         text, f"/api/jobs/{job_id}/files",
         figure_boxes=_load_figure_boxes(job),
-        page_separator=st.settings.page_separator,
+        page_separator=_job_page_separator(job, st.settings),
     )
     stem = Path(job.filename).stem or "document"
     html = render_document_standalone(
@@ -1725,7 +1737,7 @@ async def translate_start(request: Request, job_id: str) -> JSONResponse:
         cancel = threading.Event()
         thread = threading.Thread(
             target=_run_translate_thread,
-            args=(st, job, lang, cfg, cancel, force, st.settings.page_separator),
+            args=(st, job, lang, cfg, cancel, force, _job_page_separator(job, st.settings)),
             name=f"translate-{job_id}-{lang}", daemon=True,
         )
         st.translate_tasks[(job_id, lang)] = {"thread": thread, "cancel": cancel}
@@ -1946,7 +1958,7 @@ async def job_qa(request: Request, job_id: str, body: AskRequest) -> dict:
     page = body.page or 1
     # result.md 읽기+분할은 blocking 파일 IO — async 핸들러의 루프를 막지 않게 오프로드
     page_count, text = await anyio.to_thread.run_sync(
-        get_page_context, job.dir, page, st.settings.page_separator
+        get_page_context, job.dir, page, _job_page_separator(job, st.settings)
     )
     if not (1 <= page <= page_count):
         raise HTTPException(422, f"페이지 {page}은 1-{page_count} 범위를 벗어났습니다")

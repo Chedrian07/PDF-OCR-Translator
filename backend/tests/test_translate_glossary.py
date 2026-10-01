@@ -161,3 +161,41 @@ def test_LLM_A엔트리_형태_검증():
     a = {e.src: e.ko for e in g.entries if e.policy == "A"}
     assert "publaynet" in a and "unlimited ocr" in a
     assert "long" not in a and "to-end" not in a
+
+
+# ── 첫 등장 병기 — md·layout 순서 각각 (translate-llm-12) ──────────────────────
+
+def test_first_unit은_md와_layout_순서를_따로_둔다():
+    from app.translate.segment import layout_units
+
+    md = "We use sparse attention first.\n\nThen more sparse attention later."
+    md_units = split_markdown(md, SEP)
+    lay_units = layout_units([{"page": 1, "blocks": [
+        {"type": "text", "content": "We use sparse attention first."},
+        {"type": "text", "content": "Then more sparse attention later."},
+    ]}])
+    g = Glossary([GlossaryEntry("sparse attention", "스파스 어텐션", "D")])
+    assert g.compute_first_units(md_units, lay_units) is True
+    e = g.entries[0]
+    assert (e.first_unit, e.first_lay) == ("md:0:0", "lay:1:0")
+    pair = ("sparse attention", "스파스 어텐션")
+    assert g.for_unit(md_units[0].src, "md:0:0")[1] == [pair]
+    assert g.for_unit(lay_units[0].src, "lay:1:0")[1] == [pair]   # 종전에는 영원히 []
+    assert g.for_unit(lay_units[1].src, "lay:1:1")[1] == []
+    assert g.compute_first_units(md_units, lay_units) is False     # 같은 입력 → 변화 없음
+
+
+def test_수식_안의_등장은_첫_등장으로_치지_않는다():
+    md = "The loss $\\mathrm{sparse\\ attention}$ is defined.\n\nWe use sparse attention here."
+    units = split_markdown(md, SEP)
+    g = Glossary([GlossaryEntry("sparse attention", "스파스 어텐션", "D")])
+    g.compute_first_units(units)
+    assert g.entries[0].first_unit == "md:0:1"
+
+
+def test_save_load는_layout_첫_등장도_왕복한다(tmp_path):
+    g = Glossary([GlossaryEntry("sparse attention", "스파스 어텐션", "D", "md:0:1", "lay:2:3")])
+    p = tmp_path / "glossary.json"
+    g.save(p)
+    e = Glossary.load(p).entries[0]
+    assert (e.first_unit, e.first_lay) == ("md:0:1", "lay:2:3")

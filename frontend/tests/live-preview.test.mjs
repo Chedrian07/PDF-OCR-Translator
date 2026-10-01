@@ -4,6 +4,8 @@
 //
 // 예전에는 중간에 연 잡의 확정 페이지 백로그를 RTT마다 한 장씩 순차 POST했고, 한 장만
 // 실패해도 그 사이클에서 받은 수십 장을 모두 버리고 처음부터 다시 보냈다(frontend-11).
+// /render-preview의 429(남용 방어 — 크기 가중 레이트리밋·동시 렌더 상한)는 장애가 아니라
+// "천천히"다: Retry-After만큼 쉬고, 5회 연속 실패 중단에 세지 않는다.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -101,9 +103,12 @@ function setup(t, renderFor) {
   t.mock.method(globalThis, 'fetch', async (url, init) => {
     const body = String(init && init.body);
     bodies.push(body);
-    const status = renderFor(body);
+    // renderFor는 상태 숫자 또는 {status, retryAfter}(429 응답의 Retry-After 헤더)
+    const out = renderFor(body);
+    const { status, retryAfter = null } = typeof out === 'number' ? { status: out } : out;
     return {
-      ok: status === 200, status, headers: { get: () => null },
+      ok: status === 200, status,
+      headers: { get: (name) => (/^retry-after$/i.test(name) ? retryAfter : null) },
       text: async () => `<p>${body}</p>`,
     };
   });
@@ -138,4 +143,82 @@ test('백로그 중 한 장이 실패해도 앞서 받은 페이지는 남고, �
   assert.equal(state.previewPageCache.length, 5);
   assert.equal(state.previewTailMd, 'tail');
   assert.equal(state.previewFails, 0);
+});
+
+/* ---------------- 런타임: 429 백오프 ---------------- */
+
+// 비동기 사슬(fetch → text → 반영)이 다 돌 때까지 마이크로태스크·즉시 큐를 비운다.
+async function settle() {
+  for (let i = 0; i < 20; i += 1) await flush();
+}
+
+test('render-preview 429: 실패로 세지 않고 Retry-After만큼 쉰 뒤 막힌 페이지부터 잇는다', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 });
+  t.after(() => t.mock.timers.reset());
+  let throttled = true;
+  const { bodies } = setup(t, (body) => (
+    throttled && body === 'page 2' ? { status: 429, retryAfter: '7' } : 200));
+  state.rawText = '<PAGE>page 1<PAGE>page 2<PAGE>page 3<PAGE>tail';
+  state.previewFails = 4; // 직전 일시 장애가 4번 쌓여 있어도 429 한 번으로 멈추면 안 된다
+  await runPreviewRender();
+  assert.deepEqual(state.previewPageCache, ['', '<p>page 1</p>'], '막히기 전 페이지는 반영');
+  assert.equal(state.previewFails, 4, '429는 연속 실패 횟수에 더하지 않는다');
+  assert.equal(state.previewStopped, false);
+  assert.equal(state.previewDirty, true);
+  assert.equal(state.previewRetryAt, 1_000_000 + 7_000, 'Retry-After 7초');
+  assert.ok(state.previewTimer, '대기 뒤 재시도가 예약된다');
+
+  bodies.length = 0;
+  t.mock.timers.tick(6_999);
+  await settle();
+  assert.deepEqual(bodies, [], 'Retry-After 전에는 보내지 않는다(평소 3초 재시도보다 길다)');
+  throttled = false;
+  t.mock.timers.tick(1);
+  await settle();
+  assert.deepEqual(bodies, ['page 2', 'page 3', 'tail'], '받은 페이지는 다시 보내지 않는다');
+  assert.equal(state.previewFails, 0);
+  assert.equal(state.previewTailMd, 'tail');
+});
+
+test('render-preview 429가 계속돼도 미리보기를 멈추지 않는다 — 502는 다섯 번이면 멈춘다', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 5_000_000 });
+  t.after(() => t.mock.timers.reset());
+  let status = { status: 429, retryAfter: '1' };
+  const { bodies } = setup(t, () => status);
+  state.rawText = 'tail only';
+  await runPreviewRender();
+  for (let round = 1; round < 6; round += 1) {
+    t.mock.timers.tick(1_000);                 // Retry-After(1초)가 지나 예약된 재시도가 돈다
+    await settle();
+  }
+  assert.equal(bodies.length, 6, '429마다 Retry-After 간격으로 다시 시도한다');
+  assert.equal(state.previewStopped, false, '429만으로는 중단하지 않는다');
+  assert.equal(state.previewFails, 0);
+
+  status = 502;
+  for (let round = 0; round < 5; round += 1) {
+    t.mock.timers.tick(3_000);                 // 일시 장애 재시도 간격(600ms → 4회째부터 3초)
+    await settle();
+  }
+  assert.equal(bodies.length, 11);
+  assert.equal(state.previewStopped, true, '진짜 실패는 여전히 다섯 번이면 중단');
+  assert.match(el.livePreview.textContent, /계속 실패해 중단/);
+});
+
+test('render-preview 429 대기 중 앞당겨 불린 실행은 요청 없이 남은 시간만큼 미룬다', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 9_000_000 });
+  t.after(() => t.mock.timers.reset());
+  const { bodies } = setup(t, () => 200);
+  state.rawText = '<PAGE>page 1<PAGE>tail';
+  state.previewRetryAt = 9_000_000 + 5_000;   // 직전 429가 5초 쉬라고 했다
+  await runPreviewRender();                    // replay·reset 경로가 바로 다시 부른 경우
+  assert.deepEqual(bodies, []);
+  assert.equal(state.previewDirty, true, '보낼 내용은 그대로 남는다');
+  assert.ok(state.previewTimer);
+  t.mock.timers.tick(4_999);
+  await settle();
+  assert.deepEqual(bodies, []);
+  t.mock.timers.tick(1);
+  await settle();
+  assert.deepEqual(bodies, ['page 1', 'tail']);
 });

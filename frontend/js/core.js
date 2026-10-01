@@ -917,6 +917,17 @@ export function statusLabel(job) {
   return base;
 }
 
+// 작업 목록 한 줄의 표시 서명 (순수 — tests/에서 검증). 5초 목록 폴링은 서명이 바뀐
+// 줄만 제자리에서 갱신하고, 전부 같으면 DOM을 건드리지 않는다 — 목록 안 키보드
+// 포커스(2단계 삭제 무장 포함)와 스크린리더 위치가 폴링마다 날아가지 않게.
+export function jobRowSignature(job, active) {
+  const j = job || {};
+  return JSON.stringify([
+    String(j.job_id || ''), String(j.filename || ''), j.status || 'queued', statusLabel(j),
+    String(j.created_at || ''), !!active,
+  ]);
+}
+
 export function fmtTime(iso) {
   if (!iso) return '';
   const d = new Date(iso);

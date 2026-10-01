@@ -201,8 +201,9 @@ jobs:
         run: .venv/bin/python -m pytest tests/ -v
 
   # sidecar 파서/어댑터 테스트 — 최종 OCR 마크다운 형태를 결정하는 코드라 회귀가
-  # 나면 GPU 서버 배포 뒤에야 눈으로 드러난다. parser.py·adapter.py는 stdlib(re·json)
-  # 만 쓰므로 모델·CUDA·vLLM·paddle 없이 pytest만으로 돈다(≈0.03초).
+  # 나면 GPU 서버 배포 뒤에야 눈으로 드러난다. parser.py·adapter.py·lifecycle.py는
+  # stdlib만 쓰므로 모델·CUDA·vLLM·paddle 없이 돈다. HTTP 계층 테스트(tests/test_api.py —
+  # 엔진 사망 503·폼 필드 상한)는 웹 계층만 requirements.lock과 같은 버전으로 넣어 돌린다.
   sidecar:
     runs-on: ubuntu-latest
     strategy:
@@ -216,10 +217,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-      - name: pytest (파서/어댑터)
+      - name: pytest (파서/어댑터 · 수명주기 · HTTP 계층)
         run: |
           uv venv --python 3.12 .venv
-          uv pip install -p .venv/bin/python pytest
+          uv pip install -p .venv/bin/python pytest httpx \
+            "fastapi==0.139.0" "python-multipart==0.0.32" "pillow==12.3.0"
           .venv/bin/python -m pytest tests/
 
   # CPU 이미지 빌드 + 하드닝 스모크 — 이미지는 release.yml에서만 빌드돼 Dockerfile·네이티브

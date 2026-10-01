@@ -391,6 +391,9 @@ def _read_translate_report(job, lang: str) -> dict | None:
 
 # state 응답에 덧붙이는 관측 필드 — "왜 이 문단이 원문 그대로인가"의 사유별 집계.
 _TRANSLATE_REASON_KEYS = ("skip_reasons", "kept_reasons", "reference_rule")
+# state 응답에 덧붙이는 번역 경고(report.json "warnings") 상한 — 항목 수·항목 길이.
+_TRANSLATE_STATE_WARNINGS_MAX = 50
+_TRANSLATE_STATE_WARNING_CHARS = 1000
 
 
 def _write_translate_state(job, lang: str, state: dict) -> None:
@@ -1869,8 +1872,11 @@ async def translate_start(request: Request, job_id: str) -> JSONResponse:
 def translate_state(request: Request, job_id: str, lang: str = "ko") -> dict:
     """번역 상태. 없으면 {"status":"none","lang"}. stale-running은 error로 조정해 반환.
 
-    report.json이 있으면 사유별 집계(skip_reasons·kept_reasons·reference_rule)를
-    덧붙인다 — 원문이 그대로 남은 이유를 상태 폴링 한 번으로 알 수 있게 한다.
+    report.json(마지막으로 완료된 번역의 리포트)이 있으면 사유별 집계(skip_reasons·
+    kept_reasons·reference_rule)를 덧붙인다 — 원문이 그대로 남은 이유를 상태 폴링 한
+    번으로 알 수 있게 한다. 리포트 경고(용어집 LLM 판정 실패·참고문헌 규칙 불일치·캐시
+    전량 무효 등)도 "warnings"(문자열 목록)로 덧붙인다 — 예전에는 /translate/report를
+    따로 열어야만 보였다. 경고가 없으면 키 자체가 없다.
     """
     job = _get_job(request, job_id)
     _check_lang(lang)
@@ -1882,6 +1888,14 @@ def translate_state(request: Request, job_id: str, lang: str = "ko") -> dict:
         for key in _TRANSLATE_REASON_KEYS:
             if key in report:
                 state[key] = report[key]
+        raw = report.get("warnings")
+        warnings = [
+            str(w)[:_TRANSLATE_STATE_WARNING_CHARS]
+            for w in (raw if isinstance(raw, list) else [])
+            if isinstance(w, str) and w.strip()
+        ][:_TRANSLATE_STATE_WARNINGS_MAX]
+        if warnings:
+            state["warnings"] = warnings
     return state
 
 

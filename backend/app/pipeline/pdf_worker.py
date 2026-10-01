@@ -650,6 +650,10 @@ class _WorkerProcess:
         self.completed = 0
         self.peak_rss = 0
         self.last_exitcode: int | None = None
+        # 종료·정리는 호출 스레드와 풀 종료(shutdown) 스레드가 동시에 할 수 있다 —
+        # Process.close()를 두 번 부르면 AttributeError(_sentinel)가 난다.
+        self._lifecycle = threading.Lock()
+        self._closed = False
 
     @property
     def pid(self) -> int | None:
@@ -683,7 +687,12 @@ class _WorkerProcess:
                     self.kill()
                     raise PdfWorkerTimeout(timeout)
                 wait_s = remaining if wait_s is None else min(wait_s, remaining)
-            ready = mp_connection.wait([self.conn, sentinel], timeout=wait_s)
+            try:
+                ready = mp_connection.wait([self.conn, sentinel], timeout=wait_s)
+            except (OSError, ValueError) as error:
+                # 풀 종료(shutdown) 스레드가 이 워커를 닫았다 — 결과는 오지 않는다
+                self.kill()
+                raise PdfWorkerCrashed(self.exitcode()) from error
             if self.conn in ready:
                 return self._receive(task_id)
             if sentinel in ready:
@@ -723,17 +732,21 @@ class _WorkerProcess:
             return self.last_exitcode
 
     def kill(self) -> None:
-        """terminate → 유예 → kill. C 코드 안에서도 커널이 끝낸다(파이썬 처리기 없음)."""
-        try:
-            if self.process.is_alive():
-                self.process.terminate()
-                self.process.join(_KILL_GRACE_S)
+        """terminate → 유예 → kill. C 코드 안에서도 커널이 끝낸다(파이썬 처리기 없음).
+        여러 스레드가 동시에 불러도 한 번만 정리한다."""
+        with self._lifecycle:
+            if self._closed:
+                return
+            try:
                 if self.process.is_alive():
-                    self.process.kill()
+                    self.process.terminate()
                     self.process.join(_KILL_GRACE_S)
-        except ValueError:
-            pass  # 이미 close()됨
-        self.close()
+                    if self.process.is_alive():
+                        self.process.kill()
+                        self.process.join(_KILL_GRACE_S)
+            except ValueError:
+                pass  # 이미 close()된 Process
+            self._close_locked()
 
     def stop(self, timeout: float) -> None:
         """정상 종료 요청(None) → 대기 → 남으면 kill."""
@@ -749,18 +762,26 @@ class _WorkerProcess:
             self.close()
 
     def close(self) -> None:
+        with self._lifecycle:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
+        if self._closed:
+            return
         with contextlib.suppress(Exception):
             self.conn.close()
         try:
-            if not self.process.is_alive():
-                pid = self.process.pid
-                self.last_exitcode = self.process.exitcode
-                self.process.close()
-                if pid is not None and self.last_exitcode not in (None, 0):
-                    # 종료당한 워커는 자기 임시 디렉터리를 못 지웠다(폰트 서브셋 등)
-                    shutil.rmtree(_scratch_dir(self.pool_name, pid), ignore_errors=True)
-        except ValueError:
-            pass
+            if self.process.is_alive():
+                return  # 살아 있는 프로세스는 닫지 않는다(kill이 먼저다)
+            pid = self.process.pid
+            self.last_exitcode = self.process.exitcode
+            self.process.close()
+        except (ValueError, AttributeError):
+            pid = None
+        self._closed = True
+        if pid is not None and self.last_exitcode not in (None, 0):
+            # 종료당한 워커는 자기 임시 디렉터리를 못 지웠다(폰트 서브셋 등)
+            shutil.rmtree(_scratch_dir(self.pool_name, pid), ignore_errors=True)
 
 
 def _rebuild_exception(payload: tuple) -> BaseException:

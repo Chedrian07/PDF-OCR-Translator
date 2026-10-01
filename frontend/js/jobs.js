@@ -1,7 +1,7 @@
 import { ICON, readerPosKey } from './constants.js';
 import {
-  armTransition, clampReaderPage, fmtTime, groundAnnounce, jobModelChip, parseViewerSearch,
-  progressPhaseText, statusLabel,
+  armTransition, clampReaderPage, fmtTime, groundAnnounce, jobModelChip, jobRowSignature,
+  parseViewerSearch, progressPhaseText, statusLabel,
 } from './core.js';
 import { armTimers, el, state } from './state.js';
 import { h, isTerminal, localGet, localRemove, showToast } from './ui.js';
@@ -50,15 +50,78 @@ export async function refreshJobs() {
   }
 }
 
+// 키(job_id) 기반 증분 렌더 — 기존 <li>를 재사용하고 바뀐 줄만 제자리에서 고친다.
+// 5초 폴링마다 목록을 통째로 다시 만들면 목록 안의 키보드 포커스가 body로 날아가
+// 2단계 삭제의 두 번째 Enter가 허공에 가고, 스크린리더 가상 커서도 초기화된다.
 export function renderJobList() {
   const list = el.jobList;
-  list.textContent = '';
-  if (!state.jobs.length) {
-    el.jobListEmpty.hidden = false;
-    return;
+  const rows = state.jobs.map((job) => ({
+    job, sig: jobRowSignature(job, job.job_id === state.currentJobId),
+  }));
+  el.jobListEmpty.hidden = rows.length > 0;
+  const items = [...list.children];
+  // 같은 순서·같은 서명 — 폴링 대부분은 DOM을 전혀 건드리지 않고 끝난다.
+  if (items.length === rows.length && rows.every((row, i) =>
+    items[i].dataset.jobId === row.job.job_id && items[i].dataset.sig === row.sig)) return;
+
+  const focus = captureListFocus(list, items);
+  const byId = new Map(items.map((item) => [item.dataset.jobId, item]));
+  const wanted = new Set(rows.map((row) => row.job.job_id));
+  // 곧 지워질 줄은 기준점에서 건너뛴다 — 남는 줄을 불필요하게 옮기지 않게.
+  const skipStale = (node) => {
+    let cur = node;
+    while (cur && !wanted.has(cur.dataset.jobId)) cur = cur.nextElementSibling;
+    return cur;
+  };
+  let cursor = skipStale(list.firstElementChild);
+  for (const { job, sig } of rows) {
+    let item = byId.get(job.job_id);
+    if (item) {
+      byId.delete(job.job_id);
+      if (item.dataset.sig !== sig) updateJobListItem(item, job);
+    } else {
+      item = jobListItem(job);
+    }
+    item.dataset.sig = sig;
+    if (item === cursor) cursor = skipStale(cursor.nextElementSibling);
+    else list.insertBefore(item, cursor);
   }
-  el.jobListEmpty.hidden = true;
-  for (const job of state.jobs) list.appendChild(jobListItem(job));
+  for (const stale of byId.values()) stale.remove();
+  restoreListFocus(list, focus);
+}
+
+// 목록 안 포커스를 (잡, 컨트롤 종류, 위치)로 기억한다. 줄이 옮겨지거나 지워지면
+// 브라우저가 포커스를 body로 보내므로, 렌더 뒤 같은 잡의 같은 컨트롤로 돌려준다.
+function captureListFocus(list, items) {
+  const active = typeof document !== 'undefined' ? document.activeElement : null;
+  if (!active || active === list || !list.contains(active)) return null;
+  const item = active.closest('.job-item');
+  if (!item) return null;
+  const role = ['ji-read', 'ji-del'].find((cls) => active.classList.contains(cls)) || 'ji-open';
+  return { node: active, jobId: item.dataset.jobId, role, index: items.indexOf(item) };
+}
+
+function restoreListFocus(list, focus) {
+  if (!focus) return;
+  if (focus.node.isConnected && document.activeElement === focus.node) return;
+  const items = [...list.children];
+  let item = items.find((li) => li.dataset.jobId === focus.jobId);
+  let target = item && item.querySelector(`.${focus.role}`);
+  if (!target && !item && items.length) {
+    // 그 잡이 목록에서 사라졌다(삭제) — 같은 자리(없으면 마지막) 줄로 포커스를 넘긴다.
+    item = items[Math.min(Math.max(0, focus.index), items.length - 1)];
+  }
+  if (!target && item) target = item.querySelector('.ji-open');
+  if (target) target.focus({ preventScroll: true });
+}
+
+function jobReadButton(job, fname) {
+  const read = h('button', {
+    class: 'ji-read icon-btn-sm', type: 'button',
+    'aria-label': `"${fname}" 논문 뷰어로 열기`, title: '논문 뷰어로 열기', html: ICON.read,
+  });
+  read.addEventListener('click', () => openJobInViewer(job.job_id));
+  return read;
 }
 
 export function jobListItem(job) {
@@ -78,22 +141,15 @@ export function jobListItem(job) {
   open.addEventListener('click', () => openJob(job.job_id));
 
   // 완료된 잡은 목록에서 한 번에 논문 뷰어로 — 잡 열기 → 뷰어 열기 2단계를 없앤다.
-  let read = null;
-  if (status === 'done') {
-    read = h('button', {
-      class: 'ji-read icon-btn-sm', type: 'button',
-      'aria-label': `"${fname}" 논문 뷰어로 열기`, title: '논문 뷰어로 열기', html: ICON.read,
-    });
-    read.addEventListener('click', () => openJobInViewer(job.job_id));
-  }
+  const read = status === 'done' ? jobReadButton(job, fname) : null;
 
   const del = h('button', {
     class: 'ji-del icon-btn-sm', type: 'button',
     'aria-label': `"${fname}" 삭제`, title: '삭제', html: ICON.x,
   });
   del.addEventListener('click', () => armDelete(del, job.job_id, () => deleteJob(job.job_id)));
-  // 재렌더가 무장(armed) 상태를 파괴하지 않도록 살아있는 무장을 새 버튼에 복원.
-  // 만료 타이머가 최신 버튼을 해제하도록 참조도 교체한다.
+  // 새로 만든 줄에도 살아있는 무장(armed)을 복원한다. 만료 타이머가 최신 버튼을
+  // 해제하도록 참조도 교체한다. (재사용되는 줄은 같은 버튼이라 그대로 유지된다.)
   const arm = armTimers.get(job.job_id);
   if (arm) {
     arm.btn = del;
@@ -103,9 +159,34 @@ export function jobListItem(job) {
   }
 
   const item = h('li', { class: `job-item${active ? ' active' : ''}` }, open);
+  item.dataset.jobId = job.job_id;
   if (read) item.appendChild(read);
   item.appendChild(del);
+  item._row = { name, chip, time, read, del };
   return item;
+}
+
+// 재사용하는 줄의 바뀐 필드만 고친다 — 버튼 노드는 그대로라 포커스·무장이 유지된다.
+export function updateJobListItem(item, job) {
+  const row = item._row;
+  const status = job.status || 'queued';
+  const fname = job.filename || '(이름 없음)';
+  item.classList.toggle('active', job.job_id === state.currentJobId);
+  row.name.textContent = fname;
+  row.name.title = job.filename || '';
+  row.chip.className = `chip chip-${status}`;
+  row.chip.textContent = statusLabel(job);
+  row.time.textContent = fmtTime(job.created_at);
+  row.del.setAttribute('aria-label', `"${fname}" 삭제`);
+  if (status === 'done' && !row.read) {
+    row.read = jobReadButton(job, fname);
+    item.insertBefore(row.read, row.del);
+  } else if (status !== 'done' && row.read) {
+    row.read.remove();
+    row.read = null;
+  } else if (row.read) {
+    row.read.setAttribute('aria-label', `"${fname}" 논문 뷰어로 열기`);
+  }
 }
 
 // 목록에서 바로 논문 뷰어로. 이미 열려 있는 잡이면 곧장 열고, 아니면 뷰어

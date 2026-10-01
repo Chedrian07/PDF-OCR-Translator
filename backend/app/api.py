@@ -618,6 +618,16 @@ def _sse_poll(q: queue.Queue):
         return None
 
 
+def _sse_should_stop(request: Request) -> bool:
+    """SSE 루프를 끝낼 때인가 — 서버 정상 종료가 시작됐으면 참(main.ShutdownSignal).
+
+    uvicorn은 열린 연결이 모두 닫힐 때까지 종료를 기다리므로 스트림이 스스로 끝나야
+    한다. 폴(≤1s)마다 확인하니 종료 신호 뒤 1초 안에 닫힌다. 클라이언트는 retry로
+    재연결한다."""
+    flag = getattr(request.app.state, "shutdown", None)
+    return bool(getattr(flag, "requested", False))
+
+
 @router.get("/jobs/{job_id}/events")
 async def job_events(request: Request, job_id: str) -> StreamingResponse:
     job = _get_job(request, job_id)
@@ -654,7 +664,7 @@ async def job_events(request: Request, job_id: str) -> StreamingResponse:
 
             idle = 0
             while True:
-                if await request.is_disconnected():
+                if _sse_should_stop(request) or await request.is_disconnected():
                     return
                 item = await anyio.to_thread.run_sync(
                     functools.partial(_sse_poll, q), limiter=_SSE_LIMITER,
@@ -1703,7 +1713,7 @@ async def translate_events(request: Request, job_id: str, lang: str = "ko") -> S
 
             idle = 0
             while True:
-                if await request.is_disconnected():
+                if _sse_should_stop(request) or await request.is_disconnected():
                     return
                 item = await anyio.to_thread.run_sync(
                     functools.partial(_sse_poll, q), limiter=_SSE_LIMITER,

@@ -50,6 +50,17 @@ def torch_device_name(device: str) -> str:
     return _TORCH_DEVICES.get(device, device)
 
 
+# 고정된 torch(2.10)의 MPS 백엔드 최소 macOS — 미만이면 is_available()이 False다
+# (libtorch: "The MPS backend is supported on MacOS 14.0+").
+_MIN_MACOS_FOR_MPS = "14.0"
+
+
+def _macos_version() -> str:
+    import platform
+
+    return platform.mac_ver()[0] or "알 수 없음"
+
+
 def _mps_bf16_supported() -> bool:
     # bf16은 macOS 14+ 에서만 지원 — 실제 할당으로 프로브 (torch 버전별 API 차이 회피)
     import torch
@@ -117,8 +128,11 @@ def _resolve_dtype(device: str, dtype_name: str):
         if device == "metal":
             if _mps_bf16_supported():
                 return torch.bfloat16
-            logger.warning("이 macOS/torch 조합은 MPS bfloat16을 지원하지 않아 float32로 동작합니다 "
-                           "(느림 — OCR_DTYPE=float16 시도 가능)")
+            # 고정된 torch 2.10의 MPS는 macOS 14+에서만 켜지고 거기서는 bf16이 항상 되므로
+            # 사실상 도달하지 않는다 — 프로브 자체가 실패한 비정상 상태(드라이버·설치)다.
+            logger.warning("MPS bfloat16 프로브가 실패해 float32로 동작합니다 (macOS %s — "
+                           "보통 일어나지 않는 상태이니 torch 설치를 확인하세요; 느림, "
+                           "OCR_DTYPE=float16으로 바꿀 수 있음)", _macos_version())
             return torch.float32
         return torch.float32
     if dtype_name == "bfloat16":
@@ -192,7 +206,9 @@ class UnlimitedEngine(OCREngine):
             )
         if self.device == "metal" and not torch.backends.mps.is_available():
             hint = (
-                "Apple Silicon Mac + macOS 12.3 이상이 필요합니다."
+                f"Apple Silicon Mac + macOS {_MIN_MACOS_FOR_MPS} 이상이 필요합니다 "
+                f"(설치된 torch {torch.__version__.split('+')[0]}의 MPS 요구사항 — "
+                f"현재 macOS {_macos_version()})."
                 if torch.backends.mps.is_built()
                 else "설치된 torch가 MPS 없이 빌드되었습니다 — macOS arm64용 휠로 재설치하세요 "
                      "(backend에서 `uv sync --extra metal`). Docker/Linux에서는 Metal을 쓸 수 없습니다."

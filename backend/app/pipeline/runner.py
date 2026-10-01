@@ -357,7 +357,7 @@ def _completed_pages(error: BaseException, num_pages: int) -> tuple[int, str]:
     """
     if not isinstance(error, OutputLimitError):
         return 0, ""
-    partial = getattr(error, "partial_output", None)
+    partial = error.partial_output
     if not isinstance(partial, str) or "<PAGE>" not in partial:
         return 0, ""
     segments = split_pages(partial)
@@ -643,7 +643,7 @@ def execute_job(
                     return
                 if not caps.supports_multi_page or (caps.preferred_chunk_size or 0) == 1:
                     return
-                if getattr(engine, "deterministic_rerun", False):
+                if engine.deterministic_rerun:
                     return
                 source_pdf = job.dir / "source.pdf"
                 if not source_pdf.is_file():

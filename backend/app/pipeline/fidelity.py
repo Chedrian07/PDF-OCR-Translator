@@ -43,7 +43,20 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
+
+from ..engine.base import JobCanceled
+
+# 취소 확인 콜백(runner의 cancel.is_set). 분석 루프가 이것을 보고 JobCanceled를 올린다.
+CancelCheck = Callable[[], bool] | None
+# 벡터 경로 순회 중 취소를 확인하는 간격 — 10^6 경로 페이지에서도 수십 ms 안에 반응
+_CANCEL_POLL_PATHS = 4096
+
+
+def _check_cancel(should_cancel: CancelCheck) -> None:
+    if should_cancel is not None and should_cancel():
+        raise JobCanceled()
 
 # 모델이 내는 **HTML 태그만** 벗긴다. 표 마크업을 남기면 표 페이지가 통째로 열화로
 # 보이지만(실측 p18: 12,716자 중 12,427자가 정상 <table> 마크업), 범용 `<[^>]*>`는
@@ -166,7 +179,9 @@ class PageFidelity:
         return self.score is not None
 
 
-def _pdf_graphic_areas(fitz, page, rects: list) -> list[float]:
+def _pdf_graphic_areas(
+    fitz, page, rects: list, should_cancel: CancelCheck = None
+) -> list[float]:
     """PDF가 각 사각형 안에 실제로 그린 그림·벡터의 면적 합(중복 허용) — 페이지당 1회 추출.
 
     모델의 그림 분류를 **원본으로 검증**하는 데 쓴다. 중복 계산은 의도적이다 —
@@ -197,17 +212,24 @@ def _pdf_graphic_areas(fitz, page, rects: list) -> list[float]:
             _add(info["bbox"])
     except Exception:  # noqa: BLE001 — 그림 목록 실패는 '검증 불가'
         pass
+    _check_cancel(should_cancel)
     try:
-        for drawing in page.get_cdrawings():
-            box = drawing.get("rect")
-            if box is not None:
-                _add(box)
+        drawings = page.get_cdrawings()
     except Exception:  # noqa: BLE001
-        pass
+        drawings = []
+    for n, drawing in enumerate(drawings):
+        if n % _CANCEL_POLL_PATHS == 0:
+            _check_cancel(should_cancel)
+        box = drawing.get("rect") if isinstance(drawing, dict) else None
+        if box is not None:
+            try:
+                _add(box)
+            except (TypeError, ValueError):  # 형식이 깨진 경로는 건너뛴다
+                continue
     return totals
 
 
-def _image_rects(fitz, page, blocks: list[dict]) -> list:
+def _image_rects(fitz, page, blocks: list[dict], should_cancel: CancelCheck = None) -> list:
     """모델이 그림으로 분류한 블록 중 **원본에 실제로 그림이 있는** 것의 사각형.
 
     검증이 필요한 이유: 청크 안에서 페이지를 놓친 모델이 빈 출력 대신 전면 `image`
@@ -236,7 +258,9 @@ def _image_rects(fitz, page, blocks: list[dict]) -> list:
         if rect.is_empty:
             continue
         candidates.append(rect)
-    areas = _pdf_graphic_areas(fitz, page, [r for r in candidates if r.get_area() > 0])
+    areas = _pdf_graphic_areas(
+        fitz, page, [r for r in candidates if r.get_area() > 0], should_cancel
+    )
     out = []
     drawn = iter(areas)
     for rect in candidates:
@@ -288,14 +312,14 @@ def ocr_text(blocks: list[dict]) -> str:
     )
 
 
-def truth_text(fitz, page, blocks: list[dict]) -> str:
+def truth_text(fitz, page, blocks: list[dict], should_cancel: CancelCheck = None) -> str:
     """페이지의 정답 텍스트 — 그림·표시수식 블록에 덮인 줄은 뺀다.
 
     모델은 그림 안의 글자를 본문으로 뽑지 않는 것이 정상 동작이다. 정답에서 빼지
     않으면 그림이 큰 페이지가 전부 열화로 보인다. 수식은 `ocr_text`가 후보에서도
     빼므로 대칭이다.
     """
-    rects = _image_rects(fitz, page, blocks) + _equation_rects(fitz, page, blocks)
+    rects = _image_rects(fitz, page, blocks, should_cancel) + _equation_rects(fitz, page, blocks)
     kept: list[str] = []
     try:
         raw = page.get_text("dict")
@@ -316,7 +340,9 @@ def truth_text(fitz, page, blocks: list[dict]) -> str:
     return " ".join(kept)
 
 
-def page_fidelity_blocks(fitz, page, blocks: list, page_number: int) -> PageFidelity:
+def page_fidelity_blocks(
+    fitz, page, blocks: list, page_number: int, should_cancel: CancelCheck = None
+) -> PageFidelity:
     """파싱된 블록 목록을 원본 PDF 텍스트 레이어와 대조한다.
 
     **파싱 뒤**의 블록을 재는 것이 핵심이다 — 페이지 정렬·초과 마커 보정까지
@@ -325,7 +351,7 @@ def page_fidelity_blocks(fitz, page, blocks: list, page_number: int) -> PageFide
     """
     blocks = [b for b in (blocks or []) if isinstance(b, dict)]
     ocr = normalize(ocr_text(blocks))
-    truth = normalize(truth_text(fitz, page, blocks))
+    truth = normalize(truth_text(fitz, page, blocks, should_cancel))
     if len(truth) < MIN_TRUTH_CHARS:
         return PageFidelity(page_number, None, len(truth), len(ocr), "정답 텍스트 부족")
     return PageFidelity(page_number, score(truth, ocr), len(truth), len(ocr))
@@ -358,8 +384,14 @@ def _open_pdf(pdf_path):
         return None, "원본 PDF 열기 실패"
 
 
-def evaluate_layout_pages(pdf_path, layout_pages: list) -> list[PageFidelity]:
-    """layout.json 형태의 페이지들(`{page, blocks}`)을 한 번에 판정한다."""
+def evaluate_layout_pages(
+    pdf_path, layout_pages: list, should_cancel: CancelCheck = None
+) -> list[PageFidelity]:
+    """layout.json 형태의 페이지들(`{page, blocks}`)을 한 번에 판정한다.
+
+    should_cancel(runner의 cancel.is_set)이 참이 되면 페이지마다·벡터 경로 순회 중에
+    JobCanceled를 올린다 — 벡터가 많은 문서에서 청크 평가가 수 분 걸릴 때 취소 클릭이
+    그동안 무시되지 않게."""
     fitz, doc = _open_pdf(pdf_path)
     if fitz is None:
         return [
@@ -369,12 +401,15 @@ def evaluate_layout_pages(pdf_path, layout_pages: list) -> list[PageFidelity]:
     out: list[PageFidelity] = []
     try:
         for p in layout_pages:
+            _check_cancel(should_cancel)
             pno = int(p.get("page") or 0)
             if pno < 1 or pno > doc.page_count:
                 out.append(PageFidelity(pno, None, 0, 0, "페이지 범위 밖"))
                 continue
             out.append(
-                page_fidelity_blocks(fitz, doc[pno - 1], p.get("blocks") or [], pno)
+                page_fidelity_blocks(
+                    fitz, doc[pno - 1], p.get("blocks") or [], pno, should_cancel
+                )
             )
     finally:
         doc.close()

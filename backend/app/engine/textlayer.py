@@ -203,6 +203,10 @@ class TextLayerEngine(OCREngine):
     """PDF 텍스트 레이어 우선 + Tesseract 폴백 — CPU 전용, 모델 로드 없음."""
 
     name = "textlayer"
+    # 같은 페이지를 다시 돌려도 결과가 같다(텍스트 레이어 추출·Tesseract는 결정적).
+    # runner의 충실도 게이트는 이런 엔진에서 단독 재처리를 하지 않는다 — 하면 같은
+    # Tesseract 호출(페이지당 최대 180초)이 반복되고 거짓 '충실도 미달' 경고만 남는다.
+    deterministic_rerun = True
 
     def __init__(self, settings: "Settings") -> None:
         self.device = "cpu"

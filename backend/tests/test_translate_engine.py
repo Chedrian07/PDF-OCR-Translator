@@ -890,8 +890,10 @@ def test_md줄이_layout과_일치하면_유닛당_한_번만_번역한다(tmp_p
     assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(md)
 
 
-def test_커버리지_미달이면_지연된_md유닛을_2차패스로_번역한다(tmp_path, cfg):
-    """layout이 md를 못 덮는 문서에서는 결과가 2단 패스 도입 전과 바이트 동일해야 한다."""
+def test_커버리지가_낮아도_layout으로_덮이는_md유닛은_다시_번역하지_않는다(tmp_path, cfg):
+    """유닛 단위 reconcile — 종전에는 문서 커버리지(1/5 < 0.7)가 낮으면 덮이는 유닛까지
+    2차 패스로 다시 번역했다(같은 문장 이중 과금). 유닛의 모든 줄이 layout 번역으로
+    덮이면 커버리지와 무관하게 그 번역을 쓴다(translate-llm-1)."""
     covered_line = "The accuracy improved on every benchmark dataset here."
     others = [
         "We trained the model with a very small learning rate.",
@@ -908,9 +910,78 @@ def test_커버리지_미달이면_지연된_md유닛을_2차패스로_번역한
     res = run_translation(tmp_path, "ko", cfg, client=client)
 
     assert res.status == "done"
-    # 1차 total = md 4 + layout 1, 2차에서 지연된 md 유닛 1개가 더해진다
-    assert res.total == 6 and res.kept_original == []
-    assert client.unit_calls == 6            # 1차 5 + 2차(지연된 md 유닛) 1
+    # md 4 + layout 1 — 덮이는 md 유닛은 layout 번역을 재사용하므로 2차 패스가 없다
+    assert res.total == 5 and res.kept_original == []
+    assert client.unit_calls == 5
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(md)
+
+
+def test_layout_쌍둥이가_번역에_실패한_지연_유닛은_2차_패스로_번역한다(tmp_path, cfg):
+    """layout 블록이 번역에 실패하면 그 원문을 md에 '매핑'하지 않고 md 유닛을 번역한다."""
+    lines = [
+        "The accuracy improved on every benchmark dataset here.",
+        "We trained the model with a very small learning rate.",
+    ]
+
+    class TitleEcho(EchoClient):
+        """제목 블록 프롬프트에는 영문을 그대로 돌려준다(게이트 거부 → layout 실패)."""
+
+        def complete(self, system, user, *, max_tokens):
+            src = _marker(user)
+            if src is not None and "[블록 유형 — 제목]" in user:
+                self._count(True)
+                return src
+            return super().complete(system, user, max_tokens=max_tokens)
+
+    md = "\n\n".join(lines) + "\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    lay = _layout_of(lines)
+    lay[0]["blocks"][0]["type"] = "title"
+    (tmp_path / "layout.json").write_text(json.dumps(lay, ensure_ascii=False), encoding="utf-8")
+
+    res = run_translation(tmp_path, "ko", cfg, client=TitleEcho())
+
+    assert res.kept_original == ["lay:1:0"]                  # PDF 쪽은 실패를 숨기지 않는다
+    assert res.total == 3                                    # lay 2 + 2차 md 1
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(md)
+
+
+def test_유닛_단위_reconcile은_영어_줄을_남기지_않는다(tmp_path, cfg):
+    """한 줄 문단 8개 + 2줄 목록 — 종전에는 커버리지 0.8로 reconcile이 성공해 목록
+    두 줄(여러 줄 layout 블록이라 매핑 불가)이 영어로 남았다(translate-llm-1)."""
+    paras = [f"Paragraph number {w} explains one more detail of the method." for w in (
+        "one", "two", "three", "four", "five", "six", "seven", "eight")]
+    items = ["- first item describes the encoder", "- second item describes the decoder"]
+    md = "\n\n".join([*paras, "\n".join(items)]) + "\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    lay = _layout_of([*paras, "\n".join(items)])
+    (tmp_path / "layout.json").write_text(json.dumps(lay, ensure_ascii=False), encoding="utf-8")
+
+    res = run_translation(tmp_path, "ko", cfg, client=EchoClient())
+
+    out = (tmp_path / "result.ko.md").read_text(encoding="utf-8")
+    english = [ln for ln in out.splitlines() if ln.strip() and not re.search(r"[가-힣]", ln)]
+    assert english == [], english
+    assert out == ko_expected(md) and res.kept_original == []
+
+
+def test_쪽번호_블록이_붙은_md문단도_지연된다(tmp_path, cfg):
+    """vendor result.md는 블록을 단일 개행으로 이어 쪽 번호 줄이 문단에 붙는다. 쪽 번호
+    layout 블록은 번역 대상이 아니라서 종전에는 그 문단을 '덮이지 않음'으로 보고 1차에서
+    한 번 더 번역했다(버린 번역이 layout 번역량의 6~71%)."""
+    body = "The accuracy improved on every benchmark dataset here."
+    md = f"3\n{body}\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    lay = [{"page": 1, "width": 1000, "height": 1400, "blocks": [
+        {"type": "page_number", "bbox": [0, 0, 50, 20], "content": "3"},
+        {"type": "text", "bbox": [0, 100, 999, 180], "content": body},
+    ]}]
+    (tmp_path / "layout.json").write_text(json.dumps(lay, ensure_ascii=False), encoding="utf-8")
+
+    client = EchoClient()
+    res = run_translation(tmp_path, "ko", cfg, client=client)
+
+    assert client.unit_calls == 1 and res.total == 1         # layout 본문 블록만 번역
     assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(md)
 
 

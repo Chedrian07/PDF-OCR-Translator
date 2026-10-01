@@ -244,10 +244,13 @@ def apply_layout(
     return out
 
 
-def _layout_line_candidates(source_pages: list) -> list[tuple[int, int, str]]:
-    """reconcile이 줄 매핑 후보로 삼는 layout 블록들 → [(페이지 idx, 블록 idx, 원문)].
+def _layout_line_candidates(
+    source_pages: list, *, multiline: bool = False,
+) -> list[tuple[int, int, str]]:
+    """reconcile이 매핑 후보로 삼는 layout 블록들 → [(페이지 idx, 블록 idx, 원문)].
 
-    필터: ref_text 제외, 단일 줄·비어있지 않은 content만. 번역문 쪽 조건은 여기서
+    필터: ref_text 제외, 비어있지 않은 content만. multiline=False면 단일 줄 블록만
+    (줄 매핑용), True면 여러 줄 블록도(유닛 전체 매핑용). 번역문 쪽 조건은 여기서
     알 수 없으므로 뺀다.
     """
     out: list[tuple[int, int, str]] = []
@@ -261,20 +264,25 @@ def _layout_line_candidates(source_pages: list) -> list[tuple[int, int, str]]:
             if str(source_block.get("type") or "") == "ref_text":
                 continue
             source = str(source_block.get("content") or "").strip()
-            if not source or "\n" in source:
+            if not source or ("\n" in source and not multiline):
                 continue
             out.append((page_idx, block_idx, source))
     return out
 
 
-def layout_line_sources(source_pages: list) -> set[str]:
-    """layout 번역으로 md 줄을 덮을 수 있는 원문 줄 집합 (엔진의 md 유닛 지연 판단용).
+def layout_line_sources(source_pages: list, *, multiline: bool = False) -> set[str]:
+    """layout 번역으로 md를 덮을 수 있는 원문 집합 (엔진의 md 유닛 지연 판단용).
 
+    기본은 단일 줄 블록 원문(줄 매핑). multiline=True면 여러 줄 블록의 원문 전체도
+    넣는다 — md 유닛 하나가 layout 블록 하나와 통째로 같은 경우(textlayer 잡의 저자
+    블록·여러 줄 문단, 실측 456개 중 241개)도 그 번역을 그대로 쓴다.
     같은 원문이 여러 블록에 등장하면 번역이 상충할 수 있어(layout_line_map도 그때
     매핑하지 않는다) 보수적으로 제외한다.
     """
     seen: dict[str, int] = {}
-    for _page_idx, _block_idx, source in _layout_line_candidates(source_pages):
+    for _page_idx, _block_idx, source in _layout_line_candidates(
+        source_pages, multiline=multiline,
+    ):
         seen[source] = seen.get(source, 0) + 1
     return {source for source, n in seen.items() if n == 1}
 
@@ -297,7 +305,7 @@ def layout_line_map(
     if not isinstance(source_pages, list) or not isinstance(translated_pages, list):
         return {}
     candidates: dict[str, set[str]] = {}
-    for page_idx, block_idx, source in _layout_line_candidates(source_pages):
+    for page_idx, block_idx, source in _layout_line_candidates(source_pages, multiline=True):
         if page_idx >= len(translated_pages):
             continue
         if final_ids is not None:
@@ -314,20 +322,31 @@ def layout_line_map(
         if not isinstance(translated_block, dict):
             continue
         translated = str(translated_block.get("content") or "").strip()
-        if not translated or "\n" in translated:
+        # 한 줄 원문은 한 줄 번역만(줄 단위 치환이 줄 구조를 바꾸지 않게). 여러 줄 블록은
+        # 유닛 전체 매핑에만 쓰이므로 번역의 줄 수가 달라도 된다.
+        if not translated or ("\n" in translated and "\n" not in source):
             continue
         candidates.setdefault(source, set()).add(translated)
     return {source: next(iter(values)) for source, values in candidates.items() if len(values) == 1}
 
 
 def map_unit_lines(src: str, mapping: dict[str, str]) -> str | None:
-    """md 유닛의 비어 있지 않은 **모든** 줄이 매핑에 있으면 줄별 치환 결과, 아니면 None.
+    """md 유닛이 layout 번역으로 완전히 덮이면 그 결과, 아니면 None.
+
+    유닛 전체가 블록 하나와 같으면 그 번역을 통째로, 아니면 비어 있지 않은 **모든**
+    줄이 (단일 줄 블록) 매핑에 있을 때 줄별 치환 결과를 돌려준다.
 
     reconcile을 유닛 단위로 한다(translate-llm-1). 종전 줄 단위 reconcile은 원문 줄로
     출력을 다시 만들어 매핑되지 않은 줄(여러 줄 블록·상충 중복·수식 정의 줄)을 영어로
     남기고, 1차에서 번역한 md 유닛 결과는 통째로 버렸다. 이제 한 줄이라도 매핑이
     없으면 그 유닛은 자기 번역(md 유닛 번역)을 쓴다. 줄 앞뒤 공백은 보존한다.
     """
+    whole = mapping.get(src.strip())
+    if whole is not None:
+        # 유닛 전체가 layout 블록 하나와 같다(여러 줄 블록 포함) — 그 번역을 통째로 쓴다
+        lead = src[:len(src) - len(src.lstrip())]
+        trail = src[len(src.rstrip()):]
+        return f"{lead}{whole}{trail}"
     lines = src.split("\n")
     out: list[str] = []
     mapped_any = False

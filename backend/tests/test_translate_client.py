@@ -327,6 +327,46 @@ def test_think_스트립_코드펜스_벗기기():
     assert c.complete("s", "u", max_tokens=100) == "최종 번역문"
 
 
+@pytest.mark.parametrize(("content", "expected"), [
+    # 템플릿이 <think>를 프롬프트에 미리 넣어 content에는 닫는 태그만 오는 형태
+    ("Okay, the user wants Korean.\n</think>\n\n본 논문은 새로운 방법을 제안한다.",
+     "본 논문은 새로운 방법을 제안한다."),
+    ("<think>\nfirst</think>\n<think>second</think>\n\n최종 번역.", "최종 번역."),
+    ("<think></think>\n\n번역문.", "번역문."),
+    ("  평범한 번역문.  ", "평범한 번역문."),
+])
+def test_think_흔적은_마지막_닫는_태그_뒤만_본문으로(content, expected):
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = lambda p, pl: (200, {"choices": [{"message": {"content": content}}]}, {})
+    assert c.complete("s", "u", max_tokens=100) == expected
+
+
+def test_닫히지_않은_think는_본문이_없는_것으로_본다():
+    """사고 도중 잘린 출력이 영어 독백 그대로 번역문이 되면 안 된다."""
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = lambda p, pl: (200, {"choices": [{"message": {
+        "content": "<think>\nLet me think about the terminology first"}}]}, {})
+    with pytest.raises(TranslateAPIError, match="빈 응답"):
+        c.complete("s", "u", max_tokens=100)
+
+
+def test_reasoning_content_필드는_번역문에_섞이지_않는다():
+    """reasoning을 분리하는 서버(mlx_lm·oMLX·vLLM)의 사고 필드는 무시한다."""
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = lambda p, pl: (200, {"choices": [{"message": {
+        "content": "번역문.", "reasoning_content": "Let me think", "reasoning": "hmm",
+    }}]}, {})
+    assert c.complete("s", "u", max_tokens=100) == "번역문."
+
+
+def test_content_파트_배열도_본문으로_잇는다():
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = lambda p, pl: (200, {"choices": [{"message": {"content": [
+        {"type": "text", "text": "앞 "}, {"type": "text", "text": "뒤"},
+    ]}}]}, {})
+    assert c.complete("s", "u", max_tokens=100) == "앞 뒤"
+
+
 def test_빈응답_오류():
     c = OpenAICompatClient(_cfg(api_mode="chat"))
     c._post = lambda p, pl: (200, {"choices": [{"message": {"content": "   "}}]}, {})

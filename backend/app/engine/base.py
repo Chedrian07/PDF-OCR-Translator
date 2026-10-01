@@ -25,9 +25,17 @@ class EngineError(RuntimeError):
     """엔진 실행 실패 (사용자에게 노출 가능한 메시지).
 
     transient=True이면 "일시적"(재시도/대기하면 해소될 수 있음) 조건이다 — 프리로드가
-    이를 하드 실패로 로깅하지 않고, 워커의 준비 대기가 계속 기다린다."""
+    이를 하드 실패로 로깅하지 않고, 워커의 준비 대기가 계속 기다린다.
+
+    retry_same_page=False이면 runner가 같은 청크·페이지를 **즉시 다시 요청하지 않고**
+    곧바로 페이지 격리(텍스트 레이어 폴백 → 플레이스홀더)로 넘긴다. 같은 입력을 곧장
+    다시 보내 봐야 소용없는 실패용이다 — 예: sidecar 읽기 타임아웃(SidecarTimeoutError)은
+    provider가 끊긴 요청의 추론을 끝까지 하므로 재요청이 그 뒤에 줄을 서 다시 타임아웃이
+    난다. 기본값 True(1회 재시도). runner는 EngineError가 아닌 예외(벤더 RuntimeError·
+    OOM 등)도 받으므로 `getattr(error, "retry_same_page", True)`로 읽는다."""
 
     transient: bool = False
+    retry_same_page: bool = True
 
 
 class RepetitiveOutputError(EngineError):
@@ -40,7 +48,17 @@ class OutputLimitError(RepetitiveOutputError):
     반복이 아니어도 잘린 출력은 마지막 페이지(들)의 내용이 조용히 빠진 상태다.
     runner는 다른 불안전 생성(RepetitiveOutputError)과 똑같이 취급해 그 출력을
     채택하지 않고 페이지 단위로 복구해야 한다 — 그래서 하위 클래스로 둔다.
+
+    partial_output: run_multi 형식(`<PAGE>` 구분, 크롭·raw_pages.json 등 산출물은
+    out_dir에 있음)의 잘린 출력. 엔진이 실어 주면 runner가 **끝까지 생성된 앞 페이지**
+    (마지막 세그먼트를 뺀 나머지)를 그대로 병합하고 잘린 페이지부터만 다시 처리한다.
+    None이면(run_single·모름) 청크 전체를 페이지별로 다시 처리한다. 출력 문자열은
+    문서 내용이므로 메시지(로그·잡 경고에 남는다)에는 넣지 않는다.
     """
+
+    def __init__(self, message: str, partial_output: str | None = None) -> None:
+        super().__init__(message)
+        self.partial_output = partial_output
 
 
 class JobCanceled(Exception):
@@ -84,6 +102,10 @@ class OCREngine(abc.ABC):
     name: str = "base"
     device: str = "cpu"
     dtype_name: str = "float32"
+    # 같은 페이지를 다시 돌려도 결과가 같은 결정적 엔진인가(텍스트 레이어·Tesseract).
+    # True면 runner의 충실도 게이트가 단독 재처리를 하지 않는다 — 같은 호출을 반복해
+    # 시간만 쓰고 거짓 '충실도 미달' 경고를 남긴다. 생성 모델 엔진은 False(기본).
+    deterministic_rerun: bool = False
 
     @property
     @abc.abstractmethod

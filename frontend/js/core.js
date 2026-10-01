@@ -917,6 +917,79 @@ export function statusLabel(job) {
   return base;
 }
 
+/* ── 잡 품질 경고/참고 (순수 — tests/에서 검증) ─────────────────────────────
+ * 서버는 실제 품질 저하(실패 플레이스홀더·텍스트 레이어 복구·충실도 예산 소진·페이지
+ * 경계 불일치·흰 페이지 대체 …)를 job.warnings(문자열 목록)에 남긴다. 정보성 메모를
+ * 분리한 job.notices가 생길 수 있고(Phase 2), 항목이 {level, message} 객체로 바뀔 수도
+ * 있다 — 둘 다 받아들이고, level이 info인 경고 항목은 참고로 옮긴다.
+ */
+export const JOB_NOTE_MAX_ITEMS = 200;
+const JOB_NOTE_MAX_CHARS = 1000;
+
+function noteText(entry) {
+  const raw = typeof entry === 'string' ? entry
+    : (entry && typeof entry === 'object' ? (entry.message ?? entry.text ?? '') : '');
+  return String(raw).trim().slice(0, JOB_NOTE_MAX_CHARS);
+}
+
+function noteIsInfo(entry) {
+  return !!entry && typeof entry === 'object'
+    && /^(info|notice|note)$/i.test(String(entry.level || entry.severity || ''));
+}
+
+export function jobNotices(job) {
+  const warnings = [];
+  const notices = [];
+  const seen = new Set();
+  const push = (list, entry) => {
+    const text = noteText(entry);
+    if (!text || seen.has(text) || list.length >= JOB_NOTE_MAX_ITEMS) return;
+    seen.add(text);
+    list.push(text);
+  };
+  const j = job && typeof job === 'object' ? job : {};
+  for (const entry of Array.isArray(j.warnings) ? j.warnings : []) {
+    push(noteIsInfo(entry) ? notices : warnings, entry);
+  }
+  for (const entry of Array.isArray(j.notices) ? j.notices : []) push(notices, entry);
+  return { warnings, notices };
+}
+
+// 경고 문장 속 페이지 언급을 리더 이동 링크 조각으로 나눈다.
+//   '3페이지: …', '3–5페이지: …'(첫 쪽으로), '건너뛴 페이지: 3, 5, 7 (…)'(각 번호)
+// '2/10페이지 렌더에 실패'처럼 분수의 분모는 페이지 언급이 아니다 — 링크하지 않는다.
+// 반환: [{type:'text', value} | {type:'page', page, value}] (이어 붙이면 원문 그대로).
+export function warningSegments(text) {
+  const s = String(text == null ? '' : text);
+  const spans = [];
+  const single = /(?<![\d/.])(\d{1,5})(?:\s*[–—-]\s*\d{1,5})?페이지/g;
+  let m;
+  while ((m = single.exec(s)) !== null) {
+    spans.push({ start: m.index, end: m.index + m[0].length, page: Number(m[1]) });
+  }
+  const listed = /페이지:\s*((?:\d{1,5}\s*,\s*)*\d{1,5})(?![\d/])/g;
+  while ((m = listed.exec(s)) !== null) {
+    let at = m.index + m[0].length - m[1].length;
+    for (const part of m[1].split(',')) {
+      const offset = part.search(/\d/);
+      const digits = part.trim();
+      spans.push({ start: at + offset, end: at + offset + digits.length, page: Number(digits) });
+      at += part.length + 1;
+    }
+  }
+  spans.sort((a, b) => a.start - b.start);
+  const out = [];
+  let pos = 0;
+  for (const span of spans) {
+    if (span.start < pos || !(span.page >= 1)) continue;
+    if (span.start > pos) out.push({ type: 'text', value: s.slice(pos, span.start) });
+    out.push({ type: 'page', page: span.page, value: s.slice(span.start, span.end) });
+    pos = span.end;
+  }
+  if (pos < s.length || !out.length) out.push({ type: 'text', value: s.slice(pos) });
+  return out;
+}
+
 // 작업 목록 한 줄의 표시 서명 (순수 — tests/에서 검증). 5초 목록 폴링은 서명이 바뀐
 // 줄만 제자리에서 갱신하고, 전부 같으면 DOM을 건드리지 않는다 — 목록 안 키보드
 // 포커스(2단계 삭제 무장 포함)와 스크린리더 위치가 폴링마다 날아가지 않게.
@@ -924,7 +997,7 @@ export function jobRowSignature(job, active) {
   const j = job || {};
   return JSON.stringify([
     String(j.job_id || ''), String(j.filename || ''), j.status || 'queued', statusLabel(j),
-    String(j.created_at || ''), !!active,
+    String(j.created_at || ''), !!active, jobNotices(j).warnings.length,
   ]);
 }
 

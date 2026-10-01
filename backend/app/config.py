@@ -50,7 +50,7 @@ def _find_dotenv() -> Path | None:
 # 잘못 집계되면 하네스 키까지 .env.example·compose 스레딩을 요구받는다.
 # tests/test_config_env_registry.py가 코드·.env.example·compose·하네스와 양방향으로 대조한다.
 
-# 앱 코드가 읽는 운영 키 (config·translate/types·api·derived·엔진·벤더·native_ops)
+# 앱 코드가 읽는 운영 키 (config·translate/types·api·derived·pdf_worker·엔진·벤더·native_ops)
 _APP_ENV_KEYS = frozenset("""
     OCR_DEVICE OCR_DTYPE OCR_MLX_QUANT_BITS OCR_ENGINE MODEL_ID MODEL_REVISION PRELOAD_MODEL
     DATA_DIR FRONTEND_DIR RENDER_DPI PAGES_PER_CHUNK MAX_PAGES MAX_UPLOAD_MB MAX_LENGTH
@@ -73,6 +73,8 @@ _APP_ENV_KEYS = frozenset("""
     QA_RATE_LIMIT_PER_MIN QA_MAX_CONCURRENT TRANSLATE_RATE_LIMIT_PER_MIN TRANSLATE_MAX_ACTIVE
     TRUSTED_PROXY_HOPS TRUSTED_PROXY_IPS
     PDF_EXPORT_FONT PDF_EXPORT_MAX_CONCURRENT PDF_EXPORT_QUEUE_TIMEOUT_S PDF_EXPORT_WARM_WAIT_S
+    PDF_WORKER_MODE PDF_PAGE_TIMEOUT_S PDF_EXPORT_BUILD_TIMEOUT_S PDF_WORKER_MEM_LIMIT_MB
+    PDF_MAX_PAGE_CONTENT_MB PDF_MAX_PAGE_XOBJECT_CALLS
 """.split())
 # docker compose가 같은 .env에서 읽는 배포 키 (sidecar 이미지 설정·메모리 상한·바인딩)
 _DEPLOY_ENV_KEYS = frozenset("""

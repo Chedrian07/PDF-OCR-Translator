@@ -536,7 +536,7 @@ def execute_job(
             # 실패한 single 호출이 만든 crop/layout/raw 산출물은 절대 병합하지 않는다.
             shutil.rmtree(recovery_dir, ignore_errors=True)
             page_md = extract_embedded_page_markdown(
-                job.dir / "source.pdf", page_number
+                job.dir / "source.pdf", page_number, should_cancel=cancel.is_set,
             )
             if cancel.is_set():
                 raise JobCanceled()
@@ -702,6 +702,14 @@ def execute_job(
                         source_pdf, layout, should_cancel=cancel.is_set
                     )
                 }
+                skipped_checks = sorted(pno for pno, r in scored.items() if r.timed_out)
+                if skipped_checks:
+                    # 분석이 PDF 워커의 시간 상한을 넘은 페이지 — 판정하지 않았을 뿐 결과는
+                    # 그대로다. 그 페이지가 열화돼도 게이트가 못 잡았다는 사실은 남긴다.
+                    merger.notices.append(
+                        f"{', '.join(map(str, skipped_checks))}페이지: 충실도 분석이 시간 상한을 "
+                        "넘어 이 페이지의 충실도 검사를 건너뛰었습니다 (PDF_PAGE_TIMEOUT_S)"
+                    )
                 def _lost(pno: int) -> bool:
                     r = scored[pno]
                     return r.ocr_chars < r.truth_chars * _LOST_PAGE_SHARE

@@ -1033,13 +1033,21 @@ def test_render_preview(client, sample_pdf):
     assert client.post("/api/jobs/j_nope/render-preview", content=b"x").status_code == 404
 
 
+_PREVIEW_LIMIT = 256 * 1024
+# 정확히 상한(262,144바이트)인 본문 — 256줄 × 1KiB
+_PREVIEW_AT_LIMIT = (b"x" * 1023 + b"\n") * 256
+
+
 def test_render_preview_body_limit(client, sample_pdf):
-    """상한(2MB)은 스트리밍 수신 중 검사되어 초과 즉시 413. 경계값(정확히 2MB)은 통과."""
+    """상한(256KiB)은 스트리밍 수신 중 검사되어 초과 즉시 413. 경계값(정확히 256KiB)은 통과.
+
+    예전 상한 2MB는 인증 없는 요청 한 건에 수십 초짜리 렌더를 허용했다(security-1) —
+    라이브 미리보기는 페이지 하나(최대 16,384자)씩 보내므로 256KiB면 넉넉하다."""
     jid = _upload(client, sample_pdf).json()["job_id"]
-    r = client.post(f"/api/jobs/{jid}/render-preview", content=b"x" * 2_000_001)
+    r = client.post(f"/api/jobs/{jid}/render-preview", content=b"x" * (_PREVIEW_LIMIT + 1))
     assert r.status_code == 413
-    at_limit = (b"x" * 99 + b"\n") * 20_000  # 정확히 2,000,000바이트
-    r = client.post(f"/api/jobs/{jid}/render-preview", content=at_limit)
+    assert len(_PREVIEW_AT_LIMIT) == _PREVIEW_LIMIT
+    r = client.post(f"/api/jobs/{jid}/render-preview", content=_PREVIEW_AT_LIMIT)
     assert r.status_code == 200
 
 
@@ -1170,13 +1178,18 @@ def test_upload_body_limit_middleware_cuts_streaming_body():
 
 
 def test_upload_limit_does_not_affect_other_routes(tmp_path, sample_pdf):
-    """경로별 상한이라 /render-preview는 업로드 상한이 아니라 자기 2MB 상한을 받는다."""
+    """경로별 상한이라 /render-preview는 업로드 상한도 기본 상한(64KiB)도 아닌 자기
+    상한(256KiB)을 받는다. (예전에는 프리뷰 상한 2MB가 업로드 상한 1MB보다 커서 '업로드
+    상한보다 큰 프리뷰 통과'로 검증했다 — 상한을 256KiB로 낮춘 뒤에는 양쪽 경계를 본다.)"""
     client, settings = _limited_app(tmp_path)
     with client:
         jid = _upload(client, sample_pdf).json()["job_id"]
-        # MAX_UPLOAD_MB(1MB)보다 크지만 프리뷰 상한(2MB) 안이면 통과해야 한다
-        big = b"# preview\n" + b"x" * 1_500_000
+        # 기본 상한(64KiB)보다 크지만 프리뷰 상한 안이면 통과해야 한다
+        big = b"# preview\n" + b"x" * 200_000
         assert client.post(f"/api/jobs/{jid}/render-preview", content=big).status_code == 200
+        # 업로드 상한(1MB)이 더 커도 프리뷰는 자기 상한에서 끊긴다
+        over = b"x" * (_PREVIEW_LIMIT + 1)
+        assert client.post(f"/api/jobs/{jid}/render-preview", content=over).status_code == 413
         # SSE·다운로드 등 GET 경로도 그대로
         assert client.get("/api/health").status_code == 200
 
@@ -1215,16 +1228,21 @@ def test_body_limit_default_covers_unlisted_post_routes(tmp_path):
 
 
 def test_render_preview_limit_enforced_in_middleware(tmp_path, sample_pdf):
-    """프리뷰 상한은 미들웨어에서도 같은 값(2MB)으로 걸린다 — 경계값은 여전히 통과."""
+    """프리뷰 상한은 미들웨어에서도 같은 값(256KiB)으로 걸린다 — 경계값은 여전히 통과."""
+    from app.main import _PREVIEW_LIMIT_BYTES
+
+    import app.api as api_mod
+
+    assert _PREVIEW_LIMIT_BYTES == api_mod._PREVIEW_MAX_BYTES == _PREVIEW_LIMIT
     client, _ = _limited_app(tmp_path)
     with client:
         jid = _upload(client, sample_pdf).json()["job_id"]
-        r = client.post(f"/api/jobs/{jid}/render-preview", content=b"x" * 2_000_001)
+        r = client.post(f"/api/jobs/{jid}/render-preview", content=b"x" * (_PREVIEW_LIMIT + 1))
         assert r.status_code == 413
         assert "미리보기" in r.json()["detail"]
-        at_limit = (b"x" * 99 + b"\n") * 20_000  # 정확히 2,000,000바이트
+        assert "256KiB" in r.json()["detail"]
         assert client.post(
-            f"/api/jobs/{jid}/render-preview", content=at_limit
+            f"/api/jobs/{jid}/render-preview", content=_PREVIEW_AT_LIMIT
         ).status_code == 200
 
 

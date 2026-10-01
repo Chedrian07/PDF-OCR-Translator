@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 import shutil
+import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -276,16 +279,49 @@ _FAILED_PAGE_MD = "> ⚠️ 이 페이지는 변환에 실패했습니다"
 
 def _empty_device_cache() -> None:
     """실패한 청크 재시도 전 디바이스 캐시 반환 — OOM류 실패 후 가용 메모리 복구.
-    (unlimited.py의 _release_device_cache와 동일한 best-effort empty_cache 패턴)"""
-    try:
-        import torch
+    (unlimited.py의 _release_device_cache와 동일한 best-effort empty_cache 패턴)
 
+    torch를 **이미 올린** 프로세스에서만 한다 — textlayer·sidecar 엔진만 쓰는 배포가
+    첫 실패에서 무거운 torch를 새로 임포트하지 않게."""
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return
+    try:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
-    except Exception:  # pragma: no cover — 방어적 (torch 미설치 등)
+    except Exception:  # pragma: no cover — 방어적
         pass
+
+
+def _error_summary(error: BaseException) -> str:
+    return f"{error.__class__.__name__}: {str(error)[:200]}"
+
+
+def _detach(error: BaseException) -> BaseException:
+    """예외가 쥔 traceback 프레임을 놓고 예외(클래스·메시지)만 남긴다.
+
+    실패한 엔진 호출의 예외는 traceback을 통해 run_multi → 벤더 generate 프레임을,
+    그 프레임은 실패 시도의 KV 캐시·이미지·활성화 텐서를 붙잡는다. 예외를 그대로
+    보관하면 재시도 직전의 캐시 해제가 그 메모리를 돌려받지 못해 같은 OOM이 재발하고,
+    잡이 끝날 때(순환 GC 전)까지 유니파이드 메모리에 남는다(PyTorch FAQ의 그 패턴).
+    원인 사슬(__cause__/__context__)의 프레임도 함께 비운다.
+    """
+    stack: list[BaseException] = [error]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if node.__traceback__ is not None:
+            traceback.clear_frames(node.__traceback__)
+            node.__traceback__ = None
+        for linked in (node.__cause__, node.__context__):
+            if linked is not None:
+                stack.append(linked)
+    return error
 
 
 def _add_failed_chunk(
@@ -466,14 +502,15 @@ def execute_job(
                         raise JobCanceled() from None
                     raise
                 except Exception as error:  # noqa: BLE001 — 청크 단위 격리
-                    first_error = error
+                    # 예외 객체는 보관하지 않는다 — 요약 문자열만 남기고 프레임을 놓아야
+                    # 아래 캐시 해제가 실패 시도의 텐서를 실제로 돌려받는다.
+                    first_error = _error_summary(error)
+                    _detach(error)
 
                 logger.warning(
-                    "%s 실패 (%s: %s) — 캐시 해제 후 1회 재시도",
-                    context,
-                    first_error.__class__.__name__,
-                    str(first_error)[:200],
+                    "%s 실패 (%s) — 캐시 해제 후 1회 재시도", context, first_error
                 )
+                gc.collect()  # 프레임을 놓아도 순환 참조로 남은 텐서까지 회수
                 _empty_device_cache()
                 if cancel.is_set():
                     raise JobCanceled() from None
@@ -698,7 +735,7 @@ def execute_job(
                     except JobCanceled:
                         raise
                     except Exception as page_error:  # noqa: BLE001 — 페이지 단위 격리
-                        last_error = page_error
+                        last_error = _detach(page_error)
                         if not _try_embedded_text_fallback(
                             global_page, page_dir, page_error
                         ):
@@ -737,13 +774,13 @@ def execute_job(
                     )
                     if all_failed:
                         failed_chunks += 1
-                        last_chunk_error = last_error
+                        last_chunk_error = _detach(last_error)
                 else:
                     if not _try_embedded_text_fallback(
                         start_page, work_dir, repetition_error
                     ):
                         failed_chunks += 1
-                        last_chunk_error = repetition_error
+                        last_chunk_error = _detach(repetition_error)
                         sink.rewind_to(start_page, "반복/출력 상한 감지")
                         _add_failed_chunk(
                             merger, work_dir, start_page, len(chunk), True,
@@ -762,7 +799,7 @@ def execute_job(
                         str(chunk_error)[:200],
                     )
                     failed_chunks += 1
-                    last_chunk_error = chunk_error
+                    last_chunk_error = _detach(chunk_error)
                     shutil.rmtree(work_dir, ignore_errors=True)
                     sink.rewind_to(start_page, "청크 변환 실패")
                     _add_failed_chunk(

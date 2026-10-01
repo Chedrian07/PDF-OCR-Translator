@@ -3,7 +3,8 @@
 //   node --test frontend/tests/pdf-download.test.mjs
 //
 // 여기서 지키는 계약:
-//  · 503(내보내기 대기열 포화)은 Retry-After만큼 기다렸다가 딱 한 번 재시도한다.
+//  · 503(내보내기 대기열 포화·번역 직후 예열 빌드)은 Retry-After만큼 기다렸다가
+//    PDF_RETRY_MAX회까지 재시도한다. 1회로는 60초가 넘는 예열 빌드를 못 기다린다.
 //  · 그 외 상태 코드는 절대 재시도하지 않는다 — 404/409는 기다려도 안 바뀐다.
 //  · 진행 문구는 Content-Length가 없어도 "멈춰 있지 않다"를 보여 준다.
 
@@ -19,9 +20,20 @@ test('pdfRetryDelay: 503은 Retry-After만큼 기다렸다 재시도한다', () 
   assert.equal(pdfRetryDelay(503, '30', 0), 30);
 });
 
-test('pdfRetryDelay: 재시도는 한 번뿐 — 무한 재시도로 서버를 더 밀지 않는다', () => {
-  assert.ok(pdfRetryDelay(503, '5', 0) > 0);
+test('pdfRetryDelay: 재시도는 유한하다 — 무한 재시도로 서버를 더 밀지 않는다', () => {
+  for (let attempt = 0; attempt < PDF_RETRY_MAX; attempt += 1) {
+    assert.ok(pdfRetryDelay(503, '5', attempt) > 0, `attempt ${attempt}`);
+  }
   assert.equal(pdfRetryDelay(503, '5', PDF_RETRY_MAX), 0);
+});
+
+test('pdfRetryDelay: 예열 빌드(30초 예산 503 반복)를 기다릴 만큼 여러 번 재시도한다', () => {
+  // 실경로: 25쪽 예열 37초 동안 첫 클릭이 30초 뒤 503(Retry-After 30)을 받았다.
+  // 46쪽은 예열이 67~75초라 재시도 1회로는 최종 실패했다 (gap1-metal-real-e2e-7).
+  assert.ok(PDF_RETRY_MAX >= 3, `PDF_RETRY_MAX=${PDF_RETRY_MAX}`);
+  let waited = 0;
+  for (let attempt = 0; attempt < PDF_RETRY_MAX; attempt += 1) waited += pdfRetryDelay(503, '30', attempt);
+  assert.ok(waited >= 90, `총 대기 ${waited}s`);
 });
 
 test('pdfRetryDelay: 503이 아니면 재시도하지 않는다', () => {

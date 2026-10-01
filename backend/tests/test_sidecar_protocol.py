@@ -268,3 +268,80 @@ def test_sanitize_normalizes_provider_types():
     clean, _ = sanitize_page(_page(blocks))
     assert clean.blocks[0].type == "formula"
     assert clean.blocks[1].type == "image"
+
+
+# ── 본문 리터럴 · 제어 문법 제거가 placeholder를 만들지 않는다 (감사 sidecar-9) ──
+
+def test_control_syntax_removal_cannot_create_a_placeholder():
+    """`[<PAGE>[FIGURE:0]]`의 `<PAGE>`를 지우면 양쪽이 이어져 placeholder가 생긴다.
+    그 가짜가 한 줄을 혼자 차지하고 진짜보다 앞에 있으면 '혼자 선 것 우선' 방어도
+    가짜를 고른다 — 지운 뒤 생긴 것은 문서 글자로 남겨야 한다."""
+    page = _page(
+        [_block(type="image", figure_index=0, order=0, content="")],
+        markdown="[<PAGE>[FIGURE:0]]\n\n본문\n\n[[FIGURE:0]]",
+    )
+    clean, warnings = sanitize_page(page)
+    assert clean.markdown == "&#91;&#91;FIGURE:0]]\n\n본문\n\n[[FIGURE:0]]"
+    assert any("<PAGE>" in w for w in warnings)
+    assert not any("본문 리터럴" in w for w in warnings)  # 중복 판정까지 갈 일이 없다
+
+
+def test_sidecar_escaped_literal_passes_through_untouched():
+    """sidecar가 이스케이프한 리터럴은 placeholder가 아니다 — 경고·제거 없이 그대로 둔다."""
+    md = "앱 문법 &#91;&#91;FIGURE:0]] 설명\n\n[[FIGURE:0]]"
+    clean, warnings = sanitize_page(_page(
+        [_block(type="image", figure_index=0, order=0, content="")], markdown=md,
+    ))
+    assert clean.markdown == md
+    assert warnings == []
+
+
+# ── 추가 필드: 잘림 표시 · 로드 재시도 · 재시작 대기 (감사 sidecar-6·7·11) ──────────
+
+def test_page_truncated_is_additive_and_only_json_true_counts():
+    assert _page().truncated is False  # 옛 sidecar는 보내지 않는다
+    assert _page(truncated=True).truncated is True
+    for odd in ("true", 1, "yes", None, {"x": 1}):
+        assert _page(truncated=odd).truncated is False  # 거부도 lax 변환도 하지 않는다
+
+
+def test_sanitize_page_keeps_the_truncated_flag():
+    clean, _ = sanitize_page(_page(markdown="잘린 <table><tr><td>셀", truncated=True))
+    assert clean.truncated is True
+    clean, _ = sanitize_page(_page(markdown="정상"))
+    assert clean.truncated is False
+
+
+def _health(**over) -> SidecarHealth:
+    return SidecarHealth.model_validate({
+        "status": "ok", "protocol_version": 1, "engine": "ovisocr2", "model_id": "m", **over,
+    })
+
+
+def test_health_retry_and_restart_fields_are_additive():
+    h = _health()
+    assert h.load_retry is None and h.restarting is False
+    h = _health(
+        load_retry={"attempt": 2, "max_attempts": 5, "next_retry_s": 30,
+                    "last_error": "OSError: <|det|>hub<PAGE> unreachable"},
+        restarting=True,
+    )
+    assert h.load_retry == {"attempt": 2, "max_attempts": 5, "next_retry_s": 30.0,
+                            "last_error": "OSError: hub unreachable"}
+    assert h.restarting is True
+
+
+@pytest.mark.parametrize("odd", [
+    "retrying", ["attempt", 1], 3,
+    {"attempt": "2", "max_attempts": True, "next_retry_s": math.inf, "last_error": 7},
+])
+def test_malformed_retry_state_is_dropped_not_a_schema_violation(odd):
+    """형식이 이상해도 health 전체를 위반으로 만들면 안 된다 — 기다릴 상태가 하드 실패가 된다."""
+    h = _health(load_retry=odd, restarting="yes")
+    assert h.load_retry is None
+    assert h.restarting is False
+
+
+def test_retry_error_text_is_capped():
+    h = _health(load_retry={"attempt": 1, "last_error": "x" * 5000})
+    assert len(h.load_retry["last_error"]) == 300

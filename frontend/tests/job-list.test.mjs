@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { jobRowSignature } from '../js/core.js';
 import { armTimers, el, state } from '../js/state.js';
 import { pollJobs, refreshJobs, renderJobList } from '../js/jobs.js';
-import { installFakeDom, mount } from './helpers/fake-dom.mjs';
+import { assertSameNode, installFakeDom, mount } from './helpers/fake-dom.mjs';
 
 function job(id, status = 'done', extra = {}) {
   return { job_id: id, filename: `${id}.pdf`, status, created_at: '2026-10-01T09:00:00Z', ...extra };
@@ -72,7 +72,7 @@ test('같은 데이터로 다시 렌더하면 DOM을 건드리지 않고 포커�
   state.jobs = [job('a'), job('b'), job('c')]; // 폴링 — 새 객체, 같은 내용
   renderJobList();
   assert.equal(mutations.n, 0);
-  assert.equal(doc.activeElement, del);
+  assertSameNode(assert, doc.activeElement, del, '포커스가 그대로');
 });
 
 test('상태가 바뀐 줄은 제자리에서 갱신되고 포커스·삭제 무장이 유지된다', (t) => {
@@ -85,13 +85,13 @@ test('상태가 바뀐 줄은 제자리에서 갱신되고 포커스·삭제 무
   assert.ok(del.classList.contains('armed'));
   state.jobs = [job('a'), job('b', 'done')];
   renderJobList();
-  assert.equal(rows()[1], item, '같은 <li>를 재사용한다');
-  assert.equal(control('b', 'ji-del'), del, '같은 삭제 버튼을 재사용한다');
-  assert.equal(doc.activeElement, del, '키보드 포커스가 body로 날아가지 않는다');
+  assertSameNode(assert, rows()[1], item, '같은 <li>를 재사용한다');
+  assertSameNode(assert, control('b', 'ji-del'), del, '같은 삭제 버튼을 재사용한다');
+  assertSameNode(assert, doc.activeElement, del, '키보드 포커스가 body로 날아가지 않는다');
   assert.ok(del.classList.contains('armed'), '무장이 재렌더를 넘어 유지된다');
   assert.equal(item.querySelector('.chip').textContent, '완료');
   assert.ok(item.querySelector('.ji-read'), '완료되면 바로 읽기 버튼이 생긴다');
-  assert.equal(armTimers.get('b').btn, del);
+  assertSameNode(assert, armTimers.get('b').btn, del, '무장 타이머가 현재 버튼을 가리킨다');
 });
 
 test('줄 순서가 바뀌어 포커스가 빠지면 같은 잡의 같은 컨트롤로 돌려준다', (t) => {
@@ -101,7 +101,7 @@ test('줄 순서가 바뀌어 포커스가 빠지면 같은 잡의 같은 컨트
   state.jobs = [job('c'), job('a'), job('b')];
   renderJobList();
   assert.deepEqual(ids(), ['c', 'a', 'b']);
-  assert.equal(doc.activeElement, control('c', 'ji-del'));
+  assertSameNode(assert, doc.activeElement, control('c', 'ji-del'), '같은 잡의 삭제 버튼으로 복원');
 });
 
 test('새 잡이 맨 위에 생겨도 기존 줄은 옮기지 않는다', (t) => {
@@ -111,8 +111,8 @@ test('새 잡이 맨 위에 생겨도 기존 줄은 옮기지 않는다', (t) =>
   state.jobs = [job('n', 'queued'), job('a'), job('b')];
   renderJobList();
   assert.deepEqual(ids(), ['n', 'a', 'b']);
-  assert.equal(rows()[1], before[0]);
-  assert.equal(rows()[2], before[1]);
+  assertSameNode(assert, rows()[1], before[0], '기존 첫 줄 재사용');
+  assertSameNode(assert, rows()[2], before[1], '기존 둘째 줄 재사용');
 });
 
 test('포커스된 잡이 목록에서 사라지면 같은 자리 줄의 열기 버튼으로 넘긴다', (t) => {
@@ -122,7 +122,7 @@ test('포커스된 잡이 목록에서 사라지면 같은 자리 줄의 열기 
   state.jobs = [job('a'), job('c')];
   renderJobList();
   assert.deepEqual(ids(), ['a', 'c']);
-  assert.equal(doc.activeElement, control('c', 'ji-open'));
+  assertSameNode(assert, doc.activeElement, control('c', 'ji-open'), '같은 자리 줄의 열기 버튼');
 });
 
 test('빈 목록이면 안내 문구를 보이고 줄을 모두 지운다', (t) => {

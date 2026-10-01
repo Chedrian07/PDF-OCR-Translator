@@ -115,20 +115,79 @@ def _balance_table_tags(html: str) -> str:
 # `$`는 통화($5)와 수식이 모두 쓰는 모호한 문자다 — `$$`는 항상 수식으로, `$…$`는
 # 내용이 LaTeX스러울 때(\^_{} 포함)만 수식으로, 그 외 bare `$`는 통화로 이스케이프한다.
 # 결과 md(result.md)는 원본 표기를 그대로 보존하고, 변환은 렌더에서만 한다.
-_CODE_REGION = re.compile(
-    r"^```.*?^```[ \t]*$|^~~~.*?^~~~[ \t]*$|`[^`\n]+`",
-    re.DOTALL | re.MULTILINE,
-)
+#
+# **비용 상한(보안)**: 이 정규화는 인증 없는 POST /render-preview(본문 최대 2MB)가
+# 그대로 호출하고, 정규식은 GIL을 놓지 않는다. 그래서 모든 패턴이 입력 길이에
+# **선형**이어야 한다 — 짝 없는 여는 델리미터마다 문단 끝까지 다시 훑는 패턴은
+# 개행 없는 `\[ a ` 반복 200KiB에 61초(크기 2배→시간 4배) 동안 프로세스 전체를
+# 멈췄다. 원칙: (1) 수식 본문은 다음 **짝 없는(이스케이프되지 않은) 여는 델리미터**나
+# 빈 줄에서 멈춘다 — 어느 여는 델리미터든 다음 여는 델리미터까지만 보므로 전체 합이
+# 선형이다. (2) 코드펜스는 줄 단위 상태 기계로 찾는다(`_mask_code_regions`).
+# (3) 마스크 복원은 한 번의 패스로 한다.
+_FENCE_CLOSE = {
+    "```": re.compile(r"```[ \t]*"),
+    "~~~": re.compile(r"~~~[ \t]*"),
+}
+_INLINE_CODE = re.compile(r"`[^`\n]+`")
+# 이스케이프되지 않은 여는 델리미터. `\\[2pt]`(LaTeX 줄바꿈 간격 — aligned·array 안에서
+# 흔하다)의 `\[`는 디스플레이 수식의 시작이 아니고, 수식 본문 안에 나와도 본문을
+# 끊지 않는다.
+_OPEN_DISPLAY = r"(?<!\\)\\\["
+_OPEN_INLINE = r"(?<!\\)\\\("
+_PARA_BREAK = r"\n[ \t]*\n"
 # 디스플레이 수식은 **문단 경계를 넘지 않는다**: 짝이 어긋난 여는 델리미터 하나가
 # 다음 델리미터까지의 문단들을 통째로 tex로 삼켜(그 안의 헤딩·이미지가 소실)
-# KaTeX 오류 덩어리로 바뀌던 것을 막는다 — 본문에 빈 줄(문단 경계)을 금지하는
-# tempered-dot으로 폭주 범위를 한 문단으로 가둔다(표 태그 정규식과 같은 방식).
-_MATH_DISPLAY = re.compile(r"\\\[((?:(?!\n[ \t]*\n).)+?)\\\]", re.DOTALL)
-_MATH_INLINE = re.compile(r"\\\((.+?)\\\)", re.DOTALL)
-_MATH_DOLLAR_DISPLAY = re.compile(r"\$\$((?:(?!\n[ \t]*\n).)+?)\$\$", re.DOTALL)
+# KaTeX 오류 덩어리로 바뀌던 것을 막는다 — 본문에 빈 줄(문단 경계)과 다음 여는
+# 델리미터를 금지하는 tempered-dot으로 폭주 범위를 가둔다(표 태그 정규식과 같은 방식).
+_MATH_DISPLAY = re.compile(
+    rf"{_OPEN_DISPLAY}((?:(?!{_OPEN_DISPLAY}|{_PARA_BREAK}).)+?)\\\]", re.DOTALL
+)
+# 인라인 수식도 같은 울타리를 친다 — 짝 없는 `\(` 하나(잘린 수식·코드의 리터럴 `\(`)가
+# 다음 수식의 `\)`까지 본문 전체를 수식 스팬으로 삼키지 않게.
+_MATH_INLINE = re.compile(
+    rf"{_OPEN_INLINE}((?:(?!{_OPEN_INLINE}|{_PARA_BREAK}).)+?)\\\)", re.DOTALL
+)
+_MATH_DOLLAR_DISPLAY = re.compile(rf"\$\$((?:(?!{_PARA_BREAK}).)+?)\$\$", re.DOTALL)
 _MATH_DOLLAR_INLINE = re.compile(r"\$([^$\n]+?)\$")
 _MATH_LIKE = re.compile(r"[\\^_{}]")  # LaTeX 명령/첨자
 _MASK_FMT = "\x00MDMASK{}\x00"
+_MASK_TOKEN = re.compile("\x00MDMASK(\\d+)\x00")
+
+
+def _mask_code_regions(md_text: str, mask) -> str:
+    """코드펜스(``` / ~~~)와 인라인 코드를 mask(text)→토큰으로 바꾼다 — 선형 시간.
+
+    의미는 예전 정규식 `^```.*?^```[ \\t]*$|^~~~.*?^~~~[ \\t]*$|`[^`\\n]+``과 같다:
+    0열에서 시작하는 펜스 줄은 그 뒤 첫 '닫는 줄'(같은 펜스 문자 + 공백뿐)까지를
+    통째로 덮고, 닫는 줄이 없으면 덮지 않는다. 정규식은 닫히지 않은 여는 줄마다
+    문서 끝까지 다시 훑어 `"```a\\n" × N`에서 O(N²)이었다 — 여기서는 '다음 닫는 줄'
+    위치를 뒤에서부터 한 번에 구해 둔다. 펜스는 줄 전체를 덮고 인라인 코드는 줄을
+    넘지 못하므로, 펜스를 먼저 덮고 남은 본문에 인라인 패턴을 돌려도 결과가 같다.
+    """
+    lines = md_text.split("\n")
+    n = len(lines)
+    next_close: dict[str, list[int]] = {}
+    for fence, closer in _FENCE_CLOSE.items():
+        nxt = [-1] * n
+        found = -1
+        for i in range(n - 1, -1, -1):
+            nxt[i] = found  # i보다 **뒤**의 첫 닫는 줄
+            if closer.fullmatch(lines[i]):
+                found = i
+        next_close[fence] = nxt
+    out: list[str] = []
+    i = 0
+    while i < n:
+        line = lines[i]
+        fence = line[:3]
+        j = next_close[fence][i] if fence in next_close else -1
+        if j != -1:
+            out.append(mask("\n".join(lines[i : j + 1])))
+            i = j + 1
+        else:
+            out.append(line)
+            i += 1
+    return _INLINE_CODE.sub(lambda m: mask(m.group(0)), "\n".join(out))
 
 
 def _is_inline_dollar_math(tex: str) -> bool:
@@ -152,8 +211,12 @@ def _normalize_math_delimiters(md_text: str) -> str:
         masked.append(text)
         return _MASK_FMT.format(len(masked) - 1)
 
+    # 0) NUL은 CommonMark가 어차피 U+FFFD로 바꾼다(markdown-it도 동일) — 미리 바꿔
+    #    본문이 마스크 토큰을 위조해 복원 단계를 교란하지 못하게 한다.
+    md_text = md_text.replace("\x00", "\ufffd")
+
     # 1) 코드펜스/인라인 코드 보호
-    md_text = _CODE_REGION.sub(lambda m: _mask_literal(m.group(0)), md_text)
+    md_text = _mask_code_regions(md_text, _mask_literal)
 
     # 2) 모델이 `$$`/`$`로 낸 수식을 **통화 이스케이프 전에** 마스킹(Ovis/Paddle).
     #    $$는 항상 수식, $…$는 LaTeX스러운 내용일 때만(그 외는 통화로 남겨 이스케이프).
@@ -185,14 +248,31 @@ def _normalize_math_delimiters(md_text: str) -> str:
     md_text = _MATH_DISPLAY.sub(_display, md_text)
     md_text = _MATH_INLINE.sub(_inline, md_text)
 
-    # 5) 마스킹 복원 (코드 + $$/$ 수식)
-    for i, original in enumerate(masked):
-        md_text = md_text.replace(_MASK_FMT.format(i), original)
-    return md_text
+    # 5) 마스킹 복원 (코드 + $$/$ 수식) — 한 번의 패스. 토큰마다 전체 문자열을
+    #    다시 훑는 replace 반복은 마스크 수 × 길이(인라인 코드 50만 개짜리 2MB 본문에서
+    #    10^12)라 이것만으로도 프로세스를 멈춘다. `$…$` 마스크 안에 먼저 만든 코드
+    #    마스크가 들어 있을 수 있어 **더 앞 번호만** 재귀로 펼친다(종료·크기 보장 —
+    #    토큰마다 원문은 한 곳에만 있다).
+    def _restore(text: str, limit: int) -> str:
+        def _repl(m: re.Match) -> str:
+            idx = int(m.group(1))
+            if idx >= limit:
+                return m.group(0)
+            return _restore(masked[idx], idx)
+
+        return _MASK_TOKEN.sub(_repl, text)
+
+    return _restore(md_text, len(masked))
 
 
 # ── 플레인 텍스트 + 수식 스팬 (마크다운이 아닌 문맥용 — 레이아웃 뷰 등) ──
-_MATH_ANY = re.compile(r"\\\[(.+?)\\\]|\\\((.+?)\\\)", re.DOTALL)
+# 마크다운 경로(_MATH_DISPLAY/_MATH_INLINE)와 같은 울타리: 이스케이프되지 않은 다음
+# 여는 델리미터나 빈 줄을 넘지 않는다(짝 없는 `\(`가 뒤 본문을 삼키지 않고, 비용도 선형).
+_MATH_ANY = re.compile(
+    rf"{_OPEN_DISPLAY}((?:(?!{_OPEN_DISPLAY}|{_PARA_BREAK}).)+?)\\\]"
+    rf"|{_OPEN_INLINE}((?:(?!{_OPEN_INLINE}|{_PARA_BREAK}).)+?)\\\)",
+    re.DOTALL,
+)
 
 
 def text_with_math_html(text: str) -> str:

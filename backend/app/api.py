@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -200,8 +201,42 @@ class _AbuseGuard:
 # TRUSTED_PROXY_HOPS = 앱 앞단에 있는 신뢰 프록시 수(각 홉이 XFF에 한 항목을 덧붙인다).
 # 미설정(0)이면 헤더를 완전히 무시하는 현행 동작 그대로 — 기본값이 안전한 쪽이다.
 _TRUSTED_PROXY_HOPS_ENV = "TRUSTED_PROXY_HOPS"
+# 홉 수만으로는 '그 헤더를 정말 프록시가 붙였는가'를 알 수 없다. 프록시를 두고도
+# 백엔드 포트(compose 기본 0.0.0.0)가 LAN에 열려 있으면, 직접 붙은 클라이언트가
+# 요청마다 X-Forwarded-For를 위조해 IP 레이트리밋을 무력화하고 리미터 키를 무한히
+# 늘릴 수 있었다. 그래서 XFF는 **직접 연결한 피어가 신뢰 프록시 주소일 때만** 읽는다
+# (uvicorn forwarded_allow_ips와 같은 모델). TRUSTED_PROXY_IPS = 주소·CIDR 콤마 목록,
+# 비우면 루프백만(같은 호스트의 nginx/Caddy — 가장 흔한 배치). 컨테이너 앞 프록시는
+# 피어가 브리지 주소(예: 172.17.0.1)로 보이므로 그 주소를 넣어야 한다.
+_TRUSTED_PROXY_IPS_ENV = "TRUSTED_PROXY_IPS"
+_DEFAULT_TRUSTED_PROXIES = ("127.0.0.0/8", "::1/128")
 _XFF_KEY_MAX = 64
 _trusted_proxy_warned: set[str] = set()
+
+
+@functools.lru_cache(maxsize=8)
+def _trusted_proxy_networks(raw: str) -> tuple:
+    """TRUSTED_PROXY_IPS 값 → 네트워크 목록(잘못된 항목은 경고 후 건너뛴다)."""
+    entries = [part.strip() for part in raw.split(",") if part.strip()]
+    networks = []
+    for entry in entries or _DEFAULT_TRUSTED_PROXIES:
+        try:
+            networks.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            logger.warning("%s 항목이 IP·CIDR이 아닙니다 (%r) — 건너뜁니다",
+                           _TRUSTED_PROXY_IPS_ENV, entry)
+    return tuple(networks)
+
+
+def _is_trusted_proxy(host: str) -> bool:
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # 'unknown'·유닉스 소켓 등 — 프록시로 볼 근거가 없다
+    if address.version == 6 and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped  # 듀얼 스택 소켓의 ::ffff:127.0.0.1
+    networks = _trusted_proxy_networks(os.environ.get(_TRUSTED_PROXY_IPS_ENV) or "")
+    return any(address in network for network in networks)
 
 
 def _trusted_proxy_hops() -> int:
@@ -223,6 +258,18 @@ def _client_key(request: Request) -> str:
     direct = client.host if client is not None else "unknown"
     hops = _trusted_proxy_hops()
     if hops <= 0:
+        return direct
+    if not _is_trusted_proxy(direct):
+        # 프록시를 거치지 않은 직접 연결 — 헤더는 클라이언트가 쓴 값이라 믿지 않는다.
+        if "untrusted-peer" not in _trusted_proxy_warned:
+            _trusted_proxy_warned.add("untrusted-peer")
+            logger.warning(
+                "%s=%d이지만 직접 연결 피어 %s가 %s(기본: 루프백)에 없어 X-Forwarded-For를 "
+                "무시합니다 — 리버스 프록시 주소를 %s에 넣거나 백엔드 포트를 닫으세요"
+                "(BIND_HOST=127.0.0.1)",
+                _TRUSTED_PROXY_HOPS_ENV, hops, direct, _TRUSTED_PROXY_IPS_ENV,
+                _TRUSTED_PROXY_IPS_ENV,
+            )
         return direct
     chain = [p.strip() for p in (request.headers.get("x-forwarded-for") or "").split(",")]
     chain = [p for p in chain if p]

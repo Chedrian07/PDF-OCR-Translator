@@ -123,7 +123,16 @@ class OCREngine(abc.ABC):
         """직전 실행에서 쌓인 사용자 노출용 경고를 꺼내고 비운다 (기본: 없음).
 
         runner가 청크마다 호출해 잡 warnings에 합친다 — 정화/절단으로 내용이
-        빠졌는데 잡이 조용히 'done'이 되는 것을 막는다."""
+        빠졌는데 잡이 조용히 'done'이 되는 것을 막는다. 여기에는 **실제 품질 저하**만
+        넣는다(잡 quality.state가 이것으로 'degraded'가 된다)."""
+        return []
+
+    def drain_notices(self) -> list[str]:
+        """직전 실행에서 쌓인 정보성 메모를 꺼내고 비운다 (기본: 없음).
+
+        내용·품질에는 문제가 없는 처리 경위(예: 일시 중단 뒤 재시도로 정상 처리됨)용이다.
+        runner가 drain_warnings와 같은 시점에 잡 notices로 합친다 — warnings에 섞으면
+        정상 결과까지 'degraded'로 보인다."""
         return []
 
     @abc.abstractmethod

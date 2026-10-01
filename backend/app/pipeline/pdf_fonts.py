@@ -18,6 +18,7 @@ PDF에 텍스트 레이어가 있으면 그 안의 span 크기를 그대로 읽�
   (arXiv 왼쪽 여백 스탬프 같은 90° 회전 텍스트 — 렌더러가 writing-mode로 재현).
 - 처리한 페이지에는 page["fonts_v"] 버전을 스탬프한다 — 백필이 구버전
   enrichment 결과를 감지해 1회 재실행할 수 있게 (매 요청 재스캔 방지).
+  건너뛴 페이지(번호 오류·범위 밖·텍스트 추출 예외)도 똑같이 스탬프한다.
 - span이 하나도 없거나 텍스트 레이어가 없는 블록은 건드리지 않는다(폴백에 위임).
 
 실패(텍스트 레이어 없음·손상 PDF·페이지 범위 초과)는 조용히 무시한다 —
@@ -119,7 +120,8 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
     """layout.json 페이지 블록에 원본 PDF 실측 폰트 크기(cqw)를 주입.
 
     pages 엔트리: {"page": N(1-based), "width", "height", "blocks": [...]}.
-    블록을 제자리(in-place)로 수정하고, 하나라도 주입했으면 True를 돌려준다."""
+    블록을 제자리(in-place)로 수정하고, 하나라도 주입했거나 fonts_v 스탬프를 새로
+    찍었으면 True를 돌려준다(스탬프만으로도 저장이 필요하다)."""
     try:
         # 조용한 임포트 — 손상 폰트 PDF에서 get_text가 MuPDF 에러를 stderr에
         # 페이지마다 쏟아내던 것을 차단(요약은 아래 finally의 drain이 로깅)
@@ -137,122 +139,142 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
     changed = False
     try:
         for page in pages:
-            try:
-                pno = int(page.get("page", 0))
-            except (TypeError, ValueError):
-                continue
-            if pno < 1 or pno > doc.page_count:  # 페이지 범위 방어
-                continue
-            fpage = doc[pno - 1]
-            pw = float(fpage.rect.width)
-            ph = float(fpage.rect.height)
-            if pw <= 0 or ph <= 0:
+            if not isinstance(page, dict):
                 continue
             try:
-                text_dict = fpage.get_text("dict")
-            except Exception:
-                continue
-            # 페이지의 모든 span을 평면화 (bbox·size·text·flags·font)
-            spans: list[tuple[dict, tuple, int]] = []
-            line_no = 0
-            for tb in text_dict.get("blocks", ()):
-                for line in tb.get("lines", ()):
-                    ldir = tuple(line.get("dir") or (1, 0))
-                    for sp in line.get("spans", ()):
-                        spans.append((sp, ldir, line_no))
-                    line_no += 1
-            if not spans:
-                page["fonts_v"] = ENRICH_VERSION
-                changed = True
-                continue
-
-            for block in page.get("blocks", ()):
-                if block.get("image"):
-                    continue  # 이미지 블록 — 폰트 크기 없음
-                bbox = block.get("bbox")
-                if not bbox or len(bbox) != 4:
-                    continue
-                x1, y1, x2, y2 = bbox
-                # 0–999 정규화 → pt, ±3pt 확장
-                rx1 = x1 / 999 * pw - 3
-                ry1 = y1 / 999 * ph - 3
-                rx2 = x2 / 999 * pw + 3
-                ry2 = y2 / 999 * ph + 3
-
-                pairs: list[tuple[float, int]] = []
-                bold_chars = 0
-                total_chars = 0
-                serif_chars = 0
-                sans_chars = 0
-                vert_up = vert_down = 0
-                matched_lines: dict[int, list[float]] = {}
-                for sp, ldir, source_line_no in spans:
-                    sb = sp.get("bbox")
-                    if not sb or len(sb) != 4:
-                        continue
-                    cx = (sb[0] + sb[2]) / 2
-                    cy = (sb[1] + sb[3]) / 2
-                    if not (rx1 <= cx <= rx2 and ry1 <= cy <= ry2):
-                        continue
-                    n = len((sp.get("text") or "").strip())
-                    if n <= 0:
-                        continue
-                    size = float(sp.get("size", 0) or 0)
-                    if size <= 0:
-                        continue
-                    pairs.append((size, n))
-                    total_chars += n
-                    bounds = matched_lines.setdefault(
-                        source_line_no, [float(sb[0]), float(sb[1]), float(sb[2]), float(sb[3])],
-                    )
-                    bounds[0] = min(bounds[0], float(sb[0]))
-                    bounds[1] = min(bounds[1], float(sb[1]))
-                    bounds[2] = max(bounds[2], float(sb[2]))
-                    bounds[3] = max(bounds[3], float(sb[3]))
-                    if _span_is_bold(sp):
-                        bold_chars += n
-                    style = _font_style(str(sp.get("font") or ""))
-                    if style == "serif":
-                        serif_chars += n
-                    elif style == "sans":
-                        sans_chars += n
-                    if abs(ldir[1]) > 0.7:  # 세로쓰기 줄 (y축 진행)
-                        if ldir[1] < 0:
-                            vert_up += n    # 아래→위 (arXiv 스탬프 방향)
-                        else:
-                            vert_down += n
-
-                if not pairs or total_chars <= 0:
-                    continue  # 매칭 span 없음 — 블록 미변경(폴백에 위임)
-                block["fs"] = _weighted_median(pairs) / pw * 100
-                if bold_chars > total_chars * 0.5:
-                    block["bold"] = True
-                else:
-                    block.pop("bold", None)
-                if sans_chars > serif_chars and sans_chars > 0:
-                    block["font_style"] = "sans"
-                elif serif_chars > 0:
-                    block["font_style"] = "serif"
-                else:
-                    block.pop("font_style", None)
-                align = _infer_alignment(
-                    block,
-                    (rx1 + 3, ry1 + 3, rx2 - 3, ry2 - 3),
-                    [tuple(values) for values in matched_lines.values()],
-                    pw,
-                )
-                if align:
-                    block["align"] = align
-                else:
-                    block.pop("align", None)
-                if (vert_up + vert_down) > total_chars * 0.5:
-                    block["vertical"] = "up" if vert_up >= vert_down else "down"
-                else:
-                    block.pop("vertical", None)
-                changed = True
-            page["fonts_v"] = ENRICH_VERSION
-            changed = True
+                if _enrich_page(doc, page):
+                    changed = True
+            except Exception:  # noqa: BLE001 — 한 페이지 실패가 나머지 백필을 막지 않는다
+                pass
+            finally:
+                # 건너뛴 페이지(번호 오류·범위 밖·크기 0·텍스트 추출 예외)도 이 버전으로
+                # "시도했고 얻을 것이 없었다"고 스탬프한다. 빼먹으면 백필 호출부가
+                # 미스탬프 페이지를 보고 매 요청 전 문서를 재스캔하고 layout을 다시 써서
+                # 내보내기 PDF 캐시까지 무효화하는 루프에 빠진다(손상 PDF로 재현).
+                if page.get("fonts_v") != ENRICH_VERSION:
+                    page["fonts_v"] = ENRICH_VERSION
+                    changed = True
     finally:
         doc.close()
         drain_mupdf_warnings("폰트 추출")
+    return changed
+
+
+def _enrich_page(doc, page: dict) -> bool:
+    """한 페이지의 블록에 실측 메타를 심는다. 블록을 바꿨으면 True.
+
+    스탬프는 호출부가 결과와 무관하게 찍는다 — 여기서 일찍 빠져나가도 된다.
+    """
+    try:
+        pno = int(page.get("page", 0))
+    except (TypeError, ValueError):
+        return False
+    if pno < 1 or pno > doc.page_count:  # 페이지 범위 방어
+        return False
+    fpage = doc[pno - 1]
+    pw = float(fpage.rect.width)
+    ph = float(fpage.rect.height)
+    if pw <= 0 or ph <= 0:
+        return False
+    try:
+        text_dict = fpage.get_text("dict")
+    except Exception:  # noqa: BLE001 — 손상 페이지는 폴백 휴리스틱에 맡긴다
+        return False
+    # 페이지의 모든 span을 평면화 (bbox·size·text·flags·font)
+    spans: list[tuple[dict, tuple, int]] = []
+    line_no = 0
+    for tb in text_dict.get("blocks", ()):
+        for line in tb.get("lines", ()):
+            ldir = tuple(line.get("dir") or (1, 0))
+            for sp in line.get("spans", ()):
+                spans.append((sp, ldir, line_no))
+            line_no += 1
+    if not spans:
+        return False
+
+    changed = False
+    for block in page.get("blocks", ()):
+        if block.get("image"):
+            continue  # 이미지 블록 — 폰트 크기 없음
+        bbox = block.get("bbox")
+        if not bbox or len(bbox) != 4:
+            continue
+        x1, y1, x2, y2 = bbox
+        # 0–999 정규화 → pt, ±3pt 확장
+        rx1 = x1 / 999 * pw - 3
+        ry1 = y1 / 999 * ph - 3
+        rx2 = x2 / 999 * pw + 3
+        ry2 = y2 / 999 * ph + 3
+
+        pairs: list[tuple[float, int]] = []
+        bold_chars = 0
+        total_chars = 0
+        serif_chars = 0
+        sans_chars = 0
+        vert_up = vert_down = 0
+        matched_lines: dict[int, list[float]] = {}
+        for sp, ldir, source_line_no in spans:
+            sb = sp.get("bbox")
+            if not sb or len(sb) != 4:
+                continue
+            cx = (sb[0] + sb[2]) / 2
+            cy = (sb[1] + sb[3]) / 2
+            if not (rx1 <= cx <= rx2 and ry1 <= cy <= ry2):
+                continue
+            n = len((sp.get("text") or "").strip())
+            if n <= 0:
+                continue
+            size = float(sp.get("size", 0) or 0)
+            if size <= 0:
+                continue
+            pairs.append((size, n))
+            total_chars += n
+            bounds = matched_lines.setdefault(
+                source_line_no, [float(sb[0]), float(sb[1]), float(sb[2]), float(sb[3])],
+            )
+            bounds[0] = min(bounds[0], float(sb[0]))
+            bounds[1] = min(bounds[1], float(sb[1]))
+            bounds[2] = max(bounds[2], float(sb[2]))
+            bounds[3] = max(bounds[3], float(sb[3]))
+            if _span_is_bold(sp):
+                bold_chars += n
+            style = _font_style(str(sp.get("font") or ""))
+            if style == "serif":
+                serif_chars += n
+            elif style == "sans":
+                sans_chars += n
+            if abs(ldir[1]) > 0.7:  # 세로쓰기 줄 (y축 진행)
+                if ldir[1] < 0:
+                    vert_up += n    # 아래→위 (arXiv 스탬프 방향)
+                else:
+                    vert_down += n
+
+        if not pairs or total_chars <= 0:
+            continue  # 매칭 span 없음 — 블록 미변경(폴백에 위임)
+        block["fs"] = _weighted_median(pairs) / pw * 100
+        if bold_chars > total_chars * 0.5:
+            block["bold"] = True
+        else:
+            block.pop("bold", None)
+        if sans_chars > serif_chars and sans_chars > 0:
+            block["font_style"] = "sans"
+        elif serif_chars > 0:
+            block["font_style"] = "serif"
+        else:
+            block.pop("font_style", None)
+        align = _infer_alignment(
+            block,
+            (rx1 + 3, ry1 + 3, rx2 - 3, ry2 - 3),
+            [tuple(values) for values in matched_lines.values()],
+            pw,
+        )
+        if align:
+            block["align"] = align
+        else:
+            block.pop("align", None)
+        if (vert_up + vert_down) > total_chars * 0.5:
+            block["vertical"] = "up" if vert_up >= vert_down else "down"
+        else:
+            block.pop("vertical", None)
+        changed = True
     return changed

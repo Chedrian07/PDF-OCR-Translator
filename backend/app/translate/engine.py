@@ -38,9 +38,10 @@ from .masking import (
 from .segment import (
     apply_layout,
     assemble_markdown,
+    layout_line_map,
     layout_line_sources,
     layout_units,
-    reconcile_markdown_with_layout,
+    map_unit_lines,
     reference_rule_mismatch,
     split_markdown,
 )
@@ -255,6 +256,7 @@ class _TranslationRun:
     lay_units: list = field(default_factory=list)
     targets: list = field(default_factory=list)
     deferred: list = field(default_factory=list)
+    md_skipped: set[str] = field(default_factory=set)  # 번역 제외로 판정된 md 유닛 id
     # 직전 유닛 꼬리 컨텍스트 (같은 소스 내에서만). 실제 프롬프트 입력이므로
     # 캐시 키에도 넣어 같은 문장이 다른 문맥의 번역을 잘못 공유하지 않게 한다.
     context_map: dict[str, str] = field(default_factory=dict)
@@ -804,6 +806,7 @@ class _TranslationRun:
         # 번역하지 않기로 결정한 layout 블록의 사유 — layout.{lang}.json에 실어
         # 보내면 PDF 내보내기가 "실패"가 아니라 "의도적 보존"으로 집계한다.
         self.preserved_layout: dict[str, str] = {}
+        self.md_skipped = set()
         for u in all_units:
             # 유닛 자체 사유(references)가 우선, 없으면 게이트 판정 사유를 그대로 쓴다.
             reason = u.skip_reason or should_skip(u.src)
@@ -812,6 +815,8 @@ class _TranslationRun:
                 self.skip_reasons[reason] = self.skip_reasons.get(reason, 0) + 1
                 if u.id.startswith("lay:"):
                     self.preserved_layout[u.id] = reason
+                else:
+                    self.md_skipped.add(u.id)
             else:
                 targets.append(u)
         self.targets = targets
@@ -821,15 +826,21 @@ class _TranslationRun:
         # result.{lang}.md와 PDF에서 서로 다르게 처리되는 사례를 리포트로 드러낸다.
         self.ref_rule = reference_rule_mismatch(self.md_units, self.lay_units)
 
-        # 2단 패스 — reconcile이 성공하면 md 유닛 번역은 전량 폐기되고 layout 번역이
-        # 단일 기준이 된다(LLM 왕복의 절반이 낭비). 그래서 **모든 줄이 layout 블록에
-        # 커버되는** md 유닛만 1차에서 빼두고(deferred), reconcile이 폴백을 돌려준
-        # 경우에만 2차로 번역해 무손실 계약을 지킨다. 부분만 걸치는 md 유닛(다중 줄
-        # 블록·표·수식 줄)은 매핑에 안 걸려 원문이 남으므로 지금처럼 1차에서 번역한다.
+        # 2단 패스 — **모든 줄이 layout 블록에 커버되는** md 유닛은 layout 번역을 그대로
+        # 쓰므로(유닛 단위 reconcile, _md_translations) 1차에서 빼둔다(deferred). 그
+        # layout 블록이 번역에 실패한 경우에만 2차로 번역해 무손실 계약을 지킨다. 부분만
+        # 걸치는 md 유닛(다중 줄 블록·표·수식 줄)은 지금처럼 1차에서 번역한다.
+        # 번역하지 않기로 한 layout 블록(page_number 등)의 줄도 '커버됨'으로 본다 — 그
+        # 줄은 원문 그대로가 정답이다. 종전에는 단일 개행으로 붙은 쪽 번호 줄 하나 때문에
+        # md 문단이 지연되지 않아 같은 문장을 두 번 번역했다(버린 번역 6~71%).
         self.deferred = []
         if self.layout_pages is not None and self.lay_units:
-            lay_target_srcs = {u.src.strip() for u in self.targets if u.id.startswith("lay:")}
-            covered = layout_line_sources(self.layout_pages) & lay_target_srcs
+            target_ids = {u.id for u in targets}
+            lay_final_srcs = {
+                u.src.strip() for u in self.lay_units
+                if u.id in self.preserved_layout or u.id in target_ids
+            }
+            covered = layout_line_sources(self.layout_pages) & lay_final_srcs
             if covered:
                 remaining = []
                 for u in self.targets:
@@ -907,49 +918,67 @@ class _TranslationRun:
         self.sanitized_n = 0
 
     def _write_outputs(self) -> TranslateResult | None:
-        """조립·reconcile·2차 패스 후 산출물 기록. 2차 패스에서 취소되면 결과를 돌려준다."""
-        assembled = self._assemble_md()
-        new_pages = None
-        if self.layout_pages is not None:
-            lay_trans = {u.id: self.results[u.id] for u in self.lay_units if u.id in self.results}
-            new_pages = apply_layout(
-                self.layout_pages, lay_trans, getattr(self, "preserved_layout", None),
-            )
-            reconciled = reconcile_markdown_with_layout(
-                self.md_text,
-                assembled,
-                self.layout_pages,
-                new_pages,
-                self.page_separator,
-            )
-            # 폴백이면 reconcile은 인자로 받은 assembled를 그대로 돌려준다.
-            if reconciled is assembled and self.deferred:
-                # layout 번역이 md를 덮지 못했다 — 1차에서 미룬 md 유닛을 지금 번역해
-                # 무손실 계약을 지킨다(2단 패스). SSE는 total 증가를 허용한다.
-                self.total += len(self.deferred)
-                self.write_state("running", self.done, self.total)
-                logger.info("reconcile 폴백 — 지연 md 유닛 %d개 2차 번역", len(self.deferred))
-                canceled = False
-                try:
-                    canceled = not self._dispatch(self.deferred)
-                    if not canceled:
-                        # 2차 패스 유닛도 같은 축퇴 방어를 받아야 한다 —
-                        # 1차 스윕은 이 dispatch 이전에 끝났다.
-                        self._sweep_degenerate()
-                finally:
-                    self.flush_cache()
-                if canceled:
-                    return self._canceled_result()
-                self._verify_endpoint_health()  # 2차 패스의 미뤄둔 4xx도 같은 기준으로 확정
-                assembled = self._assemble_md()
-            else:
-                assembled = reconciled
-            _atomic_write(
-                self.job_dir / f"layout.{self.lang}.json",
-                json.dumps(new_pages, ensure_ascii=False),
-            )
+        """reconcile·2차 패스·조립 후 산출물 기록. 2차 패스에서 취소되면 결과를 돌려준다."""
+        if self.layout_pages is None:
+            _atomic_write(self.job_dir / f"result.{self.lang}.md", self._assemble_md())
+            return None
+        new_pages, mapping = self._layout_mapping()
+        # 지연된 md 유닛 중 layout 번역으로 덮이지 않는 것(그 블록이 번역에 실패·축퇴)은
+        # 지금 번역한다(2단 패스). SSE는 total 증가를 허용한다.
+        pending = [u for u in self.deferred if map_unit_lines(u.src, mapping) is None]
+        if pending:
+            self.total += len(pending)
+            self.write_state("running", self.done, self.total)
+            logger.info("layout으로 덮이지 않는 지연 md 유닛 %d개 2차 번역", len(pending))
+            canceled = False
+            try:
+                canceled = not self._dispatch(pending)
+                if not canceled:
+                    # 2차 패스 유닛도 같은 축퇴 방어를 받아야 한다 —
+                    # 1차 스윕은 이 dispatch 이전에 끝났다.
+                    self._sweep_degenerate()
+            finally:
+                self.flush_cache()
+            if canceled:
+                return self._canceled_result()
+            self._verify_endpoint_health()  # 2차 패스의 미뤄둔 4xx도 같은 기준으로 확정
+        assembled = assemble_markdown(
+            self.md_text, self.page_separator, self._md_translations(mapping),
+        )
+        _atomic_write(
+            self.job_dir / f"layout.{self.lang}.json",
+            json.dumps(new_pages, ensure_ascii=False),
+        )
         _atomic_write(self.job_dir / f"result.{self.lang}.md", assembled)
         return None
+
+    def _layout_mapping(self) -> tuple[list, dict[str, str]]:
+        """layout.{lang}.json 페이지와 md 줄 → layout 번역 줄 매핑."""
+        lay_trans = {u.id: self.results[u.id] for u in self.lay_units if u.id in self.results}
+        preserved = getattr(self, "preserved_layout", None) or {}
+        new_pages = apply_layout(self.layout_pages, lay_trans, preserved)
+        mapping = layout_line_map(self.layout_pages, new_pages, set(lay_trans) | set(preserved))
+        return new_pages, mapping
+
+    def _md_translations(self, mapping: dict[str, str]) -> dict[str, str]:
+        """md 유닛별 최종 번역 — 유닛 단위 reconcile (translate-llm-1).
+
+        모든 줄이 layout 번역으로 덮이는 유닛은 layout 번역을 쓴다(PDF·리더와 같은 표기).
+        아니면 그 유닛 자신의 번역을, 둘 다 없으면 원문을 둔다. 종전 줄 단위 reconcile은
+        커버리지 0.7 이상이면 md 유닛 번역을 전부 버리고 원문 줄로 출력을 다시 만들어,
+        여러 줄 블록·상충 중복·수식 정의 줄이 result.ko.md에 영어로 남았다.
+        건너뛴 md 유닛(참고문헌·코드)은 md 쪽 보존 정책을 따른다.
+        """
+        out: dict[str, str] = {}
+        for u in self.md_units:
+            if u.skip_reason or u.id in self.md_skipped:
+                continue
+            mapped = map_unit_lines(u.src, mapping) if mapping else None
+            if mapped is not None:
+                out[u.id] = mapped
+            elif u.id in self.results:
+                out[u.id] = self.results[u.id]
+        return out
 
     def _finish(self) -> TranslateResult:
         cfg = self.cfg

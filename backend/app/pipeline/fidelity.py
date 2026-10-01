@@ -42,6 +42,7 @@ born-digital PDF에서는 PyMuPDF가 뽑는 텍스트가 **공짜 정답**이다
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -75,11 +76,27 @@ _HTML_TAGS = (
 _MARKUP_RE = re.compile(
     rf"</?(?:{_HTML_TAGS})(?=[\s/>])[^>\n]*>", re.IGNORECASE
 )
-_WS_RE = re.compile(r"\s+")
-# 정답에 없고 모델만 내는 마크다운 장식(**굵게**, `코드`, # 제목, 표의 `|`).
-# 양쪽에 같이 적용하므로 대칭이고, 실측 기여는 마진 +0.003으로 작다 — 그래도
-# 모델 전용 장식을 빼는 쪽이 지표의 의미에 맞아 남긴다.
-_MD_NOISE_RE = re.compile(r"[|*_`~#]+")
+# 비교는 **글자와 숫자만**으로 한다(정답·후보에 똑같이). 구두점·기호·마크다운 장식·
+# 공백은 전사 품질과 무관하게 양쪽 표기만 다른 경우가 대부분이다:
+#   · 목차의 점선 리더(`Introduction ........ 3`) — 모델은 점을 줄이거나 생략한다.
+#     실측 unlimited-ocr-paper.pdf 2쪽: 빠진 bigram 596개 중 562개가 `..`, 0.465로 오탐.
+#   · 수식 — PDF 글리프(`∥x∥`, `⟨y, x⟩`, `Q−1`)와 모델 LaTeX(`\|x\|`, `\langle y,
+#     x\rangle`, `Q^{-1}`). 2504.19874v1.pdf 13쪽이 0.656으로 오탐.
+#   · 리거처(`eﬃciently`)·전각·위첨자 숫자 — NFKC로 맞춘다.
+# LaTeX 명령 이름(`\frac`, `\mathbb`)은 후보만 부풀리므로 지우되, 그리스 문자처럼
+# PDF에 글자로 남는 명령은 그 글자로 바꾼다. 유실(통째로 빠진 문장)과 과생성(중복
+# 전사)은 글자·숫자 bigram에 그대로 드러나므로 게이트의 탐지력은 유지된다.
+_NON_WORD_RE = re.compile(r"[\W_]+")
+_LATEX_CMD_RE = re.compile(r"\\([A-Za-z]+)")
+_LATEX_LETTERS = {
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
+    "varepsilon": "ε", "zeta": "ζ", "eta": "η", "theta": "θ", "vartheta": "θ",
+    "iota": "ι", "kappa": "κ", "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ",
+    "pi": "π", "rho": "ρ", "sigma": "σ", "tau": "τ", "upsilon": "υ", "phi": "φ",
+    "varphi": "φ", "chi": "χ", "psi": "ψ", "omega": "ω",
+    "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ", "Pi": "Π",
+    "Sigma": "Σ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω", "ell": "ℓ",
+}
 
 # 판정에 필요한 최소 정답 분량. 이보다 짧은 페이지(표지·백지·전면 그림)는
 # 정답 자체가 빈약해 지표가 요동친다 — 게이트를 걸지 않는다.
@@ -103,8 +120,8 @@ _FIGURE_TYPES = frozenset({"image", "chart", "figure", "diagram"})
 # (`\\(E = mc^{2}\\)`)는 **같은 내용인데 길이가 크게 다르다** — 그대로 두면 수식이 많은
 # 페이지가 과생성으로 오탐된다(리뷰 지적: truth 504자 vs LaTeX 972자 → 0.594).
 # 양쪽에서 함께 빼면 대칭이라 수식이 없는 문서에는 무해한 no-op이다.
-# 남은 위험: `text` 블록 **안**의 인라인 수식은 뺄 수 없다. 실측 이 논문에서는
-# 인라인 수식이 페이지의 6% 미만이라 슬랙 1.3 안에 들어간다.
+# `text` 블록 **안**의 인라인 수식은 뺄 수 없지만, 정규화(LaTeX 명령 제거 + 글자·숫자만
+# 비교)가 글리프와 LaTeX의 표기 차이를 흡수한다(실측 2504.19874v1.pdf 13쪽 0.656 → 0.99).
 _EQUATION_TYPES = frozenset({
     "equation", "formula", "isolate_formula", "interline_equation",
 })
@@ -114,10 +131,10 @@ _EQUATION_MAX_COVER = 0.5
 
 
 def normalize(text: str) -> str:
-    """비교용 정규화 — 마크업·마크다운 장식·공백 제거."""
-    text = _MARKUP_RE.sub(" ", text or "")
-    text = _MD_NOISE_RE.sub(" ", text)
-    return _WS_RE.sub("", text)
+    """비교용 정규화 — 마크업·LaTeX 명령을 지우고 NFKC 후 글자·숫자만 남긴다(소문자)."""
+    text = unicodedata.normalize("NFKC", _MARKUP_RE.sub(" ", text or ""))
+    text = _LATEX_CMD_RE.sub(lambda m: _LATEX_LETTERS.get(m.group(1), " "), text)
+    return _NON_WORD_RE.sub("", text).casefold()
 
 
 def _bigrams(text: str) -> Counter:
@@ -229,8 +246,26 @@ def _pdf_graphic_areas(
     return totals
 
 
-def _image_rects(fitz, page, blocks: list[dict], should_cancel: CancelCheck = None) -> list:
-    """모델이 그림으로 분류한 블록 중 **원본에 실제로 그림이 있는** 것의 사각형.
+def _block_rect(fitz, page, block: dict):
+    """블록 bbox(0-999 정규화, 렌더 공간) → 비회전 PDF 좌표 사각형. 없거나 퇴화면 None."""
+    bbox = block.get("bbox")
+    if not bbox or len(bbox) != 4:
+        return None
+    try:
+        x1, y1, x2, y2 = (float(v) for v in bbox)
+    except (TypeError, ValueError):
+        return None
+    w, h = page.rect.width, page.rect.height
+    rect = fitz.Rect(x1 / 999 * w, y1 / 999 * h, x2 / 999 * w, y2 / 999 * h)
+    rect = rect * page.derotation_matrix
+    rect.normalize()
+    return None if rect.is_empty else rect
+
+
+def _trusted_figures(
+    fitz, page, blocks: list[dict], should_cancel: CancelCheck = None
+) -> list[tuple[int, object]]:
+    """모델이 그림으로 분류한 블록 중 **원본에 실제로 그림이 있는** 것의 (번호, 사각형).
 
     검증이 필요한 이유: 청크 안에서 페이지를 놓친 모델이 빈 출력 대신 전면 `image`
     블록 하나를 내면(판독 실패 영역을 그림으로 분류하는 것은 OCR 모델의 흔한 동작),
@@ -239,87 +274,71 @@ def _image_rects(fitz, page, blocks: list[dict], should_cancel: CancelCheck = No
     그 분류는 틀린 것이므로 무시한다.
     """
     candidates = []
-    w, h = page.rect.width, page.rect.height
-    for b in blocks:
+    for i, b in enumerate(blocks):
         if not isinstance(b, dict):
             continue
         if str(b.get("type") or "") not in _FIGURE_TYPES and not b.get("image"):
             continue
-        bbox = b.get("bbox")
-        if not bbox or len(bbox) != 4:
-            continue
-        try:
-            x1, y1, x2, y2 = (float(v) for v in bbox)
-        except (TypeError, ValueError):
-            continue
-        rect = fitz.Rect(x1 / 999 * w, y1 / 999 * h, x2 / 999 * w, y2 / 999 * h)
-        rect = rect * page.derotation_matrix
-        rect.normalize()
-        if rect.is_empty:
-            continue
-        candidates.append(rect)
-    areas = _pdf_graphic_areas(
-        fitz, page, [r for r in candidates if r.get_area() > 0], should_cancel
-    )
+        rect = _block_rect(fitz, page, b)
+        if rect is not None and rect.get_area() > 0:
+            candidates.append((i, rect))
+    areas = _pdf_graphic_areas(fitz, page, [r for _, r in candidates], should_cancel)
+    # 원본에 그림이 거의 없으면 모델의 그림 분류를 믿지 않는다
+    return [
+        (i, rect) for (i, rect), drawn in zip(candidates, areas)
+        if drawn >= abs(rect.get_area()) * _GRAPHIC_MIN_COVER
+    ]
+
+
+def _image_rects(fitz, page, blocks: list[dict], should_cancel: CancelCheck = None) -> list:
+    """믿을 수 있는 그림 블록의 사각형 (`_trusted_figures`의 사각형만)."""
+    return [rect for _, rect in _trusted_figures(fitz, page, blocks, should_cancel)]
+
+
+def _trusted_equations(fitz, page, blocks: list[dict]) -> list[tuple[int, object]]:
+    """표시수식 블록의 (번호, 사각형). 합쳐서 페이지 절반을 넘게 덮으면 전부 믿지 않는다."""
     out = []
-    drawn = iter(areas)
-    for rect in candidates:
-        area = abs(rect.get_area())
-        if area > 0 and next(drawn) < area * _GRAPHIC_MIN_COVER:
-            continue        # 원본에 그림이 없다 — 모델의 그림 분류를 믿지 않는다
-        out.append(rect)
+    for i, b in enumerate(blocks):
+        if not isinstance(b, dict) or str(b.get("type") or "") not in _EQUATION_TYPES:
+            continue
+        rect = _block_rect(fitz, page, b)
+        if rect is not None:
+            out.append((i, rect))
+    page_area = abs(page.rect.get_area()) or 1.0
+    if sum(abs(r.get_area()) for _, r in out) > page_area * _EQUATION_MAX_COVER:
+        return []
     return out
 
 
 def _equation_rects(fitz, page, blocks: list[dict]) -> list:
     """표시수식 블록의 사각형. 페이지의 절반을 넘게 덮으면 믿지 않는다."""
-    out = []
-    w, h = page.rect.width, page.rect.height
-    for b in blocks:
-        if not isinstance(b, dict) or str(b.get("type") or "") not in _EQUATION_TYPES:
-            continue
-        bbox = b.get("bbox")
-        if not bbox or len(bbox) != 4:
-            continue
-        try:
-            x1, y1, x2, y2 = (float(v) for v in bbox)
-        except (TypeError, ValueError):
-            continue
-        rect = fitz.Rect(x1 / 999 * w, y1 / 999 * h, x2 / 999 * w, y2 / 999 * h)
-        rect = rect * page.derotation_matrix
-        rect.normalize()
-        if not rect.is_empty:
-            out.append(rect)
-    page_area = abs(page.rect.get_area()) or 1.0
-    if sum(abs(r.get_area()) for r in out) > page_area * _EQUATION_MAX_COVER:
-        return []
-    return out
+    return [rect for _, rect in _trusted_equations(fitz, page, blocks)]
 
 
-def ocr_text(blocks: list[dict]) -> str:
+def ocr_text(blocks: list[dict], excluded: set[int] | None = None) -> str:
     """비교용 후보 텍스트 — 정답에서 영역을 빼는 블록은 후보에서도 뺀다.
 
     한쪽만 빼면 비대칭이 된다: 그림 영역을 정답에서 지우면서 모델이 그 그림에 대해
-    쓴 글자를 후보에 남기면, 완벽한 전사가 과생성으로 보인다. 실측 이 모델의
-    그림·차트 블록은 내용이 비어 있어(19개 중 0개) 지금은 no-op이지만, 차트 안
-    텍스트를 뽑는 모델로 바뀌어도 지표가 무너지지 않게 여기서 막는다.
+    쓴 글자를 후보에 남기면, 완벽한 전사가 과생성으로 보인다. 반대로 분류를 믿지
+    않아 정답에 **남긴** 영역(그림이 그려지지 않은 '그림', 페이지 절반을 넘게 덮는
+    '수식')의 블록 내용은 후보에도 남겨야 한다 — 예전에는 타입만 보고 늘 빼서, 수식
+    분류를 불신한 페이지가 정답에만 수식이 남아 열화로 보였다.
+    excluded가 None이면 타입만 보고 그림·수식 블록을 뺀다(영역 검증 없는 호출용).
     """
-    skip = _EQUATION_TYPES | _FIGURE_TYPES
+    if excluded is None:
+        skip = _EQUATION_TYPES | _FIGURE_TYPES
+        return " ".join(
+            str(b.get("content") or "")
+            for b in blocks
+            if str(b.get("type") or "") not in skip
+        )
     return " ".join(
-        str(b.get("content") or "")
-        for b in blocks
-        if str(b.get("type") or "") not in skip
+        str(b.get("content") or "") for i, b in enumerate(blocks) if i not in excluded
     )
 
 
-def truth_text(fitz, page, blocks: list[dict], should_cancel: CancelCheck = None) -> str:
-    """페이지의 정답 텍스트 — 그림·표시수식 블록에 덮인 줄은 뺀다.
-
-    모델은 그림 안의 글자를 본문으로 뽑지 않는 것이 정상 동작이다. 정답에서 빼지
-    않으면 그림이 큰 페이지가 전부 열화로 보인다. 수식은 `ocr_text`가 후보에서도
-    빼므로 대칭이다.
-    """
-    rects = _image_rects(fitz, page, blocks, should_cancel) + _equation_rects(fitz, page, blocks)
+def _truth_outside(fitz, page, rects: list) -> str:
+    """페이지 텍스트 레이어에서 rects에 덮인 줄을 뺀 정답 텍스트."""
     kept: list[str] = []
     try:
         raw = page.get_text("dict")
@@ -340,6 +359,16 @@ def truth_text(fitz, page, blocks: list[dict], should_cancel: CancelCheck = None
     return " ".join(kept)
 
 
+def truth_text(fitz, page, blocks: list[dict], should_cancel: CancelCheck = None) -> str:
+    """페이지의 정답 텍스트 — 그림·표시수식 블록에 덮인 줄은 뺀다.
+
+    모델은 그림 안의 글자를 본문으로 뽑지 않는 것이 정상 동작이다. 정답에서 빼지
+    않으면 그림이 큰 페이지가 전부 열화로 보인다. 수식은 후보에서도 빼므로 대칭이다.
+    """
+    rects = _image_rects(fitz, page, blocks, should_cancel) + _equation_rects(fitz, page, blocks)
+    return _truth_outside(fitz, page, rects)
+
+
 def page_fidelity_blocks(
     fitz, page, blocks: list, page_number: int, should_cancel: CancelCheck = None
 ) -> PageFidelity:
@@ -350,8 +379,11 @@ def page_fidelity_blocks(
     대상을 본다.
     """
     blocks = [b for b in (blocks or []) if isinstance(b, dict)]
-    ocr = normalize(ocr_text(blocks))
-    truth = normalize(truth_text(fitz, page, blocks, should_cancel))
+    regions = _trusted_figures(fitz, page, blocks, should_cancel)
+    regions += _trusted_equations(fitz, page, blocks)
+    # 정답에서 뺀 영역의 블록만 후보에서도 뺀다 — 양쪽이 같은 블록을 본다
+    ocr = normalize(ocr_text(blocks, excluded={i for i, _ in regions}))
+    truth = normalize(_truth_outside(fitz, page, [r for _, r in regions]))
     if len(truth) < MIN_TRUTH_CHARS:
         return PageFidelity(page_number, None, len(truth), len(ocr), "정답 텍스트 부족")
     return PageFidelity(page_number, score(truth, ocr), len(truth), len(ocr))

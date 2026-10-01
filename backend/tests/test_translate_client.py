@@ -368,9 +368,12 @@ def test_content_파트_배열도_본문으로_잇는다():
 
 
 def test_빈응답_오류():
+    """빈 응답은 같은 프롬프트(온도 0)면 반복되는 유닛 단위 거부다(probe:MLX-03)."""
+    from app.translate.types import TranslateEmptyOutput
+
     c = OpenAICompatClient(_cfg(api_mode="chat"))
     c._post = lambda p, pl: (200, {"choices": [{"message": {"content": "   "}}]}, {})
-    with pytest.raises(TranslateAPIError, match="빈 응답"):
+    with pytest.raises(TranslateEmptyOutput, match="빈 응답"):
         c.complete("s", "u", max_tokens=100)
 
 
@@ -434,42 +437,114 @@ def test_잘림_responses_incomplete_재시도():
     assert calls == [100, 200]
 
 
-def test_잘림_재시도도_잘리면_재시도_출력_반환():
-    """2배 예산 후에도 잘리면 그 출력을 그대로 쓴다 — 이후는 래더가 흡수."""
+def test_잘림_재시도도_잘리면_잘린_출력을_반환하지_않는다():
+    """2배 예산 후에도 잘리면 유닛 단위 거부(TranslateOutputTruncated)로 올린다.
+
+    종전에는 '래더가 흡수'한다며 잘린 출력을 반환했지만, 플레이스홀더 없는 산문은
+    래더에 들어가지도 않아 문단 끝이 빠진 번역이 채택·캐시됐다(probe:MLX-02,
+    mlx-integration-3). 잘린 출력은 어떤 경로로도 호출자에게 가지 않는다.
+    """
+    from app.translate.types import TranslateOutputTruncated, TranslateUnitRejected
+
     seq = iter([
         (200, {"choices": [{"message": {"content": "A"}, "finish_reason": "length"}]}, {}),
         (200, {"choices": [{"message": {"content": "AB"}, "finish_reason": "length"}]}, {}),
     ])
     c = OpenAICompatClient(_cfg(api_mode="chat"))
     c._post = lambda p, pl: next(seq)
-    assert c.complete("s", "u", max_tokens=100) == "AB"
+    with pytest.raises(TranslateOutputTruncated, match="잘렸습니다") as exc:
+        c.complete("s", "u", max_tokens=100)
+    assert isinstance(exc.value, TranslateUnitRejected)   # 엔진의 유닛 강등 경로
 
 
-def test_잘림_재시도_API오류면_잘린_첫출력_반환(caplog):
-    """2배 재시도가 TranslateAPIError로 실패해도 잘린 첫 출력이 있으면 그것을 반환 — 래더가 흡수."""
-    import logging
+def test_잘림_재시도가_4xx면_잘림으로_보고한다():
+    """2배 예산이 서버 상한을 넘어 400이 와도 그 유닛의 원인은 잘림이다."""
+    from app.translate.types import TranslateOutputTruncated
 
     seq = iter([
         (200, {"choices": [{"message": {"content": "잘린 절반"}, "finish_reason": "length"}]}, {}),
-        (400, "bad request", {}),  # 2배 재시도 — 비재시도 상태코드로 즉시 TranslateAPIError
+        (400, "max_tokens too large", {}),
     ])
     c = OpenAICompatClient(_cfg(api_mode="chat"))
     c._post = lambda p, pl: next(seq)
-    with caplog.at_level(logging.WARNING, logger="app.translate.client"):
-        assert c.complete("s", "u", max_tokens=100) == "잘린 절반"
-    assert any("2배 재시도 실패" in r.message for r in caplog.records)
+    with pytest.raises(TranslateOutputTruncated, match="2배 재시도 거부"):
+        c.complete("s", "u", max_tokens=100)
 
 
-def test_잘림_재시도_API오류_첫출력도_비면_예외전파():
-    """첫 출력이 비어 있으면(전부 잘림) 재시도 실패 예외를 그대로 전파한다."""
+def test_잘림_재시도_4xx_첫출력도_비면_thinking_안내():
+    """첫 출력이 전부 잘렸으면(thinking이 예산 소진) 서버측 끄기 안내를 담는다."""
+    from app.translate.types import TranslateOutputTruncated
+
     seq = iter([
         (200, {"choices": [{"message": {"content": ""}, "finish_reason": "length"}]}, {}),
         (400, "bad request", {}),
     ])
     c = OpenAICompatClient(_cfg(api_mode="chat"))
     c._post = lambda p, pl: next(seq)
-    with pytest.raises(TranslateAPIError, match="HTTP 400"):
+    with pytest.raises(TranslateOutputTruncated, match="thinking"):
         c.complete("s", "u", max_tokens=100)
+
+
+def test_잘림_재시도가_연결실패면_전역_오류로_전파():
+    """연결 실패·5xx 소진은 엔드포인트 문제라 유닛 강등 대상이 아니다."""
+    import requests as _requests
+
+    from app.translate.types import TranslateUnitRejected
+
+    calls = []
+
+    def post(p, pl):
+        calls.append(1)
+        if len(calls) == 1:
+            return (200, {"choices": [{"message": {"content": "잘린 절반"},
+                                       "finish_reason": "length"}]}, {})
+        raise _requests.ConnectionError("down")
+
+    c = OpenAICompatClient(_cfg(api_mode="chat", max_retries=0))
+    c._post = post
+    with pytest.raises(TranslateAPIError, match="연결 실패") as exc:
+        c.complete("s", "u", max_tokens=100)
+    assert not isinstance(exc.value, TranslateUnitRejected)
+
+
+def test_잘린_출력이_반복_루프면_2배_재시도를_생략한다(caplog):
+    """온도 0 greedy 루프는 2배 예산도 끝까지 태운다(probe:MLX-05) — 왕복 1회로 끝낸다."""
+    import logging
+
+    from app.translate.types import TranslateOutputTruncated
+
+    calls = []
+
+    def post(p, pl):
+        calls.append(pl["max_tokens"])
+        return (200, {"choices": [{"message": {"content": "불필요한 영역을" + "만" * 400},
+                                   "finish_reason": "length"}]}, {})
+
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = post
+    with caplog.at_level(logging.WARNING, logger="app.translate.client"):
+        with pytest.raises(TranslateOutputTruncated, match="반복 루프"):
+            c.complete("s", "u" * 50, max_tokens=8192)
+    assert calls == [8192]
+    assert any("2배 재시도 생략" in r.message for r in caplog.records)
+
+
+def test_잘린_출력이_입력보다_지나치게_길면_2배_재시도를_생략한다():
+    from app.translate.types import TranslateOutputTruncated
+
+    calls = []
+    words = " ".join(f"단어{i}" for i in range(1200))   # 반복 아님 · 입력의 4배 초과
+
+    def post(p, pl):
+        calls.append(1)
+        return (200, {"choices": [{"message": {"content": words},
+                                   "finish_reason": "length"}]}, {})
+
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = post
+    with pytest.raises(TranslateOutputTruncated, match="4배"):
+        c.complete("s", "[번역할 원문]\n" + "Short source sentence." * 5, max_tokens=8192)
+    assert calls == [1]
 
 
 def test_잘림_빈출력_reasoning_예산소진_재시도로_회복():
@@ -491,8 +566,16 @@ def test_잘림_전부_빈출력이면_오류():
         c.complete("s", "u", max_tokens=100)
 
 
-def test_잘림_max_tokens_param_none이면_재시도_안함():
-    """max_tokens를 안 보내는 설정에선 재시도해도 같은 요청 — 1회로 끝낸다."""
+def test_잘림_max_tokens_param_none이면_재시도_없이_잘림으로_보고(caplog):
+    """max_tokens를 안 보내는 설정에선 재시도해도 같은 요청 — 1회로 끝낸다.
+
+    종전에는 잘린 출력을 경고 없이 반환했다. mlx_lm은 이때 서버 기본 512토큰에서
+    잘라 '만만만…' 루프가 그대로 캐시됐다(probe:MLX-02) — 이제 잘림으로 보고한다.
+    """
+    import logging
+
+    from app.translate.types import TranslateOutputTruncated
+
     calls = []
 
     def post(p, pl):
@@ -502,8 +585,11 @@ def test_잘림_max_tokens_param_none이면_재시도_안함():
 
     c = OpenAICompatClient(_cfg(api_mode="chat", max_tokens_param="none"))
     c._post = post
-    assert c.complete("s", "u", max_tokens=100) == "부분 출력"
+    with caplog.at_level(logging.WARNING, logger="app.translate.client"):
+        with pytest.raises(TranslateOutputTruncated, match="서버 상한"):
+            c.complete("s", "u", max_tokens=100)
     assert len(calls) == 1
+    assert any("TRANSLATE_MAX_TOKENS_PARAM=none" in r.message for r in caplog.records)
 
 
 def test_재시도_경로_warning_로그(caplog):

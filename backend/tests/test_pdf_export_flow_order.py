@@ -297,3 +297,44 @@ def test_plan_falls_back_to_a_conservative_pass_when_it_cannot_converge(tmp_path
     assert len(seen) == 2, seen          # 1패스(불일치) + 보수적 재계획
     assert seen[0] and seen[-1] == frozenset()
     assert result.replaced >= 1, result.report()
+
+
+def test_unchanged_listing_rows_are_obstacles_within_the_same_pass(tmp_path, monkeypatch):
+    """줄 단위로 확정된 리스팅의 바뀌지 않은 행은 같은 패스의 flow에서 바로 장애물이다.
+
+    블록은 '교체됨'이어도 그 행의 원문은 남는다. 다음 패스로 미루면 계획을 한 번 더
+    세워야 해서(실측 25쪽 논문에서 10쪽이 2패스) 빌드가 느려진다.
+    """
+    from app.pipeline.pdf_export import build as build_mod
+
+    job_dir, original, translated = _listing_job(tmp_path, "residual", single_span_second_row=False)
+    translated[0]["blocks"][1]["content"] = "알파\n베타\nGamma\nDelta"   # 두 번째 행은 그대로
+    translated[0]["blocks"][2]["content"] = (
+        "형제 문단의 번역은 원문보다 훨씬 길어서 한 줄에 들어가지 않고 여러 줄이 "
+        "필요하며 위로 당겨질 수 있다. " * 3
+    ).strip()
+    _write(job_dir, original, translated)
+
+    passes: list[frozenset] = []
+    plan_targets = build_mod._plan_page_targets
+
+    def counting(ctx, result):
+        passes.append(ctx.cleared_indices)
+        return plan_targets(ctx, result)
+
+    monkeypatch.setattr(build_mod, "_plan_page_targets", counting)
+    result = build_translated_pdf(job_dir, "ko")
+    assert result.listing_lines_replaced == 2, result.report()
+    assert len(passes) == 1, passes
+    with fitz.open(result.path) as exported:
+        page = exported[0]
+        gamma = _line_rect(page, "Gamma")
+        sibling = [
+            fitz.Rect(line["bbox"])
+            for block in page.get_text("dict")["blocks"]
+            for line in block.get("lines", [])
+            if "형제" in "".join(span["text"] for span in line["spans"])
+            or "번역은" in "".join(span["text"] for span in line["spans"])
+        ]
+    assert sibling
+    assert not [line for line in sibling if (line & gamma).get_area() > 0.5], (gamma, sibling)

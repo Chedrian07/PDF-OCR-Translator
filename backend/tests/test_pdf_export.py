@@ -1187,3 +1187,63 @@ def test_latex_escapes_become_literal_symbols():
     # 이스케이프가 아닌 기호와 실제 수식은 그대로 동작한다
     assert _plain_text("50% 감소") == "50% 감소"
     assert _plain_text(r"\(E=mc^{2}\)") == "E=mc²"
+
+
+_SHARED_SPACE_FONT = "/System/Library/Fonts/AppleSDGothicNeo.ttc"
+
+
+@pytest.mark.skipif(
+    not Path(_SHARED_SPACE_FONT).is_file(),
+    reason="공백과 NBSP가 같은 글리프인 폰트(AppleSDGothicNeo)가 없는 환경",
+)
+def test_공백과_NBSP가_같은_글리프인_폰트도_공백을_U0020으로_추출한다(tmp_path):
+    """같은 글리프를 쓰는 폰트로 삽입하면 모든 공백이 U+00A0으로 추출되던 회귀.
+
+    화면은 같지만 복사·검색·grep에서 단어가 이어 붙는다. 테스트 헬퍼들이 NBSP를
+    정규화해 가려 왔으므로 여기서는 정규화 없이 원시 추출 텍스트를 본다.
+    """
+    import fitz
+
+    job_dir = _unit_job(tmp_path)
+    result = build_translated_pdf(job_dir, "ko", fontfile=_SHARED_SPACE_FONT)
+    with fitz.open(result.path) as exported:
+        raw = exported[0].get_text()
+    assert result.replaced == 1, result.report()
+    assert KO_TEXT in raw, repr(raw)
+    assert "\xa0" not in raw, repr(raw)
+
+
+def test_ToUnicode_공백_복원은_같은_글리프인_폰트에서만_한_줄을_고친다(tmp_path, monkeypatch):
+    """폰트 cmap이 공백·NBSP를 같은 gid로 매핑할 때만 그 bfchar를 U+0020으로 고친다."""
+    import fitz
+
+    from app.pipeline.pdf_export import build as build_mod
+
+    fontfile, _name = _resolve_font("")
+    if fontfile is None:
+        pytest.skip("파일 기반 한글 폰트가 없다")
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=100)
+    page.insert_text((20, 50), "번역 문장", fontsize=12, fontname="uocr-serif", fontfile=fontfile)
+    xref = next(entry[0] for entry in page.get_fonts(full=True) if entry[4] == "uocr-serif")
+    cmap_xref = int(doc.xref_get_key(xref, "ToUnicode")[1].split()[0])
+    gid = fitz.Font(fontfile=fontfile).has_glyph(0x20)
+    fake = (
+        b"begincmap\n1 beginbfchar\n"
+        + f"<{gid:04x}> <00a0>\n".encode()
+        + b"endbfchar\n1 beginbfrange\n<0100> <0101> <00a0>\nendbfrange\nendcmap\n"
+    )
+    doc.update_stream(cmap_xref, fake)
+    fonts = build_mod._ExportFonts(fontfile, "uocr-serif", None, "korea", None, "korea")
+
+    monkeypatch.setattr(build_mod, "_space_sharing_glyph", lambda path: None)
+    assert build_mod._restore_space_tounicode(doc, fonts) == 0
+    assert doc.xref_stream(cmap_xref) == fake
+
+    monkeypatch.setattr(build_mod, "_space_sharing_glyph", lambda path: gid)
+    assert build_mod._restore_space_tounicode(doc, fonts) == 1
+    fixed = doc.xref_stream(cmap_xref)
+    assert f"<{gid:04x}> <0020>".encode() in fixed
+    # bfrange는 건드리지 않는다(다른 글리프의 실제 NBSP 매핑일 수 있다).
+    assert b"<0100> <0101> <00a0>" in fixed
+    doc.close()

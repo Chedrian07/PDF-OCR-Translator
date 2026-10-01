@@ -6,9 +6,17 @@
 
 ARG TORCH_VARIANT=cpu
 
+# ── 베이스 이미지 고정 ─────────────────────────────────────────
+# 태그는 다시 밀린다 — digest(멀티 아키텍처 인덱스)까지 고정해 같은 커밋이 같은 OS·
+# 툴체인으로 빌드되게 한다(오프라인 tar.gz와 레지스트리 이미지의 내용 일치).
+# 갱신: `docker buildx imagetools inspect <이미지:태그>`의 Digest로 교체하고 릴리스
+# 노트에 남긴다. digest 고정만 하면 OS 보안 패치가 멈추므로 런타임 단계의
+# apt-get upgrade와 반드시 함께 간다(Dependabot docker 생태계가 갱신 PR을 연다).
+FROM ghcr.io/astral-sh/uv:0.11.33@sha256:77280f2f771df71f90786c314fe1bbc1e023feac652969bbf139c280babf2eb7 AS uv
+
 # ── 1단계: 의존성 + 네이티브 모듈 빌드 ─────────────────────────
-FROM python:3.12-slim-bookworm AS builder
-COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /bin/
+FROM python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS builder
+COPY --from=uv /uv /uvx /bin/
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential cmake ninja-build \
@@ -30,7 +38,7 @@ COPY native /src/native
 RUN uv pip install -p /venv/bin/python /src/native
 
 # ── 2단계: 런타임 ──────────────────────────────────────────────
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
 
 # tesseract-ocr(+eng/kor): textlayer 엔진의 스캔 페이지 OCR 폴백 (OCR_LANGUAGES=eng+kor)
 # fonts-noto-cjk: 번역 PDF 내보내기(pdf_export._SYSTEM_FONT_CANDIDATES)의
@@ -38,7 +46,10 @@ FROM python:3.12-slim-bookworm
 #   전각 조판(라틴 자간 파손)이 된다
 # fontconfig: 정적 폰트 후보가 전부 없을 때의 fc-list 런타임 탐색
 #   (pdf_export._fontconfig_candidates)용
+# apt-get upgrade: 베이스 스냅샷 이후 나온 Debian 보안 업데이트를 받는다 — 0.1.0
+#   이미지에는 수정판이 이미 있던 libexpat1 HIGH 6건이 그대로 남아 있었다.
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends curl \
         tesseract-ocr tesseract-ocr-eng tesseract-ocr-kor \
         fonts-noto-cjk fontconfig \

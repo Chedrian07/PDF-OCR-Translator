@@ -25,7 +25,7 @@ import {
 import { clampQaPage, clampReaderPage, jobIdFromHash, parseViewerSearch } from './js/core.js';
 import { el, grabEls, state } from './js/state.js';
 import { localGet, localSet, setupTheme, showToast } from './js/ui.js';
-import { loadHealth } from './js/health.js';
+import { loadHealth, setupHealthPolling } from './js/health.js';
 import {
   onPageImgError, onPageImgLoad, onPreviewScroll, onStreamScroll, pageNav, updateLeftPane,
 } from './js/live.js';
@@ -347,6 +347,7 @@ function init() {
   });
 
   showEmptyState();
+  setupHealthPolling(); // 숨은 탭에서는 멈추고, 다시 보이면 바로 묻는다
   loadHealth();
   refreshJobs().then(() => {
     // 첫 잡 목록 수신 직후 해시의 잡 복원 — 새로고침·공유 링크 진입.

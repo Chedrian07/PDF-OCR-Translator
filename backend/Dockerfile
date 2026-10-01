@@ -22,9 +22,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential cmake ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
+# UV_COMPILE_BYTECODE: /venv를 빌드 시점에 .pyc로 컴파일한다 — 런타임 사용자(app)는 root
+#   소유 /venv에 __pycache__를 못 써서, 미리 컴파일하지 않으면 기동·OOM 재기동마다
+#   torch·transformers를 메모리에서 다시 컴파일했다.
 ENV UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/venv \
-    UV_PYTHON_DOWNLOADS=never
+    UV_PYTHON_DOWNLOADS=never \
+    UV_COMPILE_BYTECODE=1
 
 ARG TORCH_VARIANT
 WORKDIR /src/backend
@@ -57,9 +61,17 @@ RUN apt-get update \
     && useradd --uid 1000 --create-home app \
     && mkdir -p /data/hf && chown -R app:app /data
 
+# 코드는 root 소유·읽기 전용으로 둔다 — 실행 사용자(app)가 쓸 수 있는 곳은 /data
+# (볼륨)뿐이다. 예전 --chown=app:app은 파일 쓰기 취약점 하나로 무인증 사용자 전원에게
+# 서빙되는 app.js(지속형 XSS)나 app/*.py(재시작 뒤에도 남는 코드 실행)를 바꿀 수 있게 했다.
 COPY --from=builder /venv /venv
-COPY --chown=app:app backend/app /srv/backend/app
-COPY --chown=app:app frontend /srv/frontend
+COPY backend/app /srv/backend/app
+COPY frontend /srv/frontend
+# 권한 정규화: 빌드 컨텍스트의 권한(개발자 umask 077이면 600)을 그대로 받으면 app이
+# 코드를 못 읽는다 — 모두 읽기 가능·쓰기는 root만으로 맞춘다. 앱 코드도 미리 컴파일한다
+# (/venv와 같은 이유 — 실행 사용자는 __pycache__를 못 쓴다).
+RUN chmod -R a+rX,go-w /srv/backend/app /srv/frontend \
+    && /venv/bin/python -m compileall -q /srv/backend/app
 
 ENV PATH="/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

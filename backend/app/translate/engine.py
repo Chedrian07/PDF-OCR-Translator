@@ -164,6 +164,11 @@ def _source_signature(src: str) -> str:
     )
 
 
+# 용어집 LLM 판정이 실패했다는 표식 — 있으면 다음 실행에서 glossary.json을 재사용하지
+# 않고 다시 판정한다(성공하면 지운다). 내용은 실패 사유(문서 원문은 담지 않는다).
+GLOSSARY_RETRY_MARK = "glossary.incomplete"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -876,14 +881,34 @@ class _TranslationRun:
             self.job_dir.name, self.lang, self.total, self.skipped,
         )
 
-        # 용어집 — 있으면 로드(캐시 안정), 없거나 force면 빌드 후 저장
+        # 용어집 — 있으면 로드(캐시 안정), 없거나 force면 빌드 후 저장.
+        # LLM 판정이 실패한 용어집은 '다시 판정할 것' 표식(glossary.incomplete)과 함께
+        # 저장해 다음 실행에서 다시 판정한다. 종전에는 서버를 켜기 전에 번역을 눌러
+        # 실패하면 시드 전용 용어집이 영구 저장돼, 서버를 켜고 다시 돌려도 용어 일관성과
+        # 첫 등장 병기가 force(전량 재과금) 없이는 돌아오지 않았다(translate-llm-6).
         gpath = self.tdir / "glossary.json"
-        if gpath.is_file() and not self.force:
-            glossary = Glossary.load(gpath)
-            built = False
-        else:
+        retry_mark = self.tdir / GLOSSARY_RETRY_MARK
+        notes: list[str] = []
+        glossary = None
+        if gpath.is_file() and not self.force and not retry_mark.is_file():
+            try:
+                glossary = Glossary.load(gpath)
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                # 잘린·손상된 파일 — 매번 같은 오류로 실패하지 않게 다시 만든다(concurrency-9)
+                notes.append("용어집 파일(glossary.json)이 손상돼 다시 만들었습니다")
+                logger.warning(
+                    "용어집 로드 실패 — 재생성: %s (lang=%s, %s)",
+                    self.job_dir.name, self.lang, type(e).__name__,
+                )
+        built = glossary is None
+        if built:
+            # 취소(TranslateCancelled)는 build_glossary가 삼키지 않는다 → run 취소로 귀결
             glossary = build_glossary(self.md_text, self.md_units, self.client, cfg)
-            built = True
+            if glossary.llm_ok:
+                # 용어집 호출 성공도 엔드포인트·인증·모델이 정상이라는 증거다 — 콜드 run의
+                # 첫 유닛이 빠른 400(초대형 표 등)을 받아도 잡 전체를 실패시키지 않는다
+                # (translate-llm-7). 같은 클라이언트·모델로 방금 왕복이 성공했다.
+                self.progressed.set()
         # 첫 등장 병기(policy D)는 번역 대상 유닛 순서로 정한다 — md와 layout 각각.
         # layout 잡에서 md 기준 first_unit만 두면 lay:* 유닛과 일치하지 않아 병기가
         # PDF·result.{lang}.md 어디에도 나오지 않았다(translate-llm-12). 건너뛴 유닛
@@ -893,6 +918,11 @@ class _TranslationRun:
         changed = glossary.compute_first_units(md_seq, lay_seq)
         if built or changed:
             glossary.save(gpath)
+        if built and glossary.llm_failed:
+            _atomic_write(retry_mark, "\n".join(glossary.warnings) + "\n")
+            notes.append("용어집 LLM 판정에 실패해 시드 용어집으로 번역했습니다 — 다음 실행에서 다시 판정합니다")
+        elif built:
+            retry_mark.unlink(missing_ok=True)
         self.glossary = glossary
 
         # 유닛 캐시 (dict: cache_key → 번역문)
@@ -906,7 +936,7 @@ class _TranslationRun:
                 cache = {}
         self.flights = SingleFlight(cache)
 
-        self.warnings = list(glossary.warnings)
+        self.warnings = list(glossary.warnings) + notes
         ref_rule = self.ref_rule
         if ref_rule.get("md_only") or ref_rule.get("layout_only"):
             self.warnings.append(

@@ -346,7 +346,8 @@ def page_plain_texts(pdf_path: Path, page_indices: list[int]) -> list[str] | Non
     """여러 페이지(0-based)의 텍스트 레이어 원문 — 페이지마다 PDF 워커 작업.
 
     하나라도 실패하거나 시간 상한을 넘으면 None — 호출자(병합기의 페이지 정합)는 위치 기반
-    배치로 돌아간다. 원문은 정합 대조용이라 일부만으로 판단하지 않는다."""
+    배치로 돌아간다. 원문은 정합 대조용이라 일부만으로 판단하지 않는다. 단, 앞서 상한을 넘은
+    페이지(격리 메모)는 기다리지 않으므로 빈 원문(텍스트 없는 페이지와 같다)으로 두고 계속한다."""
     from . import pdf_worker
 
     texts: list[str] = []
@@ -355,6 +356,8 @@ def page_plain_texts(pdf_path: Path, page_indices: list[int]) -> list[str] | Non
             texts.append(pdf_worker.run_page(
                 "app.pipeline.pdf:page_text_local", pdf_path, index,
             ))
+        except pdf_worker.PdfPageQuarantined:
+            texts.append("")
         except Exception as error:  # noqa: BLE001 — 정합은 선택적 개선이다
             logger.info("%d페이지 텍스트 레이어를 읽지 못해 정합을 건너뜀 (%s: %s)",
                         index + 1, error.__class__.__name__, str(error)[:200])

@@ -446,8 +446,9 @@ def test_e2e_upload_to_done_with_sidecar(sidecar_client_app, stub):
     assert body["model_revision"] == "rev"
     assert body["provider"] == "local-sidecar"
 
-    # 페이지 단위 모델 안내 warning (multi 모드였으므로)
-    assert any("페이지 단위 모델" in w for w in body["warnings"])
+    # 페이지 단위 모델 안내는 참고(notices) — 품질 경고가 아니다 (multi 모드였으므로)
+    assert any("페이지 단위 모델" in n for n in body["notices"])
+    assert not any("페이지 단위 모델" in w for w in body["warnings"])
 
     # 기존 산출물 규약: 글로벌 리넘버링된 figure + layout
     md = c.get(f"/api/jobs/{job_id}/markdown").text
@@ -728,7 +729,7 @@ def test_capability_chunk_size_fake_engine_unchanged(client, sample_pdf):
     body = wait_done(client, r.json()["job_id"])
     assert body["progress"]["total_chunks"] == 1
     assert body["engine"] == "fake"  # 잡 메타는 fake 엔진에도 기록된다
-    assert not any("페이지 단위 모델" in w for w in body["warnings"])
+    assert not any("페이지 단위 모델" in m for m in body["warnings"] + body["notices"])
 
 
 def test_repeated_wait_note_does_not_evict_loss_warnings(tmp_path, stub):

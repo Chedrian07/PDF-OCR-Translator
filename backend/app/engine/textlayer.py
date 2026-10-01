@@ -199,6 +199,47 @@ def _drain_mupdf(context: str) -> None:
     drain_mupdf_warnings(context)
 
 
+def native_page_blocks(
+    fitz, doc, page_number: int,
+) -> list[tuple[tuple[int, int, int, int] | None, str]]:
+    """열린 문서의 1-based 페이지 텍스트 레이어 블록 — (0–999 정규화 bbox, 정화된 텍스트).
+
+    블록은 **읽기 순서**다(reading_order.page_text_blocks — 내용 스트림 순서 기준, 다단이면
+    띠별로 왼쪽 단 → 오른쪽 단, 한 문장·한 줄 조각은 병합). 좌표는 렌더 PNG와 같은 회전
+    반영 공간이다. 범위 밖 페이지는 빈 목록. 추출 예외는 호출자가 다룬다."""
+    if not 1 <= page_number <= doc.page_count:
+        return []
+    from ..pipeline.reading_order import page_text_blocks
+
+    page = doc[page_number - 1]
+    rect = page.rect
+    blocks: list[tuple[tuple[int, int, int, int] | None, str]] = []
+    for block in page_text_blocks(page, fitz):
+        text = sanitize_text(block.text).strip()
+        if not text:
+            continue
+        blocks.append((_norm_bbox((block.x0, block.y0, block.x1, block.y1), rect), text))
+    return blocks
+
+
+def native_blocks_local(source_pdf: Path, page_index: int) -> list:
+    """(PDF 워커) 원본 PDF 페이지 하나의 텍스트 레이어 블록 — 열 수 없거나 암호화·추출 실패면
+    빈 목록(그 페이지는 OCR 경로로 간다)."""
+    from ..pipeline import pdf_worker
+
+    try:
+        with pdf_worker.open_document(source_pdf) as doc:
+            if doc.needs_pass:  # 업로드 probe가 거르지만 방어적으로
+                return []
+            return native_page_blocks(_fitz(), doc, page_index + 1)
+    except Exception as e:  # noqa: BLE001 — 손상 페이지·원본은 OCR 경로로 격리
+        logger.warning("%d페이지 텍스트 레이어 추출 실패 (%s: %s)",
+                       page_index + 1, e.__class__.__name__, str(e)[:200])
+        return []
+    finally:
+        _drain_mupdf("textlayer 추출")
+
+
 class TextLayerEngine(OCREngine):
     """PDF 텍스트 레이어 우선 + Tesseract 폴백 — CPU 전용, 모델 로드 없음."""
 
@@ -279,22 +320,6 @@ class TextLayerEngine(OCREngine):
 
     # ── 페이지 추출 ────────────────────────────────────────────
 
-    def _open_source(self, source_pdf: Path):
-        """원본 PDF 열기 — 실패해도 잡을 죽이지 않는다 (텍스트 레이어 없이 진행)."""
-        if not source_pdf.is_file():
-            logger.warning("source.pdf가 없어 텍스트 레이어를 건너뜁니다: %s", source_pdf)
-            return None
-        fitz = _fitz()
-        try:
-            doc = fitz.open(str(source_pdf))
-        except Exception as e:  # noqa: BLE001 — 렌더는 이미 성공했다, best-effort
-            logger.warning("source.pdf 열기 실패 (%s) — 텍스트 레이어 없이 진행", str(e)[:200])
-            return None
-        if doc.needs_pass:  # 업로드 probe가 거르지만 방어적으로
-            doc.close()
-            return None
-        return doc
-
     def _native_blocks(self, doc, image_path: Path) -> list[tuple[tuple[int, int, int, int] | None, str]]:
         """텍스트 레이어 블록 추출 (Localight documents._native_text 이식) + bbox 정규화.
 
@@ -311,36 +336,57 @@ class TextLayerEngine(OCREngine):
             logger.warning("페이지 번호를 파일명에서 파싱하지 못했습니다: %s", image_path.name)
             return []
         page_number = int(match.group(1))
-        if not 1 <= page_number <= doc.page_count:
-            return []
-        fitz = _fitz()
         try:
-            from ..pipeline.reading_order import page_text_blocks
-
-            page = doc[page_number - 1]
-            rect = page.rect
-            text_blocks = page_text_blocks(page, fitz)
+            return native_page_blocks(_fitz(), doc, page_number)
         except Exception as e:  # noqa: BLE001 — 손상 페이지는 OCR 경로로 격리
             logger.warning("%d페이지 텍스트 레이어 추출 실패 (%s: %s)",
                            page_number, e.__class__.__name__, str(e)[:200])
             return []
-        blocks: list[tuple[tuple[int, int, int, int] | None, str]] = []
-        for block in text_blocks:
-            text = sanitize_text(block.text).strip()
-            if not text:
-                continue
-            blocks.append((_norm_bbox((block.x0, block.y0, block.x1, block.y1), rect), text))
-        return blocks
+
+    def _isolated_blocks(
+        self, source_pdf: Path | None, image_path: Path, cancel: threading.Event,
+    ) -> list[tuple[tuple[int, int, int, int] | None, str]]:
+        """_native_blocks와 같은 결과를 PDF 워커 프로세스에서 얻는다(잡 실행 경로).
+
+        텍스트 레이어 추출도 MuPDF가 내용 스트림을 해석하는 작업이라, 적대적 페이지가 OCR
+        워커 스레드와 서버 GIL을 붙잡지 않게 페이지 작업(시간 상한 PDF_PAGE_TIMEOUT_S)으로
+        돌린다. 상한을 넘었거나 앞서 넘은 페이지는 경고를 남기고 OCR 경로로 보낸다."""
+        if source_pdf is None:
+            return []
+        match = _PAGE_NAME.match(image_path.name)
+        if match is None:  # 규약 밖 파일명 — 텍스트 레이어 매칭 불가, OCR 경로로
+            logger.warning("페이지 번호를 파일명에서 파싱하지 못했습니다: %s", image_path.name)
+            return []
+        from ..pipeline import pdf_worker
+
+        try:
+            return pdf_worker.run_page(
+                "app.engine.textlayer:native_blocks_local", source_pdf,
+                int(match.group(1)) - 1, cancel=cancel.is_set,
+            )
+        except pdf_worker.PdfWorkerCanceled:
+            raise JobCanceled() from None
+        except pdf_worker.PdfWorkerError as e:
+            self._note(
+                f"{image_path.name} 텍스트 레이어 추출을 건너뛰었습니다 ({e}) — "
+                "이 페이지는 OCR 경로로 처리합니다"
+            )
+            return []
 
     def _extract_page(self, doc, image_path: Path, job_dir: Path) -> tuple[str, str]:
-        """페이지 1장 → (페이지 마크다운 텍스트, 레이아웃 뷰용 raw det 문법).
+        """페이지 1장 → (페이지 마크다운 텍스트, 레이아웃 뷰용 raw det 문법) — 열린 문서에서."""
+        return self._page_from_blocks(self._native_blocks(doc, image_path), image_path, job_dir)
+
+    def _page_from_blocks(
+        self, blocks: list, image_path: Path, job_dir: Path,
+    ) -> tuple[str, str]:
+        """텍스트 레이어 블록 → (페이지 마크다운 텍스트, 레이아웃 뷰용 raw det 문법).
 
         Localight extract_page의 auto 모드: 텍스트 레이어의 영숫자 수가
         native_text_threshold 이상이면 그대로, 미만이면 Tesseract OCR.
         레이아웃 raw는 어느 경로든 텍스트 레이어 블록에서만 합성한다
         (Tesseract 출력에는 bbox가 없다 — 스캔 문서의 레이아웃 뷰는 빈 페이지).
         """
-        blocks = self._native_blocks(doc, image_path)
         native_text = "\n\n".join(text for _, text in blocks).strip()
         raw = "\n".join(
             f"<|det|>text [{bbox[0]}, {bbox[1]}, {bbox[2]}, {bbox[3]}]<|/det|>{text}"
@@ -396,27 +442,28 @@ class TextLayerEngine(OCREngine):
         # pages/ 그대로라 동일하게 성립한다.
         job_dir = image_paths[0].parent.parent
         source_pdf = job_dir / "source.pdf"
+        if not source_pdf.is_file():
+            logger.warning("source.pdf가 없어 텍스트 레이어를 건너뜁니다: %s", source_pdf)
+            source: Path | None = None
+        else:
+            source = source_pdf
 
-        doc = self._open_source(source_pdf)
         texts: list[str] = []
         raws: list[str] = []
-        try:
-            for image_path in image_paths:
-                if cancel.is_set():
-                    raise JobCanceled()
-                page_text, raw = self._extract_page(doc, image_path, job_dir)
-                if single:
-                    sink.on_text(page_text)
-                else:
-                    # 페이지 단위 스트림: 페이지당 정확히 마커 1개 + 전체 텍스트
-                    # (BrokerSink의 <PAGE> 진행률 계약 — fake.py와 동일 형식)
-                    sink.on_text("<PAGE>\n" + page_text + "\n")
-                texts.append(page_text)
-                raws.append(raw)
-        finally:
-            if doc is not None:
-                doc.close()
-            _drain_mupdf("textlayer 추출")
+        for image_path in image_paths:
+            if cancel.is_set():
+                raise JobCanceled()
+            page_text, raw = self._page_from_blocks(
+                self._isolated_blocks(source, image_path, cancel), image_path, job_dir,
+            )
+            if single:
+                sink.on_text(page_text)
+            else:
+                # 페이지 단위 스트림: 페이지당 정확히 마커 1개 + 전체 텍스트
+                # (BrokerSink의 <PAGE> 진행률 계약 — fake.py와 동일 형식)
+                sink.on_text("<PAGE>\n" + page_text + "\n")
+            texts.append(page_text)
+            raws.append(raw)
         (out_dir / "raw_pages.json").write_text(
             json.dumps({"pages": raws}, ensure_ascii=False), encoding="utf-8"
         )

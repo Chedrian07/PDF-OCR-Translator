@@ -53,21 +53,30 @@ def test_extract_embedded_text_uses_global_one_based_page_number(tmp_path):
     page2 = extract_embedded_page_markdown(pdf, 2)
     page3 = extract_embedded_page_markdown(pdf, 3)
 
-    assert page2 is not None and "    Sample page 2" in page2
-    assert page3 is not None and "    Sample page 3" in page3
+    assert page2 is not None and "\nSample page 2" in page2
+    assert page3 is not None and "\nSample page 3" in page3
     assert "Sample page 1" not in page2
     assert extract_embedded_page_markdown(pdf, 0) is None
     assert extract_embedded_page_markdown(pdf, 4) is None
 
 
 def test_embedded_text_is_plain_markdown_and_cannot_split_pages(tmp_path):
+    """복구 본문은 글자 그대로 렌더되는 **문단**이다 — 원문의 `#`·`---`·`|`·`*`가 제목·
+    페이지 구분자·표·강조가 되지 않고, `<PAGE>`는 마커로 세지 않는다.
+
+    예전에는 페이지 전체를 4칸 들여쓴 코드 블록으로 냈다. 코드 블록은 번역 유닛이
+    되지 않아(segment._OPENERS에 code_block 없음) 복구 페이지가 한국어 번역본과 번역
+    PDF에 영어로 남았다 — 기대값을 문단 + 이스케이프로 바꾼다."""
     import fitz
+
+    from app.translate.segment import split_markdown
 
     doc = fitz.open()
     page = doc.new_page()
     page.insert_text(
         (72, 72),
-        "# source heading\n\n---\n\n<PAGE>\n| a | b |\n* emphasis *",
+        "# source heading\n\n---\n\n<PAGE>\n| a | b |\n* emphasis *\n"
+        "![](https://tracker.example/x.png) see \\(x\\) and [2]",
     )
     pdf = tmp_path / "markdown-like.pdf"
     doc.save(str(pdf))
@@ -77,10 +86,47 @@ def test_embedded_text_is_plain_markdown_and_cannot_split_pages(tmp_path):
 
     assert recovered is not None
     assert recovered.startswith("> ℹ️ PDF 내장 텍스트 레이어")
-    assert "    # source heading" in recovered
-    assert "    <PAGE>" in recovered
-    assert "    | a | b |" in recovered
-    assert "\n\n---\n\n" not in recovered
+    assert "\n    " not in recovered                 # 들여쓴 코드 블록이 아니다
+    assert "\n\n---\n\n" not in recovered          # 페이지 구분자로 해석되지 않는다
+    assert "<PAGE>" not in recovered and "⟨PAGE⟩" in recovered
+
+    html = render_markdown_html(recovered, "/f")
+    for tag in ("<h1>", "<hr", "<table", "<em>", "<img", "<code>", "math-"):
+        assert tag not in html, (tag, html)
+    for literal in ("# source heading", "---", "| a | b |", "* emphasis *", "[2]"):
+        assert literal in html, (literal, html)
+
+    # 번역 유닛이 된다 (안내 blockquote 외에 본문 문단)
+    units = split_markdown(recovered, "\n\n---\n\n")
+    assert any(u.kind == "paragraph" and "source heading" in u.src for u in units)
+
+
+def test_embedded_text_recovery_keeps_two_columns_apart(tmp_path):
+    """같은 높이의 좌·우 단 줄이 한 줄로 섞이지 않는다(get_text('text', sort=True)는
+    'leftword0 … rightword0 …'처럼 합쳤다) — 왼쪽 단 문단 전체가 오른쪽 단보다 먼저."""
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((230, 60), "Column Recovery Title", fontsize=14)
+    for i in range(3):
+        y = 100 + i * 200
+        for rect, text in (
+            (fitz.Rect(54, y, 293, y + 180), f"LEFT{i} " + "leftword " * 30),
+            (fitz.Rect(317, y, 556, y + 180), f"RIGHT{i} " + "rightword " * 30),
+        ):
+            assert page.insert_textbox(rect, text, fontsize=9) >= 0  # 상자에 다 들어갔다
+    pdf = tmp_path / "two-col.pdf"
+    doc.save(str(pdf))
+    doc.close()
+
+    recovered = extract_embedded_page_markdown(pdf, 1)
+
+    assert recovered is not None
+    for line in recovered.splitlines():
+        assert not ("leftword" in line and "rightword" in line), line
+    order = [recovered.index(m) for m in ("LEFT0", "LEFT1", "LEFT2", "RIGHT0", "RIGHT1", "RIGHT2")]
+    assert order == sorted(order)
 
 
 def test_image_only_page_has_no_embedded_text_fallback(tmp_path):

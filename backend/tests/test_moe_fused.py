@@ -1,16 +1,20 @@
-"""[vendor patch P17] DeepseekV2MoE 융합 소배치 경로 수치/게이트 검증.
+"""[vendor patch P17] DeepseekV2MoE 융합 디코드 경로 수치/게이트/프리빌드 검증.
 
-CUDA 없이 CPU에서 검증한다. 융합 경로는 발동 조건에 x.is_cuda를 포함하지만,
+CUDA·MPS 없이 CPU에서 검증한다. 융합 경로는 발동 조건에 디바이스(cuda/mps)를 포함하지만,
 수치 검증은 내부 함수(_moe_infer_fused)를 직접 호출해 그 게이트를 우회한다.
 
 수치 동일성 수준 (요구 1):
-- N=1(디코드 소배치)은 bitwise 동일(torch.equal). 토큰 1개당 expert별 단일행
-  matmul이라 eager의 mm과 fused의 bmm이 완전히 같은 값을 낸다(전 시드 실측 확인).
+- N=1(디코드)은 **CPU에서** bitwise 동일(torch.equal). 토큰 1개당 expert별 단일행
+  matmul이라 eager의 mm과 fused의 bmm이 같은 값을 낸다(전 시드 실측 확인). CUDA는
+  재스택만으로 cuBLAS 커널 선택이 바뀌어 비트가 다를 수 있고, MPS는 실모델 토큰
+  동일만 실측됐다 — 이 bitwise 단언은 CPU 계약이다.
 - N>1은 eager가 같은 expert에 배정된 여러 토큰을 하나의 mm으로 묶는 반면 fused는
   (token,k) 쌍마다 [1,h] bmm을 돌려 BLAS 누적 순서가 달라진다. dtype 캐스트/최종
   가중합 순서는 moe_infer와 bitwise 동일하게 맞췄으므로 이 차이는 순수 matmul 누적
   round-off(fp32, 실측 max_rel ~2e-7)뿐 → rtol=1e-3으로 완화(대여유 마진).
 """
+
+from types import SimpleNamespace
 
 import pytest
 
@@ -54,16 +58,15 @@ def _route(moe: DeepseekV2MoE, n_tokens: int, seed: int = 0):
 
 
 class _FakeTensor:
-    """_should_use_fused는 x.is_cuda / x.shape / topk_ids.shape만 본다.
+    """_should_use_fused는 x.device.type / x.shape / topk_ids.shape만 본다.
 
-    CPU에는 CUDA 텐서가 없으므로, is_cuda=True 상황의 크기/ep 게이트를 검증하려면
+    CPU에는 CUDA·MPS 텐서가 없으므로, 가속기 상황의 크기/ep 게이트를 검증하려면
     이 덕타이핑 스텁으로 대신한다(실제 연산은 하지 않음).
     """
 
-    is_cuda = True
-
-    def __init__(self, *shape):
+    def __init__(self, *shape, device_type: str = "cuda"):
         self.shape = shape
+        self.device = SimpleNamespace(type=device_type)
 
 
 # ── 요구 1·2: 수치 동일성 (N=1 bitwise, N>1 fp round-off) ──
@@ -147,23 +150,40 @@ def test_env_killswitch_off(monkeypatch, val):
     assert moe._should_use_fused(_FakeTensor(1, HIDDEN), _FakeTensor(1, 2)) is False
 
 
-def test_should_use_fused_requires_cuda(monkeypatch):
-    # CPU 텐서(is_cuda=False)는 기본 CUDA 전용 정책상 발동 안 함.
+def test_should_use_fused_skips_cpu(monkeypatch):
+    # CPU 텐서는 legacy moe_infer 그대로 (가속기 전용 정책).
     monkeypatch.setenv("OCR_MOE_FUSED", "1")
     moe = _build_moe()
     x, topk_idx, _ = _route(moe, 1)
-    assert x.is_cuda is False
+    assert x.device.type == "cpu"
     assert moe._should_use_fused(x, topk_idx) is False
 
 
-def test_should_use_fused_size_gate(monkeypatch):
-    # is_cuda=True(스텁)에서 **N==1(디코드)만** 발동 검증 — N>1은 mm↔bmm 누적
+@pytest.mark.parametrize("device_type", ["cuda", "mps"])
+def test_should_use_fused_on_accelerators(monkeypatch, device_type):
+    # MPS도 허용 — P18의 레이어당 .tolist() 동기화(토큰당 11회)를 없애 M4 Max 디코드
+    # 1.77x(토큰 동일 실측, audit MPS-2). 그 외 디바이스 타입은 발동 안 함.
+    monkeypatch.delenv("OCR_MOE_FUSED", raising=False)
+    moe = _build_moe()
+    x = _FakeTensor(1, HIDDEN, device_type=device_type)
+    assert moe._should_use_fused(x, _FakeTensor(1, 2)) is True
+    xla = _FakeTensor(1, HIDDEN, device_type="xla")
+    assert moe._should_use_fused(xla, _FakeTensor(1, 2)) is False
+
+
+@pytest.mark.parametrize("device_type", ["cuda", "mps"])
+def test_should_use_fused_size_gate(monkeypatch, device_type):
+    # 가속기(스텁)에서 **N==1(디코드)만** 발동 검증 — N>1은 mm↔bmm 누적
     # 순서차로 근접 argmax가 뒤집혀 E2E가 갈라진 실측(표 colspan 손상) 때문에 제외.
     monkeypatch.setenv("OCR_MOE_FUSED", "1")
     moe = _build_moe()
-    assert moe._should_use_fused(_FakeTensor(1, HIDDEN), _FakeTensor(1, 2)) is True
-    assert moe._should_use_fused(_FakeTensor(2, HIDDEN), _FakeTensor(2, 2)) is False
-    assert moe._should_use_fused(_FakeTensor(32, HIDDEN), _FakeTensor(32, 2)) is False
+
+    def x(n):
+        return _FakeTensor(n, HIDDEN, device_type=device_type)
+
+    assert moe._should_use_fused(x(1), _FakeTensor(1, 2)) is True
+    assert moe._should_use_fused(x(2), _FakeTensor(2, 2)) is False
+    assert moe._should_use_fused(x(32), _FakeTensor(32, 2)) is False
 
 
 def test_should_use_fused_ep_gate(monkeypatch):
@@ -184,3 +204,135 @@ def test_forward_eval_cpu_runs():
         y = moe(h)
     assert y.shape == h.shape
     assert torch.isfinite(y).all()
+
+
+# ── 로드 시점 프리빌드(prebuild_fused_moe) — 메모리 중복 없음 + 수치 불변 ──
+
+
+def _tiny_moe_model(seed: int = 0):
+    """MoE 2층(첫 층 dense) tiny DeepseekV2Model — 프리빌드가 모든 MoE 레이어를 찾는지 본다."""
+    from app.vendor.unlimited_ocr.modeling_deepseekv2 import DeepseekV2Model
+
+    torch.manual_seed(seed)
+    cfg = DeepseekV2Config(
+        vocab_size=64, hidden_size=HIDDEN, intermediate_size=64, moe_intermediate_size=16,
+        num_hidden_layers=3, num_attention_heads=4, num_key_value_heads=4,
+        n_shared_experts=1, n_routed_experts=8, num_experts_per_tok=2,
+        first_k_dense_replace=1, moe_layer_freq=1, topk_method="greedy",
+        scoring_func="softmax", n_group=1, topk_group=1, hidden_act="silu",
+        aux_loss_alpha=0.0, use_mla=False, max_position_embeddings=64,
+    )
+    cfg._attn_implementation = "eager"
+    return DeepseekV2Model(cfg).eval()
+
+
+def _moe_layers(model):
+    return [m for m in model.modules() if isinstance(m, DeepseekV2MoE)]
+
+
+def _expert_storages(moe):
+    return {
+        p.untyped_storage().data_ptr()
+        for e in moe.experts
+        for p in (e.gate_proj.weight, e.up_proj.weight, e.down_proj.weight)
+    }
+
+
+def test_prebuild_rebinds_every_expert_as_view_without_duplication(monkeypatch):
+    """프리빌드 후 expert 가중치는 레이어당 스택 3개(gate/up/down)의 뷰뿐 — 개별 버퍼 0개.
+    스택 바이트 = 원래 expert 가중치 바이트(복사본이 남지 않음)."""
+    from app.vendor.unlimited_ocr.modeling_deepseekv2 import prebuild_fused_moe
+
+    monkeypatch.delenv("OCR_MOE_FUSED", raising=False)
+    model = _tiny_moe_model()
+    layers = _moe_layers(model)
+    assert len(layers) == 2
+    before_bytes = sum(
+        p.numel() * p.element_size()
+        for moe in layers for e in moe.experts
+        for p in (e.gate_proj.weight, e.up_proj.weight, e.down_proj.weight)
+    )
+    assert len(_expert_storages(layers[0])) == 8 * 3  # 프리빌드 전: expert별 개별 버퍼
+
+    assert prebuild_fused_moe(model, "cpu") == 2
+    stacked_bytes = 0
+    for moe in layers:
+        g, u, d = moe._fused_w
+        assert _expert_storages(moe) == {
+            g.untyped_storage().data_ptr(),
+            u.untyped_storage().data_ptr(),
+            d.untyped_storage().data_ptr(),
+        }
+        for i, e in enumerate(moe.experts):
+            assert e.gate_proj.weight.data_ptr() == g[i].data_ptr()
+            assert e.up_proj.weight.data_ptr() == u[i].data_ptr()
+            assert e.down_proj.weight.data_ptr() == d[i].data_ptr()
+        stacked_bytes += sum(t.untyped_storage().nbytes() for t in (g, u, d))
+    assert stacked_bytes == before_bytes
+
+
+def test_prebuild_keeps_model_forward_bitwise_identical_on_cpu(monkeypatch):
+    """뷰 재지정 후 프리필(N>1)·디코드(N==1) 모두 legacy와 비트 동일(CPU 계약)."""
+    from app.vendor.unlimited_ocr.modeling_deepseekv2 import prebuild_fused_moe
+
+    monkeypatch.delenv("OCR_MOE_FUSED", raising=False)
+    seq = torch.randint(0, 64, (1, 6), generator=torch.Generator().manual_seed(9))
+    with torch.no_grad():
+        ref = _tiny_moe_model()(input_ids=seq, use_cache=False).last_hidden_state
+        model = _tiny_moe_model()
+        prebuild_fused_moe(model, "cpu")
+        got = model(input_ids=seq, use_cache=False).last_hidden_state
+    assert torch.equal(ref, got)
+
+
+@pytest.mark.parametrize("n_tokens", [1, 4])
+def test_fused_matches_legacy_with_prebuilt_views(monkeypatch, n_tokens):
+    """프리빌드(뷰 공유) 상태에서도 fused ↔ legacy 등가 — N=1 bitwise, N>1 round-off만."""
+    from app.vendor.unlimited_ocr.modeling_deepseekv2 import prebuild_fused_moe
+
+    monkeypatch.delenv("OCR_MOE_FUSED", raising=False)
+    model = _tiny_moe_model(seed=3)
+    prebuild_fused_moe(model, "cpu")
+    for moe in _moe_layers(model):
+        x, topk_idx, topk_weight = _route(moe, n_tokens, seed=n_tokens)
+        ref = moe.moe_infer(x, topk_idx, topk_weight)
+        got = moe._moe_infer_fused(x, topk_idx, topk_weight)
+        if n_tokens == 1:
+            assert torch.equal(ref, got)
+        else:
+            assert torch.allclose(ref, got, rtol=1e-3, atol=1e-5)
+
+
+@pytest.mark.parametrize("val", ["0", "off", "False"])
+def test_prebuild_respects_kill_switch(monkeypatch, val):
+    """OCR_MOE_FUSED=0 → 프리빌드 없음(legacy 개별 가중치 그대로 = 완전 legacy 복원)."""
+    from app.vendor.unlimited_ocr.modeling_deepseekv2 import prebuild_fused_moe
+
+    monkeypatch.setenv("OCR_MOE_FUSED", val)
+    model = _tiny_moe_model()
+    assert prebuild_fused_moe(model, "cpu") == 0
+    for moe in _moe_layers(model):
+        assert getattr(moe, "_fused_w", None) is None
+        assert len(_expert_storages(moe)) == 8 * 3
+
+
+def test_prebuild_then_lazy_build_is_a_noop(monkeypatch):
+    """프리빌드한 스택은 첫 디코드의 지연 빌드(device=None)가 다시 만들지 않는다."""
+    from app.vendor.unlimited_ocr.modeling_deepseekv2 import prebuild_fused_moe
+
+    monkeypatch.delenv("OCR_MOE_FUSED", raising=False)
+    model = _tiny_moe_model()
+    prebuild_fused_moe(model, "cpu")
+    for moe in _moe_layers(model):
+        first = moe._fused_w
+        moe._build_fused_experts()
+        assert moe._fused_w is first
+
+
+def test_env_parse_shared_with_module_helper(monkeypatch):
+    from app.vendor.unlimited_ocr.modeling_deepseekv2 import fused_moe_env_enabled
+
+    for value, expected in (("", True), ("1", True), ("bogus", True), ("0", False), (" OFF ", False)):
+        monkeypatch.setenv("OCR_MOE_FUSED", value)
+        assert fused_moe_env_enabled() is expected, value
+        assert _build_moe()._fused_env_enabled() is expected, value

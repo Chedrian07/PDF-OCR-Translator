@@ -331,36 +331,117 @@ def test_p19_rope_recomputed_with_static_position_buffer(monkeypatch):
         assert torch.equal(a, b)
 
 
-def test_p20_ring_state_is_device_tensor_and_wraps():
-    """P20: 링 위치가 0-dim int64 텐서(_ring_pos_t)로 단일화되고(int dict _ring_pos 폐기),
-    정상상태 스텝마다 +1 mod W로 랩어라운드하며 캐시 길이는 prefill+W로 고정된다."""
+def test_p20_ring_state_defaults_to_host_int_and_wraps():
+    """P20 기본(eager): 링 슬롯은 호스트 int(_ring_pos) 하나뿐이고 텐서 슬롯은 없다 —
+    MPS에서 index_copy_가 KV 길이에 비례하는 비용(8쪽 청크 토큰당 15.9ms)이라 텐서
+    슬롯은 CUDA Graph 모드에서만 쓴다. 정상상태 스텝마다 +1 mod W로 랩어라운드하고
+    캐시 길이는 prefill+W로 고정된다."""
     model = _tiny_ring_model()  # W=2
     seq = torch.randint(0, 64, (1, 10), generator=torch.Generator().manual_seed(7))
     _, cache, _ = _drive_decode(model, seq, "fresh")
 
-    assert not hasattr(cache, "_ring_pos")  # 파이썬 int 상태는 폐기(이중 상태 금지)
-    assert hasattr(cache, "_ring_pos_t")
-    for li in range(2):
-        t = cache._ring_pos_t[li]
-        assert torch.is_tensor(t) and t.dtype == torch.long and t.dim() == 0
+    assert not hasattr(cache, "_ring_pos_t")  # 이중 상태 금지 — 텐서 표현 없음
+    assert getattr(cache, "_ring_tensor_mode", False) is False
+    assert set(cache._ring_pos) == {0, 1}
+    assert all(type(v) is int for v in cache._ring_pos.values())
     # 디코드 6스텝 = 워밍업 2 + 정상상태 4 → ring_pos = 4 % 2 = 0
-    assert int(cache._ring_pos_t[0]) == 0
+    assert cache._ring_pos[0] == 0
     assert cache.get_seq_length() == 4 + 2  # prefill(4)+W(2)로 고정 — 정상상태에서 불변
 
 
-def test_p20_ring_multi_token_chunk_advances_tensor_slot():
-    """정상상태에서 q_len=2 조각 투입 — P20 t-루프가 텐서 슬롯으로 2회 전진(랩 포함)."""
+@pytest.mark.parametrize("tensor_mode", [False, True])
+def test_p20_ring_multi_token_chunk_advances_slot(tensor_mode):
+    """정상상태에서 q_len=2 조각 투입 — t-루프가 두 모드 모두 슬롯을 2회 전진(랩 포함)."""
+    from app.vendor.unlimited_ocr.modeling_deepseekv2 import ring_slots_to_tensor
+
     model = _tiny_ring_model()  # W=2
     seq = torch.randint(0, 64, (1, 9), generator=torch.Generator().manual_seed(3))
     _, cache, _ = _drive_decode(model, seq, "fresh")  # 디코드 5스텝 → ring_pos = 3 % 2 = 1
-    assert int(cache._ring_pos_t[0]) == 1
+    assert cache._ring_pos[0] == 1
+    if tensor_mode:
+        ring_slots_to_tensor(cache)
 
     chunk = torch.randint(0, 64, (1, 2), generator=torch.Generator().manual_seed(4))
     pos = torch.tensor([[9, 10]], dtype=torch.long)
     with torch.no_grad():
         model(input_ids=chunk, use_cache=True, past_key_values=cache, position_ids=pos)
-    assert int(cache._ring_pos_t[0]) == (1 + 2) % 2  # 두 슬롯 전진 + 랩
+    slots = cache._ring_pos_t if tensor_mode else cache._ring_pos
+    assert int(slots[0]) == (1 + 2) % 2  # 두 슬롯 전진 + 랩
     assert cache.get_seq_length() == 4 + 2  # 여전히 고정 길이(링 덮어쓰기)
+
+
+def test_p20_mode_switch_keeps_single_state():
+    """int→텐서→int 전환은 값을 보존하고 항상 한 표현만 남긴다(그래프 진입·폴백 계약)."""
+    from app.vendor.unlimited_ocr.modeling_deepseekv2 import ring_slots_to_int, ring_slots_to_tensor
+
+    model = _tiny_ring_model()  # W=2
+    seq = torch.randint(0, 64, (1, 9), generator=torch.Generator().manual_seed(5))
+    _, cache, _ = _drive_decode(model, seq, "fresh")
+    before = dict(cache._ring_pos)
+
+    ring_slots_to_tensor(cache)
+    assert not hasattr(cache, "_ring_pos") and cache._ring_tensor_mode is True
+    for li, t in cache._ring_pos_t.items():
+        assert torch.is_tensor(t) and t.dtype == torch.long and t.dim() == 0
+        assert int(t) == before[li]
+
+    ring_slots_to_int(cache)
+    assert not hasattr(cache, "_ring_pos_t") and cache._ring_tensor_mode is False
+    assert cache._ring_pos == before
+
+
+def _drive_with_switches(model, seq, switches):
+    """prefill 4토큰 후 티처포싱 디코드 — switches {step: fn(cache)}로 스텝 직전 모드 전환."""
+    cache = DynamicCache()
+    with torch.no_grad():
+        out = model(input_ids=seq[:, :4], use_cache=True, past_key_values=cache)
+    cache = out.past_key_values
+    hs = []
+    for step in range(4, seq.shape[1]):
+        if step in switches:
+            switches[step](cache)
+        pos = torch.tensor([[step]], dtype=torch.long)
+        with torch.no_grad():
+            out = model(input_ids=seq[:, step:step + 1], use_cache=True,
+                        past_key_values=cache, position_ids=pos)
+        cache = out.past_key_values
+        hs.append(out.last_hidden_state.clone())
+    return hs
+
+
+def test_p20_tensor_and_int_slots_are_bitwise_identical_across_switches():
+    """링 여러 바퀴 동안 int→텐서(그래프 진입)→int(폴백) 전환이 섞여도 순수 int 실행과
+    스텝별 출력이 비트 동일 — 두 경로가 같은 슬롯에 같은 K/V를 쓴다."""
+    from app.vendor.unlimited_ocr.modeling_deepseekv2 import ring_slots_to_int, ring_slots_to_tensor
+
+    seq = torch.randint(0, 64, (1, 20), generator=torch.Generator().manual_seed(11))
+    ref = _drive_with_switches(_tiny_ring_model(), seq, {})
+    mixed = _drive_with_switches(
+        _tiny_ring_model(), seq, {8: ring_slots_to_tensor, 13: ring_slots_to_int}
+    )
+    assert len(ref) == len(mixed) == 16
+    for a, b in zip(ref, mixed):
+        assert torch.equal(a, b)
+
+
+def test_p20_int_mode_never_uses_index_copy(monkeypatch):
+    """기본 eager 경로는 index_copy_를 호출하지 않는다(MPS O(KV) 비용 회귀 방지).
+    텐서 모드(그래프)에서만 index_copy_가 쓰인다."""
+    from app.vendor.unlimited_ocr.modeling_deepseekv2 import ring_slots_to_tensor
+
+    calls = {"n": 0}
+    real = torch.Tensor.index_copy_
+
+    def spy(self, *args, **kwargs):
+        calls["n"] += 1
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "index_copy_", spy)
+    seq = torch.randint(0, 64, (1, 12), generator=torch.Generator().manual_seed(2))
+    _drive_with_switches(_tiny_ring_model(), seq, {})
+    assert calls["n"] == 0
+    _drive_with_switches(_tiny_ring_model(), seq, {7: ring_slots_to_tensor})
+    assert calls["n"] > 0
 
 
 def test_graph_precheck_skips_when_moe_kill_switch_off(monkeypatch):

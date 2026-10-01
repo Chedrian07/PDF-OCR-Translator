@@ -24,3 +24,8 @@ secrets/
 tmp/
 output/
 frontend/tests/e2e/shots/
+# OCR 벤치마크 출력(엔진별 문서 OCR 전문) — 빌드 컨텍스트로도 보내지 않는다
+**/bench_out/
+# 프런트엔드 테스트·픽스처 — `COPY frontend`가 정적 서빙 루트(/srv/frontend)에 그대로
+# 실어 무인증으로 공개되던 개발 산출물이다(런타임 미사용)
+frontend/tests/

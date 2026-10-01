@@ -35,6 +35,17 @@ _TOKEN_HISTORY_MAX_CHARS = 8 * 1024 * 1024
 _UNSUBMITTED_SEQ = float("inf")
 # JobStore.create가 만드는 잡 디렉터리 이름 — 재시작 정리가 이 형식만 건드린다.
 _JOB_DIR_NAME = re.compile(r"^j_[0-9a-f]{12}$")
+# SSE 구독자 상한. 브라우저 탭 하나는 채널당 스트림 1개(잡 이벤트·번역 이벤트)라
+# 채널당 8이면 같은 잡을 탭 여덟 개로 봐도 넉넉하다. 전체 상한은 SSE 폴 스레드 예산
+# (api._SSE_LIMITER = 64)과 같게 둔다 — 그 이상은 어차피 폴 차례를 기다린다. 상한이
+# 없으면 스크립트 하나가 본문을 읽지 않는 연결 수천 개로 구독자 큐(각 2000건)와 접속
+# replay 사본(각 최대 8M자)을 연결 수에 비례해 쌓을 수 있었다.
+_SUBSCRIBERS_PER_CHANNEL = 8
+_SUBSCRIBERS_TOTAL = 64
+
+
+class SubscriberLimitError(RuntimeError):
+    """SSE 구독자 상한 초과 — 라우트가 503 + Retry-After(재시도)로 옮긴다."""
 
 
 def _now_iso() -> str:
@@ -405,7 +416,14 @@ class EventBroker:
     출력을 다시 실어 나른다.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        max_per_channel: int = _SUBSCRIBERS_PER_CHANNEL,
+        max_total: int = _SUBSCRIBERS_TOTAL,
+    ) -> None:
+        self.max_per_channel = max_per_channel
+        self.max_total = max_total
         self._subs: dict[str, list[queue.Queue]] = {}
         self._token_history: dict[str, deque[str]] = {}
         self._token_history_chars: dict[str, int] = {}
@@ -424,9 +442,23 @@ class EventBroker:
         q.token_dropped = False
         return q
 
+    def _over_limit_locked(self, job_id: str) -> bool:
+        """_lock을 쥔 채로만 부른다 — 이 채널 또는 전체 구독자가 상한에 닿았는가."""
+        if len(self._subs.get(job_id, ())) >= self.max_per_channel:
+            return True
+        return sum(len(subs) for subs in self._subs.values()) >= self.max_total
+
+    def has_room(self, job_id: str) -> bool:
+        """구독을 하나 더 받을 수 있는가 — 라우트가 스트림을 열기 전에 503을 고른다.
+        (판정과 실제 구독 사이의 경합은 subscribe*가 다시 막는다.)"""
+        with self._lock:
+            return not self._over_limit_locked(job_id)
+
     def subscribe(self, job_id: str) -> queue.Queue:
         q = self._new_queue()
         with self._lock:
+            if self._over_limit_locked(job_id):
+                raise SubscriberLimitError(job_id)
             self._subs.setdefault(job_id, []).append(q)
         return q
 
@@ -439,6 +471,8 @@ class EventBroker:
         """
         q = self._new_queue()
         with self._lock:
+            if self._over_limit_locked(job_id):
+                raise SubscriberLimitError(job_id)
             replay = "".join(self._token_history.get(job_id, ()))
             truncated = job_id in self._token_history_truncated
             self._subs.setdefault(job_id, []).append(q)

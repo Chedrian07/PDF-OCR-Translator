@@ -30,6 +30,7 @@ from .engine import build_engine
 from .jobs import EventBroker, JobStore, Worker
 from .llm import build_router
 from .owner_lock import JobsDirLock, acquire_jobs_dir_lock
+from .pipeline import pdf_worker
 from .pipeline.runner import chunk_length_budget_note
 
 # 스레드 이름을 포맷에 포함한다 — 번역은 잡별 데몬 스레드로 **병렬** 실행되고
@@ -359,6 +360,30 @@ def _remove_shutdown_hooks(installed: dict) -> None:
             signal.signal(sig, previous)
 
 
+def _log_pdf_worker_config() -> None:
+    """PyMuPDF 격리 설정을 기동 시 한 줄로 — 워커는 첫 사용 때 뜬다(pipeline/pdf_worker)."""
+    page = pdf_worker.page_timeout()
+    build = pdf_worker.export_build_timeout()
+    mode = pdf_worker.mode()
+    if mode != pdf_worker.MODE_PROCESS:
+        logger.warning(
+            "PDF_WORKER_MODE=%s — PyMuPDF 작업을 서버 프로세스 안에서 실행합니다(시간 상한·"
+            "프로세스 격리 없음, 테스트·디버깅용)", mode,
+        )
+        return
+    logger.info(
+        "PDF 워커: process 모드 (ocr 1 · export %d · probe %d, 페이지 상한 %s · 빌드 상한 %s, "
+        "업로드 게이트 페이지당 %s · XObject 호출 %s)",
+        pdf_worker.get_pool(pdf_worker.POOL_EXPORT).size(),
+        pdf_worker.get_pool(pdf_worker.POOL_PROBE).size(),
+        f"{page:g}s" if page else "없음", f"{build:g}s" if build else "없음",
+        f"{pdf_worker.max_page_content_bytes() // 1048576}MB"
+        if pdf_worker.max_page_content_bytes() else "끔",
+        f"{pdf_worker.max_page_xobject_calls():,}회"
+        if pdf_worker.max_page_xobject_calls() else "끔",
+    )
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     settings.jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -384,6 +409,7 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
     budget_note = chunk_length_budget_note(settings, engine)
     if budget_note:
         logger.info("%s", budget_note)
+    _log_pdf_worker_config()
     cancel_events: dict[str, threading.Event] = {}
     # 모델 로드 오류 — 프리로드 스레드와 워커(잡 시작 시 로드)가 함께 기록하고
     # /api/health의 model_load_error가 읽는다.
@@ -446,6 +472,9 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
             # 신호 없이 끝나는 수명(TestClient 등)에서도 남은 스트림이 끝나게 한다.
             shutdown.requested = True
             _remove_shutdown_hooks(shutdown_hooks)
+            # PyMuPDF 워커 프로세스를 정리한다(쉬는 워커는 정상 종료, 작업 중이면 종료) —
+            # 다음 사용(같은 프로세스의 새 앱)이 lazily 다시 띄운다. atexit도 같은 일을 한다.
+            await asyncio.to_thread(pdf_worker.shutdown_pools)
             # 닫힌 앱은 잡 디렉터리 소유권을 바로 놓는다 — 같은 DATA_DIR로 다음 앱
             # (재시작·테스트의 재생성)이 뜰 수 있게. 예외로 끝난 수명도 마찬가지다.
             owner_lock.release()

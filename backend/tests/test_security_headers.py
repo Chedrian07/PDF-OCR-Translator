@@ -8,6 +8,10 @@
 정상 실행 — 여기서는 그 근거가 되는 헤더 계약을 고정한다. 테마 부트스트랩은 같은 출처
 파일(frontend/theme-init.js)이라 'self'로 실행되고, 인라인 스크립트가 다시 생기면 해시로만
 허용된다.
+
+SPA에는 정책이 두 겹이다 — 서버 헤더(main.py)와 index.html의 meta. 브라우저는 둘 다
+적용하므로(교집합) 한쪽만 고치면 다른 쪽이 조용히 막거나, 고친 줄 알았던 완화가 무효가
+된다. 그래서 meta가 표현할 수 있는 지시어는 두 층이 같아야 하고, Referrer 정책도 같다.
 """
 
 import base64
@@ -63,6 +67,53 @@ class _InlineScripts(HTMLParser):
             self._inline = False
 
 
+class _MetaPolicies(HTMLParser):
+    """index.html의 meta CSP·meta referrer 값을 모은다."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.csp: list[str] = []
+        self.referrer: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "meta":
+            return
+        a = dict(attrs)
+        if (a.get("http-equiv") or "").lower() == "content-security-policy":
+            self.csp.append(a.get("content") or "")
+        elif (a.get("name") or "").lower() == "referrer":
+            self.referrer.append(a.get("content") or "")
+
+
+# meta로는 전달되지 않는(브라우저가 무시하는) 지시어 — 헤더에만 둘 수 있다.
+_HEADER_ONLY_DIRECTIVES = {"frame-ancestors", "report-uri", "report-to", "sandbox"}
+# 없으면 다른 지시어로 대체되는 fetch 지시어(CSP3 대체 사슬). base-uri·form-action처럼
+# 사슬이 없는 지시어는 없으면 '제한 없음'이다.
+_FALLBACK = {
+    "script-src-elem": ("script-src", "default-src"),
+    "script-src-attr": ("script-src", "default-src"),
+    "style-src-elem": ("style-src", "default-src"),
+    "style-src-attr": ("style-src", "default-src"),
+    "worker-src": ("child-src", "script-src", "default-src"),
+    "frame-src": ("child-src", "default-src"),
+    **{
+        name: ("default-src",)
+        for name in (
+            "child-src", "script-src", "style-src", "img-src", "font-src", "connect-src",
+            "media-src", "object-src", "manifest-src",
+        )
+    },
+}
+
+
+def _effective(policy: dict[str, list[str]], directive: str) -> list[str] | None:
+    """지시어의 실효 출처 목록(대체 사슬 반영, 순서 무관). None = 제한 없음."""
+    for name in (directive, *_FALLBACK.get(directive, ())):
+        if name in policy:
+            return sorted(policy[name])
+    return None
+
+
 def _sha256_source(text: str) -> str:
     return "'sha256-" + base64.b64encode(hashlib.sha256(text.encode("utf-8")).digest()).decode() + "'"
 
@@ -98,6 +149,32 @@ def test_spa_document_csp_blocks_external_images_but_allows_its_own_scripts(spa_
         parts = urlsplit(src)
         assert not parts.scheme and not parts.netloc, src     # 외부 출처 스크립트 없음
     assert response.headers["referrer-policy"] == "same-origin"
+
+
+def test_spa_meta_csp_and_referrer_agree_with_the_header(spa_client):
+    """SPA 문서에는 서버 헤더 CSP와 index.html meta CSP가 함께 걸린다(실효 정책은 교집합).
+    둘이 어긋나면 한쪽 수정이 다른 쪽에 조용히 막힌다 — 예: 헤더에만 출처를 더하면 meta가
+    막고, 인라인 스크립트를 넣으면 헤더는 해시를 자동으로 더하지만 meta가 막는다. meta가
+    표현할 수 있는 모든 지시어(frame-ancestors 등 헤더 전용 제외)의 실효 출처와 Referrer
+    정책이 두 층에서 같아야 한다."""
+    response = spa_client.get("/")
+    header = _directives(response.headers["content-security-policy"])
+    meta = _MetaPolicies()
+    meta.feed((REPO / "frontend" / "index.html").read_text(encoding="utf-8"))
+    assert len(meta.csp) == 1, meta.csp
+    declared = _directives(meta.csp[0])
+    assert not _HEADER_ONLY_DIRECTIVES & declared.keys()        # meta에 두면 무시될 뿐이다
+    names = (header.keys() | declared.keys()) - _HEADER_ONLY_DIRECTIVES
+    # 비교가 공허하지 않게 — 핵심 지시어는 두 층 모두 직접 선언한다
+    assert {"default-src", "script-src", "style-src", "img-src"} <= header.keys() & declared.keys()
+    mismatched = {
+        name: {"header": _effective(header, name), "meta": _effective(declared, name)}
+        for name in sorted(names)
+        if _effective(header, name) != _effective(declared, name)
+    }
+    assert mismatched == {}
+    # Referrer: meta가 헤더를 덮어쓴다 — 값이 다르면 문서화된 헤더 정책이 거짓말이 된다
+    assert meta.referrer == [response.headers["referrer-policy"]]
 
 
 def test_spa_csp_follows_index_html_changes(settings, tmp_path):

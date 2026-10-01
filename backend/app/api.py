@@ -49,7 +49,7 @@ from .pipeline.render import render_document_html, render_markdown_html
 from .translate import SUPPORTED_LANGS, TranslateConfig, TranslateError, run_translation
 from .translate.client import OpenAICompatClient
 from .translate.types import PROMPT_V
-from .llm import LlmError
+from .llm import QA_PROVIDER_IDS, LlmError
 from .qa import AskRequest, get_page_context
 
 logger = logging.getLogger(__name__)
@@ -538,10 +538,14 @@ def _translate_available() -> bool:
 def _qa_available(st) -> bool:
     """Q&A가 실제로 가능한지 — 기본 프로바이더의 구성 여부로 판정한다.
 
-    openai-*는 LLM_OPENAI_API_KEY 유무(OpenAIClient.configured)로 네트워크 호출 없이
-    알 수 있다. ollama는 로컬 데몬 기동 여부를 동기 조회할 수 없어(health는 폴링 대상)
-    True로 두고 실시간 가용성은 /api/providers가 알려준다."""
+    openai-*는 LLM_OPENAI_API_KEY 유무(OpenAIClient.configured), local-openai는
+    LLM_LOCAL_OPENAI_BASE_URL·MODEL 구성 여부로 네트워크 호출 없이 알 수 있다
+    (LlmRouter.configured). ollama는 로컬 데몬 기동 여부를 동기 조회할 수 없어(health는
+    폴링 대상) True로 두고 실시간 가용성은 /api/providers가 알려준다."""
     provider = st.settings.llm_provider
+    configured = getattr(st.llm_router, "configured", None)
+    if callable(configured):
+        return bool(configured(provider))
     if provider.startswith("openai-"):
         return bool(getattr(getattr(st.llm_router, "openai", None), "configured", False))
     return True
@@ -1971,7 +1975,9 @@ async def llm_providers(request: Request) -> dict:
     return await _state(request).llm_router.providers()
 
 
-_QA_PROVIDERS = ("openai-responses", "openai-chat", "ollama")
+# /api/providers가 광고하는 프로바이더 전부(local-openai 포함) — 단일 출처는
+# app.llm.QA_PROVIDER_IDS. 광고된 프로바이더를 UI가 명시해 보내면 400이 되면 안 된다.
+_QA_PROVIDERS = QA_PROVIDER_IDS
 # app/llm/providers.py는 클라이언트 입력 거절(모델 허용목록·프로바이더 위반)과 실제
 # 업스트림 장애를 같은 LlmError로 던진다. 앞의 것은 재시도해도 소용없으므로 400,
 # 뒤의 것만 503으로 매핑한다. 문구의 단일 출처는 providers.py이며

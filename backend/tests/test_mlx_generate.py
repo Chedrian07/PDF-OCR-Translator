@@ -20,7 +20,7 @@ if not _OK:
 
 import mlx.core as mx  # noqa: E402
 
-from app.vendor.unlimited_ocr_mlx.generate import generate  # noqa: E402
+from app.vendor.unlimited_ocr_mlx.generation import generate  # noqa: E402
 from app.vendor.unlimited_ocr_mlx.processing import OCRInputs  # noqa: E402
 
 V = 16

@@ -124,7 +124,41 @@ def _open_pdf(fitz, pdf_path: Path, context: str):
 
 def probe_pdf(pdf_path: Path, max_pages: int) -> int:
     """업로드 검증: 열 수 있는 PDF인지 확인하고 페이지 수를 돌려준다.
-    문제가 있으면 사용자 메시지를 담은 ValueError(서버 경로 등 내부 정보 없음)."""
+    문제가 있으면 사용자 메시지를 담은 ValueError(서버 경로 등 내부 정보 없음).
+
+    검증 자체(손상 xref repair·복잡도 게이트)도 MuPDF 작업이라 서버 프로세스가 아니라 probe
+    풀 워커에서 돌린다(pdf_worker). 업로드가 수 분짜리 내보내기 빌드나 적대적 페이지를 처리
+    중인 OCR 워커 뒤에 줄서지 않도록 풀을 따로 둔다. 시간 상한(PDF_PAGE_TIMEOUT_S)을 넘거나
+    워커가 죽은 PDF는 거부한다. 빈 워커를 상한 안에 얻지 못하면 PdfWorkerBusy(→ API 503)."""
+    from . import pdf_worker
+
+    timeout = pdf_worker.page_timeout()
+    try:
+        return pdf_worker.run(
+            "app.pipeline.pdf:probe_pdf_local",
+            (
+                pdf_path, max_pages,
+                pdf_worker.max_page_content_bytes(), pdf_worker.max_page_xobject_calls(),
+            ),
+            pool=pdf_worker.POOL_PROBE, timeout=timeout, wait=timeout,
+        )
+    except pdf_worker.PdfWorkerTimeout as error:
+        raise ValueError(
+            f"PDF 검증이 시간 상한({timeout:g}초)을 넘었습니다 — 지나치게 복잡하거나 "
+            "손상된 PDF입니다"
+        ) from error
+    except pdf_worker.PdfWorkerCrashed as error:
+        raise ValueError(
+            "PDF 검증 중 처리 프로세스가 비정상 종료했습니다 — 손상되었거나 지원하지 않는 "
+            "PDF입니다"
+        ) from error
+
+
+def probe_pdf_local(
+    pdf_path: Path, max_pages: int, max_content_bytes: int = 0, max_xobject_calls: int = 0,
+) -> int:
+    """probe_pdf의 본체 — probe 워커(또는 inline 모드의 호출 스레드)에서 실행한다.
+    복잡도 상한은 부모가 읽어 넘긴다(워커는 기동 시점의 환경을 물려받으므로)."""
     fitz = quiet_fitz()
 
     doc = _open_pdf(fitz, pdf_path, "업로드 검증")
@@ -146,26 +180,25 @@ def probe_pdf(pdf_path: Path, max_pages: int) -> int:
                     f"페이지 {i + 1}의 크기({r.width:.0f}×{r.height:.0f}pt)가 "
                     f"한 변 상한({MAX_PAGE_SIDE_PT}pt)을 초과합니다"
                 )
-        _check_page_complexity(fitz, doc, n)
+        _check_page_complexity(fitz, doc, n, max_content_bytes, max_xobject_calls)
         return n
     finally:
         doc.close()
         drain_mupdf_warnings("업로드 검증")
 
 
-def _check_page_complexity(fitz, doc, page_count: int) -> None:
+def _check_page_complexity(
+    fitz, doc, page_count: int, max_bytes: int, max_calls: int,
+) -> None:
     """업로드 복잡도 게이트 — 페이지가 그리게 하는 콘텐츠와 중첩 XObject 호출을 렌더 없이 센다.
 
     페이지 수·한 변 길이만 보던 검증을 수 KB짜리 중첩 Form XObject PDF(리프 그리기 10^12회)와
     평면 대량 path 페이지가 그대로 통과해 렌더·분석이 폭주했다(감사 security-2·gap3-…-2).
-    상한(PDF_MAX_PAGE_CONTENT_MB·PDF_MAX_PAGE_XOBJECT_CALLS — pdf_worker)을 넘으면 사용자
-    메시지를 담은 ValueError(ContentTooComplex)로 거부한다 → API 400. 분석 자체가 실패한
+    상한(PDF_MAX_PAGE_CONTENT_MB·PDF_MAX_PAGE_XOBJECT_CALLS — pdf_worker, 0 = 끄기)을 넘으면
+    사용자 메시지를 담은 ValueError(ContentTooComplex)로 거부한다 → API 400. 분석 자체가 실패한
     페이지는 거부하지 않는다 — 깨진 페이지는 렌더 단계가 흰 페이지로 격리하는 기존 계약이다."""
-    from . import pdf_worker
     from .pdf_complexity import ComplexityScanner, ContentTooComplex
 
-    max_bytes = pdf_worker.max_page_content_bytes()
-    max_calls = pdf_worker.max_page_xobject_calls()
     if not (max_bytes or max_calls) or not doc.is_pdf:
         return
     try:

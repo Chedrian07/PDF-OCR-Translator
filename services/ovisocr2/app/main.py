@@ -4,6 +4,7 @@ GET  /health   : 프로토콜 health (모델 미로드 시에도 200 — model_l
 POST /v1/parse : 페이지 이미지 1장 → normalized page (figure는 [[FIGURE:n]] placeholder)
 
 응답에는 이미지 바이너리·로컬 경로·토큰이 없다. crop은 메인 backend가 수행한다.
+모델 로드 재시도·엔진 사망 시 자가 재시작은 lifecycle.py 참조.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
+from . import lifecycle
 from .config import OvisConfig
 from .model import OvisModel
 from .parser import parse_page
@@ -51,10 +53,21 @@ class ParseOptions(BaseModel):
 
 
 def _load_in_background() -> None:
-    try:
-        model.load()
-    except Exception:  # noqa: BLE001 — load_error로 health에 노출됨
-        pass
+    # 일시적 실패는 백오프 재시도(그동안 health는 status=ok·model_loaded=false라 backend가
+    # 기다린다), 결정적 실패·재시도 소진만 load_error로 health에 노출한다.
+    lifecycle.supervise_load(model, logger)
+
+
+_RESTART_DETAIL = "추론 엔진이 종료돼 sidecar를 재시작합니다 — 모델 재로드 뒤 다시 시도하세요"
+
+
+def _restart_unavailable(e: Exception) -> HTTPException:
+    """엔진 사망 → 프로세스 종료를 예약하고 503을 낸다.
+
+    503은 backend가 '재시작/재로드 중'으로 보고 준비될 때까지 기다렸다가 그 페이지만
+    다시 보내는 상태 코드다(502는 페이지 실패로 확정된다)."""
+    lifecycle.schedule_restart(logger, f"{e.__class__.__name__}: {str(e)[:200]}")
+    return HTTPException(503, _RESTART_DETAIL)
 
 
 @asynccontextmanager
@@ -122,6 +135,9 @@ def health() -> dict:
         "dtype": cfg.dtype,
         "model_loaded": model.loaded,
         "load_error": model.load_error,
+        # 확장 필드(backend는 모르는 키를 무시한다) — 재시도 대기·재시작 대기를 구분해 보인다
+        "load_retry": model.load_retry,
+        "restarting": model.restart_required,
         **_gpu_info(),
     }
 
@@ -161,6 +177,8 @@ def parse(
     options: str = Form("{}"),
 ) -> dict:
     if not model.loaded:
+        if model.restart_required:
+            raise HTTPException(503, _RESTART_DETAIL)
         detail = model.load_error or "모델이 아직 로드되지 않았습니다"
         raise HTTPException(503, detail)
     try:
@@ -184,8 +202,11 @@ def parse(
     max_output_tokens = min(opts.max_output_tokens or cfg.max_output_tokens,
                             cfg.max_output_tokens)
     try:
-        raw = model.infer(image, max_pixels=max_pixels, max_output_tokens=max_output_tokens)
-    except Exception as e:  # noqa: BLE001 — OOM만 1회 강등 재시도, 그 외 502
+        out = model.infer(image, max_pixels=max_pixels, max_output_tokens=max_output_tokens)
+    except Exception as e:  # noqa: BLE001 — OOM만 1회 강등 재시도, 엔진 사망은 503, 그 외 502
+        if model.restart_required:
+            logger.exception("추론 엔진 사망 (req=%s)", request_id[:64])
+            raise _restart_unavailable(e) from e
         if not _is_oom(e):
             logger.exception("추론 실패 (req=%s)", request_id[:64])
             raise HTTPException(502, f"추론 실패: {e.__class__.__name__}") from e
@@ -205,9 +226,12 @@ def parse(
             request_id[:64], max_pixels, reduced,
         )
         try:
-            raw = model.infer(image, max_pixels=reduced, max_output_tokens=max_output_tokens)
+            out = model.infer(image, max_pixels=reduced, max_output_tokens=max_output_tokens)
             warnings.append(f"GPU 메모리 부족으로 해상도 강등(max_pixels {max_pixels}→{reduced})")
         except Exception as e2:  # noqa: BLE001 — 재시도 실패는 명확한 오류로
+            if model.restart_required:
+                logger.exception("OOM 재시도 중 추론 엔진 사망 (req=%s)", request_id[:64])
+                raise _restart_unavailable(e2) from e2
             model.release_cache()
             logger.exception("OOM 재시도 실패 (req=%s)", request_id[:64])
             raise HTTPException(
@@ -215,13 +239,25 @@ def parse(
             ) from e2
     t2 = time.monotonic()
 
+    raw = out.text
+    # 출력 토큰 상한(finish_reason=length)에서 끊긴 페이지는 끝부분이 빠졌을 수 있다
+    # (닫히지 않은 <table> 등). 주기적 반복 루프는 parse_page가 따로 정리·경고하지만,
+    # 주기 없는 퇴화 출력이나 정말 긴 밀집 페이지는 예전에 경고 없이 정상 처리됐다.
+    # truncated는 프로토콜 확장 필드다(backend PageResult는 모르는 키를 무시한다).
+    truncated = out.finish_reason == "length"
+    if truncated:
+        warnings.append(
+            f"출력 토큰 상한({max_output_tokens})에 도달 — 페이지 끝부분이 잘렸을 수 있습니다"
+        )
+
     page = parse_page(raw)
     t3 = time.monotonic()
 
     logger.info(
-        "parse 완료 (req=%s, page=%d, %.0fms, 출력 %d자, figure %d개)",
+        "parse 완료 (req=%s, page=%d, %.0fms, 출력 %d자, figure %d개%s)",
         request_id[:64], page_index, (t2 - t1) * 1000, len(page["markdown"]),
         sum(1 for b in page["blocks"] if b["type"] == "image"),
+        ", 출력 상한 도달" if truncated else "",
     )
     return {
         "protocol_version": PROTOCOL_VERSION,
@@ -234,6 +270,7 @@ def parse(
             "blocks": page["blocks"],
             "provider_raw": raw[:_PROVIDER_RAW_CAP],
             "warnings": page["warnings"] + warnings,
+            "truncated": truncated,
         },
         "timings": {
             "preprocess_ms": round((t1 - t0) * 1000, 1),

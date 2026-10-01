@@ -593,3 +593,138 @@ def test_single_slot_deployment_does_not_prewarm(tmp_path, monkeypatch):
         assert entered == ["single-slot"]
     finally:
         derived._forget_job_caches(job.id)
+
+
+# ── concurrency-6: MuPDF 예외도 사용자용 내보내기 오류로 정규화된다 ─────────────
+def _mupdf_failure(*args, **kwargs):
+    import pymupdf
+
+    # 사라진 디렉터리에 doc.save → 실제로 나는 예외 (FzErrorBase 직계, OSError 아님)
+    raise pymupdf.mupdf.FzErrorSystem("code=2: cannot open file: No such file or directory")
+
+
+def test_mupdf_error_during_export_keeps_each_route_contract(client, sample_pdf, monkeypatch):
+    """예전에는 MuPDF 예외가 정규화를 우회해 /pdf·/page가 메시지 없는 500, /layout·
+    document.html은 문서화된 '좌표 텍스트 렌더 폴백' 대신 500, 예열 스레드는 죽었다."""
+    import app.api as api_mod
+    from app.pipeline import derived
+
+    _export_env(monkeypatch)
+    monkeypatch.setattr(api_mod, "build_translated_pdf", _mupdf_failure)
+    jid, _job_dir = _ko_layout_job(client, sample_pdf)
+
+    for path in ("/pdf?lang=ko", "/pdf?lang=ko&view=dual", "/page/1?lang=ko"):
+        r = client.get(f"/api/jobs/{jid}{path}")
+        assert r.status_code == 409, (path, r.status_code, r.text)
+        assert "번역 PDF를 만들 수 없습니다" in r.json()["detail"]
+
+    layout = client.get(f"/api/jobs/{jid}/layout?lang=ko")
+    assert layout.status_code == 200                    # 좌표 텍스트 렌더 폴백
+    assert "rendered/ko" not in layout.text
+    assert client.get(f"/api/jobs/{jid}/document.html?lang=ko").status_code == 200
+
+    job = client.app.state.store.get(jid)
+    settings = client.app.state.settings
+    assert derived.warm_translated_pdf(job, "ko", settings, build=_mupdf_failure) is False
+
+
+def test_page_render_failure_is_409_not_500(client, sample_pdf, monkeypatch):
+    """래스터 실패(전 페이지 실패·암호화·페이지 상한 = ValueError)도 잡 상태 문제다."""
+    import app.api as api_mod
+
+    _export_env(monkeypatch)
+    jid, _job_dir = _ko_layout_job(client, sample_pdf)
+
+    def _all_pages_failed(*args, **kwargs):
+        raise ValueError("모든 페이지 렌더에 실패했습니다")
+
+    monkeypatch.setattr(api_mod, "render_pdf_pages", _all_pages_failed)
+    r = client.get(f"/api/jobs/{jid}/page/1?lang=ko")
+    assert r.status_code == 409, r.text
+    assert "모든 페이지 렌더에 실패했습니다" in r.json()["detail"]
+
+
+def test_pdf_layout_mismatch_is_409_with_the_reason(client, sample_pdf, monkeypatch):
+    """레이아웃 대응 불일치는 결정적인 잡 상태 오류다 — /page처럼 409 + 원인 문구."""
+    _export_env(monkeypatch)
+    jid, job_dir = _ko_layout_job(client, sample_pdf)
+    pages = json.loads((job_dir / "layout.ko.json").read_text(encoding="utf-8"))
+    pages[0]["blocks"] = pages[0]["blocks"][:-1]          # 블록 하나가 사라진 번역
+    (job_dir / "layout.ko.json").write_text(json.dumps(pages), encoding="utf-8")
+
+    r = client.get(f"/api/jobs/{jid}/pdf?lang=ko")
+    assert r.status_code == 409, r.text
+    assert "블록 수가 일치하지 않습니다" in r.json()["detail"]
+
+
+# ── concurrency-8: 삭제와 겹친 빌드가 잡 디렉터리를 되살리지 않는다 ─────────────
+def test_dual_build_finishing_after_delete_does_not_resurrect_the_job(
+    client, sample_pdf, monkeypatch,
+):
+    """대조 PDF 빌드 중 잡이 삭제되면, 빌더의 out.parent.mkdir(parents=True)가 meta.json
+    없는 잡 디렉터리를 되살려 export.ko.dual.pdf만 든 영구 고아가 됐다(재현)."""
+    import app.api as api_mod
+
+    _export_env(monkeypatch)
+    jid, job_dir = _ko_layout_job(client, sample_pdf)
+    store = client.app.state.store
+    job = store.get(jid)
+    assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200
+
+    def _build_racing_delete(source_pdf, translated_pdf, out):
+        store.delete_dir(job)                      # 빌드 도중 DELETE(또는 TTL GC)
+        out.parent.mkdir(parents=True, exist_ok=True)   # 빌더가 하는 그대로
+        out.write_bytes(b"%PDF-1.4 dual")
+        return out
+
+    monkeypatch.setattr(api_mod, "build_dual_pdf", _build_racing_delete)
+    r = client.get(f"/api/jobs/{jid}/pdf?lang=ko&view=dual")
+    assert r.status_code in (404, 409), r.text
+    assert not job_dir.exists(), sorted(p.name for p in job_dir.iterdir())
+
+
+def test_facsimile_render_finishing_after_delete_does_not_resurrect_the_job(
+    client, sample_pdf, monkeypatch,
+):
+    import app.api as api_mod
+
+    _export_env(monkeypatch)
+    jid, job_dir = _ko_layout_job(client, sample_pdf)
+    store = client.app.state.store
+    job = store.get(jid)
+
+    def _render_racing_delete(pdf_path, out_dir, *, dpi, max_pages):
+        store.delete_dir(job)
+        out_dir.mkdir(parents=True, exist_ok=True)      # render_pdf_pages가 하는 그대로
+        (out_dir / "page_0001.png").write_bytes(b"\x89PNG")
+
+    monkeypatch.setattr(api_mod, "render_pdf_pages", _render_racing_delete)
+    r = client.get(f"/api/jobs/{jid}/page/1?lang=ko")
+    assert r.status_code in (404, 409), r.text
+    assert not job_dir.exists()
+
+
+def test_export_on_an_already_deleted_job_dir_does_not_recreate_it(tmp_path):
+    """삭제가 먼저 끝났으면 빌드·렌더를 아예 시작하지 않는다."""
+    from types import SimpleNamespace
+
+    from app.pipeline import derived
+
+    job = SimpleNamespace(id="gone", dir=tmp_path / "gone", dpi=72)
+    settings = SimpleNamespace(pdf_export_font="", max_pages=10)
+    with pytest.raises(derived.PdfExportError):
+        derived._ensure_facsimile_pages(job, [1], "ko", settings, build=_mupdf_failure)
+    with pytest.raises(derived.PdfExportError):
+        derived._ensure_dual_pdf(job, "ko", job.dir / "export.ko.pdf", build=_mupdf_failure)
+    assert not job.dir.exists()
+
+
+def test_translate_state_write_does_not_recreate_a_deleted_job_dir(tmp_path):
+    from types import SimpleNamespace
+
+    import app.api as api_mod
+
+    job = SimpleNamespace(id="gone", dir=tmp_path / "gone")
+    with pytest.raises(OSError):
+        api_mod._write_translate_state(job, "ko", {"status": "error"})
+    assert not job.dir.exists()

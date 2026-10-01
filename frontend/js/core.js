@@ -401,6 +401,11 @@ export function qaProviderHint(provider) {
   if (id === 'ollama') {
     return '로컬 Ollama를 사용할 수 없습니다. ollama serve 실행 후 ollama pull qwen3:8b 로 모델을 준비해 주세요.';
   }
+  if (id === 'local-openai') {
+    // 루프백(또는 host.docker.internal)의 OpenAI 호환 서버 — id가 'openai-'로 시작하지 않아
+    // 위 키 안내와 섞이지 않는다. 키보다 서버가 꺼져 있거나 주소·모델 id가 틀린 경우가 흔하다.
+    return '로컬 OpenAI 호환 서버를 사용할 수 없습니다. 서버(oMLX·LM Studio·mlx_lm.server)를 켜고 LLM_LOCAL_OPENAI_BASE_URL·LLM_LOCAL_OPENAI_MODEL 설정을 확인해 주세요.';
+  }
   return '선택한 LLM 공급자를 사용할 수 없습니다. 서버 설정을 확인해 주세요.';
 }
 

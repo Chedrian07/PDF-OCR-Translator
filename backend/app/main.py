@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import re
+import signal
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -298,6 +299,60 @@ class SecurityHeadersMiddleware:
         await self.app(scope, receive, send_with_headers)
 
 
+# ── 정상 종료 신호 → 열린 SSE 스트림 종료 ─────────────────────────────────────
+# uvicorn은 SIGTERM/SIGINT를 받으면 새 연결을 막고 진행 중 응답에는 keep_alive=False만
+# 세운 뒤, 연결이 **모두 닫힐 때까지** 기다리고 나서야 lifespan 종료를 보낸다(기본
+# timeout_graceful_shutdown=None). 진행 중 잡·번역의 SSE 스트림은 done/error나 클라이언트
+# 끊김으로만 끝나므로, 탭 하나만 열려 있어도 docker stop은 매번 SIGKILL(lifespan 종료
+# 미실행)로 끝났고 make dev(--reload)는 잡이 끝날 때까지 재시작이 멈췄다. lifespan은
+# 너무 늦게 불리므로, 서버가 설치한 신호 처리기를 감싸 종료 요청을 앱에도 알리고 SSE
+# 루프가 다음 폴(≤1s)에서 스스로 끝나게 한다. EventSource는 retry로 재연결한다.
+_SHUTDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+
+class ShutdownSignal:
+    """종료 요청 표식 — SSE 루프가 폴마다 읽는다.
+
+    신호 처리기에서 세우므로 락·Event를 쓰지 않는다: 처리기는 메인 스레드의 바이트코드
+    사이에서 돌아, 두 번째 신호가 첫 처리기의 Event.set() 내부(락 보유 중)를 끊으면
+    같은 스레드가 같은 락을 다시 기다리는 교착이 될 수 있다. 속성 대입은 원자적이다."""
+
+    def __init__(self) -> None:
+        self.requested = False
+
+
+def _install_shutdown_hooks(flag: ShutdownSignal) -> dict:
+    """서버가 설치한 SIGINT/SIGTERM 파이썬 처리기를 감싸 종료 요청을 flag에도 남긴다.
+
+    신호 처리기는 메인 스레드에서만 바꿀 수 있다(TestClient의 lifespan은 별도 스레드 —
+    그때는 아무것도 하지 않는다). 파이썬 처리기가 없으면(기본 동작) 감쌀 대상도, 기다릴
+    정상 종료도 없으므로 건드리지 않는다. 원래 처리기는 그대로 호출한다."""
+    installed: dict = {}
+    if threading.current_thread() is not threading.main_thread():
+        return installed
+    for sig in _SHUTDOWN_SIGNALS:
+        previous = signal.getsignal(sig)
+        if not callable(previous):
+            continue
+
+        def _hook(signum, frame, _previous=previous) -> None:
+            flag.requested = True
+            _previous(signum, frame)
+
+        signal.signal(sig, _hook)
+        installed[sig] = (previous, _hook)
+    return installed
+
+
+def _remove_shutdown_hooks(installed: dict) -> None:
+    """감싼 처리기를 원래대로 — 그 사이 다른 쪽이 바꿨다면 건드리지 않는다."""
+    if not installed or threading.current_thread() is not threading.main_thread():
+        return
+    for sig, (previous, hook) in installed.items():
+        if signal.getsignal(sig) is hook:
+            signal.signal(sig, previous)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     settings.jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -356,8 +411,11 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
                 logger.exception("잡 GC 실패")
             await asyncio.sleep(_GC_INTERVAL_S)
 
+    shutdown = ShutdownSignal()
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        shutdown_hooks = _install_shutdown_hooks(shutdown)
         try:
             worker.start()
             if settings.preload_model and not engine.loaded:
@@ -371,6 +429,9 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
                     await gc_task
             worker.stop()
         finally:
+            # 신호 없이 끝나는 수명(TestClient 등)에서도 남은 스트림이 끝나게 한다.
+            shutdown.requested = True
+            _remove_shutdown_hooks(shutdown_hooks)
             # 닫힌 앱은 잡 디렉터리 소유권을 바로 놓는다 — 같은 DATA_DIR로 다음 앱
             # (재시작·테스트의 재생성)이 뜰 수 있게. 예외로 끝난 수명도 마찬가지다.
             owner_lock.release()
@@ -410,6 +471,8 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
     app.state.worker = worker
     app.state.cancel_events = cancel_events
     app.state.load_state = load_state
+    # 정상 종료 요청 표식 — SSE 루프(api.py)가 폴마다 보고 스스로 끝난다.
+    app.state.shutdown = shutdown
     # 번역 태스크 레지스트리: 키 (job_id, lang) → {"thread","cancel"}.
     # OCR 워커(단일 스레드 직렬)와 달리 번역은 잡별 데몬 스레드로 병렬 실행된다.
     app.state.translate_tasks: dict[tuple[str, str], dict] = {}

@@ -1423,6 +1423,24 @@ class DeepseekV2FlashAttention2(DeepseekV2Attention):
 # ─────────────────────────────────────────────────────────────────────────
 
 
+def _sdpa_enabled(device_type, env_value=None):
+    """[vendor patch P16] SDPA 사용 정책 — 기본은 CUDA 전용, MPS/CPU는 원본 eager(fp32 softmax).
+
+    OCR_SDPA=1/true/yes/on(전 디바이스 강제 on) / 0/false/no/off(강제 off). env_value를
+    주면 그 값을 쓴다(forward가 호출당 1회 읽어 넘김 — 레이어마다 env 조회 반복 방지).
+    MPS 기본 off 근거: M1 Max·torch 2.10.0에서 SDPA fused 커널이 로짓을 오염시켜 디코드가
+    반복 붕괴(P12와 같은 계열). M4 Max·torch 2.10.0(2026-10 감사)에서는 붕괴가 재현되지
+    않았고(1쪽 801토큰·2쪽 1,680토큰 EOS 정상 종료) 디코드가 +15~28% 빨랐지만 출력이 비트
+    동일하지 않다(bbox ±1~2, 8쪽 청크는 2번째 토큰부터 분기) → 기본값 불변, 옵트인만."""
+    value = os.environ.get("OCR_SDPA", "") if env_value is None else env_value
+    value = value.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    return device_type == "cuda"
+
+
 def _layer_keys(cache, layer_idx):
     """레이어의 K 캐시 텐서 (구/신 DynamicCache 호환 — forward의 _get_kcache와 동일)."""
     if hasattr(cache, "key_cache"):
@@ -1541,18 +1559,12 @@ class SlidingWindowLlamaAttention(LlamaAttention):
         bsz, q_len, _ = hidden_states.size()
         W = getattr(self.config, '_ring_window', None)  # Read from config (set before generate)
 
-        # [vendor patch P16] SDPA 사용 정책 — 기본은 CUDA 전용. MPS 실측(M1 Max,
-        # torch 2.10.0)에서 SDPA fused 커널이 로짓을 오염시켜 디코드가 반복 붕괴
-        # (P12 autocast 오염과 같은 계열) → MPS/CPU는 원본 eager(fp32 softmax).
-        # OCR_SDPA=1(전 디바이스 강제 on) / 0(강제 off)으로 오버라이드 가능.
-        _sdpa_env = os.environ.get("OCR_SDPA", "").strip().lower()
+        # [vendor patch P16] SDPA 사용 정책 — 모듈 함수 _sdpa_enabled(기본 CUDA 전용,
+        # OCR_SDPA=1/0 오버라이드). env는 forward 호출당 1회만 읽는다.
+        _sdpa_env = os.environ.get("OCR_SDPA", "")
 
         def _use_sdpa(device_type):
-            if _sdpa_env in ("1", "true", "yes", "on"):
-                return True
-            if _sdpa_env in ("0", "false", "no", "off"):
-                return False
-            return device_type == "cuda"
+            return _sdpa_enabled(device_type, _sdpa_env)
 
         # --- Helper: standard QKV attention ---
         def _attn_forward(use_cache_update=True):

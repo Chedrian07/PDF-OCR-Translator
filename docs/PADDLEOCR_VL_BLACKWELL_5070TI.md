@@ -15,20 +15,43 @@
 | 모델 revision | `66317acc4c9fc17bd154591ce650735cd2855f3e` (코드 기본값 — 기동 시 `snapshot_download`로 캐시 선점) |
 | 라이선스 | Apache-2.0 |
 | 파라미터 | 0.9B (BF16, ~959MB) + layout detector |
-| paddlepaddle-gpu | **3.3.1** (공식 cu129 인덱스 — Blackwell 가이드 최소 3.2.1) |
-| paddleocr | **3.6.0** (`paddleocr[doc-parser]` — VL-1.6 동봉 버전, paddlex 3.6.x 고정) |
-| Docker base | `python:3.12-slim-bookworm` + 위 고정 wheel (자체 빌드 — 아래 §설치 경로) |
+| paddlepaddle-gpu | **3.3.1** (공식 cu129 CDN 휠 URL + 해시 고정 — Blackwell 가이드 최소 3.2.1) |
+| paddleocr | **3.6.0** (`paddleocr[doc-parser]` — VL-1.6 동봉 버전, paddlex 3.6.1) |
+| Docker base | `python:3.12-slim-bookworm@sha256:392307d2…`(backend와 같은 digest) + `apt-get upgrade` + 아래 해시 잠금 (자체 빌드 — 아래 §설치 경로) |
+| 플랫폼 | **linux/amd64 전용** (paddlepaddle-gpu 휠이 x86_64 전용) |
 | dtype | bfloat16 (공식 기본) |
 
 ## Blackwell 설치 경로 (공식 가이드 기준)
 
 공식 [PaddleOCR-VL NVIDIA Blackwell 가이드]가 제시하는 두 경로 중 **wheel 경로**를
-기본으로 채택했다:
+기본으로 채택했다. 가이드의 명령은 다음과 같다:
 
 ```
 python -m pip install paddlepaddle-gpu==3.3.1 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
 python -m pip install "paddleocr[doc-parser]==3.6.0"
 ```
+
+이미지는 이 명령을 그대로 돌리지 않고 같은 버전을 **해시 잠금**으로 설치한다
+(`services/paddleocr_vl/Dockerfile`):
+
+- `requirements.in`이 원천(최상위 고정·보안 하한), `requirements.lock`이 전이 의존성 116개를
+  해시까지 고정한 실제 잠금이다. Dockerfile은
+  `pip install --require-hashes --no-deps --only-binary :all: -r requirements.lock`으로만
+  설치한다 — 해시 불일치(미러·CDN 변조)·lock 밖 패키지·소스 빌드는 빌드 실패다.
+- `paddlepaddle-gpu`는 PyPI에 cu129 빌드가 없다(2.6.2까지만). cu129 인덱스를 추가 인덱스로
+  걸면 그 인덱스가 미러로 서빙하는 numpy·pillow 등까지 출처가 섞이므로, 인덱스가 가리키는
+  공식 CDN 휠 URL과 해시를 lock에 직접 고정한다. 그래서 이미지는 linux/amd64 전용이다
+  (예전 인덱스 설치는 aarch64도 허용했다).
+- 날짜 창: RTX 5070 Ti 실측 검증 이미지의 빌드 시점(`--exclude-newer 2026-07-27`,
+  huggingface_hub 1.24.0)으로 전이 버전을 맞춘다. 그 뒤에 나온 보안 수정판만 예외로
+  올린다(urllib3 2.8.0). 다시 만드는 명령은 lock 머리말에 있다.
+- 웹 계층(fastapi 0.139.0·starlette 1.3.1·python-multipart 0.0.32·uvicorn 0.50.2)은
+  backend와 같은 버전이라 폼 파서 상한도 같다(필드 1000개 초과 → 400). CI
+  `dependency-audit` 잡이 lock을 pip-audit로, `paddlepaddle==3.3.1`을 OSV로 검사한다.
+  Dependabot은 이 lock을 같은 방식으로 다시 만들 수 없어 대상에서 뺐다 — 갱신은 사람이 한다.
+- ⚠ 이 잠금은 2026-07-27 해석을 재현한 것이지 검증 이미지의 `pip freeze`가 아니다
+  (protobuf 7.35.1·numpy 2.3.5 포함). 다시 빌드한 이미지는 GPU 호스트에서
+  `scripts/smoke_paddleocr_vl_5070ti.py`로 확인한다.
 
 - 가이드는 RTX 5090/5080/**5070 Ti**/5070/5060(Ti)/5050을 대상 목록에 두지만
   **공식 검증 장비는 RTX 5070**이다 — 5070 Ti에서는 반드시
@@ -78,21 +101,27 @@ docker compose --profile paddle down           # 전체 정리 (ocr-cpu도 함�
 캐시 삭제:
 
 ```bash
-docker volume rm pdf_markdown_unlimited-ocr_paddle-hf-cache \
-                 pdf_markdown_unlimited-ocr_paddle-x-cache
+# 실제 볼륨 이름에는 compose 프로젝트 접두사가 붙는다(기본 = 이 디렉터리 이름) — 확인 후 지운다
+docker compose --profile paddle config --format json | python3 -c \
+  "import json,sys;v=json.load(sys.stdin)['volumes'];print(v['paddle-hf-cache']['name'],v['paddle-x-cache']['name'])"
+docker volume rm <위에서 확인한 두 이름>   # 예: <PROJECT>_paddle-hf-cache <PROJECT>_paddle-x-cache
 ```
 
 ⚠ **비루트 실행(uid 1000)으로 전환됨** (`services/paddleocr_vl/Dockerfile`).
 PaddleX 캐시는 `$HOME` 기준이라 컨테이너 마운트 지점이 `/root/.paddlex` →
 **`/home/app/.paddlex`** 로 바뀌었다(볼륨 이름 `paddle-x-cache`는 그대로). 비어 있는
 볼륨은 이미지의 chown 결과를 물려받지만, **이미 root 소유로 채워진 기존 볼륨은
-자동으로 바뀌지 않는다** — 업그레이드 후 캐시 쓰기가 실패하면 한 번만:
+자동으로 바뀌지 않는다** — 업그레이드 후 캐시 쓰기가 실패하면 한 번만 실행한다.
+compose가 `cap_drop: [ALL]`을 걸어 두므로 이 실행에만 두 캡을 돌려준다:
 
 ```bash
-docker run --rm -v pdf_markdown_unlimited-ocr_paddle-hf-cache:/a \
-                 -v pdf_markdown_unlimited-ocr_paddle-x-cache:/b alpine \
-  chown -R 1000:1000 /a /b
+docker compose --profile paddle run --rm --no-deps --user 0 --cap-add CHOWN \
+  --cap-add DAC_OVERRIDE --entrypoint chown paddleocr-vl \
+  -R 1000:1000 /data/hf /home/app/.paddlex
 ```
+
+예전 안내의 `docker run -v <접두사 없는 이름>:… alpine chown …`은 존재하지 않는 볼륨을
+새로 만들고 exit 0으로 끝나 아무것도 고치지 못했다.
 
 compose는 이 sidecar에 로그 로테이션(json-file 10MB×3)과 호스트 RAM 상한
 `PADDLE_MEM_LIMIT`(기본 24g)을 건다 — VRAM과 무관한 안전판이며 호스트 RAM이 작으면
@@ -113,8 +142,28 @@ compose는 이 sidecar에 로그 로테이션(json-file 10MB×3)과 호스트 RA
   한자/영문 혼용은 무변형 보존 (`tests/test_adapter.py`가 고정)
 - 공식 markdown dict(base64 이미지 포함)는 **사용하지 않는다** — 이미지 바이너리
   금지 원칙. figure는 bbox로 backend가 원본 페이지에서 직접 crop
+- 문서 본문에 리터럴로 실린 `[[FIGURE:`는 **조립한 페이지 markdown에서만**
+  `&#91;&#91;FIGURE:`로 이스케이프한다(렌더하면 같은 글자, placeholder로는 안 읽힘).
+  블록 `content`는 리터럴 그대로 둔다 — placeholder로 읽히는 것은 페이지 markdown뿐이다
+  (OCR_ENGINE_PROTOCOL.md §markdown 규약)
 - fixture: `services/paddleocr_vl/tests/fixtures/official_page.json` — 실 GPU에서
   스키마 드리프트 발견 시 실측 결과로 교체하고 어댑터를 함께 갱신할 것
+
+## 로드 재시도 · 고착 CUDA 오류 자가 재시작
+
+- **로드 재시도**: 첫 기동의 HF 스냅샷 다운로드·파이프라인 로드가 일시적으로 실패하면
+  15/30/60/120초 뒤 다시 시도한다(최대 5회). 그동안 health는 `status:ok`·
+  `model_loaded:false`·`load_retry:{…}`라 잡은 `모델 로드 재시도 대기 중…`으로 기다린다.
+  CUDA 가드·설치 누락(`ImportError`)·HTTP 401/403/404는 곧바로 `load_error`다.
+- **웨지 신고**: 연속 추론 실패가 임계를 넘으면 모델은 유지한 채 health를
+  `status:"error"`로 바꾸고, 다음 성공에서 스스로 푼다(OvisOCR2와 같은 규칙). 오탐일 수
+  있어 backend는 `model_loaded:true`인 이 신고로 잡을 실패시키지 않고 잡마다 한 번
+  경고로만 남긴다.
+- **고착(sticky) CUDA 오류**: illegal memory access·illegal instruction처럼 CUDA 컨텍스트가
+  망가지는 오류가 나면 같은 프로세스의 이후 GPU 작업이 전부 실패한다. 그 요청에 503을
+  돌려주고 health에 `restarting:true`를 올린 뒤 1.5초 뒤 종료 코드 3으로 끝난다 — compose
+  `restart: unless-stopped`가 컨테이너를 다시 띄우고, backend는 `sidecar 재시작 대기 중…`으로
+  기다렸다가 그 페이지만 다시 보낸다.
 
 ## OOM 완화 순서
 
@@ -131,10 +180,13 @@ compose는 이 sidecar에 로그 로테이션(json-file 10MB×3)과 호스트 RA
 | 증상 | 확인 |
 |---|---|
 | health `status:error` | `docker compose --profile paddle logs paddleocr-vl` (paddle import/CUDA 오류가 흔함) |
-| `The GPU architecture is not supported` 류 | 드라이버가 CUDA 12.9+ 지원인지, wheel이 cu129 인덱스인지 확인 |
-| 모델 다운로드 실패 | `PADDLE_PDX_MODEL_SOURCE=huggingface`, HF_TOKEN(프라이빗 미러 시), 네트워크 |
+| `The GPU architecture is not supported` 류 | 드라이버가 CUDA 12.9+ 지원인지, lock의 `paddlepaddle-gpu`가 cu129 CDN 휠인지 확인 |
+| arm64 호스트에서 빌드 실패 | 정상 — lock의 paddlepaddle-gpu 휠이 x86_64 전용이라 이 이미지는 linux/amd64만 빌드된다 |
+| 빌드가 해시 불일치로 실패 | lock을 손으로 고치지 말고 `requirements.in`을 고친 뒤 lock 머리말의 명령으로 다시 만든다 |
+| 모델 다운로드 실패 | `PADDLE_PDX_MODEL_SOURCE=huggingface`, HF_TOKEN(프라이빗 미러 시), 네트워크 — 일시적 실패는 자동 재시도(`/api/health`의 `provider_health.load_retry`) |
+| 컨테이너가 종료 코드 3으로 재시작됨 | 고착 CUDA 오류 뒤 자가 재시작(위 §고착 CUDA 오류) — 반복되면 로그의 원인을 보고 OOM 완화 순서대로 줄인다 |
 | 캐시 쓰기 `Permission denied` | 비루트(uid 1000) 전환 전에 만들어진 볼륨 소유권 — 위 §캐시 삭제의 chown 1회 |
-| 한글 깨짐/누락 | smoke를 `--pdf 한국어문서.pdf`로 실행해 재현 — adapter는 무변형 보존이므로 모델/렌더 단 확인 |
+| 한글 깨짐/누락 | smoke를 `--pdf 한국어문서.pdf`로 실행해 재현(텍스트 레이어가 없는 스캔본은 `--expect-korean`) — 입력에 한글이 있는데 출력에 없으면 smoke가 실패한다. adapter는 무변형 보존이므로 모델/렌더 단 확인 |
 
 ## 실행 스레드 정책 (중요 — 실측 기반)
 

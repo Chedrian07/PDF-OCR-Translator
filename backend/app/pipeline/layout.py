@@ -20,6 +20,7 @@ import re
 import base64
 import functools
 import logging
+import sys
 from pathlib import Path
 
 from markdown_it.common.utils import escapeHtml
@@ -42,11 +43,35 @@ _REF_BLOCK = re.compile(
 _DET_INLINE = re.compile(r"<\|det\|>\s*([A-Za-z_][\w-]*)\s*\[([^\]]+)\]\s*<\|/det\|>")
 _SPECIAL = re.compile(r"<\|[^|>]{0,64}\|>")
 _SAFE_TYPE = re.compile(r"^[a-z][a-z0-9_-]{0,24}$")
+# 좌표 숫자 하나의 최대 자릿수. 정상 좌표는 0–999(3자리)이고 여유를 둬도 6자리면
+# 충분하다. 퇴화한 모델 출력이 det 괄호에 수천 자리 숫자를 내면 int()가 ValueError
+# (파이썬의 int 문자열 변환 상한, 기본 4300자리)를 던져, 이미 끝난 앞 청크까지 포함한
+# 잡 전체가 error로 끝났다. 상한 안이라도 터무니없이 큰 좌표는 하류의 `x / 999 * w`
+# float 변환에서 OverflowError를 내므로 그 박스는 블록으로 만들지 않는다.
+_MAX_COORD_DIGITS = 6
 
 
-def _quads(payload: str) -> list[tuple[int, int, int, int]]:
-    nums = [int(n) for n in re.findall(r"\d+", payload)]
-    return [tuple(nums[i : i + 4]) for i in range(0, len(nums) - 3, 4)]
+def _quads(payload: str) -> list[tuple[int, int, int, int] | None]:
+    """det 페이로드 → 4개씩 묶은 좌표. 쓸 수 없는 박스는 자리만 남긴 None.
+
+    None 자리를 지우지 않는 이유: image 라벨의 crop_index는 벤더가 저장한 크롭
+    순서와 같아야 한다. 벤더는 literal_eval에 성공한 페이로드의 박스마다 크롭
+    번호를 하나씩 쓰므로(좌표가 이상해도), 우리도 번호는 세고 블록만 건너뛴다.
+    반대로 벤더 literal_eval이 실패하는 페이로드(int 변환 상한 초과)는 크롭을 하나도
+    만들지 않으므로 박스 0개로 돌려준다.
+    """
+    tokens = re.findall(r"\d+", payload)
+    limit = sys.get_int_max_str_digits()
+    if limit and any(len(token) > limit for token in tokens):
+        return []
+    quads: list[tuple[int, int, int, int] | None] = []
+    for i in range(0, len(tokens) - 3, 4):
+        group = tokens[i : i + 4]
+        if any(len(token) > _MAX_COORD_DIGITS for token in group):
+            quads.append(None)
+            continue
+        quads.append(tuple(int(token) for token in group))
+    return quads
 
 
 def parse_page_blocks(raw: str) -> list[dict]:
@@ -88,6 +113,8 @@ def parse_page_blocks(raw: str) -> list[dict]:
         content_end = events[i + 1]["start"] if i + 1 < len(events) else len(raw)
         content = _SPECIAL.sub("", raw[e["end"]:content_end]).strip()
         for bi, box in enumerate(e["boxes"]):
+            if box is None:
+                continue  # 좌표가 퇴화한 박스 — crop 번호만 소비하고 블록은 만들지 않는다
             block: dict = {"type": e["label"].lower(), "bbox": list(box), "content": content}
             if "crop_indices" in e:
                 block["crop_index"] = e["crop_indices"][bi]

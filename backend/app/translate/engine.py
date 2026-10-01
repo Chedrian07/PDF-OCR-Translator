@@ -329,14 +329,20 @@ class _TranslationRun:
         # 미사용 토큰은 과금되지 않고, 상한은 폭주 방지용이다.
         return self.cfg.max_output_tokens
 
-    def _run_pass(self, prompt: str, max_toks: int, mapping: dict) -> tuple[str, list, list, int, str]:
-        """complete → sanitize → unmask 한 번. (복원문, missing, dup, 치환건수, 정리된_원출력)."""
+    def _run_pass(
+        self, prompt: str, max_toks: int, mapping: dict, masked: str = "",
+    ) -> tuple[str, list, list, int, str]:
+        """complete → sanitize → unmask 한 번. (복원문, missing, dup, 치환건수, 정리된_원출력).
+
+        masked(마스킹된 원문)를 주면 원문 산문에 원래 있던 `<t1`류 문자열을 잔여 플레이스
+        홀더로 오인하지 않는다(translate-llm-9).
+        """
         raw = self.client.complete(prompts.SYSTEM_TRANSLATE, prompt, max_tokens=max_toks)
         # API 왕복 하나가 성공했다 = 엔드포인트·인증·설정은 정상. step-0의 결정적
         # 4xx를 유닛 단위로 강등해도 되는지 판단하는 신호(워커 안에서 즉시 세운다).
         self.progressed.set()
         clean, sc = sanitize_translation(raw)
-        restored, missing, dup = unmask(clean, mapping)
+        restored, missing, dup = unmask(clean, mapping, masked)
         return restored, missing, dup, sc, clean
 
     def _accepted(self, src: str, restored: str, missing: list, dup: list, mapping: dict) -> bool:
@@ -381,7 +387,7 @@ class _TranslationRun:
             unit_kind=unit_kind,
         )
         try:
-            restored, missing, dup, sc, clean = self._run_pass(prompt, max_toks, mapping)
+            restored, missing, dup, sc, clean = self._run_pass(prompt, max_toks, mapping, masked)
         except TranslateError:
             return None
         stats["sanitized"] += sc
@@ -391,7 +397,7 @@ class _TranslationRun:
             return None
         try:
             rprompt = prompts.build_repair_prompt(masked, clean, missing + dup)
-            r_restored, r_missing, r_dup, r_sc, _ = self._run_pass(rprompt, max_toks, mapping)
+            r_restored, r_missing, r_dup, r_sc, _ = self._run_pass(rprompt, max_toks, mapping, masked)
             stats["sanitized"] += r_sc
             if self._accepted(src, r_restored, r_missing, r_dup, mapping):
                 return r_restored
@@ -487,7 +493,7 @@ class _TranslationRun:
         #    분할하면 반쪽은 예산 안에 들고 생성도 짧아진다(종전엔 잡 전체 실패).
         rejection = ""
         try:
-            restored, missing, dup, sc, clean = self._run_pass(prompt, max_toks, mapping)
+            restored, missing, dup, sc, clean = self._run_pass(prompt, max_toks, mapping, masked)
         except TranslateUnitRejected as e:
             if not self._may_degrade(e):
                 raise
@@ -518,7 +524,7 @@ class _TranslationRun:
         if not rejection and _repair_worthy(masked, clean, missing, dup):
             try:
                 rprompt = prompts.build_repair_prompt(masked, clean, missing + dup)
-                r_restored, r_missing, r_dup, r_sc, _ = self._run_pass(rprompt, max_toks, mapping)
+                r_restored, r_missing, r_dup, r_sc, _ = self._run_pass(rprompt, max_toks, mapping, masked)
                 stats["sanitized"] += r_sc
                 if self._accepted(u.src, r_restored, r_missing, r_dup, mapping):
                     stats["repaired"] = 1

@@ -17,7 +17,37 @@ import { closeViewer, openViewer } from './viewer.js';
 
 /* ============================ Job history ============================ */
 
-export async function refreshJobs() {
+// 목록 갱신은 한 번에 하나만 돈다. 느린 서버에서 5초 틱이 겹치면 늦게 도착한 옛
+// 목록이 새 목록을 덮고 syncOpenJob이 중복 실행된다(frontend-12). 진행 중에 들어온
+// 명시적 갱신(삭제·업로드·완료 후)은 끝난 뒤 한 번 더 돌고, 주기 폴링(pollJobs)은
+// 진행 중이면 그냥 건너뛴다 — 응답이 느릴수록 요청이 쌓이지 않는다.
+let jobsRefresh = null;
+let jobsRefreshAgain = false;
+
+export function refreshJobs() {
+  if (jobsRefresh) {
+    jobsRefreshAgain = true;
+    return jobsRefresh;
+  }
+  jobsRefresh = (async () => {
+    try {
+      do {
+        jobsRefreshAgain = false;
+        await refreshJobsOnce();
+      } while (jobsRefreshAgain);
+    } finally {
+      jobsRefresh = null;
+    }
+  })();
+  return jobsRefresh;
+}
+
+// 5초 주기 폴링 진입점 — 이전 갱신이 아직 응답을 기다리면 이번 틱은 건너뛴다.
+export function pollJobs() {
+  return jobsRefresh || refreshJobs();
+}
+
+async function refreshJobsOnce() {
   let data;
   try {
     data = await apiGet('/api/jobs');

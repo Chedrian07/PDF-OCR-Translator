@@ -926,12 +926,18 @@ def _plan_flow_group(
     *,
     scales: tuple[float, ...] = _SHRINK_STEPS,
     min_pt: float = _MIN_BODY_FONT_PT,
+    decorative_rects: list[object] | None = None,
 ) -> list[_Replacement] | None:
     """인접 블록을 순차 reflow하고 전부 성공할 때만 계획을 확정한다.
 
     scales/min_pt는 최후 수단 호출이 가독성 하한을 낮춰 다시 시도할 때만 넘긴다
     (원문을 남기는 것보다 작게라도 번역을 놓는 편이 낫기 때문 — constants의
-    _LASTRESORT_SHRINK_STEPS 주석 참조)."""
+    _LASTRESORT_SHRINK_STEPS 주석 참조).
+
+    `fixed_rects`는 반드시 피해야 하는 장애물(남는 원문 span·그림·이미 계획된
+    번역 잉크)이고, `decorative_rects`는 벡터 도형에서 온 장애물이다. 블록 안쪽을
+    가로지르는 전폭 띠를 '피할 수 없는 장식'으로 빼 주는 예외는 도형에만 적용한다.
+    """
     if not candidates:
         return []
     ordered = sorted(candidates, key=lambda item: (item.rect.y0, item.rect.x0))
@@ -941,26 +947,35 @@ def _plan_flow_group(
     original_start = min(item.rect.y0 for item in ordered)
     original_bottom = max(item.rect.y1 for item in ordered)
 
-    relevant_fixed = [
-        rect for rect in fixed_rects
-        if rect is not None
-        and not rect.is_empty
-        and _rect_horizontal_overlap(
-            quiet_fitz().Rect(column_x0, rect.y0, column_x1, rect.y1), rect,
-        ) >= min(column_width, rect.width) * 0.15
-    ]
-    # 자기 세로 구간을 가로지르는 **단 폭 전체** 장애물은 피할 방법이 없다.
+    def _in_column(rects) -> list[object]:
+        return [
+            rect for rect in rects or ()
+            if rect is not None
+            and not rect.is_empty
+            and _rect_horizontal_overlap(
+                quiet_fitz().Rect(column_x0, rect.y0, column_x1, rect.y1), rect,
+            ) >= min(column_width, rect.width) * 0.15
+        ]
+
+    # 자기 세로 구간을 가로지르는 **단 폭 전체** 도형 띠는 피할 방법이 없다.
     # 큰 도형(코드 상자 테두리·배경 채움)을 테두리 띠로 바꿀 때 생기는 가로 띠가
     # 하필 본문 블록 안쪽에 놓이는 경우가 그렇다(실측 p5 블록8: 338–438pt 상자
     # 안의 y=343.0–344.5 전폭 띠). 원문 글자는 그 띠를 가로질러 인쇄돼 있으므로
     # 장애물이 아니라 장식이다 — 남겨 두면 자리가 있는 번역이 no_fit으로 버려진다.
+    # 이 예외는 **도형에만** 쓴다. 예전에는 남는 원문 span에도 적용돼, 두 번역 문단
+    # 사이에 끼어 남는 전폭 한 줄(OCR이 놓친 줄, 번역이 원문과 같은 줄)이 장애물에서
+    # 빠지고 한국어가 그 영문 위에 겹쳐 찍혔다.
     def _unavoidable_interior(rect) -> bool:
         if not (original_start + 0.5 < rect.y0 and rect.y1 < original_bottom - 0.5):
             return False
         covered = min(rect.x1, column_x1) - max(rect.x0, column_x0)
         return covered >= column_width * 0.95
 
-    relevant_fixed = [r for r in relevant_fixed if not _unavoidable_interior(r)]
+    relevant_fixed = _in_column(fixed_rects)
+    relevant_fixed.extend(
+        rect for rect in _in_column(decorative_rects)
+        if not _unavoidable_interior(rect)
+    )
     page_area_bounds = _page_bounds(page)
     lower_bound = page_area_bounds.y0 + _BLOCK_GAP_PT
     for obstacle in relevant_fixed:

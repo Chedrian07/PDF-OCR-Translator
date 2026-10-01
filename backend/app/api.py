@@ -1815,7 +1815,9 @@ async def translate_start(request: Request, job_id: str) -> JSONResponse:
                 })
             except OSError:
                 logger.warning("번역 시작 오류 상태 기록 실패: %s", job_id, exc_info=True)
-            raise HTTPException(503, message) from e
+            # 일시적 자원 부족 — 재시도 대상이므로 Retry-After를 붙인다(503 + Retry-After =
+            # 재시도, Retry-After 없는 503 = 미구성 등 기다려도 안 되는 상태).
+            raise HTTPException(503, message, headers={"Retry-After": "5"}) from e
     return JSONResponse({"job_id": job_id, "lang": lang, "status": "running"}, status_code=202)
 
 

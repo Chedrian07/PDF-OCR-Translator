@@ -144,6 +144,46 @@ FakeNode.prototype[inspect.custom] = function inspectNode() {
 class FakeText extends FakeNode {
   constructor(doc, data) { super(doc, 3); this.data = String(data); }
   get nodeValue() { return this.data; }
+  get length() { return this.data.length; }
+  splitText(offset) {
+    const tail = new FakeText(this.ownerDocument, this.data.slice(offset));
+    this.data = this.data.slice(0, offset);
+    if (this.parentNode) this.parentNode.insertBefore(tail, this.nextSibling);
+    return tail;
+  }
+}
+
+const NODE_FILTER = { FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3, SHOW_ALL: 0xFFFFFFFF, SHOW_ELEMENT: 0x1, SHOW_TEXT: 0x4 };
+
+// 문서 순서 TreeWalker (nextNode만). whatToShow·acceptNode를 따른다 — REJECT는 그 하위도
+// 건너뛰고, SKIP은 자신만 건너뛴다(텍스트 노드에는 둘이 같다).
+function createTreeWalker(root, whatToShow = NODE_FILTER.SHOW_ALL, filter = null) {
+  const accept = (node) => {
+    const bit = node.nodeType === 1 ? NODE_FILTER.SHOW_ELEMENT : (node.nodeType === 3 ? NODE_FILTER.SHOW_TEXT : 0);
+    if (!(whatToShow & bit)) return NODE_FILTER.FILTER_SKIP;
+    if (!filter) return NODE_FILTER.FILTER_ACCEPT;
+    return typeof filter === 'function' ? filter(node) : filter.acceptNode(node);
+  };
+  const order = [];
+  const walk = (node) => {
+    for (const child of node.childNodes) {
+      const verdict = accept(child);
+      if (verdict === NODE_FILTER.FILTER_ACCEPT) order.push(child);
+      if (verdict !== NODE_FILTER.FILTER_REJECT || child.nodeType !== 1) walk(child);
+    }
+  };
+  walk(root);
+  let index = -1;
+  return {
+    root,
+    currentNode: root,
+    nextNode() {
+      index += 1;
+      if (index >= order.length) return null;
+      this.currentNode = order[index];
+      return this.currentNode;
+    },
+  };
 }
 
 class FakeFragment extends FakeNode {
@@ -336,6 +376,20 @@ class FakeElement extends FakeNode {
     for (const node of descendants(this)) if (matchesSelector(node, selector)) out.push(node);
     return out;
   }
+  normalize() {
+    const merged = [];
+    for (const child of this.childNodes) {
+      if (child.nodeType === 3) {
+        if (!child.data) { child.parentNode = null; continue; }
+        const prev = merged[merged.length - 1];
+        if (prev && prev.nodeType === 3) { prev.data += child.data; child.parentNode = null; continue; }
+      } else if (child.nodeType === 1) {
+        child.normalize();
+      }
+      merged.push(child);
+    }
+    this.childNodes = merged;
+  }
   getBoundingClientRect() { return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; }
   getClientRects() { return []; }
   scrollTo(opts) { if (opts && typeof opts.top === 'number') this.scrollTop = opts.top; }
@@ -352,6 +406,7 @@ export function createFakeDocument() {
     createElement(tag) { return new FakeElement(doc, tag); },
     createTextNode(text) { return new FakeText(doc, text); },
     createDocumentFragment() { return new FakeFragment(doc); },
+    createTreeWalker,
     getElementById(id) { return doc.documentElement.querySelector(`#${id}`); },
     querySelector(sel) { return doc.documentElement.querySelector(sel); },
     querySelectorAll(sel) { return doc.documentElement.querySelectorAll(sel); },
@@ -380,11 +435,12 @@ export function createFakeDocument() {
 export function installFakeDom(t) {
   const doc = createFakeDocument();
   const saved = {};
-  for (const key of ['document', 'window', 'requestAnimationFrame', 'cancelAnimationFrame']) {
+  for (const key of ['document', 'window', 'requestAnimationFrame', 'cancelAnimationFrame', 'NodeFilter']) {
     saved[key] = Object.getOwnPropertyDescriptor(globalThis, key);
   }
   const frames = [];
   globalThis.document = doc;
+  globalThis.NodeFilter = NODE_FILTER;
   globalThis.window = globalThis;
   globalThis.requestAnimationFrame = (fn) => { frames.push(fn); return frames.length; };
   globalThis.cancelAnimationFrame = () => {};
@@ -414,4 +470,42 @@ export function assertSameNode(assert, actual, expected, message) {
 
 export function assertNotSameNode(assert, actual, expected, message) {
   assert.ok(actual !== expected, `${message || '다른 노드여야 한다'} — ${inspect(actual)}`);
+}
+
+// Map 기반 localStorage. quota를 주면 그 바이트(키+값 길이 합)를 넘는 setItem이 브라우저처럼
+// QuotaExceededError를 던진다. installFakeStorage(t)는 테스트 동안 전역 localStorage를 바꾼다.
+export function createFakeStorage({ quota = Infinity } = {}) {
+  const data = new Map();
+  const size = () => [...data].reduce((sum, [k, v]) => sum + k.length + v.length, 0);
+  return {
+    get length() { return data.size; },
+    key(i) { return [...data.keys()][i] ?? null; },
+    getItem(k) { return data.has(String(k)) ? data.get(String(k)) : null; },
+    setItem(k, v) {
+      const key = String(k);
+      const value = String(v);
+      const prev = data.get(key);
+      data.set(key, value);
+      if (size() > quota) {
+        if (prev === undefined) data.delete(key); else data.set(key, prev);
+        const err = new Error('QuotaExceededError');
+        err.name = 'QuotaExceededError';
+        throw err;
+      }
+    },
+    removeItem(k) { data.delete(String(k)); },
+    clear() { data.clear(); },
+    keys() { return [...data.keys()]; },
+  };
+}
+
+export function installFakeStorage(t, options) {
+  const storage = createFakeStorage(options);
+  const saved = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', { value: storage, configurable: true, writable: true });
+  t.after(() => {
+    if (saved) Object.defineProperty(globalThis, 'localStorage', saved);
+    else delete globalThis.localStorage;
+  });
+  return storage;
 }

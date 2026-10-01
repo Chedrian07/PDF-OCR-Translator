@@ -6,17 +6,27 @@ export const busyRetryClock = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
+// 파생 산출물 요청 한 번의 시간 제한. 서버는 예열 빌드를 기다리느라 한 요청에 수십 초에서
+// 몇 분까지 쓸 수 있으므로 넉넉히 잡되, 멈춘 요청 하나가 같은 탭의 로드(중복 방지로
+// 하나만 돈다)를 영영 붙잡지 않게 끊는다 — 초과는 네트워크 오류(status 0)와 같다.
+export const ARTIFACT_TIMEOUT_MS = 240000;
+
 // 파생 산출물(/layout·/html·/markdown 등) 텍스트 GET. 503(빌드·예열 중)이면
 // Retry-After를 지켜 BUSY_RETRY_MAX회까지 다시 묻고, 기다릴 때마다
 // onWait(초, 시도 번호, 상한)으로 진행을 알린다. isCurrent()가 거짓이 되면(잡·언어
 // 전환) 즉시 포기한다. 반환 {status, text}: status 0 = 네트워크 오류, text는 2xx일
 // 때만 문자열이다. 실패의 의미 판정은 호출부가 langFetchVerdict로 한다.
 export async function fetchTextWithBusyRetry(url, options = {}) {
-  const { accept = '*/*', onWait, isCurrent, maxAttempts = BUSY_RETRY_MAX } = options;
+  const {
+    accept = '*/*', onWait, isCurrent, maxAttempts = BUSY_RETRY_MAX,
+    timeoutMs = ARTIFACT_TIMEOUT_MS,
+  } = options;
   for (let attempt = 0; ; attempt += 1) {
     let res;
     try {
-      res = await fetch(url, { headers: { Accept: accept } });
+      const signal = timeoutMs > 0 && typeof AbortSignal !== 'undefined' && AbortSignal.timeout
+        ? AbortSignal.timeout(timeoutMs) : undefined;
+      res = await fetch(url, { headers: { Accept: accept }, signal });
     } catch (_) {
       return { status: 0, text: null };
     }

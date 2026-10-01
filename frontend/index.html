@@ -163,6 +163,9 @@
             <h2 id="job-filename" class="job-filename"></h2>
             <span id="job-time" class="muted"></span>
             <span id="job-model" class="chip chip-model" hidden></span>
+            <!-- 잡 품질 경고 칩 — 누르면 아래 목록을 펼친다 (JS가 표시/숨김) -->
+            <button id="job-warnings-chip" class="chip chip-warn" type="button"
+                    aria-expanded="false" aria-controls="job-warnings" hidden></button>
           </div>
           <div class="job-head-actions">
             <button id="job-stop" class="btn btn-stop" type="button" hidden>
@@ -172,6 +175,16 @@
             <button id="job-delete" class="btn btn-ghost btn-danger-ghost" type="button">삭제</button>
           </div>
         </div>
+
+        <!-- 잡 품질 경고/참고 목록 — 실패 플레이스홀더·텍스트 레이어 복구·충실도 예산 소진 등.
+             'N페이지' 언급은 리더 이동 링크가 된다 (JS가 채우고 표시/숨김) -->
+        <section id="job-warnings" class="job-warnings" aria-label="작업 품질 경고" hidden>
+          <ul id="job-warnings-list" class="job-warnings-list"></ul>
+          <div id="job-notices" class="job-notices" hidden>
+            <p class="job-notices-title">참고</p>
+            <ul id="job-notices-list" class="job-notices-list"></ul>
+          </div>
+        </section>
 
         <!-- Progress -->
         <section id="progress-section" class="progress-section" aria-live="polite" hidden>

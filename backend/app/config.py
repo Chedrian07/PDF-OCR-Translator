@@ -276,7 +276,9 @@ def _llm_provider() -> str:
 
 @dataclass
 class Settings:
-    device: str = "cpu"                 # auto | cpu | cuda | metal | mlx (mps는 metal의 별칭, registry.VALID_DEVICES)
+    # auto | cpu | cuda | metal | mlx (mps는 metal의 별칭, registry.VALID_DEVICES).
+    # 직접 생성(테스트·스크립트)은 하드웨어 탐지 없이 결정적인 cpu, 운영 진입점 from_env는 auto.
+    device: str = "cpu"
     dtype: str = "auto"                 # auto | bfloat16 | float16 | float32
     # MLX 엔진(device=mlx) 디코더 인메모리 양자화 비트 — 0=없음(dtype 그대로) | 8.
     # 4비트는 감사 스파이크에서 숫자 오인식(2504→2304)이 측정돼 받지 않는다.
@@ -361,7 +363,12 @@ class Settings:
     def from_env(cls) -> "Settings":
         load_dotenv_file()  # 로컬 실행(Metal 등)에서도 .env의 번역/OCR 설정이 잡히게
         frontend = os.environ.get("FRONTEND_DIR")
-        device = os.environ.get("OCR_DEVICE", "cpu").strip().lower()
+        # 미설정(빈 값 포함) = auto: unlimited 엔진이 mlx → cuda → metal → cpu 중 쓸 수 있는
+        # 첫 디바이스를 고른다(registry.resolve_auto_device). compose는 backend 서비스마다
+        # OCR_DEVICE를 명시하고 Dockerfile에는 기본값이 없다 — CPU 이미지는 auto여도 cpu다.
+        # 바뀌는 것은 로컬 실행뿐: Apple Silicon의 `make dev`가 조용히 CPU fp32로 돌던 함정
+        # 대신 MLX(없으면 torch MPS)를 쓴다. .env의 OCR_DEVICE는 그대로 존중된다.
+        device = (_env_raw("OCR_DEVICE") or "auto").strip().lower()
         return cls(
             device="metal" if device == "mps" else device,
             dtype=os.environ.get("OCR_DTYPE", "auto").strip().lower(),

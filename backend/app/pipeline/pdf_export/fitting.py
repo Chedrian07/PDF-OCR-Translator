@@ -997,6 +997,24 @@ def _plan_flow_group(
     if end <= shifted_start + 0.5:
         return None
 
+    # 읽기 순서 하한. compact 재배치는 후보를 앞 후보 잉크 바로 뒤에 붙이므로,
+    # 원래 두 후보 사이에 있던 보존 콘텐츠(남는 원문 줄·짧은 수식·그림)를 건너뛰어
+    # 뒤 문단을 그 위로 끌어올렸다 — 수식 설명('where x is…')이 수식보다 먼저
+    # 나오는 식의 순서 뒤바뀜이다. 후보의 원래 윗변보다 위에서 끝나는(즉 원래
+    # 그 후보보다 먼저 읽히던) 이 단의 장애물 아래에서만 시작하게 한다. 원래
+    # 윗변보다 아래로는 밀지 않으므로 non-compact 배치는 그대로다.
+    def _reading_floor(candidate: _FlowCandidate) -> float:
+        floor = original_start
+        for obstacle in relevant_fixed:
+            if (
+                obstacle.y0 >= original_start - 0.5
+                and obstacle.y1 <= candidate.rect.y0 + 0.5
+            ):
+                floor = max(floor, obstacle.y1 + _FLOW_OBSTACLE_GAP_PT)
+        return min(candidate.rect.y0, floor)
+
+    reading_floors = {id(candidate): _reading_floor(candidate) for candidate in ordered}
+
     # 이 flow에서 가장 작은 블록이 _MIN_BODY_FONT_PT 아래로 내려가는 축소는
     # 읽을 수 없는 번역이 된다 — 시도하지 않고 원문을 보존한다.
     smallest_pt = min(item.base_pt for item in ordered)
@@ -1018,6 +1036,8 @@ def _plan_flow_group(
                     gap = 0.0 if index == 0 else _flow_gap(ordered[index - 1], candidate)
                     preferred_y0 = candidate.rect.y0 if not compact else cursor + gap
                     y0 = max(start if index == 0 else cursor + gap, preferred_y0)
+                    if index > 0:
+                        y0 = max(y0, reading_floors[id(candidate)])
                     if y0 >= end - 0.5:
                         failed = True
                         break

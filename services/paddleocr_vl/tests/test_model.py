@@ -97,3 +97,16 @@ def test_load_failure_does_not_set_load_error_itself(monkeypatch):
     with pytest.raises(ConnectionError):
         m.load()
     assert m.load_error is None and not m.loaded
+
+
+def test_failures_after_a_sticky_cuda_error_do_not_raise_a_wedge_report():
+    """재시작 대기 중 뒤따른 실패가 웨지 신고(status=error)를 세우면 backend는 재시작을
+    기다리지 않고 잡을 실패시킨다."""
+    m = _model([_STICKY])
+    with pytest.raises(OSError):
+        m.predict_page("/tmp/page.png")
+    for _ in range(5):
+        m._note_infer_failure(RuntimeError("late failure"))
+    assert m.restart_required and m.load_error is None
+    with pytest.raises(RuntimeError, match="로드되지 않았습니다"):
+        m.predict_page("/tmp/page.png")

@@ -44,6 +44,7 @@ export const state = {
   previewTimer: 0,
   previewInFlight: false,
   previewFails: 0,
+  previewRetryAt: 0,       // 429(서버 남용 방어) 뒤 다음 렌더 요청을 보내도 되는 시각(ms)
   previewStopped: false,   // 413/연속 실패로 라이브 프리뷰 중단됨
   previewPageCache: [],    // 확정 페이지 렌더 HTML 캐시 (인덱스 = 확정 페이지 순번)
   previewPageNodes: [],    // 확정 페이지별 DOM 노드 (reset으로 되돌릴 때 제거 대상)

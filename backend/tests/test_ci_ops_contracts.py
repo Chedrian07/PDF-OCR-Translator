@@ -431,6 +431,33 @@ def test_ci_audits_dependencies_without_silent_skips(ci):
         assert svc in script, f"sidecar 잠금 {svc}를 감사하지 않는다"
 
 
+_ADVISORY_ID = re.compile(r"\b(?:PYSEC-\d{4}-\d+|CVE-\d{4}-\d+|GHSA(?:-[0-9a-z]{4}){3})\b")
+
+
+def _audit_policy(text: str) -> tuple[set[str], set[str], set[str]]:
+    """감사 스크립트 → (수용 권고 ID, 재검토 기한, pip-audit 버전 고정)."""
+    block = re.search(r"\b(?:ignores|IGNORES)=\((.*?)^\s*\)", text, re.MULTILINE | re.DOTALL)
+    assert block, "수용 권고 목록(ignores=(…))을 못 찾았다"
+    return (
+        set(_ADVISORY_ID.findall(block.group(1))),
+        set(re.findall(r"\b20\d\d-\d\d-\d\d\b", text)),
+        set(re.findall(r"pip-audit==[\w.]+", text)),
+    )
+
+
+def test_local_dependency_audit_matches_the_ci_job(ci):
+    """make audit(scripts/dependency_audit.sh)는 CI 잡과 같은 수용 목록·기한·도구 버전이어야
+    한다 — 한쪽만 고치면 로컬은 통과하는데 CI가 실패하거나, 만료된 수용이 로컬에 남는다."""
+    ci_ids, ci_dates, ci_tool = _audit_policy(_job_script(ci["jobs"]["dependency-audit"]))
+    local = (SCRIPTS / "dependency_audit.sh").read_text(encoding="utf-8")
+    ids, dates, tool = _audit_policy(local)
+    assert ci_ids and ids == ci_ids
+    assert ci_dates == {"2027-04-01"} and dates == ci_dates
+    assert ci_tool and tool == ci_tool
+    for flag in ("--extra cpu", "--strict", "--no-deps", "-s osv"):
+        assert flag in local, f"CI와 다른 감사 방식: {flag} 없음"
+
+
 def test_ci_builds_and_smokes_the_image_without_pushing(ci):
     job = ci["jobs"]["docker-image"]
     build = next(s for s in job["steps"] if "build-push-action" in str(s.get("uses", "")))

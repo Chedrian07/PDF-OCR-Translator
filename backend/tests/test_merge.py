@@ -677,3 +677,46 @@ def test_weak_alignment_evidence_falls_back_to_positional_placement(tmp_path):
     assert "alpha" in m.pages_md[0] and "beta" in m.pages_md[1]
     assert "PAGE ONE" in m.pages_md[2] and m.pages_md[3] == ""
     assert any("빈 페이지로 보정" in w for w in m.warnings), m.warnings
+
+
+def test_one_page_with_unparseable_grounding_does_not_break_the_chunk(tmp_path, monkeypatch):
+    """모델 원출력은 신뢰할 수 없는 입력이다 — 한 페이지의 기형 grounding이 파서 예외를
+    내도 청크 병합(=잡)이 실패하지 않는다. 그 페이지 좌표만 비우고 경고로 남긴다."""
+    import app.pipeline.layout as layout_mod
+
+    real = layout_mod.parse_page_blocks
+
+    def flaky(raw):
+        if "BROKEN" in raw:
+            raise ValueError("기형 grounding")
+        return real(raw)
+
+    monkeypatch.setattr(layout_mod, "parse_page_blocks", flaky)
+    m = IncrementalMerger(tmp_path, SEP)
+    c = _mk_multi_chunk(tmp_path, "chunk_00", 2)
+    raw = [
+        "<|ref|>text<|/ref|><|det|>[[60, 60, 930, 200]]<|/det|>\nFirst page body",
+        "<|ref|>text<|/ref|><|det|>[[60, 60, 930, 200]]<|/det|>\nBROKEN second page",
+    ]
+    (c / "raw_pages.json").write_text(json.dumps({"pages": raw}), encoding="utf-8")
+    m.add_chunk(ChunkResult(c, 1, 2, "<PAGE>\nFirst page body\n<PAGE>\nBROKEN second page"))
+    out = m.finalize()
+
+    assert "First page body" in out and "BROKEN second page" in out  # 본문은 그대로
+    pages = {p["page"]: p for p in m.layout_pages}
+    assert pages[1]["blocks"] and pages[2]["blocks"] == []
+    assert [w for w in m.warnings if "레이아웃 좌표를 해석하지 못해" in w] == [
+        "2페이지: 레이아웃 좌표를 해석하지 못해 이 페이지의 좌표 블록을 비웠습니다 "
+        "(본문은 유지; ValueError)"
+    ]
+
+    # 충실도 게이트의 페이지 교체 경로도 같은 격리를 받는다
+    single = tmp_path / "work" / "fidelity" / "page_0001"
+    _touch(single / "result_with_boxes.jpg")
+    (single / "raw_pages.json").write_text(
+        json.dumps({"pages": ["BROKEN replacement"]}), encoding="utf-8",
+    )
+    assert m.replace_page(1, ChunkResult(single, 1, 1, "replacement body", single=True))
+    pages = {p["page"]: p for p in m.layout_pages}
+    assert pages[1]["blocks"] == []
+    assert sum("레이아웃 좌표를 해석하지 못해" in w for w in m.warnings) == 2

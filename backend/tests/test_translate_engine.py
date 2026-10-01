@@ -1395,3 +1395,115 @@ def test_캐시_전량_무효화는_경고와_지표로_남는다(job, cfg):
     invalidated = _report(job)
     assert invalidated["cache_reused"] == 0 and invalidated["cache_prior"] > 0
     assert any("전량 재번역" in w and "PROMPT_V" in w for w in invalidated["warnings"])
+
+
+# ── 잘림·루프 출력 (probe:MLX-02/03/05/09, mlx-integration-3/4) ─────────────
+
+_LONG_PARA = (
+    "The first half of this long paragraph explains the training procedure in detail. "
+    "The second half of this long paragraph summarizes the evaluation protocol briefly."
+)
+_SHORT_PARA = "A short paragraph describes the dataset."
+
+
+class _TruncatingClient(EchoClient):
+    """원문이 120자를 넘으면 출력이 잘린다(TranslateOutputTruncated) — 반쪽은 예산 안에 든다."""
+
+    def __init__(self, limit=120):
+        super().__init__()
+        self.limit = limit
+        self.seen: list[str] = []
+
+    def complete(self, system, user, *, max_tokens):
+        from app.translate.types import TranslateOutputTruncated
+
+        self.calls += 1
+        src = _marker(user)
+        if src is None:
+            return ""
+        self.seen.append(src)
+        if len(src) > self.limit:
+            raise TranslateOutputTruncated("번역 API 출력이 max_tokens(8192)에서 잘렸습니다")
+        return koreanize(src)
+
+
+def test_잘린_유닛은_분할로_복구되고_잘린_출력은_캐시되지_않는다(tmp_path, cfg):
+    from dataclasses import replace
+
+    md = _SHORT_PARA + "\n\n" + _LONG_PARA + "\n"
+    client = _TruncatingClient()
+    res, report, out = _run_md(tmp_path, replace(cfg, concurrency=1), md, client)
+
+    assert res.status == "done" and res.kept_original == []
+    assert report["split"] == 1 and report["retried"] == 1
+    assert out == ko_expected(md)
+    # 잘림은 repair 대상이 아니다 — 최초 1 + 반쪽 2 (repair 없음)
+    assert [len(s) > 120 for s in client.seen] == [False, True, False, False]
+
+
+def test_분할도_잘리면_truncated_사유로_원문을_유지한다(tmp_path, cfg):
+    from dataclasses import replace
+
+    md = _SHORT_PARA + "\n\n" + _LONG_PARA + "\n"
+    client = _TruncatingClient(limit=60)   # 반쪽(80자대)도 잘린다
+    res, report, out = _run_md(tmp_path, replace(cfg, concurrency=1), md, client)
+
+    assert res.status == "done" and res.kept_original == ["md:0:1"]
+    assert report["kept_reasons"] == {"truncated": 1}
+    assert _LONG_PARA in out                                   # 무손실 — 원문 유지
+    cache = json.loads((tmp_path / "translations/ko/units.json").read_text(encoding="utf-8"))
+    assert len(cache) == 1                                     # 짧은 문단만 캐시
+
+
+def test_성공_전_첫_유닛이_잘리면_잡_오류로_원인을_알린다(tmp_path, cfg):
+    """thinking이 모든 유닛의 예산을 태우는 설정 오류 — 전 유닛을 kept로 조용히
+    done 시키지 않고, 첫 잘림에서 안내 문구와 함께 실패한다(종전 정책 유지)."""
+    from dataclasses import replace
+
+    from app.translate.types import TranslateError
+
+    (tmp_path / "result.md").write_text(_LONG_PARA + "\n", encoding="utf-8")
+    with pytest.raises(TranslateError, match="잘렸습니다"):
+        run_translation(tmp_path, "ko", replace(cfg, concurrency=1), client=_TruncatingClient())
+    assert "잘렸습니다" in _state(tmp_path)["error"]
+
+
+def test_태그가_멀쩡한_게이트_거부는_repair_없이_분할로_간다(tmp_path, cfg):
+    """빈 태그 목록 repair('태그만 바로잡아')는 echo·거부문을 고칠 수 없다(probe:MLX-09)."""
+    prompts_seen = []
+
+    class EchoFirstClient(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            prompts_seen.append(user)
+            src = _marker(user)
+            if src is None:
+                return ""
+            return src if len(src) > 120 else koreanize(src)   # 전체는 영문 echo, 반쪽은 번역
+
+    md = _LONG_PARA + "\n"
+    res, report, out = _run_md(tmp_path, cfg, md, EchoFirstClient())
+    assert res.kept_original == [] and report["split"] == 1 and report["repaired"] == 0
+    assert not any("[수정할 번역문]" in p for p in prompts_seen)
+    assert out == ko_expected(md)
+
+
+def test_루프_출력은_repair_없이_거부되고_캐시되지_않는다(tmp_path, cfg):
+    """태그가 빠진 루프 출력에 repair를 보내면 같은 루프를 재생산한다(mlx-integration-4)."""
+    prompts_seen = []
+    loop = "손실을 최소화한다" + "만" * 300
+
+    class LoopClient(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            prompts_seen.append(user)
+            return "" if _marker(user) is None else loop
+
+    md = "We minimize the loss $L$ during training.\n"
+    res, report, out = _run_md(tmp_path, cfg, md, LoopClient())
+    assert res.kept_original == ["md:0:0"]
+    assert report["kept_reasons"] == {"placeholder-mismatch": 1}
+    assert not any("[수정할 번역문]" in p for p in prompts_seen)
+    assert loop not in out
+    cache = json.loads((tmp_path / "translations/ko/units.json").read_text(encoding="utf-8"))
+    assert loop not in cache.values()

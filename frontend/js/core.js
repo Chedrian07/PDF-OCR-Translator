@@ -966,13 +966,114 @@ export function pdfReportMessage(report) {
   const tableCells = n(r.tableCells);
   const warnings = n(r.warnings);
   const specialistKept = n(r.specialistKept);
+  const rasterErased = n(r.rasterErased);
   const details = [`번역 ${replaced}개 블록`];
   if (tableCells) details.push(`표 ${tableCells}개 셀`);
+  if (rasterErased) details.push(`스캔 원문 ${rasterErased}개 블록 지움`);
   if (relocated) details.push(`충돌 없이 ${relocated}개 재배치`);
   if (kept) details.push(`원문 ${kept}개 보존`);
   if (specialistKept) details.push(`전문 조판 ${specialistKept}개 원형 보존`);
   if (warnings) details.push(`주의 ${warnings}건`);
   return `PDF 생성 완료: ${details.join(' · ')}`;
+}
+
+/* ── PDF 생성 리포트 상세 (순수 — tests/에서 검증) ───────────────────────────────
+ * 서버는 export.{lang}.report.json에 PdfExportResult.report()를 남긴다
+ * (backend/app/pipeline/pdf_export/report.py): {format_version, replaced, kept, relocated,
+ * table_cells_replaced, listing_lines_replaced, raster_blocks_erased, specialist_kept,
+ * kept_reasons, warning_count, warnings(앞 50건)}. 응답 헤더(X-UOCR-PDF-*)에는 숫자만 실린다 —
+ * 원문 보존 사유와 주의 문장은 JSON 리포트(GET /api/jobs/{id}/pdf/report?lang=)에서만 온다.
+ */
+export const PDF_KEPT_LABELS = {
+  unchanged: '번역문이 원문과 같음',
+  no_rect: '블록 좌표 없음',
+  figure_text: '그림 위 텍스트',
+  ambiguous_source: '지울 원문 위치가 모호함',
+  listing_line_unaligned: '원문 줄 위치 정렬 실패(그 줄만 원문)',
+  listing_line_no_fit: '목록·코드 줄 공간 부족',
+  no_fit: '공간 부족',
+  flattened_no_fit: '가로 평탄화 블록 리플로우 실패',
+  table_grid_untrusted: '표 격자 추정 실패',
+  table_cell_no_fit: '표 칸 공간 부족',
+  vertical: '세로쓰기',
+  page_source_mismatch: '다른 쪽 내용과 겹쳐 건너뛴 페이지',
+};
+const PDF_PRESERVE_TYPE_LABELS = { ref_text: '참고문헌', header: '머리글', footer: '바닥글' };
+export const PDF_REPORT_MAX_WARNINGS = 50;
+
+// 보존 사유 키 → 한국어. 'preserve_type:<유형>'(원문 그대로 두는 블록 유형)과
+// 'preserved:<사유>'(번역 단계가 일부러 남긴 코드·식별자 등)는 접두사로 읽고, 모르는 키는
+// 그대로 보인다 — 새 사유가 생겨도 개수를 잃지 않는다.
+export function pdfKeptReasonLabel(key) {
+  const k = String(key);
+  if (Object.prototype.hasOwnProperty.call(PDF_KEPT_LABELS, k)) return PDF_KEPT_LABELS[k];
+  if (k.startsWith('preserve_type:')) {
+    const type = k.slice('preserve_type:'.length);
+    return `원문 유지 대상(${PDF_PRESERVE_TYPE_LABELS[type] || type})`;
+  }
+  if (k.startsWith('preserved:')) return `번역 단계에서 보존(${k.slice('preserved:'.length)})`;
+  return k;
+}
+
+// 서버 경고의 'p3: …' 페이지 표기를 화면 문구('3페이지: …')로 바꾼다.
+function pdfWarningText(entry) {
+  const text = noteText(entry);
+  return text.replace(/^p(\d{1,5}):\s*/, '$1페이지: ');
+}
+
+// report() 사전 → 토스트 한 줄(message)과 상세 목록(lines: 정보, warnings: 주의 문장).
+// 비정상 값은 0·빈 목록으로 방어하고, 서버가 앞 50건만 싣는 경고의 나머지 수는
+// moreWarnings로 알린다.
+export function pdfReportDetails(report) {
+  const r = report && typeof report === 'object' ? report : {};
+  const n = (v) => {
+    const x = Math.floor(Number(v));
+    return Number.isFinite(x) && x >= 0 ? x : 0;
+  };
+  const specialist = r.specialist_kept && typeof r.specialist_kept === 'object'
+    ? Object.values(r.specialist_kept).reduce((acc, v) => acc + n(v), 0) : 0;
+  const warnings = [];
+  const seen = new Set();
+  for (const entry of Array.isArray(r.warnings) ? r.warnings : []) {
+    const text = pdfWarningText(entry);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    warnings.push(text);
+    if (warnings.length >= PDF_REPORT_MAX_WARNINGS) break;
+  }
+  const warningCount = Math.max(n(r.warning_count), warnings.length);
+  const kept = n(r.kept);
+  const message = pdfReportMessage({
+    replaced: r.replaced, kept, relocated: r.relocated, tableCells: r.table_cells_replaced,
+    warnings: warningCount, specialistKept: specialist, rasterErased: r.raster_blocks_erased,
+  });
+  const lines = [];
+  const raster = n(r.raster_blocks_erased);
+  if (raster) {
+    lines.push(`스캔(이미지) 원문 ${raster}개 블록은 픽셀을 바탕색으로 덮고 번역을 넣었습니다`);
+  }
+  const listing = n(r.listing_lines_replaced);
+  if (listing) lines.push(`목록·코드 ${listing}줄은 원문 줄 위치에 맞춰 조판했습니다`);
+  const keptPairs = reasonPairs(r.kept_reasons);
+  if (keptPairs.length) {
+    lines.push(`원문 보존 사유 — ${keptPairs.map(([key, c]) => `${pdfKeptReasonLabel(key)} ${c}`).join(' · ')}`);
+  }
+  return {
+    message,
+    tone: kept || warningCount ? 'warn' : '',
+    lines,
+    warnings,
+    moreWarnings: Math.max(0, warningCount - warnings.length),
+  };
+}
+
+// 대조 PDF 주소(/api/jobs/<id>/pdf?lang=ko&view=dual) → 같은 잡·언어의 JSON 리포트 주소.
+// 다른 모양의 주소는 null — 리포트 없이 헤더 요약만 쓴다.
+export function pdfReportUrl(pdfUrl) {
+  const m = /^(\/api\/jobs\/[^/?#]+\/pdf)(?:\?([^#]*))?$/.exec(String(pdfUrl || ''));
+  if (!m) return null;
+  const lang = new URLSearchParams(m[2] || '').get('lang') || 'ko';
+  return `${m[1]}/report?lang=${encodeURIComponent(lang)}`;
 }
 
 /* ── 번역 결과: "왜 이 문단이 원문 그대로인가" 요약 ────────────────────────

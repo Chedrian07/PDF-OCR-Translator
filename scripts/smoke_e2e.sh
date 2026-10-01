@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # E2E 스모크: 서버에 샘플 PDF를 업로드하고 결과 마크다운/이미지를 검증한다.
+# figure를 지원하는 엔진(health capabilities.figures=true)은 샘플의 그림 2개 중
+# 하나라도 뽑아야 통과한다 — textlayer처럼 크롭하지 않는 엔진은 확인만 건너뛴다.
 #
 #   ./scripts/smoke_e2e.sh                      # http://localhost:8000 (cpu)
 #   ./scripts/smoke_e2e.sh http://localhost:8001  # cuda
@@ -62,6 +64,8 @@ wc -c "$OUT_DIR/result.md" "$OUT_DIR/result.zip"
 python3 - "$OUT_DIR" "$BASE_URL" "$job_id" <<'PY'
 import json, sys, urllib.request, zipfile
 out, base, jid = sys.argv[1], sys.argv[2], sys.argv[3]
+health = json.load(urllib.request.urlopen(f"{base}/api/health"))
+caps = health.get("capabilities", {})
 md = open(f"{out}/result.md", encoding="utf-8").read()
 assert md.strip(), "마크다운이 비어 있음"
 zf = zipfile.ZipFile(f"{out}/result.zip")
@@ -74,15 +78,18 @@ if "![](images/" in md:
     ref = md.split("![](images/", 1)[1].split(")", 1)[0]
     assert f"images/{ref}" in names, f"참조 {ref} 가 zip에 없음"
     print(f"  figure 추출 확인: images/{ref}")
+elif caps.get("figures"):
+    # sample.pdf에는 그림이 2개 있다 — figure를 지원한다는 엔진이 하나도 못 뽑았다면
+    # figure 크롭 경로의 회귀다(예전에는 경고만 찍고 'E2E 성공'으로 끝났다).
+    sys.exit("  실패: capabilities.figures=true인데 샘플(그림 2개)에서 figure 참조가 없음")
 else:
-    print("  경고: 마크다운에 이미지 참조 없음 (모델이 figure를 감지하지 못함)")
+    print("  참고: 이 엔진은 figure를 크롭하지 않는다 (capabilities.figures=false)")
 body = json.load(urllib.request.urlopen(f"{base}/api/jobs/{jid}"))
 res = body["result"]
 assert res["pages"], "페이지 산출물 누락"
 # textlayer는 레이아웃 PNG 대신 layout.json 좌표를 제공한다. capability와
 # 실제 alignment 응답을 검증해 정상 엔진을 PNG 유무로 실패시키지 않는다.
-health = json.load(urllib.request.urlopen(f"{base}/api/health"))
-if health.get("capabilities", {}).get("layout") == "full":
+if caps.get("layout") == "full":
     assert res.get("has_layout"), "레이아웃 좌표 산출물 누락"
     alignment = json.load(urllib.request.urlopen(f"{base}/api/jobs/{jid}/alignment?page=1"))
     assert alignment.get("blocks"), "첫 페이지 레이아웃 블록 누락"

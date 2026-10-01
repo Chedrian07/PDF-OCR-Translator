@@ -91,7 +91,20 @@ async function refreshJobsOnce() {
           && isTerminal(open.status) && !isTerminal(state.displayedStatus)) {
         syncOpenJob();
       }
+    } else if (state.displayedStatus != null
+        && !page.hasMore && (page.total != null || page.jobs.length < JOB_LIST_PAGE)) {
+      // 목록이 전부인데 열린 잡이 없다 — 다른 탭·API가 지웠을 수 있다. 완료 잡은 SSE가 없어
+      // 삭제 알림({deleted:true})을 받지 못하므로 상세를 한 번 물어 404면 화면을 닫는다.
+      confirmOpenJobGone(state.currentJobId);
     }
+  }
+}
+
+async function confirmOpenJobGone(id) {
+  try {
+    await apiGet(`/api/jobs/${id}`, { timeoutMs: POLL_TIMEOUT_MS });
+  } catch (e) {
+    if (e && e.status === 404 && state.currentJobId === id) closeDeletedJob(id, { remote: true });
   }
 }
 

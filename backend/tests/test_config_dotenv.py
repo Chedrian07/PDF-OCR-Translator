@@ -197,6 +197,83 @@ def test_PAGE_SEPARATOR_깨진_이스케이프는_변수명과_함께_실패한�
         Settings.from_env()
 
 
+# ── 숫자 env 검증 (감사 api-jobs-11, sidecar-12) ──
+
+@pytest.mark.parametrize(("name", "raw", "rule"), [
+    ("RENDER_DPI", "abc", "정수여야"),
+    ("JOB_TTL_DAYS", "7d", "정수여야"),
+    ("MAX_PAGE_OUTPUT_CHARS", "lots", "정수여야"),
+    ("TRANSLATE_GLOBAL_CONCURRENCY", "x", "정수여야"),
+    ("OCR_FIDELITY_THRESHOLD", "high", "숫자여야"),
+])
+def test_숫자_env_파싱_오류는_변수명과_값을_담는다(monkeypatch, name, raw, rule):
+    """예전에는 `invalid literal for int()`만 남아 어느 키인지 traceback을 읽어야 했다."""
+    monkeypatch.setenv(name, raw)
+
+    with pytest.raises(ValueError) as excinfo:
+        Settings.from_env()
+
+    message = str(excinfo.value)
+    assert name in message and repr(raw) in message and rule in message
+
+
+@pytest.mark.parametrize(("name", "raw"), [
+    ("RENDER_DPI", "600"),           # 업로드 dpi 검증(72–400) 밖 → dpi 없는 업로드가 전부 400
+    ("RENDER_DPI", "71"),
+    ("PAGES_PER_CHUNK", "0"),
+    ("MAX_PAGES", "0"),              # 모든 업로드 거부
+    ("MAX_UPLOAD_MB", "0"),          # 모든 업로드 413
+    ("MAX_LENGTH", "0"),
+    ("OCR_DECODE_BLOCK", "0"),
+    ("JOB_TTL_DAYS", "-1"),
+    ("FAKE_DELAY", "-0.5"),          # time.sleep 음수 → 모든 페이지 실패
+    ("OCR_SIDECAR_CONNECT_TIMEOUT_S", "0"),  # requests ValueError → 모든 페이지 실패
+    ("OCR_SIDECAR_READ_TIMEOUT_S", "-1"),
+    ("OCR_SIDECAR_READ_TIMEOUT_S", "nan"),
+    ("OCR_SIDECAR_HEALTH_TIMEOUT_S", "inf"),
+    ("OCR_FIDELITY_MAX_RETRY_RATIO", "inf"),  # int(total*inf) OverflowError
+])
+def test_범위_밖_숫자_env는_기동_시_변수명과_함께_실패한다(monkeypatch, name, raw):
+    monkeypatch.setenv(name, raw)
+
+    with pytest.raises(ValueError, match=name):
+        Settings.from_env()
+
+
+def test_숫자_env_경계값과_빈_값은_통과한다(monkeypatch):
+    for name, raw in (
+        ("RENDER_DPI", "72"), ("PAGES_PER_CHUNK", "1"), ("MAX_UPLOAD_MB", "1"),
+        ("JOB_TTL_DAYS", "0"), ("OCR_SIDECAR_READ_TIMEOUT_S", "0.5"), ("FAKE_DELAY", "0"),
+    ):
+        monkeypatch.setenv(name, raw)
+    monkeypatch.setenv("MAX_PAGES", "")  # compose가 넘기는 빈 값 = 미설정
+
+    s = Settings.from_env()
+
+    assert (s.render_dpi, s.pages_per_chunk, s.max_upload_mb) == (72, 1, 1)
+    assert (s.job_ttl_days, s.sidecar_read_timeout_s, s.fake_delay) == (0, 0.5, 0.0)
+    assert s.max_pages == 200
+    monkeypatch.setenv("RENDER_DPI", "400")
+    assert Settings.from_env().render_dpi == 400
+
+
+def test_sidecar_모델_대기_상한은_음수를_0으로_보정한다(monkeypatch):
+    monkeypatch.setenv("OCR_SIDECAR_MODEL_WAIT_S", "-5")
+
+    assert Settings.from_env().sidecar_model_wait_s == 0.0
+
+
+def test_남용_방어_상한의_오타는_기본값으로_강등된다(monkeypatch, caplog):
+    """기존 의도 유지 — 운영 중 남용 방어 설정 실수가 기동 실패나 500이 되면 안 된다."""
+    monkeypatch.setenv("QA_RATE_LIMIT_PER_MIN", "abc")
+
+    with caplog.at_level(logging.WARNING, logger="app.config"):
+        s = Settings.from_env()
+
+    assert s.qa_rate_limit_per_min == 30
+    assert any("QA_RATE_LIMIT_PER_MIN" in r.getMessage() for r in caplog.records)
+
+
 def test_QA키는_번역키를_폴백하지_않는다(monkeypatch):
     """LLM_OPENAI_API_KEY 미설정 시 llm_openai_api_key는 빈 문자열이어야 한다 —
     번역용 OPENAI_API_KEY는 임의 게이트웨이 키일 수 있고, Q&A는 항상

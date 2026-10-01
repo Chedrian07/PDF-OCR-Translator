@@ -30,6 +30,7 @@ from .engine import build_engine
 from .jobs import EventBroker, JobStore, Worker
 from .llm import build_router
 from .owner_lock import JobsDirLock, acquire_jobs_dir_lock
+from .pipeline.runner import chunk_length_budget_note
 
 # 스레드 이름을 포맷에 포함한다 — 번역은 잡별 데몬 스레드로 **병렬** 실행되고
 # (api.py: name=f"translate-{job_id}-{lang}") OCR 워커·sidecar 요청 스레드도 함께
@@ -374,6 +375,11 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
     restored = store.load_existing(default_page_separator=settings.page_separator)
     broker = EventBroker()
     engine = build_engine(settings)  # 잘못된 OCR_DEVICE/OCR_ENGINE은 여기서 즉시 실패
+    # MAX_LENGTH < 청크 최악 길이는 설정의 성질이다 — 잡마다가 아니라 기동 시 한 번만,
+    # 경고가 아닌 안내로 남긴다(잘린 청크는 페이지별로 복구돼 내용이 빠지지 않는다).
+    budget_note = chunk_length_budget_note(settings, engine)
+    if budget_note:
+        logger.info("%s", budget_note)
     cancel_events: dict[str, threading.Event] = {}
     # 모델 로드 오류 — 프리로드 스레드와 워커(잡 시작 시 로드)가 함께 기록하고
     # /api/health의 model_load_error가 읽는다.

@@ -89,16 +89,21 @@ export function renderHealth(d) {
 
   const isCuda = d.device === 'cuda';
   const isMetal = d.device === 'metal';
-  const devName = isCuda ? 'CUDA' : (isMetal ? 'Metal' : (d.device === 'cpu' ? 'CPU' : String(d.device || '?').toUpperCase()));
+  // mlx = Apple Silicon 인프로세스 MLX 엔진(OCR_DEVICE=auto의 Apple 기본값) — Metal과 같은
+  // Apple GPU라 같은 배지 스타일과 칩 이름을 쓴다(회색 CPU 배지로 보이면 안 된다).
+  const isMlx = d.device === 'mlx';
+  const isAppleGpu = isMetal || isMlx;
+  const devName = isCuda ? 'CUDA' : isMetal ? 'Metal' : isMlx ? 'MLX'
+    : (d.device === 'cpu' ? 'CPU' : String(d.device || '?').toUpperCase());
   let devText = devName;
-  if ((isCuda || isMetal) && d.gpu_name) {
+  if ((isCuda || isAppleGpu) && d.gpu_name) {
     const short = shortenGpu(d.gpu_name);
     if (short) devText = `${devName} · ${short}`;
   }
   const devTitle = `디바이스: ${devName}` +
     (d.gpu_name ? ` (${d.gpu_name})` : '') +
     ` · dtype: ${d.dtype || '-'} · 네이티브 연산: ${d.native_ops ? 'on' : 'off'}`;
-  const devClass = isCuda ? 'is-cuda' : (isMetal ? 'is-metal' : 'is-cpu');
+  const devClass = isCuda ? 'is-cuda' : (isAppleGpu ? 'is-metal' : 'is-cpu');
   c.appendChild(h('span', { class: `badge badge-device ${devClass}`, title: devTitle },
     h('span', { class: 'badge-dot' }),
     h('span', { text: devText }),

@@ -477,7 +477,8 @@ def execute_job(
         engine.drain_warnings()  # 이전 잡의 잔여 경고 폐기 (엔진은 잡 간 공유된다)
         if job.mode != "per_page" and not caps.supports_multi_page:
             # 페이지 단위 모델 안내 — 한 번만 기록 (multi를 선택해도 정상 처리되지만
-            # 내부적으로는 페이지별 추론이며 오류도 페이지 단위로 격리된다)
+            # 내부적으로는 페이지별 추론이며 오류도 페이지 단위로 격리된다 — 여러 쪽
+            # 청크가 실패하면 청크 재시도 없이 페이지별 처리로 내린다)
             merger.warnings.append(
                 f"{engine.name} 엔진은 페이지 단위 모델이라 문서를 페이지별로 처리했습니다"
                 " (결과는 동일하게 하나의 Markdown으로 병합됨)"
@@ -554,11 +555,15 @@ def execute_job(
                 *,
                 reset_output: Callable[[], None] | None = None,
                 rewind_page: int | None = None,
+                retry: bool = True,
             ) -> str:
                 """엔진 호출을 1회 재시도하되 의미 반복은 즉시 호출자에게 넘긴다.
 
                 반복 감지는 재시도해도 같은 내용에서 재발하므로 재시도 대상이
-                아니다 — 복구(per_page 강등·텍스트 레이어 폴백)는 호출자 몫."""
+                아니다 — 복구(per_page 강등·텍스트 레이어 폴백)는 호출자 몫.
+                `retry_same_page=False`인 예외(sidecar 읽기 타임아웃 — provider가 아직 그
+                페이지를 추론 중이라 재요청은 그 뒤에 줄을 선다)와 retry=False인 호출도
+                재시도 없이 곧바로 호출자의 페이지 격리로 넘긴다."""
                 try:
                     return run()
                 except JobCanceled:
@@ -568,6 +573,10 @@ def execute_job(
                         raise JobCanceled() from None
                     raise
                 except Exception as error:  # noqa: BLE001 — 청크 단위 격리
+                    if not retry or getattr(error, "retry_same_page", True) is False:
+                        if cancel.is_set():
+                            raise JobCanceled() from None
+                        raise
                     # 예외 객체는 보관하지 않는다 — 요약 문자열만 남기고 프레임을 놓아야
                     # 아래 캐시 해제가 실패 시도의 텐서를 실제로 돌려받는다.
                     first_error = _error_summary(error)
@@ -935,6 +944,10 @@ def execute_job(
                     f"청크 {ci + 1}/{len(chunks)}",
                     reset_output=lambda: shutil.rmtree(work_dir, ignore_errors=True),
                     rewind_page=start_page,
+                    # 페이지 단위 엔진의 여러 쪽 청크(OCR_REMOTE_PAGE_CONCURRENCY>1)는
+                    # 청크를 통째로 다시 보내지 않는다 — 실패한 한 쪽 때문에 정상 페이지까지
+                    # GPU에서 다시 추론하게 된다. 곧바로 페이지별 처리로 내린다.
+                    retry=caps.supports_multi_page or len(chunk) <= 1,
                 )
             except JobCanceled:
                 raise

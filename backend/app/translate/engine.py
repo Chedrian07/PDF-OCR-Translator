@@ -242,6 +242,9 @@ class _TranslationRun:
                 # 캐시 키 재료 — translate_eval이 units.json 키를 재현할 때 쓴다
                 "temperature": cfg.temperature,
                 "reasoning": cfg.reasoning,
+                # 실제 전달 방식(auto 확정값) — off가 서버에 닿았는지 확인하는 단서
+                "reasoning_style": cfg.effective_reasoning_style,
+                "request_variant": cfg.request_variant,
                 "started_at": self.started,
                 "finished_at": _now() if status in ("done", "error", "canceled") else None,
             })
@@ -356,6 +359,7 @@ class _TranslationRun:
             context_tail=ctx,
             temperature=cfg.temperature,
             reasoning=cfg.reasoning,
+            request_variant=cfg.request_variant,
         )
         return masked, mapping, pairs, first, keep, key
 

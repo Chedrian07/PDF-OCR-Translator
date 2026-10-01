@@ -1,7 +1,9 @@
 """[vendor patch P18] MoE 단일 토큰 디코드 패스트패스 — 골든 패리티(비트 동일) 검증.
 
-배치=1 디코드에서 argsort/scatter/cnts 기계장치와 레이어당 호스트 동기화를 건너뛰고
-topk 전문가만 직접 실행한다. 연산 순서(view→type→mul_→sum→type)가 원본과 동일해
+배치=1 디코드에서 argsort/scatter/cnts 라우팅 기계장치를 건너뛰고 topk 전문가만 직접
+실행한다. 레이어당 호스트 동기화는 남는다(topk_ids.tolist() 1회 — 토큰당 11회, M4 Max
+실측 이득 1.20x). MPS 디코드는 이제 P17 융합 경로가 먼저 받으므로 P18은
+OCR_MOE_FUSED=0일 때의 폴백이다. 연산 순서(view→type→mul_→sum→type)가 원본과 동일해
 패스트패스(on)와 원본 경로(off) 결과가 torch.equal 이어야 한다. CI는 CPU라 게이트를
 OCR_MOE_FAST=1/0으로 강제해 두 경로를 CPU에서 비교한다.
 """

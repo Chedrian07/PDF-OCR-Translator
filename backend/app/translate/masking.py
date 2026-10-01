@@ -376,6 +376,44 @@ _SCAFFOLD_RE = re.compile(
 )
 
 
+# 축퇴(반복 루프) — 같은 조각(1–40자)이 연달아 8번 이상 이어진 구간. greedy(온도 0)
+# 소형·양자화 모델이 '…영역을만만만만…'처럼 예산 끝까지 같은 토큰을 내는 실패 모드다
+# (probe:MLX-02 실측: 512토큰에서 잘린 루프가 길이비 0.55로 게이트를 통과해 캐시됐다).
+# 구분선·말줄임(-----, ......)처럼 글자 없는 반복은 축퇴가 아니라 표기라서 뺀다.
+_REPEAT_RE = re.compile(r"(.{1,40}?)\1{7,}", re.DOTALL)
+_REPEAT_MEANINGFUL_RE = re.compile(r"[0-9A-Za-z가-힣]")
+# 이 길이 미만의 반복은 표 행(| 0 | 0 |…)·짧은 나열로 정상 텍스트에도 나온다.
+REPEAT_MIN_SPAN = 80
+
+
+def longest_repetition(text: str) -> int:
+    """연속 반복 구간 중 가장 긴 것의 길이(문자) — 없으면 0. 12k자 기준 ~6ms."""
+    best = 0
+    for m in _REPEAT_RE.finditer(text or ""):
+        if _REPEAT_MEANINGFUL_RE.search(m.group(1)):
+            best = max(best, len(m.group(0)))
+    return best
+
+
+# 글자 하나(한글 음절·영문자)가 24번 이상 이어지는 것은 어떤 정상 문장에도 없다 —
+# 짧은 유닛의 '만만만…' 루프는 위 80자 기준에 못 미쳐도 축퇴다.
+_LETTER_RUN_RE = re.compile(r"([A-Za-z가-힣])\1{23,}")
+
+
+def is_degenerate_repetition(out: str, src: str = "") -> bool:
+    """출력에 원문에는 없는 긴 반복 루프가 있는가.
+
+    원문에도 반복(같은 값이 이어진 표 행 등)이 있으면 그 번역도 반복이 정상이므로
+    원문 반복의 2배+여유를 넘을 때만 축퇴로 본다.
+    """
+    if _LETTER_RUN_RE.search(out or "") and not _LETTER_RUN_RE.search(src or ""):
+        return True
+    span = longest_repetition(out)
+    if span < REPEAT_MIN_SPAN:
+        return False
+    return span > 2 * longest_repetition(src) + REPEAT_MIN_SPAN // 2
+
+
 def looks_untranslated(src: str, out: str, mapping: dict) -> bool:
     """출력 측 최소 검증 — 거부문·요약·원문 echo면 True(엔진이 래더로 보낸다).
 
@@ -387,7 +425,7 @@ def looks_untranslated(src: str, out: str, mapping: dict) -> bool:
 def untranslated_reason(src: str, out: str, mapping: dict) -> str:
     """게이트 판정 사유 — 통과면 "", 거부면 어느 규칙이 걸었는지 나타내는 슬러그.
 
-    사유: scaffold / refusal / hangul-ratio / length-ratio.
+    사유: scaffold / refusal / repetition / hangul-ratio / length-ratio.
 
     **오탐 관측용이다.** 게이트는 오탐해도 조용하다 — 정상 번역이 거부되면 래더
     왕복이 늘고, 래더가 소진되면 그 문단이 영어로 남는다(kept_reason=gate-rejected).
@@ -418,14 +456,19 @@ def untranslated_reason(src: str, out: str, mapping: dict) -> str:
         return "refusal"
 
     residual = _PLACEHOLDER_RE.sub(" ", mask(src)[0])
-    src_words = [w.lower() for w in re.findall(r"[A-Za-z]{2,}", residual)]
-    if len(src_words) < 2:
-        return ""  # 고유명사·짧은 라벨은 원문 그대로 나와도 정상
     # 복원된 불변 토큰(수식·URL·코드)은 한글일 수 없으므로 비율 계산에서 뺀다 —
-    # 넣고 세면 수식·표가 많은 정상 번역이 거부문으로 오탐된다.
+    # 넣고 세면 수식·표가 많은 정상 번역이 거부문으로 오탐된다. 반복 검사도 같은
+    # 이유로 복원 토큰을 뺀 본문끼리 비교한다(같은 수식이 여러 번 나오는 정상 출력).
     out_text = out
     for original in mapping.values():
         out_text = out_text.replace(original, " ")
+    # 반복 루프는 원문 길이·언어와 무관하게 번역이 아니다 — 짧은 원문 면제보다 먼저 본다.
+    if is_degenerate_repetition(out_text, residual):
+        return "repetition"
+
+    src_words = [w.lower() for w in re.findall(r"[A-Za-z]{2,}", residual)]
+    if len(src_words) < 2:
+        return ""  # 고유명사·짧은 라벨은 원문 그대로 나와도 정상
     non_ws = len(re.findall(r"\S", out_text))
     hangul_ratio = len(re.findall(r"[가-힣]", out_text)) / non_ws if non_ws else 0.0
     if non_ws and hangul_ratio < 0.15:

@@ -611,6 +611,9 @@ def health(request: Request) -> dict:
         # ── Localight Q&A 통합 필드 (추가만) ──
         "qa_available": _qa_available(st),
         "llm_default_provider": st.settings.llm_provider,
+        # .env에 있지만 이 앱이 읽지 않는 키의 짧은 안내(키 이름·오타 후보만, 값 없음) —
+        # 예: REASONING_EFFORT(번역은 TRANSLATE_REASONING). 없으면 빈 목록.
+        "config_warnings": list(getattr(st.settings, "config_warnings", ()) or ()),
     }
 
 

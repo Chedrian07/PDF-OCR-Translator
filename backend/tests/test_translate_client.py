@@ -321,6 +321,67 @@ def test_chat_404_엔드포인트_메시지():
         c.complete("s", "u", max_tokens=100)
 
 
+def test_chat_404_JSON_오류본문이면_모델ID를_안내한다():
+    """mlx_lm은 모르는 모델 ID에 404 + {"error": …}를 낸다(probe:MLX-07)."""
+    c = OpenAICompatClient(_cfg(api_mode="chat", model="mlx-community/Qwen3.5-0.8B-6bit"))
+    c._post = lambda p, pl: (404, {"error": "Cannot find an appropriate cached snapshot"}, {})
+    with pytest.raises(TranslateAPIError) as exc:
+        c.complete("s", "u", max_tokens=100)
+    msg = str(exc.value)
+    assert "모델 ID" in msg and "mlx-community/Qwen3.5-0.8B-6bit" in msg
+    assert "cached snapshot" in msg and "default_model" in msg
+
+    c2 = OpenAICompatClient(_cfg(api_mode="chat"))
+    c2._post = lambda p, pl: (404, {"error": {"message": "The model `m` does not exist",
+                                              "code": "model_not_found"}}, {})
+    with pytest.raises(TranslateAPIError, match="does not exist"):
+        c2.complete("s", "u", max_tokens=100)
+
+
+def test_responses_요청은_store_false를_보낸다():
+    """번역 Responses에 store가 없어 OpenAI 30일 보관·oMLX SSD 영속(mlx-integration-2)."""
+    c = OpenAICompatClient(_cfg(api_mode="responses"))
+    assert c._build_payload("responses", "s", "u", 10)["store"] is False
+    assert "store" not in c._build_payload("chat", "s", "u", 10)
+
+
+def test_store를_거부하는_서버는_빼고_재시도한_뒤_래치한다(caplog):
+    import logging
+
+    sent = []
+
+    def post(path, payload):
+        sent.append(dict(payload))
+        if "store" in payload:
+            return (400, {"error": {"message": "Unknown parameter: 'store'."}}, {})
+        return (200, {"output_text": "번역"}, {})
+
+    c = OpenAICompatClient(_cfg(api_mode="responses"))
+    c._post = post
+    with caplog.at_level(logging.WARNING, logger="app.translate.client"):
+        assert c.complete("s", "u", max_tokens=10) == "번역"
+    assert ["store" in p for p in sent] == [True, False] and c._store_ok is False
+    assert any("store" in r.message for r in caplog.records)
+    assert c.complete("s", "u", max_tokens=10) == "번역"
+    assert ["store" in p for p in sent] == [True, False, False]   # 이후 store 없이 직행
+
+
+def test_store_무관한_400은_재시도하지_않는다():
+    from app.translate.types import TranslateUnitRejected
+
+    calls = []
+
+    def post(path, payload):
+        calls.append(1)
+        return (400, {"error": {"message": "context length exceeded"}}, {})
+
+    c = OpenAICompatClient(_cfg(api_mode="responses"))
+    c._post = post
+    with pytest.raises(TranslateUnitRejected):
+        c.complete("s", "u", max_tokens=10)
+    assert calls == [1] and c._store_ok is None
+
+
 def test_think_스트립_코드펜스_벗기기():
     c = OpenAICompatClient(_cfg(api_mode="chat"))
     content = "<think>추론 과정</think>\n```\n최종 번역문\n```"

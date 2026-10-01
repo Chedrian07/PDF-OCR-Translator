@@ -99,10 +99,12 @@ def test_gc_disabled_when_ttl_zero(tmp_path):
 # ── work/ 터미널 정리 (runner.execute_job finally) ───────────────
 
 
-def _run_fake_job(tmp_path, engine=None):
+def _run_fake_job(tmp_path, engine=None, pdf_bytes=None):
     store = JobStore(tmp_path / "jobs")
     job = store.create("doc.pdf", "multi", dpi=72)
-    (job.dir / "source.pdf").write_bytes(make_pdf_bytes(pages=2, with_image=False))
+    if pdf_bytes is None:
+        pdf_bytes = make_pdf_bytes(pages=2, with_image=False)
+    (job.dir / "source.pdf").write_bytes(pdf_bytes)
     settings = Settings(
         engine="fake", device="cpu", data_dir=tmp_path / "data",
         preload_model=False, fake_delay=0.0, pages_per_chunk=1,
@@ -123,6 +125,19 @@ def test_work_dir_removed_on_done(tmp_path):
     assert list((job.dir / "layout").glob("*.jpg"))
 
 
+def _textless_pdf_bytes(pages: int) -> bytes:
+    """텍스트 레이어가 없는 PDF — 1페이지 청크는 텍스트 레이어부터 시도해 복구되므로
+    (C-1), 전 청크 실패를 재현하려면 복구할 텍스트가 없어야 한다."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    for _ in range(pages):
+        doc.new_page(width=595, height=842)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
 def test_work_dir_removed_on_error(tmp_path):
     """전 청크 실패(status=error)여도 실패 청크의 work/ 잔여물이 남지 않는다."""
 
@@ -131,7 +146,9 @@ def test_work_dir_removed_on_error(tmp_path):
             out_dir.mkdir(parents=True, exist_ok=True)  # 실패 전 부분 산출물 흉내
             raise RuntimeError("모의 실패")
 
-    job = _run_fake_job(tmp_path, engine=FailingEngine(delay=0.0))
+    job = _run_fake_job(
+        tmp_path, engine=FailingEngine(delay=0.0), pdf_bytes=_textless_pdf_bytes(2)
+    )
     assert job.status == "error"
     assert not (job.dir / "work").exists()
 

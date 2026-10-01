@@ -1668,8 +1668,12 @@ OCR로 얻은 **데이터 레이어**(`result.md` + `layout.json`)를 OpenAI 호
 변환 완료(done) 잡 ──► POST /translate ──► 번역 데몬 스레드(잡·lang별, OCR 워커와 별개로 병렬)
   run_translation(job_dir, lang, cfg, *, page_separator, progress, cancel, force)
     1. result.md(+layout.json)를 번역 유닛으로 분해, 마스킹(<m1 .../> 플레이스홀더)
-    1b. 2단 패스 준비 — 모든 줄이 layout 블록에 완전히 커버되는 md 유닛은 1차에서 제외(deferred)
+       (layout.json에 텍스트 블록이 없으면 — image 블록뿐 — layout 없이 md만 번역하고
+        layout.{lang}.json을 쓰지 않는다. 잡 디렉터리가 사라졌으면 다시 만들지 않고 실패)
+    1b. 2단 패스 준비 — layout 블록 번역으로 완전히 덮이는 md 유닛은 1차에서 제외(deferred)
     2. 유닛 캐시(units.json)·용어집(glossary.json) 활용해 API 호출 (Chat/Responses)
+       - chat은 기본 SSE 스트리밍(TRANSLATE_STREAM), reasoning 필드는 서버 계열별
+         (TRANSLATE_REASONING_STYLE), Responses 요청은 store:false, 응답은 TRANSLATE_MAX_RESPONSE_MB 상한
        - 잡당 최대 8 worker, 프로세스 전역 HTTP 세마포어 기본 8
          (`TRANSLATE_GLOBAL_CONCURRENCY`로 1–8 조정)
        - 같은 cache key는 single-flight로 결과·오류를 공유해 중복 과금/재시도를 차단
@@ -1677,27 +1681,31 @@ OCR로 얻은 **데이터 레이어**(`result.md` + `layout.json`)를 OpenAI 호
          초기 협상이 일시 오류로 실패하면 후속 순차 호출은 재협상 가능
        - `title` 유닛은 의미·정보량을 유지하고 UI 라벨식 축약을 금지한다
        - 출력 측 검증 게이트(_accepted)를 통과한 유닛만 채택·캐시된다 (§13.4)
-    3. 플레이스홀더 복원 → layout 블록과 정확히 대응하는 Markdown 줄은 동일 번역으로 정렬
-       (PDF·개요·읽기 텍스트의 제목/용어 SSOT, ref_text는 양쪽 모두 원문 유지)
-    3b. reconcile이 폴백이면 → deferred 유닛을 2차 번역(total 증가) 후 재조립
+    3. 플레이스홀더 복원 → **유닛 단위 정렬**: layout 블록 번역으로 완전히 덮이는 md 유닛은
+       그 번역을 쓴다(PDF·개요·읽기 텍스트의 제목/용어 SSOT, ref_text는 양쪽 모두 원문 유지)
+    3b. 덮개가 깨진 deferred 유닛(그 layout 블록이 원문으로 남는 등) → 2차 번역(total 증가) 후 재조립
     4. result.{lang}.md / layout.{lang}.json 기록
     5. state.json에 running(current/total) → done|error|canceled 기록, report.json 저장
 ```
 
 #### 2단 패스 (deferred md 유닛)
 
-reconcile이 성공하면 md 유닛 번역은 전량 폐기되고 layout 번역이 단일 기준이 된다 —
-LLM 왕복의 절반이 낭비였다. 그래서 **비어 있지 않은 모든 줄이 layout 블록 원문에
-커버되는** md 유닛만 1차 디스패치에서 빼두고(`deferred`), `reconcile_markdown_with_layout`이
-**폴백을 돌려준 경우에만** 2차로 번역해 무손실 계약을 지킨다. 부분만 걸치는 md 유닛
-(다중 줄 블록·표·수식 줄)은 매핑에 안 걸려 원문이 남으므로 종전대로 1차에서 번역한다.
-2차 진입 시 `total`이 늘어나므로 SSE progress의 `total`은 **증가할 수 있다**(단조 감소는 없음).
+layout 블록이 md 유닛을 완전히 덮으면 md 유닛 번역은 버려지고 layout 번역이 단일 기준이
+된다 — 그 왕복은 낭비다. 그래서 정렬은 **유닛 단위**다(`segment.layout_line_map` +
+`map_unit_lines`): md 유닛은 비어 있지 않은 모든 줄이 layout 블록으로 덮이거나 유닛 전체가
+layout 블록 하나(여러 줄 블록 포함)와 같을 때만 layout 번역을 쓰고, 아니면 자기 번역을 쓴다.
+덮이는 md 유닛은 1차 디스패치에서 빼두고(`deferred`), 덮개 쪽 layout 블록이 실패해 원문으로
+남으면(kept) 그 블록은 덮개에서 빠지므로 deferred 쌍둥이가 2차로 번역된다 — 무손실 계약.
+쪽번호 같은 보존 블록의 줄은 deferral을 막지 않는다. 예전 줄 단위 reconcile(70% 대응률
+문턱)은 부분만 덮인 유닛에 영어 줄을 남겼다. 25쪽 하네스 잡에서 LLM 호출은 810 → 483,
+중복 원문은 365 → 39로 줄었다. 2차 진입 시 `total`이 늘어나므로 SSE progress의 `total`은
+**증가할 수 있다**(단조 감소는 없음).
 
 - 번역 코어(`app/translate/`)는 **OCR 엔진·torch에 의존하지 않는다**(requests + 표준 라이브러리).
-- 원본 Markdown의 비어 있지 않은 줄 중 70% 이상이 layout 블록과 정확히 대응하면
-  `layout.{lang}.json`의 블록 번역을 `result.{lang}.md`에도 재사용한다. 대응률이
-  낮은 비정형 Markdown은 독립 Markdown 번역을 유지하며, 중복 원문의 번역이 서로
-  다르거나 여러 줄인 블록은 보수적으로 정렬 대상에서 제외한다.
+  품질 평가 CLI `tools/translate_eval.py --judge`는 번역과 같은 출력 예산(`cfg.max_output_tokens`)을
+  쓰고 채점 실패 사유(`failed_reasons`)를 출력한다.
+- layout 블록 번역은 위 유닛 단위 규칙으로만 `result.{lang}.md`에 재사용한다(문서 전체의
+  대응률 문턱은 없다). 중복 원문의 번역이 서로 다르면 보수적으로 정렬 대상에서 제외한다.
 - API 레이어는 `run_translation`만 안다. 진행률은 `progress(current,total)` 콜백,
   중단은 `threading.Event` cancel로 통신(OCR 워커와 동일 패턴).
 - `/html?lang=ko`는 흐름형 읽기 텍스트를 제공한다. `/document.html`,
@@ -1716,7 +1724,9 @@ LLM 왕복의 절반이 낭비였다. 그래서 **비어 있지 않은 모든 �
 
 ```
 translations/{lang}/state.json     진행 상태 (아래 스키마)
-translations/{lang}/glossary.json  문서 용어집 [{"src","ko","policy","first_unit"}]
+translations/{lang}/glossary.json  문서 용어집 [{"src","ko","policy","first_unit","first_unit_lay"}]
+                                   (first_unit = md 순서, first_unit_lay = layout 순서의 첫 등장)
+translations/{lang}/glossary.incomplete  용어집 LLM 판정이 실패한 채 저장됐다는 표식 — 다음 실행이 다시 판정
 translations/{lang}/units.json     유닛 캐시 {cache_key: 번역문}
 translations/{lang}/report.json    품질 리포트 (아래 키 — GET /translate/report가 그대로 노출)
 result.{lang}.md                   번역 마크다운 — page_separator 구조·페이지 수 보존
@@ -1730,6 +1740,8 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   "current": 3, "total": 12,
   "error": null, "model": "gpt-4o-mini", "api_mode": "chat",
   "prompt_v": "6", "context": true,   // prompt_v = types.PROMPT_V 현재값 (§13.4)
+  "reasoning_style": "chat_template_kwargs",  // auto를 푼 실제 reasoning 전달 방식
+  "request_variant": "",           // 요청 모양이 종전과 다를 때만 값(캐시 키 재료)
   "started_at": "…", "finished_at": null
 }
 ```
@@ -1743,6 +1755,7 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   "kept_reasons":  {"gate-rejected": 1},                    // 왜 원문이 그대로 남았나
   "gate_reasons":  {"refusal": 1, "hangul-ratio": 2},       // 출력 게이트 규칙별 거부 횟수
   "cache_prior": 120, "cache_reused": 0,                  // 전량 재번역 감지 (§15.1)
+  "cache_rejected": 0,                // 예전 캐시 중 지금 게이트를 통과하지 못해 다시 번역한 수
   "reference_rule": "…", "cached": 0, "translated": 8,
   "api_mode": "chat", "warnings": ["…"]
 }
@@ -1750,9 +1763,11 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
 - `skip_reasons`(입력 측 `should_skip`·segment의 references 표시 —
   `references`\|`non-linguistic`\|`already-korean`\|`identifier`)·
   `kept_reasons`(래더 소진 후 원문 유지 —
-  `gate-rejected`\|`placeholder-mismatch`\|`empty-output`\|`api-rejected`\|`degenerate-output`)·
+  `gate-rejected`\|`placeholder-mismatch`\|`empty-output`\|`truncated`\|`timeout`\|`api-rejected`\|
+  `degenerate-output`)·
   `gate_reasons`(출력 측 검증 게이트가 거부한 규칙, §13.4 —
-  `refusal`\|`scaffold`\|`hangul-ratio`\|`length-ratio`)는
+  `refusal`\|`scaffold`\|`repetition`\|`label-sentence`\|`number-mismatch`\|`hangul-ratio`\|
+  `length-ratio`)는
   **"왜 이 문단이 영어 그대로인가"**의 사유별 집계다.
   총합(`skipped`/`kept_original`)만으로는 원인을 구분할 수 없어서 추가됐다.
   `gate_reasons` 합이 `kept_reasons["gate-rejected"]`보다 **훨씬 크면** 게이트 오탐이
@@ -1765,7 +1780,8 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
 - **POST /api/jobs/{id}/translate** — body `{"lang":"ko","force":false}` (기본 `lang="ko"`).
   - `400` 지원하지 않는 언어 / `409` 변환이 완료된 잡만 번역 가능 /
     `429` 잡·IP 레이트리밋 또는 동시 실행 상한 초과(`Retry-After` 동반 — §5) /
-    `503` 프로바이더 미설정(detail=사유)
+    `503` 프로바이더 미설정(detail=사유, `Retry-After` 없음 — 기다려도 안 된다) /
+    `503 + Retry-After: 5` 디스크·스레드 자원 부족으로 시작 실패(재시도 대상 — 실패는 state에도 남긴다)
   - 검사 순서: lang → 잡 상태(409) → 레이트리밋(429) → 프로바이더 구성(503) →
     동시 실행 상한(429, `translate_lock` 안)
   - 이미 실행 중 → `200 {"status":"running"}`; state가 `done`이고 `force` 아님 → `200 {"status":"done"}`
@@ -1776,6 +1792,9 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   - `report.json`이 있으면 사유별 집계 **`skip_reasons`·`kept_reasons`·`reference_rule`**를
     응답에 덧붙인다(§13.2) — 상태 폴링 한 번으로 "왜 원문이 그대로인가"를 알 수 있게.
     `gate_reasons`는 진단용이라 state에 붙이지 않고 아래 `/translate/report`로만 노출한다.
+  - 리포트 경고(용어집 LLM 판정 실패·참고문헌 규칙 불일치·캐시 전량 무효 등)는 **`warnings`**
+    (문자열 목록, 최대 50건·건당 1,000자)로 덧붙인다 — 경고가 없으면 키가 없다. 사유 집계와
+    같이 **마지막으로 완료된 번역**의 것이다. 프런트는 '번역 참고 사항 N건' 목록으로 보인다.
 - **GET /api/jobs/{id}/translate/report?lang=ko** — `translations/{lang}/report.json`을
   `{"job_id","lang", …report}`로 그대로 반환한다(§13.2의 전 키 — `kept_original` 유닛 id,
   `skip_reasons`/`kept_reasons`/`gate_reasons`, `cache_prior`/`cache_reused`, `warnings`).
@@ -1783,7 +1802,8 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
 - **POST /api/jobs/{id}/translate/cancel?lang=ko** — 실행 중이면 `202 {"status":"canceling"}`,
   아니면 현재 상태 반환.
 - **GET /api/jobs/{id}/translate/events?lang=ko** — `/events`와 동일 SSE 패턴
-  (`retry:3000`, 15초 `: ping`). 브로커 채널 키 `"{id}:translate:{lang}"`.
+  (`retry:3000`, 15초 `: ping`, 구독자 상한 초과 시 503 + `Retry-After: 5`). 브로커 채널 키
+  `"{id}:translate:{lang}"`.
   스냅샷: `done`→`done` 1회 후 종료 / `error`·`canceled`→`error` 후 종료 /
   `running`→`progress` 스냅샷 후 구독 루프 / `none`→`404`.
   - `event: progress` `{"phase":"translate","lang":"ko","current":3,"total":12,"status":"running"}`
@@ -1810,6 +1830,15 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   2개 미만이면 면제(고유명사·짧은 라벨) ③ 복원된 불변 토큰을 뺀 뒤 한글 비율 <15%면
   거절 ④ 길이비가 범위(마스킹 있으면 0.2–4.0, 없으면 0.3–3.0) 밖이면 거절.
   오탐은 래더 왕복 비용만 늘리지만 미탐은 내용 손실이므로 보수적으로 잡혀 있다.
+  추가 규칙: 프롬프트 스캐폴딩 echo(`scaffold`), 반복 루프(`repetition` — 짧은 원문 면제보다
+  먼저 본다), 1–2단어 라벨이 합쇼체 문장으로 바뀜(`label-sentence`), 80자 이하 원문의 4자리 이상
+  숫자가 전부 사라짐(`number-mismatch`), 짧은 원문 면제에도 출력 길이 상한. 원문이 번역에 관한
+  글이면 '번역…수 없' 같은 한국어 문장은 거부문으로 보지 않는다. 예전 코드가 캐시한 출력도
+  지금 게이트로 다시 판정해 떨어지면 다시 번역한다(`cache_rejected`).
+- **퇴화 출력 소거**: 같은 정규화 출력이 서로 다른 원문 3개 이상에서 나오면(예: 소형 모델의
+  '요약입니다.') 퇴화로 보고 버린다. 한 번 퇴화로 판정된 출력은 **실행 전체**에서 기억해 2차
+  패스에서도 퇴화다. 게이트가 거부한 출력과 분할 조각 출력도 증거로 세고, 이어 붙인 분할 결과도
+  유닛 전체 기준으로 게이트를 다시 통과해야 한다.
 - **원문 유지 폴백(kept_original 강등)**: 플레이스홀더 복원 실패나 위 검증 거절 유닛은
   기존 래더(repair → 문장 분할)로 흡수하고, 래더까지 소진되면 **원문을 그대로 둔다**
   (내용 손실 금지). 해당 유닛 id는 `report.json`의 `kept_original`에 남는다.
@@ -1820,7 +1849,9 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   유닛이 하나도 없으면 엔드포인트·설정 자체 문제이므로 종전대로 전파한다
   (전 유닛이 kept로 조용히 done 되는 회귀 방지).
 - **캐시 키 구성**: `sha256(PROMPT_V ∥ model ∥ 정렬된 용어집쌍 ∥ 마스킹된 원문
-  ∥ 원문 전체 ∥ 블록 종류 ∥ 직전 문맥 ∥ temperature ∥ reasoning)`.
+  ∥ 원문 전체 ∥ 블록 종류 ∥ 직전 문맥 ∥ temperature ∥ reasoning [∥ request_variant])`.
+  `request_variant`(reasoning 전달 방식·`TRANSLATE_EXTRA_BODY`)는 요청 모양이 종전과 다를 때만
+  넣는다 — 종전과 같은 요청이면 키가 그대로라 기존 `units.json`이 계속 적중한다.
   모델·프롬프트 버전·해당 유닛 용어집·원문·제목/본문 정책·샘플링 설정이 바뀌면
   영향받는 유닛만 자동 재번역된다. 짧은 placeholder 미리보기 충돌도 원문 전체로 분리하고,
   같은 문장도 직전 문맥이 다르면 별도 번역한다. `TRANSLATE_REASONING`을 off→high로
@@ -1830,14 +1861,47 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   인라인 수식 통화 오인 수정)이라 **v5 이전에 만들어진 유닛 캐시는 이번 사이클에
   무효화된다** — 이미 캐시된 거부문·echo를 강제로 다시 번역시키는 것이 목적이다.
   `report.json`/`state.json`의 `prompt_v` 필드로 어떤 버전으로 만든 결과인지 확인할 수 있다.
-- **잘림 감지 재시도**: chat `finish_reason=="length"` / Responses `status=="incomplete"`를
-  감지하면 같은 요청을 **max_tokens 2배로 1회 재시도**한다 (thinking 토큰이 예산을
-  소진하는 경우 대비). `TRANSLATE_MAX_TOKENS_PARAM=none`이면 같은 요청의 반복이라 생략.
+- **잘린 출력은 채택하지 않는다**: `client.complete()`는 잘린 텍스트를 돌려주지 않는다. chat
+  `finish_reason=="length"` / Responses `status=="incomplete"`를 감지하면 같은 요청을 **max_tokens
+  2배로 1회 재시도**하고(thinking 토큰이 예산을 소진하는 경우 대비), 그래도 잘리면
+  `TranslateOutputTruncated`를 낸다. 반복 루프·지나치게 긴 출력(프롬프트의 4배와 2,000자 중 큰
+  값 초과)·`TRANSLATE_MAX_TOKENS_PARAM=none`(경고 로그)은 2배 재시도를 하지 않는다. 빈 출력은
+  `TranslateEmptyOutput`, 읽기 타임아웃(1회 재시도 뒤)은 `TranslateTimeout` — 셋 다
+  `TranslateUnitRejected` 하위라 유닛 단위로 분할 래더를 타고, 끝내 실패하면 `truncated`·
+  `empty-output`·`timeout` 사유로 원문을 두며 **캐시하지 않는다**. 첫 성공 전에 잘린 유닛이
+  나오면(콜드 실행) 잡은 thinking을 끄라는 안내와 함께 실패한다(로컬 서버면 `--chat-template-args`
+  ·모델별 설정까지 안내). repair(태그만 바로잡기) 패스는 태그가 빠지거나 겹쳤고 출력이 루프도
+  과다 길이도 아닐 때만 돈다.
+- **스트리밍**(chat 기본, `TRANSLATE_STREAM`): HTTP 교환은 도우미 스레드가 하고 워커는 0.1초마다
+  취소를 확인한다 — 취소면 소켓을 끊어 서버 생성까지 멈춘다(실측 mlx_lm: 취소 1.52초 뒤 반환,
+  서버는 BrokenPipe 뒤 토큰을 더 내지 않음). usage·finish_reason은 스트림에서 읽고 `: keepalive`
+  주석은 무시한다. 서버가 첫 스트리밍 요청을 400/415/422로 거부하면 비스트리밍으로 다시 보내고
+  그 클라이언트에서 고정한다. 응답 본문은 `TRANSLATE_MAX_RESPONSE_MB`로 묶는다(선언 길이와 실제
+  바이트 모두 — 끝나지 않는 SSE 한 줄도). 헤더는 대소문자를 가리지 않는다(mlx_lm은
+  `Content-type`을 보낸다).
+- **Responses `store:false`**: 번역의 Responses 요청도 `store:false`를 싣는다. 서버가 `store`를
+  이유로 400/422를 내면 한 번 빼고 다시 보내 그 클라이언트에서 고정하고 경고를 남긴다.
+- **think 정리**: 마지막 `</think>` 뒤만 남긴다(여는 태그가 없어도). 닫히지 않은 선행
+  `<think>`는 본문 없음(잘림·빈 출력). `reasoning`·`reasoning_content` 필드는 무시한다. 출력
+  맨 앞에 프롬프트의 `[번역할 원문]` 줄이 메아리치면 한 줄 지운다.
+- **용어집**: 판정 호출이 실패하면 `glossary.json`과 `glossary.incomplete` 표식을 함께 저장하고
+  경고한다 — 다음 실행이 다시 판정하고 성공하면 표식을 지운다. 판정 중 취소면 `glossary.json`을
+  남기지 않는다. 첫 등장 병기는 md 순서(`first_unit`)와 layout 순서(`first_unit_lay`)를 따로
+  계산해 layout 잡도 `[첫 등장 병기]`를 정확히 한 번 보낸다. recall·attention 같은 시드 용어는
+  일반 관용구에 강제하지 않는다. 저장은 원자적이고 깨진 파일은 다시 만든다.
+- **설정 검증**: `TRANSLATE_TEMPERATURE`는 `none` 또는 0–2, `TRANSLATE_CONTEXT`는
+  `False`/`OFF`도 받는다. 모델 id가 틀려 404 + JSON 오류 본문이 오면 서버 문구와 함께 모델 id를
+  확인하라고 안내한다.
 - **취소 응답성**: cancel은 유닛 디스패치 사이뿐 아니라 **래더 단계(최초→repair→분할)
   사이에서도** 확인된다 — 거대 표 래더(유닛당 수 분)가 취소 후에도 이어지지 않는다.
   취소로 조기 반환된 유닛은 kept_original 통계에 포함되지 않는다.
 - **엔진이 상태의 단일 기록자**: `state.json`은 `run_translation`이 직접 쓴다.
-  API 스레드는 SSE 이벤트 중계와 레지스트리 정리만 담당한다.
+  API 스레드는 SSE 이벤트 중계와 레지스트리 정리만 담당한다. 예외: 번역 스레드가 엔진 밖에서
+  실패했는데 state가 아직 `running`이면 API가 실제 사유로 마감한다(엔진이 이미 쓴 error·canceled는
+  덮지 않는다).
+- **삭제된 잡**: 번역 엔진은 잡 디렉터리를 다시 만들지 않는다 — `translations/`·`translations/{lang}`만
+  `parents` 없이 만들고, 잡 디렉터리가 없으면 `작업 디렉터리가 없습니다 — 삭제된 작업은 번역할 수
+  없습니다`로 끝난다(예전에는 삭제 도중의 번역이 빈 잡 디렉터리를 되살렸다).
 
 ### 13.5 stale-running 조정
 

@@ -196,7 +196,14 @@ def export_report(job_dir: Path, lang: str) -> Path:
 
 
 def export_font_marker(job_dir: Path, lang: str) -> Path:
-    """어떤 폰트 설정으로 만든 PDF인지 남기는 표식(리포트는 파이프라인 소유)."""
+    """번역 PDF의 빌드 표식(build stamp) — 이 PDF를 무엇으로 만들었는가.
+
+    내용은 JSON `{"v": 2, "font": <폰트 정체성>, "inputs": {파일명: [ino, size, mtime_ns]}}`다
+    (pipeline/derived.py `_write_build_stamp`가 빌드 **직전**의 입력 지문으로 쓰고,
+    `_translated_pdf_cache`가 현재 지문·폰트 정체성과 같을 때만 캐시를 최신으로 본다).
+    inputs는 source.pdf·layout.json·layout.{lang}.json이다. 파일 이름은 예전 폰트 표식
+    (폰트 정체성 문자열 한 줄) 그대로라 옛 형식은 JSON이 아니어서 한 번 재빌드된다.
+    리포트(export_report)는 파이프라인이 쓰는 별도 파일이다."""
     return job_dir / f"export.{lang}.font.txt"
 
 
@@ -238,7 +245,8 @@ def invalidate_language_artifacts(job_dir: Path, lang: str) -> None:
 
     번역 PDF·대조 PDF·리포트는 번역 본문에서 파생되고, rendered/{lang}/.source.json
     은 그 PDF에서 파생된 HTML 기준면 캐시다. 표식을 지우면 다음 요청이 다시 렌더한다.
-    (폰트 표식 export.{lang}.font.txt는 PDF와 함께 재기록되므로 남겨 둔다.)
+    (빌드 표식 export.{lang}.font.txt는 PDF와 함께 재기록되고, PDF가 없으면 표식만으로는
+    캐시가 최신으로 판정되지 않으므로 남겨 둔다.)
     """
     export_pdf(job_dir, lang).unlink(missing_ok=True)
     export_report(job_dir, lang).unlink(missing_ok=True)

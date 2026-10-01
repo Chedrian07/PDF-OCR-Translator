@@ -344,3 +344,18 @@ test('apiGet: timeoutMs가 있으면 시간 제한 신호를 붙이고, 응답�
   assert.ok(seen[1], '폴링 호출은 시간 제한 신호를 붙인다');
   assert.ok(POLL_TIMEOUT_MS >= 10_000 && POLL_TIMEOUT_MS <= 60_000);
 });
+
+test('fetchTextWithBusyRetry: 멈춘 요청은 시간 제한 뒤 네트워크 오류(0)로 끝나 다시 시도할 수 있다', async (t) => {
+  const keepAlive = setInterval(() => {}, 10); // AbortSignal.timeout 타이머는 unref다
+  t.after(() => clearInterval(keepAlive));
+  const signals = [];
+  t.mock.method(globalThis, 'fetch', (url, init) => {
+    signals.push(init && init.signal);
+    return new Promise((_, reject) => {
+      init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+    });
+  });
+  assert.deepEqual(await fetchTextWithBusyRetry('/hung', { timeoutMs: 30 }), { status: 0, text: null });
+  assert.equal(signals.length, 1);
+  assert.ok(signals[0], '산출물 요청에는 항상 시간 제한 신호가 붙는다');
+});

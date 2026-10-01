@@ -384,9 +384,13 @@ def _detach(error: BaseException) -> BaseException:
 
 
 def _failure_reason(error: BaseException) -> str:
-    """사용자 경고에 쓰는 실패 사유 — 원인(특히 MAX_LENGTH)을 이름으로 드러낸다."""
+    """사용자 경고에 쓰는 실패 사유 — 원인(특히 닿은 출력 상한)을 이름으로 드러낸다.
+
+    상한 이름은 엔진이 OutputLimitError.limit_label로 알린다(in-process 엔진은 MAX_LENGTH,
+    sidecar는 페이지당 출력 토큰 상한) — sidecar 잘림을 'MAX_LENGTH 도달'로 적으면
+    sidecar에는 효과가 없는 설정으로 운영자를 이끈다."""
     if isinstance(error, OutputLimitError):
-        return "MAX_LENGTH 도달(출력 잘림)"
+        return f"{error.limit_label} 도달(출력 잘림)"
     if isinstance(error, RepetitiveOutputError):
         return "반복/출력 상한 감지"
     return "변환 실패"
@@ -882,8 +886,10 @@ def execute_job(
                     raise JobCanceled()
                 span = _page_span(start_page, len(chunk))
                 keep, kept_md = _completed_pages(chunk_error, len(chunk))
+                # 닿은 상한의 이름(엔진 계약) — keep>0은 OutputLimitError뿐이다
+                limit = chunk_error.limit_label if isinstance(chunk_error, OutputLimitError) else ""
                 if isinstance(chunk_error, OutputLimitError):
-                    head = "MAX_LENGTH 도달로 출력이 잘려 페이지별 재처리"
+                    head = f"{limit} 도달로 출력이 잘려 페이지별 재처리"
                     if keep:
                         head += f"(끝까지 생성된 앞 {keep}쪽은 유지)"
                 elif isinstance(chunk_error, RepetitiveOutputError):
@@ -899,7 +905,7 @@ def execute_job(
                 if keep:
                     # 잘린 페이지·시작 못 한 페이지의 산출물만 지우고 앞 페이지는 병합한다.
                     keep_leading_pages(work_dir, keep)
-                    sink.rewind_to(start_page + keep, "MAX_LENGTH 도달 — 잘린 페이지부터 재처리")
+                    sink.rewind_to(start_page + keep, f"{limit} 도달 — 잘린 페이지부터 재처리")
                     merger.add_chunk(ChunkResult(work_dir, start_page, keep, kept_md))
                     _gate(start_page, chunk[:keep])
                 else:

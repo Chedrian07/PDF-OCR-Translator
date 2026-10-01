@@ -199,3 +199,25 @@ def test_save_load는_layout_첫_등장도_왕복한다(tmp_path):
     g.save(p)
     e = Glossary.load(p).entries[0]
     assert (e.first_unit, e.first_lay) == ("md:0:1", "lay:2:3")
+
+
+# ── 일반 영어 용법 가드 (translate-llm-17) ─────────────────────────────────────
+
+def _terms(text: str) -> set[str]:
+    return {s for s, _ in Glossary(load_seed()).for_unit(text)[0]}
+
+
+def test_일반_관용_용법에는_시드_역어를_강제하지_않는다():
+    terms = _terms(
+        "Recall that this problem has recently attracted considerable attention from the community."
+    )
+    assert "recall" not in terms and "attention" not in terms
+
+
+def test_같은_유닛의_기술_용법은_그대로_매칭한다():
+    assert {"recall", "attention"} <= _terms(
+        "We report precision and recall for the attention mechanism."
+    )
+    mixed = _terms("The model pays more attention to recent tokens via attention weights.")
+    assert "attention" in mixed                          # 관용구를 빼도 기술 용법이 남는다
+    assert "recall" not in _terms("We recall the definition of the encoder.")

@@ -1790,3 +1790,25 @@ def test_용어집_호출_성공은_콜드_run의_첫_4xx를_유닛_강등으로
     res, report, _ = _run_md(tmp_path, replace(cfg, concurrency=1), _GLOSSARY_MD, Oversized("[]"))
     assert res.status == "done" and res.kept_original == ["md:0:0"]
     assert report["kept_reasons"] == {"api-rejected": 1}
+
+
+def test_이전_실행이_캐시한_루프_출력은_재검증에서_걸러진다(tmp_path, cfg):
+    """게이트 강화 전에 채택·캐시된 손상(probe:MLX-02의 '…만만만' 루프)이 force 없이도
+    재사용되지 않는다 — 그 유닛만 다시 번역하고 나머지 캐시는 그대로 쓴다."""
+    md = (
+        "The first paragraph explains the training procedure in detail.\n\n"
+        "The second paragraph removes the unnecessary regions before attention.\n"
+    )
+    _run_md(tmp_path, cfg, md, EchoClient())
+    upath = tmp_path / "translations/ko/units.json"
+    cache = json.loads(upath.read_text(encoding="utf-8"))
+    looped_key = next(k for k, v in cache.items() if v == koreanize(
+        "The second paragraph removes the unnecessary regions before attention."))
+    cache[looped_key] = "두 번째 문단은 주의 이전에 불필요한 영역을" + "만" * 40
+    upath.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+
+    again = EchoClient()
+    res, report, out = _run_md(tmp_path, cfg, md, again)
+    assert again.unit_calls == 1 and res.cached == 1 and res.translated == 1
+    assert report["cache_rejected"] == 1 and report["cache_reused"] == 1
+    assert "만만만" not in out and out == ko_expected(md)

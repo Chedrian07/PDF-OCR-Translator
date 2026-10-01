@@ -41,8 +41,9 @@ GitHub's private vulnerability reporting or another agreed private channel.
   `TRANSLATE_MAX_ACTIVE=4`; a value of 0 or less disables that cap. These bound the cost
   of mistakes and casual abuse of the operator's paid LLM key — they are **not a
   substitute for authentication**, and anyone who can reach the service can still read
-  and delete documents. The Compose files do not thread these variables into the
-  containers yet, so container deployments run the defaults.
+  and delete documents. `docker-compose.yml` passes all four variables to every backend
+  service, so set them in `.env` to tighten the caps for container deployments too
+  (`backend/tests/test_ci_ops_contracts.py` keeps that wiring from regressing).
 
 ## Secret response
 

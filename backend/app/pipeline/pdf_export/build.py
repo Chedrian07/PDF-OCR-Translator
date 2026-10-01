@@ -248,6 +248,10 @@ class _PageContext:
     # 원문이 텍스트가 아니라 래스터 픽셀인 블록(스캔 페이지·표 이미지). span이 없으니
     # 남는 동안에는 블록 영역 전체가 장애물이고, 교체되면 그 픽셀을 덮어 지운다.
     raster_blocks: frozenset = frozenset()
+    # 이번 패스에서 줄 단위로 확정한 리스팅 블록의 **남는** 원문 span(바뀌지 않은
+    # 줄·정렬 실패 줄). 블록은 지워진다고 가정돼도 이 줄들은 남으므로 장애물이다.
+    # 패스마다 새 dict다(`_plan_until_consistent`가 replace로 넣는다).
+    residual_spans: dict = field(default_factory=dict)
     # 계획 패스 사이에 공유하는 페이지 분석 캐시(표 검색 TextPage, 가로 선분).
     # 패스마다 `replace()`로 새 컨텍스트를 만들어도 같은 dict를 가리킨다 — 리댁션
     # 전의 원본 페이지에서만 유효하므로 `_process_page`가 계획 직후 비운다.
@@ -260,6 +264,9 @@ class _PageContext:
                 continue
             for span in spans:
                 yield span.rect
+        for owner, rects in self.residual_spans.items():
+            if owner in self.cleared_indices and owner not in exclude:
+                yield from rects
         yield from self.raster_obstacles(self.cleared_indices | frozenset(exclude))
 
     def raster_obstacles(self, skip: "set[int] | frozenset[int]" = frozenset()):
@@ -760,6 +767,11 @@ def _plan_text_block(
         if listing_changed and len(listing_targets) == listing_changed:
             targets.extend(listing_targets)
             _keep_dropped_listing_lines(ctx, block_index, listing_dropped, result)
+            # 바뀌지 않은 줄·정렬 실패 줄은 지워지지 않는다 — 같은 패스의 flow가
+            # 바로 장애물로 보게 기록한다(다음 패스까지 미루면 계획을 한 번 더 세운다).
+            ctx.residual_spans[block_index] = _unplaced_listing_spans(
+                ctx, block_index, listing_targets,
+            )
             return None
     return _FlowCandidate(
         block_index,
@@ -829,7 +841,12 @@ def _partially_redacted_blocks(ctx: "_PageContext", targets) -> set[int]:
     """
     listing: dict[int, list] = {}
     for target in targets:
-        if target.kind == "listing" and target.block_index >= 0:
+        if (
+            target.kind == "listing"
+            and target.block_index >= 0
+            # 같은 패스에서 이미 남는 줄을 장애물로 세운 블록은 일관적이다.
+            and target.block_index not in ctx.residual_spans
+        ):
             listing.setdefault(target.block_index, []).append(target)
     return {
         index for index, placed in listing.items()
@@ -1513,7 +1530,7 @@ def _plan_until_consistent(base_ctx: _PageContext, result: PdfExportResult):
         # 마지막 패스가 아니면 집계를 버린다 — 중간 패스의 keep 사유가 리포트에
         # 섞이면 실제 산출물과 다른 수치가 남는다.
         trial = PdfExportResult(path=result.path)
-        ctx = replace(base_ctx, cleared_indices=cleared)
+        ctx = replace(base_ctx, cleared_indices=cleared, residual_spans={})
         targets, flow_candidates, links = _plan_page_targets(ctx, trial)
         _plan_flow_targets(ctx, flow_candidates, targets, trial)
         # 줄 단위로 일부만 들어간 블록은 '지워졌다'고 볼 수 없다 — 남는 줄이 있다.
@@ -1531,7 +1548,7 @@ def _plan_until_consistent(base_ctx: _PageContext, result: PdfExportResult):
                 base_ctx.pno, _MAX_PLAN_PASSES,
             )
             trial = PdfExportResult(path=result.path)
-            ctx = replace(base_ctx, cleared_indices=frozenset())
+            ctx = replace(base_ctx, cleared_indices=frozenset(), residual_spans={})
             targets, flow_candidates, links = _plan_page_targets(ctx, trial)
             _plan_flow_targets(ctx, flow_candidates, targets, trial)
             break

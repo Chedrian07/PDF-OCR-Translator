@@ -28,6 +28,7 @@ from .flight import SingleFlight
 from .glossary import Glossary, build_glossary
 from .masking import (
     _TOKEN_RE,
+    is_degenerate_repetition,
     mask,
     sanitize_translation,
     should_skip,
@@ -47,8 +48,11 @@ from .types import (
     PROMPT_V,
     TranslateAPIError,
     TranslateConfig,
+    TranslateEmptyOutput,
     TranslateError,
+    TranslateOutputTruncated,
     TranslateResult,
+    TranslateTimeout,
     TranslateUnitRejected,
     cache_key,
 )
@@ -115,6 +119,32 @@ def _split_table(src: str) -> tuple[str, str] | None:
     return left, right
 
 
+def _rejection_reason(exc: TranslateUnitRejected) -> str:
+    """step-0 유닛 거부의 kept_reason — 원문이 영어로 남은 원인을 report에서 구분한다."""
+    if isinstance(exc, TranslateOutputTruncated):
+        return "truncated"
+    if isinstance(exc, TranslateEmptyOutput):
+        return "empty-output"
+    if isinstance(exc, TranslateTimeout):
+        return "timeout"
+    return "api-rejected"
+
+
+def _repair_worthy(masked: str, clean: str, missing: list, dup: list) -> bool:
+    """repair(태그만 바로잡기) 패스가 의미 있는가.
+
+    repair 프롬프트는 '번역 내용은 그대로 두고 태그만 바로잡아'라고 지시한다. 고칠 태그가
+    없으면(echo·거부문·길이비 거부 — 실측 빈 태그 목록 repair 4건 중 3건, 전부 실패)
+    또는 출력이 반복 루프·과도한 길이면 같은 출력을 재생산할 뿐이다. 루프 출력의 repair는
+    전 예산을 두 번 더 태웠다(유닛 하나에 생성 8회·max_tokens 합 98,304). 바로 분할로 간다.
+    """
+    if not (missing or dup) or not clean.strip():
+        return False
+    if is_degenerate_repetition(clean, masked):
+        return False
+    return len(clean) <= 4 * max(1, len(masked))
+
+
 def _fully_covered(src: str, covered: set[str]) -> bool:
     """유닛의 비어있지 않은 모든 줄이 layout 매핑 대상인가 (reconcile과 같은 strip 규칙)."""
     lines = [ln.strip() for ln in src.split("\n") if ln.strip()]
@@ -171,9 +201,11 @@ class _TranslationRun:
     kept_original: list[str] = field(default_factory=list)
     # 관측용 사유별 집계 — "왜 이 문단이 영어로 남았나"를 report.json에서 구분한다.
     skip_reasons: dict[str, int] = field(default_factory=dict)   # references / already-korean / non-linguistic / identifier
-    kept_reasons: dict[str, int] = field(default_factory=dict)   # gate-rejected / placeholder-mismatch / empty-output / api-rejected
-    # 출력 게이트가 어떤 규칙으로 몇 번 거부했는가 (scaffold / refusal / hangul-ratio /
-    # length-ratio). kept_reasons는 "래더까지 소진돼 영어로 남은" 최종 결과만 세므로,
+    # gate-rejected / placeholder-mismatch / empty-output / api-rejected / truncated /
+    # timeout / degenerate-output
+    kept_reasons: dict[str, int] = field(default_factory=dict)
+    # 출력 게이트가 어떤 규칙으로 몇 번 거부했는가 (scaffold / refusal / repetition /
+    # hangul-ratio / length-ratio). kept_reasons는 "래더까지 소진돼 영어로 남은" 최종 결과만 세므로,
     # 래더가 흡수한 거부(=추가 API 왕복 비용)와 오탐의 원인 규칙이 보이지 않았다.
     # 오탐 파도(임계값 회귀)와 진짜 공급자 고장을 이 분포로 구분한다.
     gate_reasons: dict[str, int] = field(default_factory=dict)
@@ -330,7 +362,7 @@ class _TranslationRun:
         stats["sanitized"] += sc
         if self._accepted(src, restored, missing, dup, mapping):
             return restored
-        if self._halted():
+        if self._halted() or not _repair_worthy(masked, clean, missing, dup):
             return None
         try:
             rprompt = prompts.build_repair_prompt(masked, clean, missing + dup)
@@ -426,24 +458,26 @@ class _TranslationRun:
         #    서버 n_ctx를 넘겨 400 등)는 잡 전체를 죽이는 대신 래더로 넘겨 강등한다.
         #    단 이 run에서 성공한 유닛이 아직 없으면 엔드포인트·설정 자체 문제일 수
         #    있으므로 강등 허용 여부는 _may_degrade가 판정한다.
-        api_rejected = False
+        #    잘림(TranslateOutputTruncated)·빈 출력·응답 정지도 같은 유닛 단위 거부다 —
+        #    분할하면 반쪽은 예산 안에 들고 생성도 짧아진다(종전엔 잡 전체 실패).
+        rejection = ""
         try:
             restored, missing, dup, sc, clean = self._run_pass(prompt, max_toks, mapping)
         except TranslateUnitRejected as e:
             if not self._may_degrade(e):
                 raise
-            logger.warning("번역 유닛 최초 패스 API 거부 — 래더로 강등: %s", u.id)
-            api_rejected = True
+            rejection = _rejection_reason(e)
+            logger.warning("번역 유닛 최초 패스 거부(%s) — 래더로 강등: %s", rejection, u.id)
             restored, missing, dup, sc, clean = "", [], [], 0, ""
         stats["sanitized"] += sc
-        if not api_rejected and self._accepted(u.src, restored, missing, dup, mapping):
+        if not rejection and self._accepted(u.src, restored, missing, dup, mapping):
             return u, restored, "translated", key, stats
 
         # 여기부터 신뢰도 래더 — 태그 누락·중복, 빈 출력, 출력 검증 실패, API 거부
         stats["retried"] = 1
         # 래더가 끝내 실패해 원문 유지로 떨어질 때 보고할 사유(최초 패스 기준).
-        if api_rejected:
-            stats["kept_reason"] = "api-rejected"
+        if rejection:
+            stats["kept_reason"] = rejection
         elif missing or dup:
             stats["kept_reason"] = "placeholder-mismatch"
         elif not restored.strip():
@@ -454,8 +488,9 @@ class _TranslationRun:
             return u, u.src, "canceled", key, stats
 
         # 1) repair 패스 — 원문(태그 포함)+깨진 번역문을 주고 태그만 바로잡게 한다.
-        #    API 거부는 고칠 깨진 출력 자체가 없으므로 건너뛰고 바로 분할로 간다.
-        if not api_rejected:
+        #    API 거부는 고칠 깨진 출력 자체가 없고, 태그가 멀쩡한 게이트 거부·루프 출력은
+        #    repair가 같은 출력을 재생산할 뿐이라(_repair_worthy) 바로 분할로 간다.
+        if not rejection and _repair_worthy(masked, clean, missing, dup):
             try:
                 rprompt = prompts.build_repair_prompt(masked, clean, missing + dup)
                 r_restored, r_missing, r_dup, r_sc, _ = self._run_pass(rprompt, max_toks, mapping)

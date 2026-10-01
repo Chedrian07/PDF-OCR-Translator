@@ -17,7 +17,12 @@ P18 경로에서 동기화 대기가 CPU 시간의 69%).
 block=8 기준 0.1~0.2초 수준.
 
 제약: 그리디(do_sample=False) 전용 — 샘플링 요청은 HF generate로 폴백.
-전역 비활성: OCR_FAST_DECODE=0 (엔진이 generate_fn을 주입하지 않음).
+전역 비활성: OCR_FAST_DECODE=0 (엔진이 HF ``generate``를 감싼 generate_fn을 주입 —
+이 루프는 쓰지 않고, 반환 텐서로 길이 상한 도달만 판정한다).
+
+길이 상한: 반환 텐서 길이가 ``max_length``이고 마지막 토큰이 EOS가 아니면 출력이
+잘린 것이다(``hit_length_limit``). 엔진은 이를 OutputLimitError로 올려 runner의
+페이지별 복구 경로를 태운다 — HF generate도 같은 반환 계약이라 같은 판정을 쓴다.
 
 ── CUDA Graph 경로 (U2) ────────────────────────────────────────────────
 디코드는 링캐시(고정 W) 정상상태에서 shape이 완전 정적 — 남은 병목은 토큰당
@@ -121,6 +126,22 @@ def _should_try_cuda_graph(input_ids, processors, model, block: int) -> bool:
     """그래프 경로 발동 조건 — 하나라도 어긋나면 False(→ eager, 예외 아님).
     사유는 _graph_skip_reason 참조 (경로 선택 로깅과 판정이 같은 검사를 공유)."""
     return _graph_skip_reason(input_ids, processors, model, block) is None
+
+
+def hit_length_limit(output_ids, gen_kwargs: dict) -> bool:
+    """생성이 EOS 없이 총 길이 상한(max_length)에 닿아 끝났는지 — 출력이 잘렸다는 뜻.
+
+    fast_greedy_decode·HF generate 공통 반환 계약(EOS 포함 절단, 상한 도달 시 길이 ==
+    max_length)만으로 판정한다. 취소·반복 중단은 보통 상한 전에 멈추고, 같은 블록에서
+    겹치면 호출자가 자기 플래그로 먼저 구분한다(우선순위: 취소 > 반복 > 길이 상한)."""
+    max_length = int(gen_kwargs.get("max_length") or 32768)
+    if output_ids.shape[-1] < max_length:
+        return False
+    eos = gen_kwargs.get("eos_token_id")
+    if eos is None:
+        return True
+    eos_ids = {int(e) for e in eos} if isinstance(eos, (list, tuple, set)) else {int(eos)}
+    return int(output_ids[0, -1]) not in eos_ids
 
 
 def fast_greedy_decode(model, gen_kwargs: dict, block: int = 8):
@@ -351,14 +372,18 @@ def _cuda_graph_greedy_decode(model, input_ids, model_kwargs, processors, criter
         _flush(toks)
 
     try:
-        # ── ③ 사이드스트림 실행 워밍업(캡처 전 필수 예열 — 표준 절차) — 실토큰 block개 ──
+        # ── ③ 사이드스트림 실행 워밍업(캡처 전 필수 예열 — 표준 절차) — 실토큰 최대 block개.
+        #    max_length까지 남은 토큰 수로 자른다 — 그러지 않으면 상한 직전(P+W+block 근처)에서
+        #    최대 block-1개를 초과 생성·스트리밍해 eager/HF와 결과가 달라진다. 잘렸다면 여기서
+        #    상한에 닿으므로 아래 _done()으로 캡처 없이 끝난다.
+        n_warm = min(block, max_length - state["input_ids"].shape[1])
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
-            for _ in range(block):
+            for _ in range(n_warm):
                 _fwd_step()
         torch.cuda.current_stream().wait_stream(s)
-        _drain(block)
+        _drain(n_warm)
         if _done():
             return _finalize(state, streamer)
 

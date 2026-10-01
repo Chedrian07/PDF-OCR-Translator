@@ -447,3 +447,44 @@ def test_done_job_without_layout_falls_back_to_semantic_exports(client, sample_p
     (job_dir / "result.ko.md").write_text("# 번역", encoding="utf-8")
     pdf = client.get(f"/api/jobs/{jid}/pdf?lang=ko")
     assert pdf.status_code == 409 and "document.html" in pdf.json()["detail"]
+
+
+# ── api-jobs-6: 읽는 쪽은 잡에 고정된 페이지 구분자를 쓴다 ─────────────────────────
+def test_readers_keep_using_the_jobs_separator_after_the_setting_changes(
+    client, sample_pdf, monkeypatch,
+):
+    """운영자가 PAGE_SEPARATOR를 바꾸면 기존 잡의 /html이 문서 전체를 한 페이지로
+    렌더하고, Q&A가 '페이지 3은 1-1 범위를 벗어났습니다'(또는 엉뚱한 페이지)로 답했다."""
+    from types import SimpleNamespace
+
+    jid = _upload(client, sample_pdf)
+    assert wait_done(client, jid)["status"] == "done"
+    settings = client.app.state.settings
+    original = settings.page_separator
+    settings.page_separator = "\n\n<<<PAGE>>>\n\n"         # 기존 잡이 있는 배포에서 변경
+    try:
+        html = client.get(f"/api/jobs/{jid}/html").text
+        assert html.count('<section class="doc-page"') == 3
+
+        asked: dict = {}
+
+        class _Router:
+            def default_model(self, provider):
+                return "mock"
+
+            async def ask(self, *, question, context, provider, model, **kwargs):
+                asked["context"] = context
+                return SimpleNamespace(
+                    content="답", provider=provider, model=model, reasoning_effort="low",
+                    reasoning_summary=None, thinking_requested=False, usage={}, remote=False,
+                )
+
+        monkeypatch.setattr(client.app.state, "llm_router", _Router())
+        r = client.post(f"/api/jobs/{jid}/qa", json={"question": "요약?", "page": 3})
+        assert r.status_code == 200, r.text
+        assert asked["context"].startswith("[Page 3]")
+        assert "<<<PAGE>>>" not in asked["context"]
+        job = client.app.state.store.get(jid)
+        assert job.page_separator == original
+    finally:
+        settings.page_separator = original

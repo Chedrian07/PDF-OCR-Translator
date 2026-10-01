@@ -915,6 +915,11 @@ test('qaProviderHint: 공급자별 한국어 미설정 안내', () => {
   const ollama = qaProviderHint('ollama');
   assert.ok(ollama.includes('ollama serve'), 'ollama serve 실행 안내');
   assert.ok(ollama.includes('ollama pull qwen3:8b'), '모델 pull 안내');
+  // 루프백 OpenAI 호환 서버(local-openai) — 일반 안내가 아니라 서버 기동·주소·모델 설정 안내
+  const local = qaProviderHint('local-openai');
+  assert.ok(local.includes('로컬 OpenAI 호환 서버를 사용할 수 없습니다'), local);
+  assert.ok(local.includes('LLM_LOCAL_OPENAI_BASE_URL') && local.includes('LLM_LOCAL_OPENAI_MODEL'), local);
+  assert.ok(!local.includes('LLM_OPENAI_API_KEY'), 'OpenAI 키 안내와 섞이지 않는다');
   assert.ok(qaProviderHint('unknown').length > 0, '미지 공급자도 일반 안내 반환');
   assert.ok(qaProviderHint(undefined).length > 0, '방어: 공급자 미선택');
 });

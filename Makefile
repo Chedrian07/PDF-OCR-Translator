@@ -8,20 +8,32 @@
 #   전환(정지):    docker compose stop ovisocr2 ocr-ovis
 #                  (`--profile … down`은 프로필 없는 ocr-cpu까지 지우므로 전체 정리용으로만)
 
-.PHONY: setup setup-metal setup-native dev dev-textlayer test coverage e2e e2e-mock verify-e2e \
+.PHONY: setup setup-mlx setup-metal setup-native dev dev-metal dev-textlayer test coverage e2e \
+	e2e-mock verify-e2e \
 	docker-up docker-down docker-up-ollama docker-pull-model docker-down-ollama
 
 setup:            ## backend 의존성 설치 (torch CPU)
 	cd backend && uv sync --extra cpu
 
-setup-metal:      ## macOS Apple Silicon용 (torch MPS)
-	cd backend && uv sync --extra metal
+# Apple Silicon: MLX 엔진(기본) + torch MPS(폴백) + C++ 모듈. uv sync는 고른 extra만 남기고
+# 나머지(다른 extra·uv pip로 넣은 native)를 지운다 — metal 단독 sync는 mlx와 native를,
+# mlx 단독 sync는 torch를 지웠다. 그래서 둘을 함께 고르고 native를 다시 넣는다.
+setup-mlx:        ## macOS Apple Silicon용 — MLX 엔진 + torch MPS 폴백 + C++ 모듈
+	cd backend && uv sync --extra metal --extra mlx && uv pip install ../native
+
+setup-metal: setup-mlx ## setup-mlx와 같다 (torch MPS만 쓰려면 make dev-metal)
 
 setup-native:     ## C++ 가속 모듈 설치 (선택 — 없어도 순수 파이썬 폴백으로 동작)
 	cd backend && uv pip install ../native
 
-dev:              ## 로컬 개발 서버 — http://127.0.0.1:8000
+# OCR_DEVICE는 넘기지 않는다 — 미설정이면 코드 기본 auto(mlx → cuda → metal → cpu, 결정은
+# 기동 로그·/api/health)라 Apple Silicon은 MLX를 쓴다. 여기서 값을 박으면 .env의 OCR_DEVICE가
+# 무시된다(.env는 이미 있는 환경변수를 덮지 않는다). 지정: make dev OCR_DEVICE=cpu
+dev:              ## 로컬 개발 서버 — http://127.0.0.1:8000 (디바이스 자동 선택)
 	cd backend && uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+
+dev-metal:        ## torch MPS(Metal) 폴백으로 개발 서버 — MLX와 결과·속도 비교용
+	cd backend && OCR_DEVICE=metal uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 dev-textlayer:    ## 모델 다운로드 없이 textlayer 엔진으로 개발 서버
 	cd backend && OCR_ENGINE=textlayer uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000

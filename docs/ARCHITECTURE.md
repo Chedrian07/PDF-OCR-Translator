@@ -1201,6 +1201,9 @@ auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은
 | `OCR_CPU_MEM_LIMIT` / `OCR_CUDA_MEM_LIMIT` / `OCR_WEB_MEM_LIMIT` | `24g` / `16g` / `8g` | (compose) backend 서비스별 메모리 상한 (§8) |
 | `OVIS_MEM_LIMIT` / `PADDLE_MEM_LIMIT` | `24g` / `24g` | (compose) sidecar 컨테이너 메모리 상한 |
 | `OVIS_MAX_UPLOAD_MB` / `PADDLEOCR_MAX_UPLOAD_MB` | `128` / `128` | (compose → sidecar) `/v1/parse` 페이지 이미지 업로드 상한 |
+| `OVIS_*` / `PADDLEOCR_*` | (sidecar 문서) | (compose → sidecar) 모델 ID·revision·dtype·VRAM·픽셀 상한·디바이스 — `OVIS_MODEL_ID`·`OVIS_MODEL_REVISION`·`OVIS_DTYPE`·`OVIS_GPU_MEMORY_UTILIZATION`·`OVIS_MAX_MODEL_LEN`·`OVIS_MAX_OUTPUT_TOKENS`·`OVIS_MAX_NUM_SEQS`·`OVIS_MIN_PIXELS`·`OVIS_MAX_PIXELS`·`OVIS_GDN_PREFILL_BACKEND`, `PADDLEOCR_MODEL_ID`·`PADDLEOCR_MODEL_REVISION`·`PADDLEOCR_DEVICE`·`PADDLEOCR_MIN_PIXELS`·`PADDLEOCR_MAX_PIXELS` (OVISOCR2_CUDA_5070TI.md·PADDLEOCR_VL_BLACKWELL_5070TI.md·`.env.example`) |
+| `HF_TOKEN` | (빈 값) | (compose) 프라이빗 미러용 Hugging Face 토큰 — 런타임 env로만 전달(빌드 레이어 미포함). PDF 워커는 기동 때 지운다 |
+| `PYTORCH_ENABLE_MPS_FALLBACK` | `1` (엔진이 `setdefault`) | torch MPS 미구현 op의 CPU 폴백 — 안전망(§6) |
 | `CUDA_LAUNCH_BLOCKING` | (빈 값) | (compose → ocr-cpu·ocr-cuda) CUDA 디버깅용 동기 실행 — 운영에서는 비워 둔다 |
 | `JOB_TTL_DAYS` | `0` | 터미널 잡(done/error/canceled) 자동 GC 보존 일수(0 이상) — `0`=비활성(기본, opt-in). 시작 시 1회 + 6시간 주기 (§15) |
 | `OCR_LANGUAGES` | `eng+kor` | (textlayer) Tesseract 언어 조합 — `tesseract -l` 인자 (§16) |

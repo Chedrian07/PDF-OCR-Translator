@@ -30,6 +30,7 @@ MAX_CONTENT_CHARS = 100_000
 MAX_MARKDOWN_CHARS = 400_000
 MAX_WARNINGS = 32
 MIN_BBOX_SIDE = 2       # 정규화 좌표 기준 최소 변 (이보다 작으면 퇴화 bbox로 폐기)
+_HEALTH_ERROR_CHARS = 300  # health 추가 필드의 오류 문구 상한 (provider_health·대기 문구로 노출)
 
 # 앱이 생성하는 제한된 figure placeholder 형식 — 이 외의 경로/태그는 파일이 되지 않는다
 FIGURE_PLACEHOLDER_RE = re.compile(r"\[\[FIGURE:(\d{1,3})\]\]")
@@ -152,6 +153,16 @@ class PageResult(BaseModel):
     blocks: list[NormalizedBlock] = Field(default_factory=list)
     provider_raw: str | None = None
     warnings: list[str] = Field(default_factory=list)
+    # 추가 필드 — 출력 토큰 상한에서 끊긴 페이지(Ovis finish_reason=length). 옛 sidecar는
+    # 보내지 않으므로 기본값 False가 곧 '알 수 없음 = 정상 처리'다.
+    truncated: bool = False
+
+    @field_validator("truncated", mode="before")
+    @classmethod
+    def _check_truncated(cls, v: object) -> bool:
+        # JSON true만 잘림으로 본다 — 비신뢰 응답의 "yes"·1 같은 값을 lax 변환으로
+        # 참으로 읽어 페이지를 복구 경로로 보내지 않게, 스키마 위반으로 응답을 버리지도 않게.
+        return v is True
 
 
 class ParseResponse(BaseModel):
@@ -182,6 +193,36 @@ class SidecarHealth(BaseModel):
     gpu_free_mb: int | None = None
     model_loaded: bool = False
     load_error: str | None = None   # sidecar 자체 로드 실패 사유 (CUDA 가드 트립 등) — 대기 무의미
+    # 추가 필드(옛 sidecar는 보내지 않는다) — 미로드 상태가 '첫 로드 중'인지, 일시적 로드
+    # 실패 뒤 재시도 대기인지(load_retry: attempt·max_attempts·next_retry_s·last_error),
+    # 추론 엔진이 죽어 컨테이너 재시작을 기다리는지(restarting) 구분한다. 형식이 이상하면
+    # 버린다 — health 전체를 스키마 위반으로 만들면 기다려야 할 상태가 하드 실패가 된다.
+    load_retry: dict[str, object] | None = None
+    restarting: bool = False
+
+    @field_validator("load_retry", mode="before")
+    @classmethod
+    def _check_load_retry(cls, v: object) -> object:
+        if not isinstance(v, dict):
+            return None
+        out: dict[str, object] = {}
+        for key in ("attempt", "max_attempts"):
+            val = v.get(key)
+            if _valid_int(val) and val >= 0:
+                out[key] = val
+        delay = v.get("next_retry_s")
+        if (isinstance(delay, (int, float)) and not isinstance(delay, bool)
+                and math.isfinite(delay) and 0 <= delay < _ABS_LIMIT):
+            out["next_retry_s"] = float(delay)
+        error = v.get("last_error")
+        if isinstance(error, str) and error.strip():
+            out["last_error"] = strip_special_tokens(error)[:_HEALTH_ERROR_CHARS]
+        return out or None
+
+    @field_validator("restarting", mode="before")
+    @classmethod
+    def _check_restarting(cls, v: object) -> bool:
+        return v is True
 
 
 def _clamp_bbox(
@@ -372,5 +413,6 @@ def sanitize_page(page: PageResult) -> tuple[PageResult, list[str]]:
         blocks=cleaned,
         provider_raw=page.provider_raw,
         warnings=page_warnings + warnings,
+        truncated=page.truncated,
     )
     return result, warnings

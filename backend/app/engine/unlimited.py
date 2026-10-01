@@ -403,8 +403,12 @@ class UnlimitedEngine(OCREngine):
                 raise RepetitiveOutputError(repetition.message)
             if outcome.length_capped and not cancel.is_set():
                 # 스트리머는 디코드 끝에서 이미 flush됐다. 잘린 청크(꼬리 페이지 손실)를
-                # 정상 결과로 넘기지 않고 runner의 페이지별 복구 경로를 태운다.
-                raise OutputLimitError(_length_limit_message(s.max_length))
+                # 정상 결과로 넘기지 않고 runner의 페이지별 복구 경로를 태운다. 잘린
+                # 출력(run_multi 형식 — 산출물은 이미 out_dir에 있다)을 함께 실어 runner가
+                # 끝까지 생성된 앞 페이지는 살리고 잘린 페이지부터만 다시 처리하게 한다.
+                raise OutputLimitError(
+                    _length_limit_message(s.max_length), partial_output=outputs,
+                )
         finally:
             self._release_device_cache()
         # 취소 시에도 부분 출력을 반환한다 — 병합 후 취소 처리는 runner 몫

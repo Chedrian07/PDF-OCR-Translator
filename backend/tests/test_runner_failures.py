@@ -612,31 +612,135 @@ def test_output_limit_in_per_page_mode_names_the_cause(tmp_path):
     assert any("MAX_LENGTH 도달" in w and "텍스트 레이어로 복구" in w for w in job.warnings)
 
 
-def test_max_length_smaller_than_chunk_budget_is_logged(tmp_path, caplog):
+class _UnlimitedNamedEngine(FakeEngine):
+    """MAX_LENGTH를 쓰는 생성 엔진(unlimited)과 같은 이름·능력 — 기동 안내 판정용."""
+
+    name = "unlimited"
+
+
+def _budget_settings(tmp_path, **overrides) -> Settings:
+    base = dict(
+        engine="fake", device="cpu", data_dir=tmp_path / "data", preload_model=False,
+        fake_delay=0.0, pages_per_chunk=8, max_length=32768, max_page_output_tokens=6144,
+    )
+    base.update(overrides)
+    return Settings(**base)
+
+
+def test_chunk_budget_note_uses_the_full_prompt_formula(tmp_path):
+    """배포 기본값(MAX_LENGTH 32,768 < 8쪽 × (6,144 + 이미지 273) + 5 = 51,341)이면 안내한다.
+    안내는 경고가 아니라 정보다 — 잘려도 앞 페이지는 지키고 잘린 쪽부터 다시 처리한다."""
+    from app.pipeline.runner import chunk_length_budget_note
+
+    engine = _UnlimitedNamedEngine(delay=0.0)
+    note = chunk_length_budget_note(_budget_settings(tmp_path), engine)
+    assert note is not None
+    assert "MAX_LENGTH=32,768" in note and "51,341토큰" in note and "8쪽" in note
+    assert "내용은 빠지지 않습니다" in note and "PAGES_PER_CHUNK" in note
+
+    # 최악 길이 = 8 × (6,144 + 273) + 5 — 프롬프트(이미지 토큰)까지 넣어야 경계가 맞다
+    assert chunk_length_budget_note(_budget_settings(tmp_path, max_length=51_341), engine) is None
+    assert chunk_length_budget_note(_budget_settings(tmp_path, max_length=51_340), engine)
+    # 1쪽 청크·페이지 토큰 상한 없음은 판단할 예산이 없다
+    assert chunk_length_budget_note(_budget_settings(tmp_path, pages_per_chunk=1), engine) is None
+    assert chunk_length_budget_note(
+        _budget_settings(tmp_path, max_page_output_tokens=None), engine,
+    ) is None
+
+
+def test_chunk_budget_note_only_applies_to_max_length_engines(tmp_path):
+    """MAX_LENGTH를 읽지 않는 엔진(fake·textlayer·sidecar)이나 페이지 단위 엔진에는 안내하지 않는다."""
+    from app.engine.base import EngineCapabilities
+    from app.pipeline.runner import chunk_length_budget_note
+
+    settings = _budget_settings(tmp_path)
+    assert chunk_length_budget_note(settings, FakeEngine(delay=0.0)) is None
+
+    class _PageUnit(_UnlimitedNamedEngine):
+        def capabilities(self):
+            return EngineCapabilities(supports_multi_page=False, preferred_chunk_size=4)
+
+    class _PageStream(_UnlimitedNamedEngine):
+        def capabilities(self):
+            return EngineCapabilities(stream_granularity="page")
+
+    assert chunk_length_budget_note(settings, _PageUnit(delay=0.0)) is None
+    assert chunk_length_budget_note(settings, _PageStream(delay=0.0)) is None
+
+
+def test_jobs_no_longer_warn_about_the_chunk_budget(tmp_path, caplog):
+    """예전에는 기본값에서 모든 multi 잡이 'MAX_LENGTH가 청크의 최악 생성 예산보다 작습니다'
+    WARNING으로 시작했다 — 설정의 성질이라 기동 시 1회 안내로 옮겼다."""
     import logging
 
     store = JobStore(tmp_path / "jobs")
     broker = EventBroker()
     job = store.create("doc.pdf", "multi", dpi=72)
     (job.dir / "source.pdf").write_bytes(make_pdf_bytes(pages=2, with_image=False))
-    settings = Settings(
-        engine="fake", device="cpu", data_dir=tmp_path / "data", preload_model=False,
-        fake_delay=0.0, pages_per_chunk=8, max_length=32768, max_page_output_tokens=6144,
-    )
-    engine = FakeEngine(delay=0.0)
+    engine = _UnlimitedNamedEngine(delay=0.0)
     engine.load()
-    with caplog.at_level(logging.WARNING, logger="app.pipeline.runner"):
-        execute_job(job, store, broker, engine, settings, threading.Event())
+    with caplog.at_level(logging.INFO, logger="app.pipeline.runner"):
+        execute_job(job, store, broker, engine, _budget_settings(tmp_path), threading.Event())
     assert job.status == "done"
-    assert any("MAX_LENGTH(32768)" in r.message and "8쪽" in r.message for r in caplog.records)
+    assert not any("MAX_LENGTH" in r.getMessage() for r in caplog.records)
 
-    caplog.clear()
-    job2 = store.create("doc.pdf", "multi", dpi=72)
-    (job2.dir / "source.pdf").write_bytes(make_pdf_bytes(pages=2, with_image=False))
-    settings.max_length = 8 * 6144 + 4096
-    with caplog.at_level(logging.WARNING, logger="app.pipeline.runner"):
-        execute_job(job2, store, broker, engine, settings, threading.Event())
-    assert not any("MAX_LENGTH(" in r.message for r in caplog.records)
+
+def test_app_logs_the_chunk_budget_note_once_at_startup(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from fastapi.testclient import TestClient
+
+    import app.main as main_module
+    from conftest import wait_done
+
+    monkeypatch.setattr(main_module, "build_engine", lambda s: _UnlimitedNamedEngine(delay=0.0))
+    settings = _budget_settings(tmp_path, frontend_dir=tmp_path / "no-frontend")
+    with caplog.at_level(logging.INFO):
+        app = main_module.create_app(settings)
+        with TestClient(app) as client:
+            for _ in range(2):
+                jid = client.post(
+                    "/api/jobs",
+                    files={"file": ("a.pdf", make_pdf_bytes(pages=2, with_image=False),
+                                    "application/pdf")},
+                ).json()["job_id"]
+                assert wait_done(client, jid)["status"] == "done"
+    notes = [r for r in caplog.records if "MAX_LENGTH=32,768" in r.getMessage()]
+    assert len(notes) == 1, [r.getMessage() for r in notes]
+    assert notes[0].levelno == logging.INFO and notes[0].name == "app.main"
+    assert not any(
+        "MAX_LENGTH" in r.getMessage() and r.levelno >= logging.WARNING for r in caplog.records
+    )
+
+
+def test_device_cache_release_drains_the_objc_pool_on_mps(monkeypatch):
+    """재시도 전 MPS 캐시 반환도 엔진처럼 오토릴리스 풀 안에서 한다 — 잡 워커 스레드에는
+    런루프 풀이 없어, 풀 밖에서 autorelease된 객체는 프로세스 수명 내내 남는다."""
+    import contextlib
+    import sys
+    from types import SimpleNamespace
+
+    import app.pipeline.runner as runner_mod
+
+    depth = {"now": 0, "seen": []}
+
+    @contextlib.contextmanager
+    def pool(enabled=True):
+        depth["now"] += 1 if enabled else 0
+        try:
+            yield
+        finally:
+            depth["now"] -= 1 if enabled else 0
+
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(is_available=lambda: False, empty_cache=lambda: None),
+        backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: True)),
+        mps=SimpleNamespace(empty_cache=lambda: depth["seen"].append(depth["now"])),
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setattr(runner_mod, "autorelease_pool", pool)
+    runner_mod._empty_device_cache()
+    assert depth["seen"] == [1]
 
 
 # ── 취소 ─────────────────────────────────────────────────────────────────

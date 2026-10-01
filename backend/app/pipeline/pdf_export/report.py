@@ -29,6 +29,10 @@ class PdfExportResult:
     relocated: int = 0
     table_cells_replaced: int = 0
     listing_lines_replaced: int = 0
+    # 원문이 텍스트가 아니라 래스터 픽셀(스캔 페이지·표 이미지)이라, 번역을 넣기 전에
+    # 그 영역을 바탕색으로 덮어 지운 교체 블록 수. 0이 아니면 '교체'가 픽셀 덮기를
+    # 동반했다는 뜻이다(덮지 못한 경우는 경고로 남는다).
+    raster_blocks_erased: int = 0
     specialist_kept: dict[str, int] = field(default_factory=dict)
     kept_reasons: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
@@ -50,6 +54,7 @@ class PdfExportResult:
         self.relocated += other.relocated
         self.table_cells_replaced += other.table_cells_replaced
         self.listing_lines_replaced += other.listing_lines_replaced
+        self.raster_blocks_erased += other.raster_blocks_erased
         for key, count in other.specialist_kept.items():
             self.specialist_kept[key] = self.specialist_kept.get(key, 0) + count
         for key, count in other.kept_reasons.items():
@@ -66,6 +71,8 @@ class PdfExportResult:
             "table_cells_replaced": self.table_cells_replaced,
             # 리스팅·평탄화 표에서 원문 줄·열 좌표에 그대로 조판한 줄 수.
             "listing_lines_replaced": self.listing_lines_replaced,
+            # 스캔 픽셀을 바탕색으로 덮은 뒤 번역을 넣은 블록 수.
+            "raster_blocks_erased": self.raster_blocks_erased,
             "specialist_kept": dict(sorted(self.specialist_kept.items())),
             # 교체 대상 타입이 아닌 블록(image/equation/algorithm 등)은 애초에
             # kept로 세지 않고 specialist_kept로만 집계한다.

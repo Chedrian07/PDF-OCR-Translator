@@ -147,7 +147,10 @@ def _repair_worthy(masked: str, clean: str, missing: list, dup: list) -> bool:
 
 
 def _fully_covered(src: str, covered: set[str]) -> bool:
-    """유닛의 비어있지 않은 모든 줄이 layout 매핑 대상인가 (reconcile과 같은 strip 규칙)."""
+    """유닛이 layout 번역으로 완전히 덮이는가 — 유닛 전체가 블록 하나와 같거나(여러 줄
+    블록 포함) 비어있지 않은 모든 줄이 단일 줄 블록과 같다(map_unit_lines와 같은 규칙)."""
+    if src.strip() in covered:
+        return True
     lines = [ln.strip() for ln in src.split("\n") if ln.strip()]
     return bool(lines) and all(ln in covered for ln in lines)
 
@@ -904,7 +907,7 @@ class _TranslationRun:
                 u.src.strip() for u in self.lay_units
                 if u.id in self.preserved_layout or u.id in target_ids
             }
-            covered = layout_line_sources(self.layout_pages) & lay_final_srcs
+            covered = layout_line_sources(self.layout_pages, multiline=True) & lay_final_srcs
             if covered:
                 remaining = []
                 for u in self.targets:

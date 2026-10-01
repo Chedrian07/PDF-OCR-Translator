@@ -300,3 +300,24 @@ def test_불일치_표본은_블록당_한_건만_센다():
     ])
     got = reference_rule_mismatch(md_units, lay_units)
     assert got["layout_only"] == 1
+
+
+def test_유닛_전체가_여러_줄_블록과_같으면_그_번역을_통째로_쓴다():
+    """textlayer 잡의 저자 블록·여러 줄 문단 — 줄 매핑으로는 덮이지 않아 두 번 번역됐다."""
+    from app.translate.segment import layout_line_sources
+
+    block = "Amir Zandieh\nGoogle Research\nzandieh@google.com"
+    source = [{"page": 1, "blocks": [{"type": "text", "content": block}]}]
+    translated = [{"page": 1, "blocks": [{"type": "text", "content":
+                                          "Amir Zandieh\n구글 리서치\nzandieh@google.com"}]}]
+    assert block not in layout_line_sources(source)                   # 줄 매핑 후보는 아님
+    assert block in layout_line_sources(source, multiline=True)       # 유닛 매핑 후보
+    mapping = layout_line_map(source, translated)
+    assert map_unit_lines(block, mapping) == "Amir Zandieh\n구글 리서치\nzandieh@google.com"
+    assert map_unit_lines("Amir Zandieh\nGoogle Research", mapping) is None   # 일부만 같으면 안 됨
+
+
+def test_한_줄_원문의_여러_줄_번역은_줄_매핑에_쓰지_않는다():
+    source = [{"page": 1, "blocks": [{"type": "text", "content": "One line."}]}]
+    translated = [{"page": 1, "blocks": [{"type": "text", "content": "한\n줄"}]}]
+    assert layout_line_map(source, translated) == {}

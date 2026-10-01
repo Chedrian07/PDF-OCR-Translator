@@ -275,14 +275,17 @@ export function connectTranslateEvents(id) {
     if (!isCurrent()) return;
     const d = parseEventData(e);
     if (d) onTranslateError(id, d);        // 서버가 보낸 번역 오류(JSON)
-    else handleTranslateConnError(id);     // 전송 계층 오류(데이터 없음)
+    else handleTranslateConnError(id, es); // 전송 계층 오류(데이터 없음)
   });
 }
 
-export function handleTranslateConnError(id) {
+export function handleTranslateConnError(id, es) {
   if (state.currentJobId !== id || !state.translateEs) return;
   state.translateSseErrors += 1;
-  if (state.translateSseErrors >= 2) { teardownTranslate(); startTranslatePolling(id); }
+  // 첫 응답이 비-200이면 EventSource는 CLOSED(2)로 오류를 한 번만 내고 재접속하지 않는다 —
+  // 번역에는 목록 폴링 같은 보조 경로가 없어 '번역 중 x/y'가 영구히 남았다(frontend-1).
+  const closed = !!es && es.readyState === 2;
+  if (closed || state.translateSseErrors >= 2) { teardownTranslate(); startTranslatePolling(id); }
 }
 
 // SSE 불가/불안정 시 state를 폴링해 진행/완료/오류를 반영하는 폴백.

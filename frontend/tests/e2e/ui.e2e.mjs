@@ -667,6 +667,7 @@ const freshContext = (options = {}) => browser.newContext({ viewport: { width: 1
   check('품질 경고: 펼친 목록에 경고·참고를 따로 보인다',
     !panel.hidden && panel.items === 1 && panel.notices === 1 && !panel.noticesHidden && panel.link === '2페이지',
     JSON.stringify(panel));
+  await warnPage.screenshot({ path: path.join(OUT, 'job-warnings.png') });
   await warnPage.waitForSelector('#reader-content .reader-rail-page', { timeout: 15_000 });
   await warnPage.click('#job-warnings-list .warning-page-link');
   await warnPage.waitForFunction(() => document.getElementById('reader-page')?.value === '2', null, { timeout: 10_000 })
@@ -750,6 +751,7 @@ if (layoutCap !== 'figure_only') {
   const citeToast = await notePage.evaluate(() => document.getElementById('toast')?.textContent || '');
   check('인용 저장: 목록에 쌓이고 정직한 안내(내보낼 수 있음)를 보인다',
     (await stored()).length === 2 && /인용을 저장했습니다/.test(citeToast), citeToast);
+  await notePage.screenshot({ path: path.join(OUT, 'reader-notes.png') });
 
   const download = notePage.waitForEvent('download');
   await notePage.click('#reader-notes-export');
@@ -803,6 +805,7 @@ if (layoutCap !== 'figure_only') {
     noticeError: document.getElementById('upload-model-notice').classList.contains('is-error'),
     noticeText: document.getElementById('upload-model-notice-text').textContent,
   }));
+  await healthPage.screenshot({ path: path.join(OUT, 'health-failure.png') });
   check('health: 로드 실패·작업 처리기 중지 배지와 사유가 담긴 업로드 안내',
     shown.badges.includes('모델 로드 실패') && shown.badges.includes('작업 처리기 중지됨')
       && !shown.badges.some((b) => b.includes('로딩 중')) && shown.notice && shown.noticeError

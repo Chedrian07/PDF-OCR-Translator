@@ -1148,6 +1148,53 @@ export function warningSegments(text) {
   return out;
 }
 
+/* ── 작업 목록 페이지 (순수 — tests/에서 검증) ─────────────────────────────────
+ * GET /api/jobs?limit=1..500&before=<잡 ID> → {jobs, has_more, total}. 인자 없이 부르면
+ * 예전과 같은 최신 50건이다. 예전 목록은 최신 50건 고정이라 51번째부터의 잡은 UI에서
+ * 보이지도 지워지지도 않았다. before 잡이 그사이 지워졌으면 422 — 처음부터 다시 받는다.
+ */
+export const JOB_LIST_PAGE = 50;        // 기본 창이자 '더 보기' 한 번에 더하는 줄 수
+export const JOB_LIST_LIMIT_MAX = 500;  // 서버 limit 상한 — 넘는 창은 before 커서로 잇는다
+
+export function jobListUrl(limit = JOB_LIST_PAGE, before = null) {
+  const n = Math.min(JOB_LIST_LIMIT_MAX, Math.max(1, Math.floor(Number(limit)) || JOB_LIST_PAGE));
+  // 기본 창은 예전 URL 그대로 — 구버전 서버·프록시 캐시 규칙과도 같다.
+  if (n === JOB_LIST_PAGE && !before) return '/api/jobs';
+  const query = new URLSearchParams({ limit: String(n) });
+  if (before) query.set('before', String(before));
+  return `/api/jobs?${query}`;
+}
+
+// 목록 응답 정규화. has_more·total이 없는 구버전 서버는 '뒤에 더 없음'으로 본다
+// ('더 보기'를 숨긴다). job_id 없는 항목은 키 기반 목록을 깨므로 버린다.
+export function normalizeJobPage(data) {
+  const d = data && typeof data === 'object' ? data : {};
+  const jobs = Array.isArray(d.jobs)
+    ? d.jobs.filter((j) => j && typeof j === 'object' && typeof j.job_id === 'string' && j.job_id)
+    : [];
+  const total = Math.floor(Number(d.total));
+  return {
+    jobs,
+    hasMore: d.has_more === true,
+    total: Number.isFinite(total) && total >= 0 ? total : null,
+  };
+}
+
+// 지금 목록 뒤에 다음 쪽을 잇는다 — 폴링 사이 새 잡이 생겨 경계가 밀리면 같은 잡이 두 쪽에
+// 걸칠 수 있어 이미 있는 잡은 건너뛴다(순서는 그대로).
+export function appendJobPage(current, incoming) {
+  const seen = new Set((current || []).map((j) => j.job_id));
+  const added = (incoming || []).filter((j) => !seen.has(j.job_id) && seen.add(j.job_id));
+  return (current || []).concat(added);
+}
+
+// '더 보기' 버튼 문구 — 전체 수를 알면 지금 보이는 수와 함께 적는다.
+export function jobListMoreLabel(shown, total) {
+  const n = Math.max(0, Math.floor(Number(shown)) || 0);
+  const all = Math.floor(Number(total));
+  return Number.isFinite(all) && all > n ? `더 보기 (${n}/${all})` : '더 보기';
+}
+
 // 작업 목록 한 줄의 표시 서명 (순수 — tests/에서 검증). 5초 목록 폴링은 서명이 바뀐
 // 줄만 제자리에서 갱신하고, 전부 같으면 DOM을 건드리지 않는다 — 목록 안 키보드
 // 포커스(2단계 삭제 무장 포함)와 스크린리더 위치가 폴링마다 날아가지 않게.

@@ -384,6 +384,33 @@ class ChunkResult:
     single: bool = False
 
 
+@dataclass(frozen=True)
+class _Placement:
+    """multi 청크의 모델 페이지 k → 물리 슬롯·크롭 파일명 접두사.
+
+    크롭·참조·layout 이름은 전부 **물리 슬롯**으로 짓는다(`p{start+slot}_{prefix}{j}`).
+    예전에는 정렬이 페이지를 옮겨도 모델 인덱스로 지어, 충실도 게이트가 빈 P쪽을 단독
+    재처리해 교체(replace_page → `p{P}_*` 삭제)하면 실제로는 P+1쪽 것인 그림이 지워지고
+    P쪽 새 크롭으로 덮였다. 한 슬롯에 모델 페이지가 여럿 모이면 두 번째부터 `x{k}_`
+    접두사로 구분한다(초과 마커 접기와 같은 규칙).
+    moved[k]: 정렬이 모델 페이지 k를 다른 슬롯으로 옮겼다 — 벤더는 크롭을 **입력
+    래스터 k**에서 잘랐으므로 그 크롭은 엉뚱한 페이지의 그림이다(다시 잘라야 한다).
+    """
+
+    slots: tuple[int, ...]
+    prefixes: tuple[str, ...]
+    moved: tuple[bool, ...]
+
+    @classmethod
+    def build(cls, slots: list[int], moved: list[bool]) -> "_Placement":
+        prefixes: list[str] = []
+        seen: set[int] = set()
+        for k, slot in enumerate(slots):
+            prefixes.append("" if slot not in seen else f"x{k}_")
+            seen.add(slot)
+        return cls(tuple(slots), tuple(prefixes), tuple(moved))
+
+
 class IncrementalMerger:
     def __init__(self, job_dir: Path, page_separator: str) -> None:
         self.job_dir = job_dir
@@ -415,7 +442,75 @@ class IncrementalMerger:
         except Exception:
             return {}
 
-    def _move_chunk_files(self, chunk: ChunkResult) -> None:
+    def _crop_name(self, chunk: ChunkResult, placement: _Placement | None, k: int, j) -> str:
+        """모델 페이지 k의 j번째 크롭 → 글로벌 이미지명(물리 슬롯 기준)."""
+        if chunk.single:
+            return _global_image_name(chunk.start_page, j)
+        if placement is not None and k < len(placement.slots):
+            return _global_image_name(
+                chunk.start_page + placement.slots[k], f"{placement.prefixes[k]}{j}"
+            )
+        global_page, prefix = _fold_local_page(chunk, k)
+        return _global_image_name(global_page, f"{prefix}{j}")
+
+    def _recrop_moved_pages(
+        self, chunk: ChunkResult, placement: _Placement, raw_pages: list
+    ) -> set[tuple[int, int]]:
+        """정렬이 옮긴 모델 페이지의 그림을 **물리 슬롯의 래스터**에서 다시 자른다.
+
+        벤더는 모델 페이지 k의 그림 좌표로 입력 래스터 k를 잘랐다 — 페이지가 옮겨졌으면
+        그 크롭은 다른 페이지의 픽셀이다. 원출력의 image 블록 좌표(0–999)로 벤더와
+        같은 계산(int(v/999*크기))을 해 슬롯 래스터에서 자른다. 래스터나 원출력이 없으면
+        벤더 크롭을 그대로 쓴다(best-effort). 반환: 다시 자른 (k, crop_index).
+        """
+        from PIL import Image
+
+        from .layout import parse_page_blocks
+
+        done: set[tuple[int, int]] = set()
+        for k, moved in enumerate(placement.moved):
+            if not moved or k >= len(raw_pages) or not raw_pages[k]:
+                continue
+            slot_page = chunk.start_page + placement.slots[k]
+            raster = self.job_dir / "pages" / f"page_{slot_page:04d}.png"
+            if not raster.is_file():
+                continue
+            figures = [
+                b for b in parse_page_blocks(str(raw_pages[k])) if "crop_index" in b
+            ]
+            if not figures:
+                continue
+            try:
+                with Image.open(raster) as im:
+                    im = im.convert("RGB")
+                    width, height = im.size
+                    for b in figures:
+                        x1, y1, x2, y2 = (float(v) for v in b["bbox"])
+                        box = (
+                            max(0, min(width, int(x1 / 999 * width))),
+                            max(0, min(height, int(y1 / 999 * height))),
+                            max(0, min(width, int(x2 / 999 * width))),
+                            max(0, min(height, int(y2 / 999 * height))),
+                        )
+                        if box[2] <= box[0] or box[3] <= box[1]:
+                            continue
+                        name = self._crop_name(chunk, placement, k, b["crop_index"])
+                        im.crop(box).save(self.images_dir / name)
+                        self.figure_boxes[name] = {
+                            "x1": box[0], "y1": box[1], "x2": box[2], "y2": box[3],
+                            "image_width": width, "image_height": height,
+                        }
+                        done.add((k, int(b["crop_index"])))
+            except Exception:  # noqa: BLE001 — 다시 자르기 실패는 벤더 크롭으로 폴백
+                continue
+        return done
+
+    def _move_chunk_files(
+        self,
+        chunk: ChunkResult,
+        placement: _Placement | None = None,
+        recropped: set[tuple[int, int]] | frozenset = frozenset(),
+    ) -> None:
         chunk_boxes = self._load_chunk_boxes(chunk)
         img_src = chunk.chunk_dir / "images"
         if img_src.is_dir():
@@ -424,14 +519,16 @@ class IncrementalMerger:
                     m = _FILE_SINGLE.match(f.name)
                     if not m:
                         continue
-                    dest = self.images_dir / _global_image_name(chunk.start_page, m.group(1))
+                    dest = self.images_dir / self._crop_name(chunk, None, 0, m.group(1))
                 else:
                     m = _FILE_MULTI.match(f.name)
                     if not m:
                         continue
-                    local_page, k = int(m.group(1)), m.group(2)
-                    global_page, prefix = _fold_local_page(chunk, local_page)
-                    dest = self.images_dir / _global_image_name(global_page, f"{prefix}{k}")
+                    k, j = int(m.group(1)), m.group(2)
+                    if (k, int(j)) in recropped:
+                        f.unlink(missing_ok=True)  # 엉뚱한 래스터의 크롭 — 다시 잘랐다
+                        continue
+                    dest = self.images_dir / self._crop_name(chunk, placement, k, j)
                 meta = chunk_boxes.get(f.name)
                 if isinstance(meta, dict):
                     self.figure_boxes[dest.name] = meta
@@ -446,12 +543,18 @@ class IncrementalMerger:
             for f in sorted(chunk.chunk_dir.iterdir()):
                 m = _BOXES_FILE.match(f.name)
                 if m:
-                    local_page = int(m.group(1))
-                    if local_page >= chunk.num_pages:
+                    k = int(m.group(1))
+                    if k >= chunk.num_pages:
                         continue  # 초과 생성분 — 마지막 페이지의 오버레이를 덮지 않는다
+                    if placement is not None and k < len(placement.slots) and (
+                        placement.moved[k] or placement.prefixes[k]
+                    ):
+                        # 벤더는 오버레이를 입력 래스터 k에 그렸다 — 옮겨진 페이지의
+                        # 박스가 엉뚱한 페이지 위에 그려진 그림이라 쓰지 않는다
+                        continue
                     shutil.move(
                         str(f),
-                        str(self.layout_dir / f"page_{chunk.start_page + local_page:04d}.jpg"),
+                        str(self.layout_dir / f"page_{chunk.start_page + k:04d}.jpg"),
                     )
 
     def _write_boxes(self) -> None:
@@ -545,40 +648,32 @@ class IncrementalMerger:
         return slots, matched
 
     def _ingest_layout(
-        self, chunk: ChunkResult, raw_pages: list, slot_source: list | None = None,
+        self,
+        chunk: ChunkResult,
+        slot_raws: list[list[tuple[int, str]]],
+        placement: _Placement | None = None,
     ) -> None:
         """청크의 모든 페이지를 layout_pages에 반영한다.
 
-        raw_pages는 물리 페이지 자리에 이미 정합된 목록이다(add_chunk가 markdown과
-        **같은 매핑**으로 배치한다) — layout.json의 페이지가 result.md의 페이지와,
+        slot_raws[L]은 물리 슬롯 L에 놓인 (모델 페이지 k, 원출력) 목록이다(add_chunk가
+        markdown과 **같은 배치**로 만든다) — layout.json의 페이지가 result.md의 페이지와,
         그리고 원본 PDF의 물리 페이지와 1:1로 대응해야 facsimile 내보내기가 엉뚱한
-        페이지의 원문을 지우지 않는다.
+        페이지의 원문을 지우지 않는다. 한 슬롯에 모델 페이지가 여럿이면 원출력을 모델
+        페이지마다 따로 파싱한다 — 크롭 번호는 모델 페이지마다 0부터라 이어 붙인 뒤
+        파싱하면 두 번째 페이지의 그림이 없는 파일을 가리킨다.
         """
         from .layout import parse_page_blocks
 
         new_pages: list[dict] = []
         for local in range(chunk.num_pages):
             g = chunk.start_page + (0 if chunk.single else local)
-            raw = raw_pages[local] if local < len(raw_pages) else None
-            blocks = parse_page_blocks(str(raw)) if raw else []
-            # 크롭 파일명은 **모델 페이지 인덱스**로 지어졌다(_move_chunk_files와 동일
-            # 기준). 정렬이 페이지를 옮겼으면 물리 슬롯이 아니라 그 인덱스를 따라야
-            # layout의 참조와 실제 파일이 일치한다.
-            source = local if slot_source is None else slot_source[local] if (
-                local < len(slot_source)
-            ) else None
-            image_page = g if chunk.single or source is None else (
-                _fold_local_page(chunk, source)[0]
-            )
-            image_prefix = "" if chunk.single or source is None else (
-                _fold_local_page(chunk, source)[1]
-            )
-            for b in blocks:
-                if "crop_index" in b:
-                    # 벤더 크롭 순서 == boxes/이미지 저장 순서 → 글로벌 이미지명 매핑
-                    b["image"] = _global_image_name(
-                        image_page, f"{image_prefix}{b.pop('crop_index')}"
-                    )
+            blocks: list[dict] = []
+            for k, raw in slot_raws[local] if local < len(slot_raws) else []:
+                for b in parse_page_blocks(str(raw)) if raw else []:
+                    if "crop_index" in b:
+                        # 벤더 크롭 순서 == boxes/이미지 저장 순서 → 글로벌 이미지명 매핑
+                        b["image"] = self._crop_name(chunk, placement, k, b.pop("crop_index"))
+                    blocks.append(b)
             w, h = self._page_size(g)
             page = {"page": g, "width": w, "height": h, "blocks": blocks}
             new_pages.append(page)
@@ -685,15 +780,18 @@ class IncrementalMerger:
 
     # ── 마크다운 재작성 ────────────────────────────────────────
 
-    def _rewrite_refs(self, page_md: str, chunk: ChunkResult) -> str:
+    def _rewrite_refs(
+        self, page_md: str, chunk: ChunkResult, placement: _Placement | None = None
+    ) -> str:
         if chunk.single:
             return _IMG_SINGLE.sub(
                 lambda m: f"![](images/{_global_image_name(chunk.start_page, m.group(1))})",
                 page_md,
             )
+
         def _multi(m: re.Match) -> str:
-            global_page, prefix = _fold_local_page(chunk, int(m.group(1)))
-            return f"![](images/{_global_image_name(global_page, f'{prefix}{m.group(2)}')})"
+            name = self._crop_name(chunk, placement, int(m.group(1)), m.group(2))
+            return f"![](images/{name})"
 
         return _IMG_MULTI.sub(_multi, page_md)
 
@@ -710,51 +808,55 @@ class IncrementalMerger:
         pages = [chunk.markdown] if chunk.single else split_pages(chunk.markdown)
         raw_pages = self._load_raw_pages(chunk)
 
-        # 개수가 어긋나면 **위치**부터 원본 PDF 본문과 대조해 정한다. 꼬리에서만
-        # 보정하면 중간에서 쪼개지거나 건너뛴 경우 그 뒤가 전부 밀린다.
-        # 물리 슬롯 L에 들어간 **모델 페이지 인덱스** k. 크롭 이미지 파일은 벤더가
-        # `page_{k}_{j}.jpg`로 저장하고 `_move_chunk_files`·`_rewrite_refs`가 k로
-        # 이름을 짓는다. 정렬이 페이지를 옮기면 `_ingest_layout`만 L로 이름을 지어
-        # **layout이 없는 파일을 가리키고 실제 파일은 고아가 된다.** 같은 k를 쓴다.
-        slot_source: list[int | None] = list(range(chunk.num_pages))
-        if len(pages) != chunk.num_pages or len(raw_pages) != chunk.num_pages:
-            aligned = self._align_chunk_pages(chunk, pages)
+        if chunk.single:
+            placement = None
+            slot_raws = [[(0, raw_pages[0])]] if raw_pages else [[]]
+            pages = [self._rewrite_refs(pages[0], chunk)]
+            self._move_chunk_files(chunk)
+            self._ingest_layout(chunk, slot_raws)
+        else:
+            # 개수가 어긋나면 **위치**부터 원본 PDF 본문과 대조해 정한다. 꼬리에서만
+            # 보정하면 중간에서 쪼개지거나 건너뛴 경우 그 뒤가 전부 밀린다.
+            aligned = None
+            if len(pages) != chunk.num_pages or len(raw_pages) != chunk.num_pages:
+                aligned = self._align_chunk_pages(chunk, pages)
             if aligned is not None:
                 slots, placed = aligned
-                slot_source = [None] * chunk.num_pages
-                for model_index, slot in enumerate(slots):
-                    if slot_source[slot] is None:   # 합쳐진 경우 첫 모델 페이지 기준
-                        slot_source[slot] = model_index
-                pages = _place(pages, slots, chunk.num_pages, "\n\n")
-                if raw_pages:
-                    padded = list(raw_pages[: len(slots)])
-                    padded += [""] * (len(slots) - len(padded))
-                    raw_pages = _place(padded, slots, chunk.num_pages, "\n")
+                moved = [slot != k for k, slot in enumerate(slots)]
                 notes.append(
                     f"{chunk.start_page}페이지 청크: 페이지 마커 {len(slots)}개 "
                     f"(기대 {chunk.num_pages}) — 원본 본문과 대조해 "
                     f"{placed}개 페이지를 제자리에 배치"
                 )
-
-        if len(pages) > chunk.num_pages:
-            # 마커가 초과 생성됨 — 초과분을 마지막 페이지에 합침
-            notes.append(
-                f"{chunk.start_page}페이지 청크: 페이지 마커 {len(pages)}개 "
-                f"(기대 {chunk.num_pages}) — 초과분을 마지막 페이지에 병합 "
-                "(초과분의 레이아웃 좌표는 제외됩니다)"
+            else:
+                # 위치 기반: 초과분은 마지막 페이지에 합치고 모자란 끝은 빈 페이지로
+                last = chunk.num_pages - 1
+                slots = [min(k, last) for k in range(len(pages))]
+                moved = [False] * len(pages)
+                if len(pages) > chunk.num_pages:
+                    notes.append(
+                        f"{chunk.start_page}페이지 청크: 페이지 마커 {len(pages)}개 "
+                        f"(기대 {chunk.num_pages}) — 초과분을 마지막 페이지에 병합 "
+                        "(초과분의 레이아웃 좌표는 제외됩니다)"
+                    )
+                elif len(pages) < chunk.num_pages:
+                    notes.append(
+                        f"{chunk.start_page}페이지 청크: 페이지 마커 {len(pages)}개 "
+                        f"(기대 {chunk.num_pages}) — 빈 페이지로 보정"
+                    )
+            placement = _Placement.build(slots, moved)
+            slot_raws: list[list[tuple[int, str]]] = [[] for _ in range(chunk.num_pages)]
+            for k, slot in enumerate(slots):
+                if k >= len(raw_pages) or (aligned is None and k >= chunk.num_pages):
+                    continue  # 위치 기반의 초과분 좌표는 쓰지 않는다(마지막 페이지와 겹친다)
+                slot_raws[slot].append((k, raw_pages[k]))
+            pages = _place(
+                [self._rewrite_refs(p, chunk, placement) for p in pages],
+                slots, chunk.num_pages, "\n\n",
             )
-            head = pages[: chunk.num_pages - 1]
-            tail = "\n\n".join(pages[chunk.num_pages - 1 :])
-            pages = head + [tail]
-        elif len(pages) < chunk.num_pages:
-            notes.append(
-                f"{chunk.start_page}페이지 청크: 페이지 마커 {len(pages)}개 (기대 {chunk.num_pages}) — 빈 페이지로 보정"
-            )
-            pages = pages + [""] * (chunk.num_pages - len(pages))
-
-        pages = [self._rewrite_refs(p, chunk) for p in pages]
-        self._move_chunk_files(chunk)
-        self._ingest_layout(chunk, raw_pages, slot_source)
+            recropped = self._recrop_moved_pages(chunk, placement, raw_pages)
+            self._move_chunk_files(chunk, placement, recropped)
+            self._ingest_layout(chunk, slot_raws, placement)
         self.pages_md.extend(_clean(p, self.page_separator) for p in pages)
         self._write_partial()
         if warn:

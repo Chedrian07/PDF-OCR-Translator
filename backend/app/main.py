@@ -360,11 +360,19 @@ def _remove_shutdown_hooks(installed: dict) -> None:
             signal.signal(sig, previous)
 
 
+_PDF_WORKER_CONFIG_LOGGED: set[str] = set()
+
+
 def _log_pdf_worker_config() -> None:
-    """PyMuPDF 격리 설정을 기동 시 한 줄로 — 워커는 첫 사용 때 뜬다(pipeline/pdf_worker)."""
+    """PyMuPDF 격리 설정을 기동 시 한 줄로 — 워커는 첫 사용 때 뜬다(pipeline/pdf_worker).
+    같은 프로세스에서 앱을 다시 만들어도(테스트·재조립) 같은 설정이면 한 번만 남긴다."""
     page = pdf_worker.page_timeout()
     build = pdf_worker.export_build_timeout()
     mode = pdf_worker.mode()
+    key = f"{mode}|{page}|{build}"
+    if key in _PDF_WORKER_CONFIG_LOGGED:
+        return
+    _PDF_WORKER_CONFIG_LOGGED.add(key)
     if mode != pdf_worker.MODE_PROCESS:
         logger.warning(
             "PDF_WORKER_MODE=%s — PyMuPDF 작업을 서버 프로세스 안에서 실행합니다(시간 상한·"

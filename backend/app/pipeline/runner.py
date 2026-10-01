@@ -19,6 +19,7 @@ from ..engine.base import (
     OutputLimitError,
     RepetitiveOutputError,
 )
+from ..engine.objc_pool import autorelease_pool
 from .fidelity import PageFidelity, evaluate_layout_pages, evaluate_raw_page
 from .layout import blocks_to_raw
 from .merge import ChunkResult, IncrementalMerger, keep_leading_pages, split_pages
@@ -297,7 +298,9 @@ def _empty_device_cache() -> None:
     (unlimited.py의 _release_device_cache와 동일한 best-effort empty_cache 패턴)
 
     torch를 **이미 올린** 프로세스에서만 한다 — textlayer·sidecar 엔진만 쓰는 배포가
-    첫 실패에서 무거운 torch를 새로 임포트하지 않게."""
+    첫 실패에서 무거운 torch를 새로 임포트하지 않게. MPS 캐시 반환은 ObjC 임시 객체를
+    autorelease로 넘기므로 엔진과 같이 오토릴리스 풀 안에서 부른다 — 잡 워커는 끝나지
+    않는 스레드라 풀 없이는 그 객체가 프로세스 수명 내내 쌓인다(objc_pool 참조)."""
     torch = sys.modules.get("torch")
     if torch is None:
         return
@@ -305,7 +308,8 @@ def _empty_device_cache() -> None:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         if torch.backends.mps.is_available():
-            torch.mps.empty_cache()
+            with autorelease_pool(True):
+                torch.mps.empty_cache()
     except Exception:  # pragma: no cover — 방어적
         pass
 

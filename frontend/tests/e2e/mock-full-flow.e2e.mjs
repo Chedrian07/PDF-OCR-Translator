@@ -109,6 +109,8 @@ const backend = spawn(PYTHON, [
   cwd: FINAL,
   env: {
     ...process.env,
+    // 개발자 .env(실키)를 자동 로드하지 않는다 — 아래에서 덮지 않은 키까지 hermetic하게.
+    DISABLE_DOTENV: '1',
     OCR_ENGINE: 'fake', OCR_DEVICE: 'cpu', PRELOAD_MODEL: '0', FAKE_DELAY: '0',
     DATA_DIR: DATA, ALLOWED_HOSTS: 'localhost,127.0.0.1',
     OPENAI_BASE_URL: mockOrigin, // bare origin 자동 /v1 보완도 함께 검증

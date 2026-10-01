@@ -10,7 +10,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-from .llm.validate import local_url, openai_url
+from .llm.validate import local_openai_url, local_url, openai_url
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +225,42 @@ def _translate_global_concurrency() -> int:
         return 8
 
 
+def _local_openai_settings() -> dict:
+    """local-openai(Q&A) 설정 — Settings의 llm_local_openai_* 필드 값.
+
+    base URL이 비면 미구성(공급자 목록에 광고하지 않음)이다. 주소는 루프백·
+    host.docker.internal만 허용하고(local_openai_url), 모델 없이 주소만 둔 설정은 기동
+    시점에 거부한다. 키는 LLM_LOCAL_OPENAI_API_KEY만 읽는다 — 번역용 OPENAI_API_KEY나
+    Q&A용 LLM_OPENAI_API_KEY로 폴백하면 그 키가 로컬 서버 로그 등으로 새어 나간다.
+    """
+    raw = os.environ.get("LLM_LOCAL_OPENAI_BASE_URL", "").strip()
+    model = os.environ.get("LLM_LOCAL_OPENAI_MODEL", "").strip()
+    models = _env_csv("LLM_LOCAL_OPENAI_MODELS", "")
+    key = os.environ.get("LLM_LOCAL_OPENAI_API_KEY", "").strip()
+    if raw and not model:
+        raise ValueError(
+            "LLM_LOCAL_OPENAI_MODEL이 필요합니다 — LLM_LOCAL_OPENAI_BASE_URL을 설정하면 "
+            "서버의 /v1/models id(mlx_lm.server는 default_model)를 함께 지정하세요"
+        )
+    return {
+        "llm_local_openai_base_url": local_openai_url(raw) if raw else "",
+        "llm_local_openai_model": model,
+        "llm_local_openai_models": models,
+        "llm_local_openai_api_key": key,
+    }
+
+
+def _llm_provider() -> str:
+    """LLM_PROVIDER — local-openai는 LLM_LOCAL_OPENAI_BASE_URL이 있을 때만 기본값이 될 수 있다."""
+    provider = _env_choice(
+        "LLM_PROVIDER", "openai-responses",
+        ("openai-responses", "openai-chat", "ollama", "local-openai"),
+    )
+    if provider == "local-openai" and not os.environ.get("LLM_LOCAL_OPENAI_BASE_URL", "").strip():
+        raise ValueError("LLM_PROVIDER=local-openai에는 LLM_LOCAL_OPENAI_BASE_URL이 필요합니다")
+    return provider
+
+
 @dataclass
 class Settings:
     device: str = "cpu"                 # cpu | cuda | metal (mps는 metal의 별칭)
@@ -282,6 +318,12 @@ class Settings:
     llm_openai_chat_models: tuple[str, ...] = ("chat-latest", "gpt-5.6-luna", "gpt-5.6-terra")
     llm_openai_responses_model: str = "gpt-5.6-luna"  # Responses 기본 모델
     llm_openai_chat_model: str = "chat-latest"        # Chat Completions 기본 모델
+    # 로컬 OpenAI 호환 서버(local-openai: oMLX·LM Studio·mlx_lm.server) — 루프백 전용.
+    # 빈 base URL = 미구성. 키는 전용 LLM_LOCAL_OPENAI_API_KEY만 쓴다(폴백 없음).
+    llm_local_openai_base_url: str = ""
+    llm_local_openai_model: str = ""
+    llm_local_openai_models: tuple[str, ...] = ()
+    llm_local_openai_api_key: str = ""
     # 번역 서브시스템(TranslateConfig.from_env)과 공유하는 키 — 여기서는 읽기만 한다
     openai_api_key: str = ""
     # Q&A 전용 OpenAI 키 — 번역 키와 분리(공유 금지). llm_openai_base_url이 공식
@@ -353,9 +395,7 @@ class Settings:
             native_text_threshold=max(0, _env_int("NATIVE_TEXT_THRESHOLD", 120)),
             ollama_base_url=local_url(os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")),
             ollama_model=os.environ.get("OLLAMA_MODEL", "qwen3:8b"),
-            llm_provider=_env_choice(
-                "LLM_PROVIDER", "openai-responses", ("openai-responses", "openai-chat", "ollama")
-            ),
+            llm_provider=_llm_provider(),
             llm_reasoning_effort=_env_choice(
                 "LLM_REASONING_EFFORT",
                 "low",
@@ -372,6 +412,7 @@ class Settings:
             ),
             llm_openai_responses_model=os.environ.get("LLM_OPENAI_RESPONSES_MODEL", "gpt-5.6-luna"),
             llm_openai_chat_model=os.environ.get("LLM_OPENAI_CHAT_MODEL", "chat-latest"),
+            **_local_openai_settings(),
             openai_api_key=os.environ.get("OPENAI_API_KEY", "").strip(),
             # OPENAI_API_KEY 폴백을 두지 않는다 — 번역 키가 api.openai.com으로 새는 경로
             llm_openai_api_key=os.environ.get("LLM_OPENAI_API_KEY", "").strip(),

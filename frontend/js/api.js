@@ -77,12 +77,13 @@ export async function apiDelete(path) {
   return true;
 }
 
-// 라이브 프리뷰 렌더 요청 상한 — 서버는 2MB 본문을 ~0.2초에 렌더한다. 이보다
+// 라이브 프리뷰 렌더 요청 상한 — 서버는 본문 상한(256KiB)을 ~0.3초에 렌더한다. 이보다
 // 훨씬 큰 여유를 두되 무한 대기는 막는다: 응답 없이 매달리면 previewInFlight가
 // 영원히 참으로 남아 오른쪽 패널이 잡이 끝날 때까지 멈춰 버린다.
 const PREVIEW_TIMEOUT_MS = 20000;
 
-// POST 한 번 — 성공 시 {html}, HTTP 실패 시 {status}, 네트워크 오류·시간 초과 시 {status: 0}.
+// POST 한 번 — 성공 시 {html}, HTTP 실패 시 {status, retryAfter}(Retry-After 헤더 원문,
+// 없으면 null — 429 백오프용), 네트워크 오류·시간 초과 시 {status: 0}.
 export async function postPreviewRender(id, body) {
   try {
     const res = await fetch(`/api/jobs/${id}/render-preview`, {
@@ -94,7 +95,7 @@ export async function postPreviewRender(id, body) {
         : undefined,
     });
     if (res.ok) return { html: await res.text() };
-    return { status: res.status };
+    return { status: res.status, retryAfter: res.headers.get('Retry-After') };
   } catch (_) {
     return { status: 0 }; // network error → retried on the next schedule
   }

@@ -1,5 +1,6 @@
 """OvisOCR2 파서 테스트 — 모델/vLLM 없이 실행 (표준 라이브러리만)."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from app.parser import (
     BBOX_MAX,
     MAX_FIGURES,
     clean_truncated_repeats,
+    escape_literal_placeholders,
     parse_page,
 )
 
@@ -185,3 +187,73 @@ def test_parse_page_applies_repeat_cleanup():
     page = parse_page(base + "루프 " * 60)
     assert any("반복 suffix" in w for w in page["warnings"])
     assert not page["markdown"].endswith("루프 루프 루프")
+
+
+# ── 본문의 리터럴 placeholder (감사 sidecar-9) ──────────────────────────────
+
+# backend protocol.FIGURE_PLACEHOLDER_RE와 같은 문법 — 여기에 걸리는 것만 figure 자리가 된다
+_PLACEHOLDER_RE = re.compile(r"\[\[FIGURE:(\d{1,3})\]\]")
+
+
+def _placeholders(markdown: str) -> list[tuple[int, str]]:
+    """(index, 그 placeholder가 놓인 줄) 목록."""
+    out = []
+    for m in _PLACEHOLDER_RE.finditer(markdown):
+        start = markdown.rfind("\n", 0, m.start()) + 1
+        end = markdown.find("\n", m.end())
+        out.append((int(m.group(1)), markdown[start:None if end == -1 else end]))
+    return out
+
+
+def test_literal_placeholder_in_document_text_is_escaped():
+    """앱 문법을 설명하는 문서의 `[[FIGURE:0]]`이 진짜 그림 자리를 가로채면 안 된다."""
+    raw = (
+        "The app syntax is [[FIGURE:0]] in prose.\n\n"
+        '<img src="images/bbox_100_200_800_700.jpg" />\n\n'
+        "After the figure."
+    )
+    page = parse_page(raw)
+    md = page["markdown"]
+    # 남는 placeholder는 진짜 그림 자리 하나뿐이고, 리터럴은 렌더하면 `[[`로 보이는 문자 참조다
+    assert _placeholders(md) == [(0, "[[FIGURE:0]]")]
+    assert "The app syntax is &#91;&#91;FIGURE:0]] in prose." in md
+    assert len(page["blocks"]) == 1 and page["blocks"][0]["figure_index"] == 0
+
+
+def test_literal_placeholder_without_figures_is_escaped():
+    page = parse_page("See [[FIGURE:3]] and [[FIGURE:12]] for the syntax.")
+    assert _placeholders(page["markdown"]) == []
+    assert page["markdown"] == "See &#91;&#91;FIGURE:3]] and &#91;&#91;FIGURE:12]] for the syntax."
+    assert page["blocks"] == []
+
+
+def test_removed_img_tag_cannot_rejoin_a_literal_placeholder():
+    """비정상 img 태그를 지운 자리 양쪽이 이어져 placeholder가 새로 생기면 안 된다."""
+    raw = (
+        'x [<img src="https://attacker.example/a.jpg" />[FIGURE:0]] y\n\n'
+        '<img src="images/bbox_100_200_800_700.jpg" />'
+    )
+    page = parse_page(raw)
+    assert _placeholders(page["markdown"]) == [(0, "[[FIGURE:0]]")]
+    assert "x &#91;&#91;FIGURE:0]] y" in page["markdown"]
+    assert any("비정상 img 태그 1개" in w for w in page["warnings"])
+
+
+def test_unclosed_img_remnant_does_not_swallow_the_following_figure():
+    """`<img alt="…` 잔여물 정리가 바로 뒤의 진짜 placeholder까지 지우면 그림이 페이지 끝으로 밀린다."""
+    page = parse_page('Text <img alt="broken <img src="images/bbox_100_200_800_700.jpg" />')
+    assert page["markdown"] == "Text [[FIGURE:0]]"
+    assert len(page["blocks"]) == 1
+    assert any("잔여물" in w for w in page["warnings"])
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("[[FIGURE:1]]", "&#91;&#91;FIGURE:1]]"),
+    ("[[[FIGURE:1]]", "[&#91;&#91;FIGURE:1]]"),
+    ("[[FIGURE:[[FIGURE:2]]", "&#91;&#91;FIGURE:&#91;&#91;FIGURE:2]]"),
+    ("[[figure:1]] [ [FIGURE:1]]", "[[figure:1]] [ [FIGURE:1]]"),  # placeholder 문법이 아니다
+])
+def test_escape_leaves_no_placeholder_syntax(text, expected):
+    out = escape_literal_placeholders(text)
+    assert out == expected
+    assert "[[FIGURE:" not in out

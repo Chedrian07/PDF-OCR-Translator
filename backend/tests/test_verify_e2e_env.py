@@ -138,3 +138,50 @@ def test_harness_http_calls_bypass_shell_proxies(monkeypatch):
     leaky = [h.proxies for h in fresh._LOOPBACK.handlers
              if isinstance(h, urllib.request.ProxyHandler) and h.proxies]
     assert not leaky, f"하네스 HTTP 호출이 셸 프록시를 탄다: {leaky}"
+
+
+# ── 자식 프로세스 수명 — 기동 실패 시 고아를 남기지 않는다 ──
+
+class _FakeProc:
+    started: list["_FakeProc"] = []
+
+    def __init__(self, args, **kwargs):
+        self.args = args
+        self.signals: list[int] = []
+        self._rc = None
+        _FakeProc.started.append(self)
+
+    def poll(self):
+        return self._rc
+
+    def send_signal(self, sig):
+        self.signals.append(sig)
+        self._rc = -sig
+
+    def wait(self, timeout=None):
+        return self._rc
+
+    def kill(self):
+        self._rc = -9
+
+
+@pytest.mark.parametrize("ready", [[False], [True, False]], ids=["mock-down", "backend-down"])
+def test_failed_startup_reaps_already_started_children(tmp_path, monkeypatch, ready):
+    """__enter__가 실패하면 with 문은 __exit__을 부르지 않는다 — 이미 띄운 목이 고아로 남아
+    포트를 쥐면 다음 실행이 그 고아(FAULT 없음)와 대화해 결함 주입이 무력화됐다(실측)."""
+    _FakeProc.started = []
+    answers = iter(ready)
+    monkeypatch.setattr(harness.subprocess, "Popen", _FakeProc)
+    monkeypatch.setattr(harness, "wait_http", lambda *a, **k: next(answers))
+    monkeypatch.setattr(harness, "WORK", tmp_path)
+
+    servers = harness.Servers(tmp_path / "data", {"FAULT": "echo"})
+    with pytest.raises(SystemExit):
+        with servers:
+            pytest.fail("기동 실패인데 본문이 실행됐다")
+
+    assert len(_FakeProc.started) == len(ready)
+    orphans = [p.args for p in _FakeProc.started if p.poll() is None]
+    assert not orphans, f"기동 실패 후 남은 자식 프로세스: {orphans}"
+    if servers.api_log is not None:
+        assert servers.api_log.closed

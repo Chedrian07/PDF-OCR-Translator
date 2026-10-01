@@ -157,17 +157,43 @@ def test_sanitize_figure_cap_and_duplicate_index():
 
 def test_본문의_리터럴_FIGURE_placeholder는_crop을_납치하지_못한다():
     """문서 본문에 '[[FIGURE:0]]' 문자열이 있으면 모델이 그대로 옮겨 적고,
-    materializer가 실제 crop을 그 위치에도 붙인다(중복·위치 납치) — <PAGE>와
-    같은 이유로 경계에서 index당 첫 1개만 남긴다."""
+    materializer가 실제 crop을 그 위치에도 붙인다(중복·위치 납치).
+
+    예전 기대값은 '개수가 1'뿐이라, 리터럴이 앞에 오면 **리터럴이 살아남고 실제 그림
+    자리가 지워지는** 동작을 그대로 통과시켰다. 살아남는 것이 실제 그림 자리(한 줄을
+    혼자 차지)인지, 리터럴 글자가 본문에 그대로 보이는지까지 확인한다."""
     page = _page(
         [_block(type="image", figure_index=0, order=0, content="")],
         markdown="원문 속 리터럴 [[FIGURE:0]] 입니다\n\n[[FIGURE:0]]\n\n[[FIGURE:9]]",
     )
     clean, warnings = sanitize_page(page)
-    assert clean.markdown.count("[[FIGURE:0]]") == 1     # 첫 참조만 유지
+    assert clean.markdown.count("[[FIGURE:0]]") == 1     # 그림 참조는 하나만
+    assert "\n\n[[FIGURE:0]]\n\n" in clean.markdown       # 실제 그림 자리가 남는다
+    assert "원문 속 리터럴 &#91;&#91;FIGURE:0]] 입니다" in clean.markdown  # 리터럴은 글자로
     assert "[[FIGURE:9]]" not in clean.markdown          # 대응 crop 없는 참조는 제거
-    assert "원문 속 리터럴" in clean.markdown            # 본문 텍스트는 보존
-    assert any("placeholder" in w for w in warnings)
+    assert any("본문 리터럴" in w for w in warnings) and any("제거" in w for w in warnings)
+
+
+def test_literal_placeholder_survives_rendering_as_text(tmp_path):
+    """리터럴로 되돌린 placeholder는 materializer가 그림으로 바꾸지 않고, 렌더하면
+    원문 글자 그대로 보인다(`\\[`로 이스케이프하면 디스플레이 수식이 된다)."""
+    from PIL import Image
+
+    from app.pipeline.render import render_markdown_html
+    from app.sidecar.materializer import ChunkMaterializer
+
+    page_png = tmp_path / "page_0001.png"
+    Image.new("RGB", (400, 560), "white").save(page_png)
+    clean, _ = sanitize_page(_page(
+        [_block(type="image", bbox=[100, 200, 800, 700], figure_index=0, order=0,
+                content="")],
+        markdown="The app syntax is [[FIGURE:0]] in docs\n\n[[FIGURE:0]]",
+    ))
+    md = ChunkMaterializer(tmp_path / "c", single=True).add_page(clean, page_png, 0)
+    assert md.count("![](images/0.jpg)") == 1
+    assert md.index("in docs") < md.index("![](images/0.jpg)")   # 그림은 제자리에
+    html = render_markdown_html(md, "/f")
+    assert "The app syntax is [[FIGURE:0]] in docs" in html and "math" not in html
 
 
 def test_sanitize_strips_literal_page_marker():

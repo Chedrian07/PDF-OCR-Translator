@@ -68,6 +68,10 @@ class Job:
     # submit()되므로 생성 순서와 어긋날 수 있다 — queue_position이 이 값을 쓴다.
     # 아직 제출 전(업로드 중)이면 None.
     submit_seq: int | None = None
+    # 워커가 큐에서 꺼내 실행을 맡았는가(런타임 전용). 상태는 모델 로딩 대기 동안
+    # 여전히 queued라, '아직 아무도 맡지 않은 대기 잡'만 API가 즉시 취소할 수 있도록
+    # 상태와 별도로 둔다 — JobStore.claim/try_cancel_queued가 같은 락에서 판정한다.
+    claimed: bool = False
 
     def _result_block(self, *, include_files: bool = True) -> dict | None:
         if self.status != "done":
@@ -209,6 +213,31 @@ class JobStore:
         with self._lock:
             self._submit_seq += 1
             job.submit_seq = self._submit_seq
+
+    def claim(self, job: Job) -> bool:
+        """워커가 대기 잡의 실행을 맡는다 — 이미 취소됐거나(맡을 것 없음) 맡았으면 False.
+
+        try_cancel_queued와 같은 락에서 판정하므로 '취소'와 '실행 시작'이 동시에
+        일어나도 정확히 한쪽만 이긴다."""
+        with self._lock:
+            if job.status != "queued" or job.claimed:
+                return False
+            job.claimed = True
+            return True
+
+    def try_cancel_queued(self, job: Job, message: str) -> bool:
+        """아직 워커가 맡지 않은 대기 잡을 지금 바로 취소로 마감한다. 마감했으면 True.
+
+        예전에는 취소 이벤트만 세우고 워커가 그 잡을 꺼낼 때까지(앞 잡이 끝날 때까지,
+        200쪽 Metal 잡이면 수십 분) queued·대기열 위치·'취소 중…'이 그대로였고, 그
+        사이 재시작되면 canceled가 아니라 '서버 재시작으로 중단' 오류로 남았다."""
+        with self._lock:
+            if job.status != "queued" or job.claimed:
+                return False
+            job.status = "canceled"
+            job.error = message
+        self.save(job)
+        return True
 
     def save(self, job: Job) -> None:
         tmp = job.dir / f".{_META_NAME}.tmp"
@@ -525,6 +554,9 @@ class Worker(threading.Thread):
                 job = self.store.get(job_id)
                 if job is None:
                     # queued 상태에서 삭제돼 dequeue 시 이미 사라진 잡
+                    continue
+                if not self.store.claim(job):
+                    # 대기 중에 API가 이미 취소로 마감했다(종료 이벤트도 그쪽이 발행)
                     continue
                 cancel = self.cancel_events.setdefault(job_id, threading.Event())
                 if job.delete_requested or cancel.is_set():

@@ -414,6 +414,34 @@ def is_degenerate_repetition(out: str, src: str = "") -> bool:
     return span > 2 * longest_repetition(src) + REPEAT_MIN_SPAN // 2
 
 
+# ── 아주 짧은 유닛 전용 검사 (Phase-0 replay: 'Abstract'·arXiv 스탬프 → '요약입니다.') ──
+# 짧은 원문은 길이비 하한(0.12)이 몇 글자에 불과해 캔드 문장이 그대로 통과한다.
+# 짧은 라벨이 문장으로 바뀌는 것과, 원문의 연도·식별 번호가 사라지는 것은 번역이
+# 아니라 대체다 — 둘 다 정상 번역 쌍(real_translation_pairs 168건)에는 없다.
+_SHORT_EXEMPT_MAX_CHARS = 40
+# 합쇼체 문장 종결 — 시스템 프롬프트가 금지하는 문체이고, 라벨의 번역은 명사구다.
+_KO_POLITE_END_RE = re.compile(r"(?:입니다|습니다)\s*[.!?]?\s*$")
+_SRC_SENTENCE_END_RE = re.compile(r"[.!?:;]\s*$")
+# 연도·식별 번호 — 4자리 이상 숫자는 번역에서 그대로 남는다(구분 쉼표만 생길 수 있다).
+_LONG_NUMBER_RE = re.compile(r"\d{4,}")
+
+
+def _label_became_sentence(src: str, out: str) -> bool:
+    """마침표 없는 1–2단어 라벨이 합쇼체 문장('요약입니다.')으로 바뀌었는가."""
+    return not _SRC_SENTENCE_END_RE.search(src.strip()) and bool(
+        _KO_POLITE_END_RE.search(out.strip())
+    )
+
+
+def _numbers_dropped(residual: str, out_text: str) -> bool:
+    """원문의 4자리 이상 숫자가 출력에 **하나도** 없는가(쉼표·공백 구분은 무시)."""
+    numbers = _LONG_NUMBER_RE.findall(residual)
+    if not numbers:
+        return False
+    flat = re.sub(r"[,\s]", "", out_text)
+    return not any(n in flat for n in numbers)
+
+
 def looks_untranslated(src: str, out: str, mapping: dict) -> bool:
     """출력 측 최소 검증 — 거부문·요약·원문 echo면 True(엔진이 래더로 보낸다).
 
@@ -425,7 +453,8 @@ def looks_untranslated(src: str, out: str, mapping: dict) -> bool:
 def untranslated_reason(src: str, out: str, mapping: dict) -> str:
     """게이트 판정 사유 — 통과면 "", 거부면 어느 규칙이 걸었는지 나타내는 슬러그.
 
-    사유: scaffold / refusal / repetition / hangul-ratio / length-ratio.
+    사유: scaffold / refusal / repetition / label-sentence / number-mismatch /
+    hangul-ratio / length-ratio.
 
     **오탐 관측용이다.** 게이트는 오탐해도 조용하다 — 정상 번역이 거부되면 래더
     왕복이 늘고, 래더가 소진되면 그 문단이 영어로 남는다(kept_reason=gate-rejected).
@@ -467,8 +496,17 @@ def untranslated_reason(src: str, out: str, mapping: dict) -> str:
         return "repetition"
 
     src_words = [w.lower() for w in re.findall(r"[A-Za-z]{2,}", residual)]
+    if len(src_words) <= 2 and _label_became_sentence(src, out):
+        return "label-sentence"
     if len(src_words) < 2:
-        return ""  # 고유명사·짧은 라벨은 원문 그대로 나와도 정상
+        # 고유명사·짧은 라벨은 원문 그대로 나와도 정상(echo 면제). 단 출력 길이에는
+        # 상한을 둔다 — 소형 모델이 [직전 문맥]까지 번역해 'Introduction' 자리에 앞
+        # 문단이 통째로 실려도 면제가 그대로 통과시켰다(translate-llm-11).
+        if len(out) > max(_SHORT_EXEMPT_MAX_CHARS, 6 * len(src)):
+            return "length-ratio"
+        return ""
+    if len(src) <= 80 and _numbers_dropped(residual, out_text):
+        return "number-mismatch"
     non_ws = len(re.findall(r"\S", out_text))
     hangul_ratio = len(re.findall(r"[가-힣]", out_text)) / non_ws if non_ws else 0.0
     if non_ws and hangul_ratio < 0.15:

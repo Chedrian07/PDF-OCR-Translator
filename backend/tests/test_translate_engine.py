@@ -993,6 +993,31 @@ def test_reasoning_설정이_바뀌면_캐시를_재사용하지_않는다(job, 
     assert hot.calls > 0 and res2.cached == 0
 
 
+def test_reasoning_전달방식이_요청을_바꿀_때만_캐시를_무효화한다(job, cfg):
+    """종전 off(OpenRouter 방식)가 무시되던 로컬 서버에서 thinking이 실제로 꺼지면
+    출력이 달라진다 — 그 캐시는 재사용하지 않는다. 같은 요청이면 키는 그대로다."""
+    from dataclasses import replace
+
+    legacy = replace(cfg, reasoning="off", reasoning_style="openrouter")
+    run_translation(job, "ko", legacy, client=EchoClient())
+    assert _state(job)["reasoning_style"] == "openrouter"
+    assert _state(job)["request_variant"] == ""
+
+    # 공개 게이트웨이의 auto는 openrouter로 확정 = 종전과 같은 요청 → 전량 적중
+    same = EchoClient()
+    run_translation(job, "ko", replace(legacy, reasoning_style="auto"), client=same)
+    assert same.calls == 0
+
+    # chat_template_kwargs로 실제 끄기 → 요청이 달라졌으니 다시 번역한다
+    local = EchoClient()
+    res = run_translation(
+        job, "ko", replace(legacy, reasoning_style="chat_template_kwargs"), client=local,
+    )
+    assert local.calls > 0 and res.cached == 0
+    assert _state(job)["reasoning_style"] == "chat_template_kwargs"
+    assert _state(job)["request_variant"] == "reasoning_style=chat_template_kwargs"
+
+
 # ── 관측: 사유별 skip/kept 집계 + 참고문헌 규칙 불일치 ──────────────────────
 
 def test_report에_skip_사유별_집계가_남는다(tmp_path, cfg):

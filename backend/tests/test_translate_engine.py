@@ -356,6 +356,7 @@ def test_잡삭제_경합시_예외없이_canceled(job, cfg):
 
     res = run_translation(job, "ko", cfg, client=DeletingClient(), cancel=ev)
     assert res.status == "canceled"
+    assert not job.exists()  # 상태·캐시 기록이 지워진 잡 디렉터리를 되살리지 않는다
 
 
 def test_force_재번역(job, cfg):
@@ -387,6 +388,59 @@ def test_layout_없어도_동작(tmp_path, cfg):
     assert res.status == "done"
     assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(RESULT_MD)
     assert not (tmp_path / "layout.ko.json").exists()
+
+
+def test_그림_블록뿐인_layout은_없는_것과_같다(tmp_path, cfg):
+    """figure_only 엔진의 옛 잡(image 블록뿐인 layout.json)은 layout 없는 잡처럼 result.md만
+    번역한다 — layout.ko.json을 만들면 그 잡이 좌표 내보내기 대상처럼 보였다
+    (artifacts.has_usable_layout과 같은 기준)."""
+    (tmp_path / "result.md").write_text(RESULT_MD, encoding="utf-8")
+    image_only = [{"page": 1, "width": 1000, "height": 1400, "blocks": [
+        {"type": "image", "bbox": [0, 320, 500, 700], "content": "", "image": "p0001_0.jpg"},
+    ]}]
+    (tmp_path / "layout.json").write_text(json.dumps(image_only), encoding="utf-8")
+    res = run_translation(tmp_path, "ko", cfg, client=EchoClient())
+    assert res.status == "done"
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(RESULT_MD)
+    assert not (tmp_path / "layout.ko.json").exists()
+
+
+def test_삭제된_잡_디렉터리를_되살리지_않는다(tmp_path, cfg):
+    """DELETE·TTL GC와 겹친 번역이 parents=True로 잡 디렉터리를 되살려 meta.json 없는
+    고아(translations/만 든 디렉터리)를 남겼다 — 없으면 만들지 않고 실패한다."""
+    from app.translate.types import TranslateError
+
+    gone = tmp_path / "j_0123456789ab"
+    with pytest.raises(TranslateError, match="삭제된"):
+        run_translation(gone, "ko", cfg, client=EchoClient())
+    assert not gone.exists()
+
+    # 잡 디렉터리는 있고 translations/가 아직 없으면 정상적으로 만든다
+    alive = tmp_path / "j_aaaaaaaaaaaa"
+    alive.mkdir()
+    (alive / "result.md").write_text(RESULT_MD, encoding="utf-8")
+    assert run_translation(alive, "ko", cfg, client=EchoClient()).status == "done"
+    assert (alive / "translations" / "ko" / "state.json").is_file()
+
+
+def test_실행_중_잡이_삭제되면_디렉터리를_되살리지_않고_실패한다(tmp_path, cfg):
+    """번역 도중 잡이 지워져도(rmtree) 상태·캐시·산출물 기록이 디렉터리를 다시 만들지 않는다."""
+    import shutil
+
+    from app.translate.types import TranslateError
+
+    job_dir = tmp_path / "j_bbbbbbbbbbbb"
+    job_dir.mkdir()
+    (job_dir / "result.md").write_text(RESULT_MD, encoding="utf-8")
+
+    class DeletingClient(EchoClient):
+        def complete(self, *args, **kwargs):
+            shutil.rmtree(job_dir, ignore_errors=True)
+            return super().complete(*args, **kwargs)
+
+    with pytest.raises(TranslateError):
+        run_translation(job_dir, "ko", cfg, client=DeletingClient())
+    assert not job_dir.exists()
 
 
 # ── 신뢰도 래더 (kept_original → 0) ─────────────────────────────────────────

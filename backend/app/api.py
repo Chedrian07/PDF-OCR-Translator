@@ -1264,6 +1264,22 @@ def _viewer_cache_headers(revision: str) -> dict[str, str]:
     }
 
 
+def _etag_matches(request: Request, etag: str) -> bool:
+    """If-None-Match 판정 — 콤마 목록·약한 비교(W/)·'*'를 처리한다(RFC 9110 §13.1.2).
+
+    정확한 문자열 비교만 하면 gzip을 거는 리버스 프록시(nginx 등)가 강한 ETag를
+    W/로 바꿔 돌려보낼 때 304가 한 번도 나오지 않는다."""
+    header = request.headers.get("if-none-match")
+    if not header:
+        return False
+    if header.strip() == "*":
+        return True
+    target = etag.removeprefix("W/")
+    return any(
+        candidate.strip().removeprefix("W/") == target for candidate in header.split(",")
+    )
+
+
 @router.get("/jobs/{job_id}/viewer-manifest")
 def job_viewer_manifest(
     request: Request,
@@ -1281,7 +1297,7 @@ def job_viewer_manifest(
         _check_lang(lang)
     revision = _viewer_artifact_revision(job, lang)
     headers = _viewer_cache_headers(revision)
-    if request.headers.get("if-none-match") == headers["ETag"]:
+    if _etag_matches(request, headers["ETag"]):
         return Response(status_code=304, headers=headers)
 
     source_layout = artifacts.layout(job.dir)
@@ -1353,7 +1369,7 @@ def job_viewer_pages(
     limit: int = 4,
     lang: str | None = None,
     include: str = "alignment",
-) -> JSONResponse:
+) -> Response:
     """인접 페이지 메타/좌표를 한 번의 layout 파싱으로 돌려주는 제한된 배치."""
     if start < 1:
         raise HTTPException(422, "시작 페이지는 1 이상이어야 합니다")
@@ -1364,6 +1380,13 @@ def job_viewer_pages(
     job = _get_job(request, job_id)
     if lang is not None:
         _check_lang(lang)
+    # ETag를 보내면서 If-None-Match를 보지 않아, 재검증 때마다 레이아웃 JSON 두 개를
+    # 전부 파싱·대응 검증한 뒤 같은 본문을 200으로 다시 보냈다. 판정은 파일 지문
+    # (_viewer_artifact_revision)만으로 되므로 파싱 **전에** 304를 고른다.
+    revision = _viewer_artifact_revision(job, lang)
+    cache_headers = _viewer_cache_headers(revision)
+    if _etag_matches(request, cache_headers["ETag"]):
+        return Response(status_code=304, headers=cache_headers)
 
     source_pages = _load_layout_pages(job)
     target_pages = _load_layout_pages(job, lang, _state(request)) if lang else source_pages
@@ -1380,6 +1403,7 @@ def job_viewer_pages(
     page_numbers = sorted(number for number in source_by_number if number >= start)
     selected = page_numbers[:limit]
     items = []
+    # 레이아웃 백필(폰트 메타)이 방금 파일을 바꿨을 수 있다 — 본문과 같은 세대로 다시 잰다.
     revision = _viewer_artifact_revision(job, lang)
     for page_number in selected:
         source_page = source_by_number[page_number]

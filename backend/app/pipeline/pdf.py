@@ -317,16 +317,14 @@ def _capped_scale(w_pt: float, h_pt: float, dpi: int) -> tuple[float, int]:
     return scale, target
 
 
-def _write_blank_page(doc, index: int, path: Path, dpi: int) -> None:
-    """렌더 실패 페이지의 대체 흰색 PNG — 페이지 크기를 못 읽으면 A4(pt) 기준.
-    정상 렌더와 같은 픽셀 상한을 지켜 대체 경로도 OOM을 못 일으키게 한다."""
+def _write_blank_page(path: Path, size_pt: tuple[float, float] | None, dpi: int) -> None:
+    """렌더 실패 페이지의 대체 흰색 PNG — 페이지 크기를 못 읽었으면 A4(pt) 기준.
+    정상 렌더와 같은 픽셀 상한을 지켜 대체 경로도 OOM을 못 일으키게 한다.
+    MuPDF를 쓰지 않는다(크기는 워커가 먼저 알려 준다) — 상한을 넘긴 페이지를 대신할 때도
+    서버 프로세스에서 안전하게 만든다."""
     from PIL import Image
 
-    try:
-        rect = doc[index].rect
-        w_pt, h_pt = float(rect.width), float(rect.height)
-    except Exception:  # 페이지 객체 자체가 깨진 경우
-        w_pt, h_pt = 595.0, 842.0
+    w_pt, h_pt = size_pt if size_pt else (595.0, 842.0)
     scale, _ = _capped_scale(w_pt, h_pt, dpi)
     size = (max(1, round(w_pt * scale)), max(1, round(h_pt * scale)))
     Image.new("RGB", size, "white").save(path)
@@ -345,75 +343,179 @@ def _write_render_warnings(pages_dir: Path, messages: list[str]) -> None:
         logger.warning("렌더 경고 파일 기록 실패 (%s): %s", path, e)
 
 
+# 페이지 렌더 시간 상한 초과가 이만큼 쌓이면 남은 페이지를 기다리지 않고 잡을 끝낸다 —
+# 업로드 게이트를 빠져나간 적대적 문서가 페이지마다 상한을 다 써서 단일 OCR 워커를 몇 시간씩
+# 붙잡지 않게(200쪽 × 60초). 정상 문서는 상한에 한 번도 닿지 않는다.
+_MAX_RENDER_TIMEOUTS = 3
+
+
+def _limit_text(seconds: float | None) -> str:
+    return f"{seconds:g}초" if seconds else "상한"
+
+
+def _listed_pages(pages: list[int]) -> str:
+    listed = ", ".join(str(p) for p in pages[:_MAX_LISTED_FAILED_PAGES])
+    more = (
+        f" 외 {len(pages) - _MAX_LISTED_FAILED_PAGES}쪽"
+        if len(pages) > _MAX_LISTED_FAILED_PAGES
+        else ""
+    )
+    return listed + more
+
+
+def render_open_local(pdf_path: Path, max_pages: int) -> list[tuple[float, float] | None]:
+    """(워커) 렌더할 문서를 검증하고 페이지별 크기(pt)를 돌려준다 — 못 읽은 페이지는 None.
+    열 수 없거나 암호화·빈 문서·페이지 상한 초과면 사용자 메시지 ValueError."""
+    from . import pdf_worker
+
+    try:
+        with pdf_worker.open_document(pdf_path) as doc:
+            if doc.needs_pass:
+                raise ValueError("암호화된 PDF는 지원하지 않습니다")
+            n = doc.page_count
+            if n == 0:
+                raise ValueError("페이지가 없는 PDF입니다")
+            if n > max_pages:
+                raise ValueError(f"페이지 수({n})가 상한({max_pages})을 초과합니다")
+            sizes: list[tuple[float, float] | None] = []
+            for i in range(n):
+                try:
+                    rect = doc[i].rect
+                    sizes.append((float(rect.width), float(rect.height)))
+                except Exception:  # noqa: BLE001 — 깨진 페이지는 그 페이지 렌더가 격리한다
+                    sizes.append(None)
+            return sizes
+    except ValueError:
+        raise
+    except Exception as e:  # noqa: BLE001 — 열기 실패(경로가 든 MuPDF 문구는 로그에만)
+        logger.warning("페이지 렌더: PDF 열기 실패 (%s: %s)", e.__class__.__name__, str(e)[:300])
+        raise ValueError(_OPEN_FAILED) from e
+    finally:
+        drain_mupdf_warnings("페이지 렌더")
+
+
+def render_page_local(
+    pdf_path: Path, page_index: int, out_path: Path, dpi: int, page_count: int,
+) -> None:
+    """(워커) 페이지 하나를 PNG로 — MAX_RENDER_PIXELS를 넘으면 비율을 유지해 줄인다."""
+    from . import pdf_worker
+
+    fitz = quiet_fitz()
+    try:
+        with pdf_worker.open_document(pdf_path) as doc:
+            page = doc[page_index]
+            rect = page.rect
+            # pix 생성 전에 목표 픽셀 수를 계산 — 상한 초과 시 비율 유지 축소
+            # (probe의 치수 검사를 통과한 페이지도 고 dpi에선 넘을 수 있다)
+            scale, target = _capped_scale(rect.width, rect.height, dpi)
+            if target > MAX_RENDER_PIXELS:
+                logger.warning(
+                    "페이지 %d/%d: 렌더 %dpx가 페이지당 상한(%dpx)을 초과 — "
+                    "비율 유지 축소 (배율 %.3f→%.3f)",
+                    page_index + 1, page_count, target, MAX_RENDER_PIXELS, dpi / 72, scale)
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+            pix.save(str(out_path))
+    finally:
+        drain_mupdf_warnings(f"{page_index + 1}페이지 렌더")
+
+
 def render_pdf_pages(
     pdf_path: Path,
     pages_dir: Path,
     dpi: int,
     max_pages: int,
     progress_cb: Callable[[int, int], None] | None = None,
+    *,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> list[Path]:
     """모든 페이지를 pages_dir/page_%04d.png (1-based)로 렌더.
 
-    한 페이지가 깨져도(get_pixmap 예외) 잡 전체를 죽이지 않는다 — 흰색 페이지로
-    대체하고 계속한다. 전 페이지 실패 시에만 ValueError.
-    페이지당 픽셀 수가 MAX_RENDER_PIXELS를 넘으면 비율을 유지한 채 축소한다."""
-    fitz = quiet_fitz()
+    MuPDF 작업은 PDF 워커 프로세스에서 페이지마다 하나씩 돈다(pdf_worker.run_page — 풀은
+    호출 맥락을 따른다: OCR 입력은 ocr, facsimile은 export). 그래서 렌더가 서버의 GIL을 쥐지
+    않고, 한 페이지가 시간 상한(PDF_PAGE_TIMEOUT_S)을 넘거나 워커를 죽여도 그 페이지만 잃는다.
+    한 페이지가 깨져도(예외·상한 초과·워커 비정상 종료) 잡 전체를 죽이지 않는다 — 흰색 페이지로
+    대체하고 사용자 경고(render_warnings.json → job.warnings)를 남긴 뒤 계속한다. 전 페이지
+    실패, 또는 상한 초과가 _MAX_RENDER_TIMEOUTS번 쌓이면 ValueError. 페이지당 픽셀 수가
+    MAX_RENDER_PIXELS를 넘으면 비율을 유지한 채 축소한다. progress_cb의 예외는 그대로
+    전파된다(러너의 페이지 사이 취소). should_cancel이 참이 되면 진행 중인 페이지의 워커까지
+    끝내고 JobCanceled — 페이지 하나가 수십 초 걸려도 취소가 기다리지 않는다."""
+    from . import pdf_worker
 
     pages_dir.mkdir(parents=True, exist_ok=True)
-    doc = _open_pdf(fitz, pdf_path, "페이지 렌더")  # 잡 오류 메시지로도 경로가 새지 않게
+    pool = pdf_worker.current_pool()
+    timeout = pdf_worker.page_timeout()
     try:
-        if doc.needs_pass:
-            raise ValueError("암호화된 PDF는 지원하지 않습니다")
-        n = doc.page_count
-        if n == 0:
-            raise ValueError("페이지가 없는 PDF입니다")
-        if n > max_pages:
-            raise ValueError(f"페이지 수({n})가 상한({max_pages})을 초과합니다")
-        out: list[Path] = []
-        failed_pages: list[int] = []
-        last_err: Exception | None = None
-        for i in range(n):
-            p = pages_dir / f"page_{i + 1:04d}.png"
-            try:
-                page = doc[i]
-                rect = page.rect
-                # pix 생성 전에 목표 픽셀 수를 계산 — 상한 초과 시 비율 유지 축소
-                # (probe의 치수 검사를 통과한 페이지도 고 dpi에선 넘을 수 있다)
-                scale, target = _capped_scale(rect.width, rect.height, dpi)
-                if target > MAX_RENDER_PIXELS:
-                    logger.warning(
-                        "페이지 %d/%d: 렌더 %dpx가 페이지당 상한(%dpx)을 초과 — "
-                        "비율 유지 축소 (배율 %.3f→%.3f)",
-                        i + 1, n, target, MAX_RENDER_PIXELS, dpi / 72, scale)
-                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
-                pix.save(str(p))
-            except Exception as e:  # noqa: BLE001 — 페이지 단위 격리
-                failed_pages.append(i + 1)
-                last_err = e
-                logger.warning("페이지 %d/%d 렌더 실패 (%s: %s) — 흰색 페이지로 대체",
-                               i + 1, n, e.__class__.__name__, str(e)[:200])
-                _write_blank_page(doc, i, p, dpi)
-            out.append(p)
-            if progress_cb:
-                progress_cb(i + 1, n)
-        if len(failed_pages) == n:
-            raise ValueError(f"모든 페이지({n}) 렌더에 실패했습니다: {last_err}") from last_err
-        # 흰 페이지 대체는 조용한 품질 저하다 — 로그만으로는 사용자가 알 수 없어
-        # 병합기가 승계할 수 있게 파일로 남긴다 (없으면 파일 삭제 = 경고 없음).
-        messages: list[str] = []
-        if failed_pages:
-            listed = ", ".join(str(p) for p in failed_pages[:_MAX_LISTED_FAILED_PAGES])
-            more = (
-                f" 외 {len(failed_pages) - _MAX_LISTED_FAILED_PAGES}쪽"
-                if len(failed_pages) > _MAX_LISTED_FAILED_PAGES
-                else ""
+        sizes = pdf_worker.run(
+            "app.pipeline.pdf:render_open_local", (pdf_path, max_pages),
+            pool=pool, timeout=timeout, cancel=should_cancel,
+        )
+    except pdf_worker.PdfWorkerCanceled:
+        _raise_job_canceled()
+    except pdf_worker.PdfWorkerTimeout as e:
+        raise ValueError(
+            f"PDF를 여는 데 시간 상한({_limit_text(timeout)})을 넘었습니다 — 손상되었거나 "
+            "지나치게 복잡한 PDF입니다"
+        ) from e
+    except pdf_worker.PdfWorkerCrashed as e:
+        raise ValueError(_OPEN_FAILED) from e
+    n = len(sizes)
+    out: list[Path] = []
+    failed_pages: list[int] = []
+    timed_out: list[int] = []
+    last_err: Exception | None = None
+    for i in range(n):
+        p = pages_dir / f"page_{i + 1:04d}.png"
+        try:
+            pdf_worker.run_page(
+                "app.pipeline.pdf:render_page_local", pdf_path, i, (p, dpi, n),
+                pool=pool, cancel=should_cancel,
             )
-            messages.append(
-                f"{len(failed_pages)}/{n}페이지 렌더에 실패해 흰 페이지로 대체했습니다 "
-                f"({listed}{more}) — 해당 페이지의 인식 결과가 비어 있거나 부정확할 수 있습니다"
-            )
-        _write_render_warnings(pages_dir, messages)
-        return out
-    finally:
-        doc.close()
-        drain_mupdf_warnings("페이지 렌더")
+        except pdf_worker.PdfWorkerCanceled:
+            _raise_job_canceled()
+        except pdf_worker.PdfWorkerTimeout as e:  # 격리 메모(PdfPageQuarantined) 포함
+            timed_out.append(i + 1)
+            last_err = e
+            logger.warning("페이지 %d/%d 렌더가 시간 상한을 넘어 흰색 페이지로 대체 (%s)",
+                           i + 1, n, e)
+            _write_blank_page(p, sizes[i], dpi)
+        except Exception as e:  # noqa: BLE001 — 페이지 단위 격리(워커 비정상 종료 포함)
+            failed_pages.append(i + 1)
+            last_err = e
+            logger.warning("페이지 %d/%d 렌더 실패 (%s: %s) — 흰색 페이지로 대체",
+                           i + 1, n, e.__class__.__name__, str(e)[:200])
+            _write_blank_page(p, sizes[i], dpi)
+        out.append(p)
+        if progress_cb:
+            progress_cb(i + 1, n)
+        if len(timed_out) >= _MAX_RENDER_TIMEOUTS and len(timed_out) < n:
+            raise ValueError(
+                f"페이지 {len(timed_out)}개의 렌더가 시간 상한({_limit_text(timeout)})을 넘어 처리를 "
+                f"중단했습니다 ({_listed_pages(timed_out)}) — 지나치게 복잡한 PDF입니다 "
+                "(PDF_PAGE_TIMEOUT_S)"
+            ) from last_err
+    if len(failed_pages) + len(timed_out) == n:
+        raise ValueError(f"모든 페이지({n}) 렌더에 실패했습니다: {last_err}") from last_err
+    # 흰 페이지 대체는 조용한 품질 저하다 — 로그만으로는 사용자가 알 수 없어
+    # 병합기가 승계할 수 있게 파일로 남긴다 (없으면 파일 삭제 = 경고 없음).
+    messages: list[str] = []
+    if failed_pages:
+        messages.append(
+            f"{len(failed_pages)}/{n}페이지 렌더에 실패해 흰 페이지로 대체했습니다 "
+            f"({_listed_pages(failed_pages)}) — 해당 페이지의 인식 결과가 비어 있거나 "
+            "부정확할 수 있습니다"
+        )
+    if timed_out:
+        messages.append(
+            f"{len(timed_out)}/{n}페이지가 렌더 시간 상한({_limit_text(timeout)})을 넘어 흰 페이지로 "
+            f"대체했습니다 ({_listed_pages(timed_out)}) — 지나치게 복잡한 페이지라 인식 결과가 "
+            "비어 있습니다 (PDF_PAGE_TIMEOUT_S)"
+        )
+    _write_render_warnings(pages_dir, messages)
+    return out
+
+
+def _raise_job_canceled():
+    """워커 취소 → 러너의 취소 계약(JobCanceled). 엔진 계층은 이 경로에서만 지연 임포트한다."""
+    from ..engine.base import JobCanceled
+
+    raise JobCanceled() from None

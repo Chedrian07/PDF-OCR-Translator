@@ -185,3 +185,13 @@ def test_failed_startup_reaps_already_started_children(tmp_path, monkeypatch, re
     assert not orphans, f"기동 실패 후 남은 자식 프로세스: {orphans}"
     if servers.api_log is not None:
         assert servers.api_log.closed
+
+
+def test_non_operator_app_keys_are_scrubbed_too():
+    """.env.example에 없는 앱 키(env 계약의 NOT_OPERATOR_KNOBS)도 셸 값이 새지 않는다 — 특히
+    PDF_WORKER_MODE=inline(테스트 세션 값)이 새면 하네스가 PyMuPDF 격리를 끈 채 검증한다."""
+    from test_ci_ops_contracts import NOT_OPERATOR_KNOBS
+
+    assert NOT_OPERATOR_KNOBS <= harness._UNDOCUMENTED_APP_KEYS
+    env = _backend({"PATH": "/bin", "PDF_WORKER_MODE": "inline", "FAKE_DELAY": "9"})
+    assert "PDF_WORKER_MODE" not in env and "FAKE_DELAY" not in env

@@ -1439,6 +1439,16 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
 }
 .reader-load-error strong { color: var(--text); font-size: 14px; }
 .reader-load-error p { max-width: 40ch; font-size: 12px; }
+/* 결과 탭의 일시 실패 안내 — 언어 선택은 유지한 채 [다시 시도](+ [원문 보기])를 준다 */
+.load-failure {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 28px 16px;
+  text-align: center;
+}
+.load-failure p { max-width: 46ch; margin: 0; font-size: 12.5px; }
+.load-failure-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .reader-document,
 .reader-research {
   min-width: 0;

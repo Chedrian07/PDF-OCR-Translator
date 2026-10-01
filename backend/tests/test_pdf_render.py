@@ -242,6 +242,62 @@ def test_normal_a4_unaffected_by_size_caps(tmp_path, caplog):
     assert not any("축소" in r.message for r in caplog.records)
 
 
+def _png_header_only(width: int, height: int) -> bytes:
+    """IHDR만 있는 PNG — 디코드 전에 선언 크기만으로 할당을 유도하는 압축 폭탄 헤더."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(kind + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IEND", b"")
+
+
+def test_pillow_decompression_limit_follows_the_render_cap(tmp_path):
+    """앱이 PIL로 여는 이미지는 렌더 상한 이하의 페이지 PNG와 그 크롭뿐이다 — Pillow
+    기본값(약 8,950만 px, 2배에서 오류) 대신 렌더 상한에 맞춘 값으로 거대한 선언
+    크기·crop 좌표를 할당 전에 끊는다."""
+    from PIL import Image
+
+    from app.pipeline.pdf import MAX_RENDER_PIXELS, PIL_MAX_IMAGE_PIXELS
+
+    assert Image.MAX_IMAGE_PIXELS == PIL_MAX_IMAGE_PIXELS
+    assert MAX_RENDER_PIXELS < PIL_MAX_IMAGE_PIXELS <= MAX_RENDER_PIXELS * 1.1
+
+    bomb = tmp_path / "bomb.png"
+    # 1.21억 px 선언 — Pillow 기본값(오류 1.79억 px)으로는 경고만 내고 통과하던 크기
+    bomb.write_bytes(_png_header_only(11_000, 11_000))
+    with pytest.raises(Image.DecompressionBombError):
+        Image.open(bomb)
+
+    # 벤더 draw_bounding_boxes처럼 검증 없는 좌표로 crop해도 할당 전에 막힌다
+    # (1.44억 px — 기본값이면 경고 뒤 432MB를 할당했다)
+    page = Image.new("RGB", (100, 140), "white")
+    with pytest.raises(Image.DecompressionBombError):
+        page.crop((0, 0, 12_000, 12_000))
+
+
+def test_capped_render_still_opens_without_bomb_warning(tmp_path):
+    """렌더 상한까지 축소된 대형 페이지(A0@300dpi)도 Pillow 경고 없이 열린다 —
+    축소 반올림으로 상한을 수천 px 넘는 것까지 여유에 들어온다."""
+    import warnings
+
+    from PIL import Image
+
+    from app.pipeline.pdf import MAX_RENDER_PIXELS
+
+    a0 = _write_pdf_sized(tmp_path, 2384, 3370, "a0.pdf")
+    out = render_pdf_pages(a0, tmp_path / "pages", dpi=300, max_pages=10)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        with Image.open(out[0]) as im:
+            w, h = im.size
+            im.crop((0, 0, w, h)).close()
+    assert w * h >= MAX_RENDER_PIXELS * 0.99
+
+
 def _write_broken_cid_pdf(tmp_path):
     """손상 CID 폰트 PDF 픽스처 — pymupdf로 1회 재저장해 xref를 정규화한다
     (리페어 잡음 제거, 손상 폰트 객체는 보존 → 남는 경고는 cid 에러뿐)."""

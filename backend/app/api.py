@@ -683,7 +683,11 @@ async def job_events(request: Request, job_id: str) -> StreamingResponse:
                         })
                     # 방금 꺼낸 token은 히스토리에 이미 들어 있다(publish가 같은
                     # 락에서 히스토리 먼저 갱신) — 다시 보내면 replay와 중복된다.
-                    if item is not None and item[0] == "token":
+                    # reset도 마찬가지다(resync가 큐 안의 reset을 버리는 규칙과 같다):
+                    # truncate가 publish보다 먼저 같은 락에서 일어나 replay는 이미 절단된
+                    # 상태다. 늦게 보내면 방금 받은 재처리 페이지 마커를 클라이언트가
+                    # 다시 잘라, 잡이 끝날 때까지 라이브 뷰 페이지 귀속이 한 칸씩 밀린다.
+                    if item is not None and item[0] in ("token", "reset"):
                         continue
                 if item is None:
                     # 방어: 종료 이벤트 없이 잡이 사라졌으면(삭제 경합) 스트림을 닫는다 —

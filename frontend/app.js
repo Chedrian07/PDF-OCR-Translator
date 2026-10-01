@@ -30,8 +30,8 @@ import {
   onPageImgError, onPageImgLoad, onPreviewScroll, onStreamScroll, pageNav, updateLeftPane,
 } from './js/live.js';
 import {
-  armDelete, deleteJob, openJob, pollJobs, refreshJobs, requestCancel, showEmptyState,
-  toggleJobWarnings,
+  armDelete, deleteJob, loadMoreJobs, openJob, pollJobs, refreshJobs, requestCancel,
+  showEmptyState, toggleJobWarnings,
 } from './js/jobs.js';
 import { teardownConnections } from './js/sse.js';
 import { cancelTranslate, setLang, startTranslate } from './js/translate.js';
@@ -82,6 +82,7 @@ function init() {
   setupTabs();
 
   el.uploadBtn.addEventListener('click', handleUpload);
+  el.jobListMore.addEventListener('click', loadMoreJobs); // 최신 50건 뒤의 기록을 한 쪽씩 더
   el.streamPane.addEventListener('scroll', onStreamScroll, { passive: true });
   el.livePreview.addEventListener('scroll', onPreviewScroll, { passive: true });
   el.jobStop.addEventListener('click', requestCancel);

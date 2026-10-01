@@ -621,16 +621,33 @@ async def create_job(
     return {"job_id": job.id, "status": job.status}
 
 
+_JOB_LIST_LIMIT_MAX = 500
+
+
 @router.get("/jobs")
-def list_jobs(request: Request) -> dict:
+def list_jobs(request: Request, limit: int = 50, before: str | None = None) -> dict:
+    """최신순 잡 목록. 기본은 예전과 같은 최신 50건이다.
+
+    선택 쿼리: limit(1–500), before=<잡 ID>(그 잡 다음부터 — '더 보기' 커서).
+    추가 필드: has_more(뒤에 더 있는가), total(전체 잡 수). 커서 잡이 없으면 422."""
+    if not 1 <= limit <= _JOB_LIST_LIMIT_MAX:
+        raise HTTPException(422, f"limit은 1–{_JOB_LIST_LIMIT_MAX} 범위여야 합니다")
     # 목록은 잡별 페이지/이미지 URL 전수 스캔이 필요 없다(프런트는 단건 조회에서 쓴다).
     # 폴링마다 잡×디렉터리 전체를 훑던 비용을 없앤다 — 응답 키는 그대로 유지된다.
     store = _state(request).store
+    try:
+        jobs, has_more, total = store.page(limit, before)
+    except KeyError:
+        raise HTTPException(
+            422, "before에 해당하는 잡이 없습니다 — 목록을 처음부터 다시 조회하세요",
+        ) from None
     return {
         "jobs": [
             j.to_dict(queue_position=store.queue_position(j), include_files=False)
-            for j in store.list()
-        ]
+            for j in jobs
+        ],
+        "has_more": has_more,
+        "total": total,
     }
 
 

@@ -45,6 +45,9 @@ MuPDF C 호출은 GIL을 쥔 채 돌고(`nm -u _mupdf.so`에 PyEval_SaveThread�
   engine.textlayer — torch·mlx·app.main·설정/LLM 계층은 끌어오지 않는다).
 - 로그는 stderr로(서버 콘솔·docker logs에 그대로 섞인다), 프로세스 이름(pdf-ocr-1 등)을 붙인다.
 - SIGINT는 무시한다(개발 서버 Ctrl+C는 부모가 정리한다).
+- 임시 파일(tempfile — 폰트 서브셋 등)은 워커 전용 디렉터리(시스템 임시 경로의
+  pdfocr-worker-<풀>-<pid>)에 만든다. 상한 초과로 종료된 워커는 정리 코드를 못 돌리므로
+  부모가 그 디렉터리를 지우고, 이전 서버가 SIGKILL로 남긴 것은 첫 풀 생성 때 쓸어 낸다.
 - 작업마다 `signal.alarm(상한 + 여유)`를 건다. SIGALRM 기본 동작은 커널이 프로세스를 끝내는
   것이라 GIL이 필요 없다 — 부모가 SIGKILL로 사라져 아무도 죽여 주지 않아도 적대적 작업이 영원히
   CPU를 태우지 않는다.
@@ -71,8 +74,10 @@ import math
 import multiprocessing
 import os
 import pickle
+import shutil
 import signal
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -458,6 +463,55 @@ def _prefer_oom_kill() -> None:
         Path("/proc/self/oom_score_adj").write_text("1000", encoding="ascii")
 
 
+_SCRATCH_PREFIX = "pdfocr-worker-"
+
+
+def _scratch_dir(pool_name: str, pid: int) -> Path:
+    """워커 전용 임시 디렉터리 — 부모·워커가 같은 규칙으로 찾는다(TMPDIR 상속)."""
+    return Path(tempfile.gettempdir()) / f"{_SCRATCH_PREFIX}{pool_name}-{pid}"
+
+
+def _use_scratch_dir(pool_name: str) -> Path | None:
+    """(워커) tempfile 기본 경로를 워커 전용 디렉터리로 돌린다."""
+    scratch = _scratch_dir(pool_name, os.getpid())
+    try:
+        scratch.mkdir(mode=0o700, exist_ok=True)
+    except OSError:
+        return None
+    tempfile.tempdir = str(scratch)
+    return scratch
+
+
+_SWEPT_SCRATCH = False
+_SWEPT_GUARD = threading.Lock()
+
+
+def _sweep_orphan_scratch() -> None:
+    """이전 서버가 SIGKILL로 남긴 워커 임시 디렉터리를 지운다(그 pid가 살아 있으면 둔다)."""
+    global _SWEPT_SCRATCH
+    with _SWEPT_GUARD:
+        if _SWEPT_SCRATCH:
+            return
+        _SWEPT_SCRATCH = True
+    try:
+        entries = list(Path(tempfile.gettempdir()).glob(f"{_SCRATCH_PREFIX}*-*"))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            pid = int(entry.name.rsplit("-", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        try:
+            os.kill(pid, 0)
+            continue  # 살아 있는 프로세스(다른 서버의 워커일 수 있다)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            continue  # 권한 없음 = 다른 사용자의 살아 있는 프로세스
+        shutil.rmtree(entry, ignore_errors=True)
+
+
 def _configure_child_logging(level: int) -> None:
     logging.basicConfig(
         level=level,
@@ -488,6 +542,7 @@ def _child_main(conn, pool_name: str, mem_limit_mb: int, log_level: int) -> None
     _configure_child_logging(log_level)
     _apply_memory_limit(mem_limit_mb)
     _prefer_oom_kill()
+    scratch = _use_scratch_dir(pool_name)
     try:
         while True:
             try:
@@ -527,6 +582,8 @@ def _child_main(conn, pool_name: str, mem_limit_mb: int, log_level: int) -> None
         _close_cached_document()
         with contextlib.suppress(Exception):
             conn.close()
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
 # ── 부모 쪽: 워커 하나 ─────────────────────────────────────────────────────
@@ -547,6 +604,7 @@ class _WorkerProcess:
     def __init__(self, pool_name: str, index: int) -> None:
         ctx = multiprocessing.get_context("spawn")
         parent_conn, child_conn = ctx.Pipe(duplex=True)
+        self.pool_name = pool_name
         self.name = f"pdf-{pool_name}-{index}"
         self.process = ctx.Process(
             target=_child_main,
@@ -665,8 +723,12 @@ class _WorkerProcess:
             self.conn.close()
         try:
             if not self.process.is_alive():
+                pid = self.process.pid
                 self.last_exitcode = self.process.exitcode
                 self.process.close()
+                if pid is not None and self.last_exitcode not in (None, 0):
+                    # 종료당한 워커는 자기 임시 디렉터리를 못 지웠다(폰트 서브셋 등)
+                    shutil.rmtree(_scratch_dir(self.pool_name, pid), ignore_errors=True)
         except ValueError:
             pass
 
@@ -855,7 +917,12 @@ def get_pool(name: str) -> WorkerPool:
         pool = _POOLS.get(name)
         if pool is None:
             pool = _POOLS[name] = WorkerPool(name, size)
-        return pool
+            created = True
+        else:
+            created = False
+    if created:
+        _sweep_orphan_scratch()
+    return pool
 
 
 def shutdown_pools(timeout: float = 2.0) -> None:

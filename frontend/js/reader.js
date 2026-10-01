@@ -14,8 +14,8 @@ import {
 } from './core.js';
 import { el, state } from './state.js';
 import {
-  copyTextToClipboard, downloadTextFile, h, localGet, localSet, nowMs, setDownload, showToast,
-  typesetMath,
+  copyTextToClipboard, downloadTextFile, h, localGet, localSet, nowMs, setDownload, setTrustedHtml,
+  showToast, typesetMath,
 } from './ui.js';
 import { apiGet, fetchTextWithBusyRetry } from './api.js';
 import { loadReaderNotes, saveReaderNotes } from './notes.js';
@@ -873,7 +873,8 @@ export function renderRailFlowContent(page, section, body, pages, transient = fa
     (pages.length === 1 && page === 1 ? pages[0] : null);
   if (entry) {
     // Trusted server-rendered fragment (/html — 미리보기 탭과 동일한 신뢰 경계).
-    body.innerHTML = entry.html;
+    // 외부 이미지 src는 붙이기 전에 막는다(frontend-3).
+    setTrustedHtml(body, entry.html);
     if (transient) {
       body.prepend(h('p', {
         class: 'reader-rail-retry-note muted',

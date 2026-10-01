@@ -12,8 +12,10 @@ layout·figure). 모델 코드는 app/vendor/unlimited_ocr_mlx이고, torch 벤�
 - 반복 감지: SemanticRepetitionDetector에 torch와 같은 순서(텍스트 먼저, 토큰 수 다음)로
   공급하고, 감지되면 생성을 멈춰 RepetitiveOutputError를 던진다.
 - 취소·반복 감지는 토큰마다 확인한다 — 멈출 때 버리는 GPU 스텝은 최대 1개(약 3 ms).
-- torch와 다른 점: MAX_LENGTH에서 EOS 없이 끊기면 OutputLimitError를 던진다. 잘린 출력은
-  마지막 페이지(들)가 조용히 빠진 상태라 채택하지 않고 runner가 페이지 단위로 복구한다.
+- MAX_LENGTH에서 EOS 없이 끊기면 torch와 똑같이 OutputLimitError를 던진다. 잘린 출력은
+  마지막 페이지(들)가 조용히 빠진 상태라 그대로 채택하지 않는다 — multi는 잘린 출력을
+  partial_output으로 실어 runner가 끝까지 생성된 앞 페이지를 살리고 잘린 페이지부터
+  페이지 단위로 다시 처리한다.
 
 mlx는 load() 이후에만 임포트한다 — Linux·Docker에서 이 모듈을 임포트해도(registry의
 auto 판정 등) mlx·torch·transformers가 올라오지 않는다.
@@ -291,8 +293,14 @@ class UnlimitedMLXEngine(OCREngine):
         cancel: threading.Event,
         repetition: SemanticRepetitionDetector,
         label: str,
+        *,
+        multi: bool = False,
     ):
-        """vendor infer 호출 1회 + 스트리밍·취소·반복 감지·잘림 판정 (run_multi/run_single 공통)."""
+        """vendor infer 호출 1회 + 스트리밍·취소·반복 감지·잘림 판정 (run_multi/run_single 공통).
+
+        multi=True(run_multi)면 MAX_LENGTH 잘림의 OutputLimitError에 잘린 출력(run_multi
+        형식, 산출물은 out_dir에 이미 저장됨)을 partial_output으로 싣는다 — runner가 끝까지
+        생성된 앞 페이지를 살린다. single은 페이지가 하나라 살릴 앞 페이지가 없다."""
         self.last_generation = None  # 생성 전에 실패해도 이전 실행의 통계가 남지 않게
         streamer = make_sink_streamer(self._tokenizer, sink, repetition, self._eos_text)
 
@@ -330,7 +338,8 @@ class UnlimitedMLXEngine(OCREngine):
         if gen.hit_max_length:
             raise OutputLimitError(
                 f"생성이 MAX_LENGTH={self._settings.max_length} 토큰(프롬프트 "
-                f"{gen.prompt_length} + 생성 {len(gen.token_ids)})에 닿아 출력이 잘렸습니다"
+                f"{gen.prompt_length} + 생성 {len(gen.token_ids)})에 닿아 출력이 잘렸습니다",
+                partial_output=(result.text or "") if multi else None,
             )
         return result
 
@@ -369,7 +378,9 @@ class UnlimitedMLXEngine(OCREngine):
                 should_stop=should_stop,
             )
 
-        result = self._generate(call, sink, cancel, repetition, f"multi {len(image_paths)}쪽")
+        result = self._generate(
+            call, sink, cancel, repetition, f"multi {len(image_paths)}쪽", multi=True,
+        )
         return result.text or ""
 
     def run_single(

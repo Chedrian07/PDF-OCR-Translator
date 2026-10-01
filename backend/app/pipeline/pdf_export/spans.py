@@ -53,8 +53,33 @@ def _source_span_records(fitz, page) -> list[_SourceSpan]:
                         int(span.get("flags") or 0),
                         (float(origin[0]), float(origin[1])),
                         direction,
+                        _span_is_visible(span),
                     ))
     return out
+
+
+# MuPDF char_flags의 칠하기/긋기 비트. 둘 다 없으면(렌더 모드 3) 화면에 그려지지 않는다.
+_CHAR_FILLED = 16
+_CHAR_STROKED = 32
+
+
+def _span_is_visible(span: dict) -> bool:
+    """span이 화면에 실제로 칠해지는가.
+
+    스캔 PDF에 Acrobat·ABBYY·ocrmypdf가 얹는 OCR 텍스트 레이어는 렌더 모드 3(투명)
+    이라 alpha가 0이고 칠하기·긋기 비트가 없다(클리핑 전용 모드 7도 alpha 0).
+    그런 span만 가진 블록의 원문은 래스터 픽셀이므로 텍스트 리댁션으로 지울 수 없다.
+    정보가 없으면 보이는 것으로 본다(예전 동작).
+    """
+    try:
+        if int(span.get("alpha", 255)) == 0:
+            return False
+        flags = span.get("char_flags")
+        if flags is not None and not int(flags) & (_CHAR_FILLED | _CHAR_STROKED):
+            return False
+    except (TypeError, ValueError):
+        return True
+    return True
 
 
 def _source_span_rects(fitz, page) -> list[object]:

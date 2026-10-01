@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -79,6 +80,11 @@ class Job:
     # submit()되므로 생성 순서와 어긋날 수 있다 — queue_position이 이 값을 쓴다.
     # 아직 제출 전(업로드 중)이면 None.
     submit_seq: int | None = None
+    # 이 잡의 result.md를 조립한 페이지 구분자(PAGE_SEPARATOR) — 생성 시점 값을 meta에
+    # 고정한다. 예전에는 읽는 쪽(/html·Q&A·번역)이 모두 **현재** 설정을 써서, 운영자가
+    # 값을 바꾸면 기존 잡 전부의 페이지 분할이 깨졌다(Q&A가 다른 페이지를 근거로 답하는
+    # 조용한 오답 포함). None = 알 수 없음(호출자가 현재 설정으로 대신한다).
+    page_separator: str | None = None
     # 업로드·검증(probe)을 마치고 워커 큐에 제출됐는가 — meta.json에 기록된다.
     # create()가 업로드 본문을 받기 **전에** queued meta를 쓰므로, 재시작 시 '대기열에
     # 들어갔지만 시작하지 못한 잡'(다시 제출해도 안전)과 '업로드 도중 죽은 잡'(부분
@@ -164,6 +170,7 @@ class Job:
             "model_revision": self.model_revision,
             "provider": self.provider,
             "submitted": self.submitted,
+            "page_separator": self.page_separator,
         }
 
 
@@ -176,12 +183,16 @@ class JobStore:
         self._lock = threading.RLock()
 
     def create(
-        self, filename: str, mode: str, dpi: int, engine_info: dict | None = None
+        self, filename: str, mode: str, dpi: int, engine_info: dict | None = None,
+        page_separator: str | None = None,
     ) -> Job:
         job_id = f"j_{uuid.uuid4().hex[:12]}"
         job_dir = self.jobs_dir / job_id
         job_dir.mkdir(parents=True)
-        job = Job(id=job_id, filename=filename, mode=mode, dpi=dpi, dir=job_dir)
+        job = Job(
+            id=job_id, filename=filename, mode=mode, dpi=dpi, dir=job_dir,
+            page_separator=page_separator,
+        )
         if engine_info:
             job.engine = engine_info.get("engine")
             job.model_id = engine_info.get("model_id")
@@ -294,6 +305,19 @@ class JobStore:
             if not isinstance(e, FileNotFoundError):
                 logger.warning("잡 메타 기록 실패: %s (%s)", job.id, e)
 
+    def _save_preserving_mtime(self, job: Job, meta_path: Path) -> None:
+        """meta를 다시 쓰되 mtime은 되돌린다 — 터미널 잡의 meta.json mtime은 TTL GC의
+        '마지막 활동' 시계라, 이식(migration) 기록이 보존 기한을 늘리면 안 된다."""
+        try:
+            before = meta_path.stat()
+        except OSError:
+            return
+        self.save(job)
+        try:
+            os.utime(meta_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        except OSError:
+            pass
+
     def remove(self, job_id: str) -> None:
         with self._lock:
             self._jobs.pop(job_id, None)
@@ -348,14 +372,18 @@ class JobStore:
             removed += 1
         return removed
 
-    def load_existing(self) -> list[Job]:
+    def load_existing(self, default_page_separator: str | None = None) -> list[Job]:
         """서버 재시작 시 디스크의 잡 복원. 실행 중이던 잡은 오류로 마킹한다.
 
         업로드·검증을 마치고 대기열에 들어갔지만(submitted) 시작하지 못한 queued 잡은
         대기 상태 그대로 두고 생성 순서로 돌려준다 — 호출자(앱 조립)가 워커에 다시
         제출한다. 예전에는 이런 잡까지 '서버 재시작으로 중단' 오류로 확정해, 긴 잡 뒤에
         줄 세워 둔 PDF를 재시작(이미지 갱신·make dev 리로드)마다 다시 올려야 했다.
-        제출 표식이 없는(업로드 도중 죽은) 잡은 원본이 부분일 수 있어 예전처럼 오류다."""
+        제출 표식이 없는(업로드 도중 죽은) 잡은 원본이 부분일 수 있어 예전처럼 오류다.
+
+        default_page_separator: 페이지 구분자를 기록하기 전에 만든 잡에 고정할 값(보통
+        현재 설정 — 그 잡이 만들어진 값의 가장 그럴듯한 추정). 한 번 meta에 남겨, 이후
+        설정이 바뀌어도 그 잡의 페이지 분할이 따라 바뀌지 않게 한다."""
         restored: list[Job] = []
         if not self.jobs_dir.is_dir():
             return restored
@@ -383,7 +411,11 @@ class JobStore:
                     engine=m.get("engine"), model_id=m.get("model_id"),
                     model_revision=m.get("model_revision"), provider=m.get("provider"),
                     submitted=bool(m.get("submitted")),
+                    page_separator=m.get("page_separator"),
                 )
+                if job.page_separator is None and default_page_separator is not None:
+                    job.page_separator = default_page_separator
+                    self._save_preserving_mtime(job, meta_path)
                 if job.status == "queued" and job.submitted and _source_intact(d):
                     with self._lock:
                         self._jobs[job.id] = job
@@ -627,6 +659,14 @@ class Worker(threading.Thread):
         self.load_state = load_state
         self._queue: queue.Queue = queue.Queue()
 
+    def _settings_for(self, job: Job) -> "Settings":
+        """이 잡을 실행할 설정 — 페이지 구분자는 잡에 고정된 값을 쓴다(재시작으로 다시
+        제출된 대기 잡이 바뀐 PAGE_SEPARATOR로 조립되면 meta와 result.md가 어긋난다)."""
+        separator = job.page_separator
+        if not separator or separator == self.settings.page_separator:
+            return self.settings
+        return dataclasses.replace(self.settings, page_separator=separator)
+
     def submit(self, job: Job) -> None:
         self.cancel_events.setdefault(job.id, threading.Event())
         self.store.mark_submitted(job)
@@ -703,7 +743,7 @@ class Worker(threading.Thread):
                     self.store.save(job)
                     self.broker.publish(job_id, "error", {"message": job.error})
                     continue
-                execute_job(job, self.store, self.broker, self.engine, self.settings, cancel)
+                execute_job(job, self.store, self.broker, self.engine, self._settings_for(job), cancel)
             except Exception:  # noqa: BLE001 — 워커 스레드 영구 정지 방지
                 logger.exception("잡 처리 중 예기치 못한 오류: %s", job_id)
                 # 메모리 상 running으로 남으면 DELETE도 거부돼(api의 running 가드)

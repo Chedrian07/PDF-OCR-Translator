@@ -4,13 +4,13 @@ import {
   jobRowSignature, parseViewerSearch, progressPhaseText, statusLabel, warningSegments,
 } from './core.js';
 import { armTimers, el, state } from './state.js';
-import { h, isTerminal, localGet, localRemove, showToast } from './ui.js';
+import { h, isTerminal, localGet, localRemove, safeParse, showToast } from './ui.js';
 import { POLL_TIMEOUT_MS, apiDelete, apiGet } from './api.js';
 import {
   drainGroundToUI, flushStream, renderOverlay, resetLiveState, retryPageImageIfNeeded,
   updateLeftPane,
 } from './live.js';
-import { startStream, teardownConnections } from './sse.js';
+import { onJobError, startStream, teardownConnections } from './sse.js';
 import { renderError, renderPartialResult, renderResult } from './results.js';
 import {
   readerIsActive, readerLangKey, readerTotal, resetReaderForJob, setReaderPage,
@@ -292,7 +292,12 @@ export function upsertJob(job) {
   renderJobList();
 }
 
+// 이 탭이 DELETE를 보내 응답을 기다리는 잡 — 서버가 같은 삭제를 SSE({deleted:true})로도
+// 알리므로, 그 이벤트가 먼저 와도 "다른 곳에서 삭제됨" 안내를 띄우지 않는다.
+const deletingJobs = new Set();
+
 export async function deleteJob(id) {
+  deletingJobs.add(id);
   try {
     await apiDelete(`/api/jobs/${id}`);
   } catch (e) {
@@ -301,21 +306,36 @@ export async function deleteJob(id) {
       return;
     }
     // 404 → already gone; fall through to local cleanup
+  } finally {
+    deletingJobs.delete(id);
   }
+  closeDeletedJob(id);
+  refreshJobs();
+}
+
+// 잡이 서버에서 지워졌다(이 탭의 삭제, 또는 다른 탭·API의 삭제를 알린 SSE {deleted:true}).
+// 목록·이어 읽기 위치·인용 메모를 정리하고, 열려 있던 화면(라이브 뷰·결과·전체 화면 뷰어)과
+// 구독(SSE·폴링·번역·질문)을 닫는다. 예전에는 다른 곳의 삭제가 '취소됨' 화면으로 그려져
+// 이미 없는 부분 결과를 계속 요청했다. remote면(SSE로 안 경우) 이유를 한 줄 알린다.
+// (404처럼 서버 쪽 사정으로 안 보이는 경우는 일시적일 수 있어 이 경로를 쓰지 않는다 —
+// 인용·하이라이트는 남겨 두고 보관 잡 수 상한이 결국 정리한다.)
+export function closeDeletedJob(id, options = {}) {
+  const wasOpen = state.currentJobId === id;
   removeJobFromList(id);
   localRemove(readerPosKey(id)); // 이어읽기 위치도 함께 정리 (localStorage 누수 방지)
-  // 사용자가 지운 잡의 인용·하이라이트도 함께 지운다. (404처럼 서버 쪽 사정으로 안 보이는
-  // 경우는 일시적일 수 있어 남겨 두고, 보관 잡 수 상한이 결국 정리한다.)
-  forgetReaderNotes(id);
-  if (state.currentJobId === id) {
+  forgetReaderNotes(id);         // 지운 잡의 인용·하이라이트도 함께 지운다
+  if (wasOpen) {
     teardownConnections();
     state.currentJobId = null;
     state.displayedStatus = null;
     state.displayedPhase = null;
+    state.cancelRequestedFor = null;
     showEmptyState();
     syncJobHash(null); // 삭제된 잡을 가리키는 해시 정리
   }
-  refreshJobs();
+  if (options.remote && wasOpen && !deletingJobs.has(id)) {
+    showToast('열려 있던 작업이 삭제되었습니다.', 'warn');
+  }
 }
 
 /* ============================ View switching ============================ */
@@ -687,11 +707,16 @@ export async function requestCancel() {
 
   let ok = false;
   let gone = false;
+  let reported = ''; // 202 본문의 status — 'canceling' | 'canceled' | 이미 끝난 잡의 터미널 상태
   try {
     const res = await fetch(`/api/jobs/${id}/cancel`, { method: 'POST' });
     ok = res.ok;
     gone = res.status === 404;
-  } catch (_) { /* network error */ }
+    if (ok) {
+      const data = safeParse(await res.text());
+      if (data && typeof data.status === 'string') reported = data.status;
+    }
+  } catch (_) { /* network error (본문 읽기 실패는 status 미상 — SSE·폴링이 마감한다) */ }
 
   if (state.currentJobId !== id) return;
   if (gone) {
@@ -709,6 +734,38 @@ export async function requestCancel() {
     state.cancelRequestedFor = null;
     setStopButton(state.displayedStatus);
     showToast('취소 요청에 실패했습니다.', 'error');
+    return;
   }
-  // success: the SSE error event (canceled:true) or status polling finalizes the UI
+  // 'canceling'(실행 중·모델 로딩 대기): 러너가 다음 확인 지점에서 마감하고 종료 SSE
+  // (canceled:true)나 상태 폴링이 화면을 마감한다. 'canceled'(워커가 아직 맡지 않은 대기 잡을
+  // 서버가 즉시 마감)나 이미 끝난 잡의 터미널 상태면 그 이벤트를 기다리지 않고 지금 그린다 —
+  // 폴링 강등·재연결 사이라 종료 이벤트를 놓친 화면이 '취소 중…'에 머물지 않게.
+  if (isTerminal(reported) && !isTerminal(state.displayedStatus)) {
+    await finalizeTerminalJob(id, reported);
+  }
+}
+
+// 서버가 끝났다고 답한 열린 잡을 마감한다 — 상세를 다시 받아 결과·오류·취소 화면을 그린다
+// (조회가 실패해도 취소는 응답대로 취소 화면으로). 그사이 SSE가 먼저 마감했으면 손대지 않는다.
+async function finalizeTerminalJob(id, reported) {
+  let job = null;
+  try {
+    job = await apiGet(`/api/jobs/${id}`, { timeoutMs: POLL_TIMEOUT_MS });
+  } catch (e) {
+    if (e && e.status === 404 && state.currentJobId === id) {
+      closeDeletedJob(id, { remote: true }); // 취소 직후 삭제됨
+      return;
+    }
+  }
+  if (state.currentJobId !== id || isTerminal(state.displayedStatus)) return;
+  if (job && isTerminal(job.status)) {
+    flushStream(true);
+    drainGroundToUI(true);
+    teardownConnections(); // SSE·폴링이 같은 마감을 다시 그리지 않게 먼저 닫는다
+    state.cancelRequestedFor = null;
+    renderJob(job);
+    refreshJobs();
+  } else if (reported === 'canceled') {
+    onJobError(id, { canceled: true });
+  }
 }

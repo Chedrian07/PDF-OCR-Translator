@@ -11,7 +11,7 @@
 CPU 백엔드 지원을 위해 벤더링 후 아래 패치를 적용했다.
 수정 대상 파일: **P1–P15는 `modeling_unlimitedocr.py`**, **P16–P20은
 `modeling_deepseekv2.py`**, **P21은 `modeling_unlimitedocr.py` + `deepencoder.py`**,
-**P22는 `modeling_unlimitedocr.py`**.
+**P22–P23은 `modeling_unlimitedocr.py`**.
 `configuration_deepseek_v2.py`·`conversation.py`는 원본 그대로다.
 (패치 지점은 소스에서 `grep -n "vendor patch P" *.py`로 전수 확인할 수 있다 —
 업스트림 갱신 시 이 목록이 아니라 grep 결과를 진리원으로 삼을 것.)
@@ -45,5 +45,6 @@ CPU 백엔드 지원을 위해 벤더링 후 아래 패치를 적용했다.
 | P21 | 추론 경로의 죽은 계산·중간 텐서 3곳 제거 — (a) (`modeling_unlimitedocr.py`) `forward`에서 `labels is None`이고 `q_len>1`(프리필)이면 `lm_head` 전에 `hidden_states[:, -1:, :]`로 자른다, (b) (`modeling_unlimitedocr.py`) `prepare_inputs_for_generation`의 `cache_position` 계산 삭제(`model_inputs`에 포함되지 않던 죽은 값), (c) (`deepencoder.py`) `SAM` neck 뒤 `net_2` 출력의 불필요한 `clone()` 제거(`net_3`은 입력을 in-place 변경하지 않고 `x2`는 이후 미사용) | (a) 프리필이 (시퀀스 × vocab) fp32 logits를 통째로 실체화해 페이지당 ~1GB급 VRAM 스파이크를 냈다 — 추론(HF generate·fast_decode)은 `[:, -1, :]`만 소비하므로 **출력 불변**, 학습(labels) 경로는 전체 유지. (b) 디코드 스텝마다 버려지는 `torch.arange` 디바이스 할당 제거 — 소비처가 없어 **동작 불변**. (c) 값이 같은 복사본 제거 — **비트 동일** |
 
 | P22 | (`modeling_unlimitedocr.py`) `draw_bounding_boxes`가 모델 좌표를 픽셀로 바꾼 뒤 **이미지 안으로 clamp** — `_clamp_box`: x/y = `int(v/999*size)`, x는 [0, W]·y는 [0, H]로 clamp, clamp 뒤 x2<=x1 또는 y2<=y1이면 퇴화 상자로 건너뜀(숫자가 아니거나(bool 포함)·비유한·4개가 아닌 좌표도 건너뜀). 건너뛴 image 상자와 좌표를 못 읽은 image ref도 크롭 번호(`img_idx`)는 소비 | **보안·견고성**: 모델 출력(PDF 내용으로 유도 가능)의 좌표가 그대로 `Image.crop`/`ImageDraw`로 가면 거대·음수 좌표가 페이지보다 큰 검정 크롭(메모리 폭주)이나 Pillow crop/paste 좌표 산술 오버플로(GHSA-6r8x-57c9-28j4 — Pillow 12.3.0에서 수정, 의존성 상향은 별도)에 닿는다(audit gap2-dependency-vuln-reachability-2). 번호 소비는 기존 crop 실패 시와 같은 규칙 — 마크다운 참조(`images/{prefix}{idx}.jpg`)·boxes.json 정렬 유지. 정상 좌표(0~999)의 결과는 불변. 같은 clamp 규칙을 MLX 엔진 이식이 공유한다 |
+| P23 | (`modeling_unlimitedocr.py`) `infer_multi`의 페이지 분할을 `outputs.split('<PAGE>')[1:]` → `_split_multi_pages(outputs)`로 교체 — 첫 마커 앞이 **공백뿐일 때만** 버린다(마커 0개면 출력 전체가 1쪽) | 업스트림은 첫 마커 앞을 항상 버려, 모델이 선행 마커를 생략하면 1쪽 내용이 result·raw_pages.json에서 조용히 사라지고 이후 페이지의 figure 크롭이 한 칸 앞 이미지(`images[page_idx]`)로 잘렸다(audit decode-correctness-7 — 실제 잡 11건에서는 미관측). 앱 `merge.split_pages`와 같은 규칙이라 벤더 산출물과 병합이 어긋나지 않는다(무작위 입력 동치 테스트). 선행 마커가 있는 정상 출력의 결과는 불변 |
 
 업스트림 갱신 시: 새 revision을 받아 이 패치들을 재적용하고 이 문서를 갱신할 것.

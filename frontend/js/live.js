@@ -1,10 +1,11 @@
 import {
-  BOX_COLORS, BOX_FALLBACK_COLOR, STREAM_PANE_MAX_NODES, STREAM_PANE_TRIM_SLACK,
+  BOX_COLORS, BOX_FALLBACK_COLOR, PREVIEW_RENDER_CONCURRENCY, STREAM_PANE_MAX_NODES,
+  STREAM_PANE_TRIM_SLACK,
 } from './constants.js';
 import {
   PAGE_MARKER, createGroundState, groundDrain, groundPush, livePageImageUrl, normalizeLabel,
-  planPreviewRender, replayExtendsRaw, streamPaneTrimCount, syncedStreamPageNo,
-  truncateRawToPage,
+  planPreviewRender, renderPagesInOrder, replayExtendsRaw, streamPaneTrimCount,
+  syncedStreamPageNo, truncateRawToPage,
 } from './core.js';
 import { el, state } from './state.js';
 import { h, sanitizeImageSources, typesetMath } from './ui.js';
@@ -486,6 +487,8 @@ export function stopLivePreview(message) {
 // arriving mid-flight mark it dirty and exactly one follow-up is scheduled.
 // 증분 렌더: 확정 페이지는 최초 1회만 POST해 HTML을 캐시하고, 이후에는
 // 미확정 꼬리만 재전송한다 — 누적 전체 재전송(O(n²)·2MB 413 루프)을 피한다.
+// 백로그(중간에 연 잡의 확정 페이지들)는 몇 장씩 겹쳐 보내고 받은 순서대로 바로
+// 반영한다 — 실패하면 그 앞까지는 남기고 다음 사이클이 실패한 페이지부터 잇는다.
 export async function runPreviewRender() {
   state.previewTimer = 0;
   if (state.previewInFlight || !state.previewDirty || state.previewStopped) return;
@@ -499,23 +502,42 @@ export async function runPreviewRender() {
   if (!plan.newPages.length && !plan.tailChanged) { maybeReschedulePreview(); return; }
 
   state.previewInFlight = true;
-  let failStatus = -1; // -1 = 실패 없음
-  const pageHtmls = [];
-  for (const p of plan.newPages) {
-    if (!p.md) { pageHtmls.push(''); continue; }
-    const r = await postPreviewRender(id, p.md);
-    if (state.currentJobId !== id || state.liveGen !== gen) { // 잡 전환 가드
-      state.previewInFlight = false;
-      maybeReschedulePreview();
-      return;
-    }
-    if (r.html == null) { failStatus = r.status; break; }
-    pageHtmls.push(r.html);
+  const isCurrent = () => state.currentJobId === id && state.liveGen === gen;
+  // 새 확정 페이지가 하나라도 붙으면 지금 꼬리(옛 미확정 본문)는 그 페이지와 겹친다 —
+  // 첫 반영 때 걷어낸다. 꼬리 내용이 그대로였다면 성공 뒤 같은 노드를 다시 붙인다.
+  const oldTail = state.previewTailNodes;
+  const oldTailMd = state.previewTailMd;
+  const oldTailSep = state.previewTailSep;
+  let tailDropped = false;
+  const dropTail = () => {
+    if (tailDropped) return;
+    tailDropped = true;
+    for (const n of oldTail) n.remove();
+    state.previewTailNodes = [];
+    state.previewTailMd = '';
+    state.previewTailSep = false;
+  };
+  const outcome = await renderPagesInOrder(
+    plan.newPages,
+    (p) => postPreviewRender(id, p.md),
+    (p, html) => {
+      dropTail();
+      state.previewPageCache.push(html); // p.idx === 캐시 길이 (순서 보장)
+      // 노드 목록도 같은 인덱스로 남긴다 — reset(재처리)이 그 페이지들만 걷어낸다
+      state.previewPageNodes.push(html ? appendPreviewFragment(html, p.sep) : []);
+    },
+    { concurrency: PREVIEW_RENDER_CONCURRENCY, isCurrent },
+  );
+  if (outcome.stale) { // 잡 전환·replay/reset 가드
+    state.previewInFlight = false;
+    maybeReschedulePreview();
+    return;
   }
+  let failStatus = outcome.failStatus; // -1 = 실패 없음
   let tailHtml = '';
   if (failStatus < 0 && plan.tailChanged && plan.tailMd) {
     const r = await postPreviewRender(id, plan.tailMd);
-    if (state.currentJobId !== id || state.liveGen !== gen) { // 잡 전환 가드
+    if (!isCurrent()) { // 잡 전환 가드
       state.previewInFlight = false;
       maybeReschedulePreview();
       return;
@@ -527,7 +549,7 @@ export async function runPreviewRender() {
 
   if (failStatus >= 0) {
     state.previewFails += 1;
-    state.previewDirty = true; // 전송하지 못한 조각은 다음 사이클에 재시도
+    state.previewDirty = true; // 전송하지 못한 조각은 다음 사이클에 재시도(받은 페이지는 유지)
     if (failStatus === 413) {
       stopLivePreview('문서가 커서 라이브 미리보기를 중단했습니다 — 완료 후 결과 탭에서 확인하세요');
     } else if (state.previewFails >= 5) {
@@ -539,23 +561,17 @@ export async function runPreviewRender() {
   }
   state.previewFails = 0;
 
-  // DOM 증분 적용: 확정 페이지 노드는 유지하고 꼬리 노드만 이동/교체한다.
-  const oldTail = state.previewTailNodes;
-  for (const n of oldTail) n.remove();
-  state.previewTailNodes = [];
-  plan.newPages.forEach((p, i) => {
-    state.previewPageCache.push(pageHtmls[i]); // p.idx === 캐시 길이 (순서 보장)
-    // 노드 목록도 같은 인덱스로 남긴다 — reset(재처리)이 그 페이지들만 걷어낸다
-    state.previewPageNodes.push(pageHtmls[i] ? appendPreviewFragment(pageHtmls[i], p.sep) : []);
-  });
   if (plan.tailChanged) {
+    dropTail();
     state.previewTailMd = plan.tailMd;
     state.previewTailSep = plan.tailSep;
     if (tailHtml) state.previewTailNodes = appendPreviewFragment(tailHtml, plan.tailSep);
-  } else {
-    // 꼬리 내용은 그대로인데 앞에 확정 페이지가 생긴 경우 — 같은 노드를 재부착
+  } else if (tailDropped) {
+    // 꼬리 내용은 그대로인데 앞에 확정 페이지가 생긴 경우 — 같은 노드를 끝에 재부착
     for (const n of oldTail) el.livePreview.appendChild(n);
     state.previewTailNodes = oldTail;
+    state.previewTailMd = oldTailMd;
+    state.previewTailSep = oldTailSep;
   }
   if (state.previewAutoScroll) el.livePreview.scrollTop = el.livePreview.scrollHeight;
   maybeReschedulePreview();

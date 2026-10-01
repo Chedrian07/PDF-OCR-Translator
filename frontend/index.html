@@ -300,6 +300,12 @@
             <summary id="translate-warnings-summary" class="result-notes-summary">번역 참고 사항</summary>
             <ul id="translate-warnings-list" class="result-notes-list"></ul>
           </details>
+          <!-- PDF 생성 리포트 — 대조 PDF를 받은 뒤 원문 보존 사유·스캔 원문 픽셀 지움·주의 문장
+               (GET /api/jobs/{id}/pdf/report). 알릴 것이 있을 때만 보인다 (JS가 채우고 표시/숨김) -->
+          <details id="pdf-report" class="result-notes" hidden>
+            <summary id="pdf-report-summary" class="result-notes-summary">PDF 생성 리포트</summary>
+            <ul id="pdf-report-list" class="result-notes-list"></ul>
+          </details>
 
           <div class="tabs" role="tablist" aria-label="결과 보기">
             <button class="tab active" role="tab" type="button" data-tab="reader" aria-selected="true">읽기</button>

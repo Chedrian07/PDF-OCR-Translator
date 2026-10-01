@@ -162,3 +162,64 @@ def test_export_reads_page_drawings_once_for_several_tables(tmp_path, monkeypatc
 
     assert result.table_cells_replaced == 4, result.report()
     assert calls == [0], calls
+
+
+def test_rich_prefix_trials_reuse_the_font_archive_and_extract_once(monkeypatch):
+    """run-in 굵은 라벨 시행마다 폰트 Archive를 다시 만들고 scratch를 두 번 추출하던 비용.
+
+    서브셋이 없는 환경에서는 시행마다 26MB 폰트를 다시 읽었다. 한 블록의 시행은
+    같은 폰트를 쓰므로 Archive는 한 번, scratch 페이지 추출은 시행당 한 번이다.
+    """
+    import pymupdf
+
+    from app.pipeline.pdf_export import _plan_rich_prefix, _resolve_font
+
+    fontfile, _name = _resolve_font("")
+    if fontfile is None:
+        pytest.skip("파일 기반 한글 폰트가 없다")
+    archives: list[tuple] = []
+
+    class CountingArchive(pymupdf.Archive):
+        # insert_htmlbox가 isinstance로 검사하므로 함수가 아니라 하위 클래스로 센다.
+        def __init__(self, *args, **kwargs):
+            archives.append(args)
+            super().__init__(*args, **kwargs)
+
+    trials: list[float] = []
+    real_insert = pymupdf.Page.insert_htmlbox
+
+    def counting_insert(self, *args, **kwargs):
+        result = real_insert(self, *args, **kwargs)
+        if result[0] >= 0 and result[1] >= 0.999:
+            trials.append(result[0])
+        return result
+
+    extractions: list[int] = []
+    real_get_text = pymupdf.Page.get_text
+
+    def counting_get_text(self, *args, **kwargs):
+        extractions.append(1)
+        return real_get_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(pymupdf, "Archive", CountingArchive)
+    monkeypatch.setattr(pymupdf.Page, "insert_htmlbox", counting_insert)
+    monkeypatch.setattr(pymupdf.Page, "get_text", counting_get_text)
+    page = pymupdf.open().new_page(width=PAGE_W, height=PAGE_H)
+    text = "굵은 라벨 다음에 이어지는 본문이 상자에 들어가려면 몇 번의 시행이 필요하다. " * 3
+    plan = _plan_rich_prefix(
+        page,
+        pymupdf.Rect(72, 100, 300, 130),
+        text.strip(),
+        ("", "굵은 라벨"),
+        10.0,
+        fontfile,
+        max_rect=pymupdf.Rect(72, 100, 300, 260),
+        lineheights=(1.52, 1.48, 1.44),
+    )
+
+    assert plan is not None
+    # Story가 내부에서 만드는 빈 Archive는 빼고, 폰트 파일을 읽은 것만 센다.
+    font_reads = [args for args in archives if args and str(args[0]) == fontfile]
+    assert len(font_reads) == 1, font_reads
+    assert trials, trials
+    assert len(extractions) == len(trials), (len(extractions), len(trials))

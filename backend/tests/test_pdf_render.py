@@ -188,6 +188,38 @@ def test_probe_pdf_limits(tmp_path):
         probe_pdf(bad, max_pages=10)
 
 
+def test_unopenable_pdf_message_does_not_leak_server_paths(tmp_path, caplog):
+    """MuPDF 예외 문자열('Failed to open file …/source.pdf')을 사용자 메시지에 붙이면
+    무인증 업로드 한 번으로 DATA_DIR 절대 경로가 400 응답·잡 오류로 새어 나간다."""
+    bad = tmp_path / "jobs" / "j_secret" / "source.pdf"
+    bad.parent.mkdir(parents=True)
+    bad.write_bytes(b"%PDF-1.4\n garbage only")
+
+    for call in (
+        lambda: probe_pdf(bad, max_pages=10),
+        lambda: render_pdf_pages(bad, tmp_path / "pages", dpi=72, max_pages=10),
+    ):
+        with caplog.at_level(logging.WARNING, logger="app.pipeline.pdf"):
+            with pytest.raises(ValueError) as excinfo:
+                call()
+        message = str(excinfo.value)
+        assert message.startswith("PDF를 열 수 없습니다")
+        assert str(tmp_path) not in message and "source.pdf" not in message
+    # 원인은 서버 로그에서 추적할 수 있다
+    assert any("PDF 열기 실패" in r.message for r in caplog.records)
+
+
+def test_corrupt_upload_400_detail_has_no_paths(client, settings):
+    r = client.post(
+        "/api/jobs",
+        files={"file": ("x.pdf", b"%PDF-1.4\n garbage only", "application/pdf")},
+    )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "PDF를 열 수 없습니다" in detail
+    assert str(settings.data_dir) not in detail and "source.pdf" not in detail
+
+
 def _write_pdf_sized(tmp_path, w_pt, h_pt, name="sized.pdf"):
     """지정한 MediaBox(pt) 크기의 빈 1페이지 PDF."""
     import fitz

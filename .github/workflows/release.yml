@@ -114,8 +114,9 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.image.outputs.version }}
             org.opencontainers.image.licenses=MIT
+          # 읽기 전용 — 태그 ref의 캐시는 다음 태그에서 복원되지 않아 쓰면 쿼터만 먹는다.
+          # main CI(ci.yml docker-image 잡)가 같은 scope를 채운다.
           cache-from: type=gha,scope=cpu-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=cpu-${{ matrix.arch }}
       - name: Smoke test the image before publishing
         env:
           IMAGE: ${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}-cpu-${{ matrix.arch }}

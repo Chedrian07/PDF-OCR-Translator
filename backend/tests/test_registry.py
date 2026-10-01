@@ -309,3 +309,36 @@ def test_health_reports_the_resolved_device(monkeypatch, tmp_path, mlx, expected
         body = c.get("/api/health").json()
     assert (body["engine"], body["device"], body["dtype"]) == ("unlimited", expected, dtype)
     assert body["model_loaded"] is False
+
+
+def test_env_default_device_is_auto(monkeypatch):
+    """OCR_DEVICE 미설정·빈 값 = auto — 로컬 실행 기본(Apple Silicon의 make dev가 CPU fp32로
+    조용히 돌던 함정 제거). 직접 생성한 Settings는 탐지 없는 cpu 그대로라 결정적이다."""
+    monkeypatch.delenv("OCR_DEVICE", raising=False)
+    assert Settings.from_env().device == "auto"
+    monkeypatch.setenv("OCR_DEVICE", "  ")
+    assert Settings.from_env().device == "auto"
+    monkeypatch.setenv("OCR_DEVICE", " MLX ")
+    assert Settings.from_env().device == "mlx"
+    assert Settings().device == "cpu"
+
+
+def test_containers_pin_their_device_so_auto_stays_a_local_default():
+    """auto 기본이 컨테이너 의미를 바꾸지 않는 전제 — backend 서비스는 OCR_DEVICE를 cpu/cuda로
+    고정하고(.env로 auto가 새어 들어가도 기본값 기준), Dockerfile은 기본값을 두지 않는다."""
+    import re
+    from pathlib import Path
+
+    yaml = pytest.importorskip("yaml", reason="PyYAML 없음 — compose 검사 생략")
+    repo = Path(__file__).resolve().parents[2]
+    compose = yaml.safe_load((repo / "docker-compose.yml").read_text(encoding="utf-8"))
+    effective = {}
+    for name, svc in compose["services"].items():
+        build = svc.get("build")
+        if not isinstance(build, dict) or build.get("dockerfile") != "backend/Dockerfile":
+            continue
+        value = str(svc["environment"]["OCR_DEVICE"])
+        m = re.fullmatch(r"\$\{OCR_DEVICE:-(\w+)\}", value)
+        effective[name] = m.group(1) if m else value
+    assert effective == {"ocr-cpu": "cpu", "ocr-cuda": "cuda", "ocr-ovis": "cpu", "ocr-paddle": "cpu"}
+    assert "OCR_DEVICE" not in (repo / "backend" / "Dockerfile").read_text(encoding="utf-8")

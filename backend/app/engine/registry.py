@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import platform
+import sys
 
 from ..config import Settings
 from .base import OCREngine
@@ -90,6 +92,12 @@ def build_engine(settings: Settings) -> OCREngine:
             f"알 수 없는 OCR_ENGINE: {settings.engine!r} (사용 가능: {', '.join(VALID_ENGINES)})"
         )
 
+    if device == "cpu" and sys.platform == "darwin" and platform.machine() == "arm64":
+        # 명시 선택이어도 알린다 (감사 api-jobs-5) — .env.example 줄을 그대로 풀면 cpu가 된다
+        logger.warning(
+            "Apple Silicon에서 OCR_DEVICE=cpu — Unlimited-OCR를 CPU(fp32)로 돌려 MLX보다 수십 배 "
+            "느립니다. OCR_DEVICE를 비우면(auto) MLX를, 없으면 torch MPS를 씁니다"
+        )
     if device == "auto":
         device = resolve_auto_device()
         # 엔진(과 health의 device)은 실제 디바이스를 본다 — 호출자의 settings는 그대로 둔다

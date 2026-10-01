@@ -20,7 +20,9 @@ def test_테스트_세션은_실제_dotenv와_개발_DATA_DIR을_쓰지_않는�
     """conftest가 app import 전에 격리를 건다 — 지우면 위 회귀가 조용히 돌아온다."""
     assert os.environ.get("DISABLE_DOTENV") == "1"
     data_dir = Path(os.environ["DATA_DIR"]).resolve()
-    assert not data_dir.is_relative_to(BACKEND)  # backend/data(개발 서버 저장소)가 아니다
+    dev_store = (BACKEND / "data").resolve()  # make dev·uvicorn 기본 DATA_DIR(실잡 저장소)
+    assert not data_dir.is_relative_to(dev_store)
+    assert not dev_store.is_relative_to(data_dir)
 
 
 def test_app_main은_import만으로_앱을_만들지_않고_uvicorn이_찾을_때_만든다(tmp_path):

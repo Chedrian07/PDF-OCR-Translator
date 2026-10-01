@@ -371,3 +371,37 @@ def test_vendor_entry_points_keep_generate_fn_hook():
     for name in ("infer", "infer_multi"):
         param = inspect.signature(getattr(UnlimitedOCRForCausalLM, name)).parameters.get("generate_fn")
         assert param is not None and param.default is None, name
+
+
+# ── Metal 안내 문구 (audit apple-mps-8) ──
+
+
+def test_metal_unavailable_hint_names_macos14_and_current_version(monkeypatch):
+    """torch 2.10 MPS는 macOS 14+ 필요 — 예전 '12.3 이상' 안내는 13.x 사용자를 오도했다."""
+    import platform
+
+    import torch
+
+    from app.engine.base import EngineError
+
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_built", lambda: True)
+    monkeypatch.setattr(platform, "mac_ver", lambda: ("13.6.1", ("", "", ""), "arm64"))
+    engine = _engine(monkeypatch, "metal")
+    with pytest.raises(EngineError) as info:
+        engine._load_locked()
+    message = str(info.value)
+    assert "macOS 14.0 이상" in message and "현재 macOS 13.6.1" in message
+    assert "12.3" not in message
+
+
+def test_metal_bf16_probe_failure_warns_with_macos_version(monkeypatch, caplog):
+    import platform
+
+    import torch
+
+    monkeypatch.setattr(unlimited_mod, "_mps_bf16_supported", lambda: False)
+    monkeypatch.setattr(platform, "mac_ver", lambda: ("26.6.2", ("", "", ""), "arm64"))
+    with caplog.at_level("WARNING", logger="app.engine.unlimited"):
+        assert unlimited_mod._resolve_dtype("metal", "auto") is torch.float32
+    assert "macOS 26.6.2" in caplog.text and "프로브가 실패" in caplog.text

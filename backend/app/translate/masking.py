@@ -34,7 +34,12 @@ _TOKEN_RE = re.compile(
     r"|(?P<m4>\\\(.*?\\\))"                                 # 인라인 \(..\)
     r"|(?P<k2>`[^`\n]+`)"                                   # 4 인라인 코드
     r"|(?P<g1>!\[[^\]]*\]\([^)\s]*\))"                      # 5 이미지
-    r"|(?P<t1></?[a-zA-Z][^>]*>)"                           # 6 HTML 태그
+    # 6 HTML 태그 — 속성은 `이름=값` 꼴만, 개행 없이. 종전 `</?[a-zA-Z][^>]*>`는
+    #   'If x<y then … A ->'·'a<b holds … c>d'처럼 부등호 사이 산문을 통째로 태그로
+    #   삼켜 번역에서 빼 버렸다(보고서에도 안 보임, translate-llm-14).
+    r"|(?P<t1></?[a-zA-Z][a-zA-Z0-9:-]*"
+    r"(?:[ \t]+[a-zA-Z_:][\w:.-]*[ \t]*=[ \t]*"
+    r"(?:\"[^\"\n<>]*\"|'[^'\n<>]*'|[^\s\"'=<>`]+))*[ \t]*/?>)"
     r"|(?P<u1>https?://\S+|\b10\.\d{4,}/\S+|[\w.+%-]+@[\w-]+\.[\w.-]+)"  # 7 URL/DOI/이메일
     r"|(?P<c1>\[\d+(?:\s*[,–-]\s*\d+)*\])"             # 8 인용 [1] [1, 2] [3-5]
     r"|(?P<f1>\b(?:Figure|Fig\.?|Table|Tab\.?|Equation|Eqs?\.?|Section|Sec\.?"
@@ -393,6 +398,22 @@ _REFUSAL_RE = re.compile(
     r"|도와드릴\s*수\s*없",
     re.IGNORECASE,
 )
+# 위 패턴 중 '번역…수 없/불가' 두 갈래 — 번역 불가능성을 다루는 MT·NLP 논문의 정상
+# 번역('직역할 수 없으므로', '번역이 불가능하다')에도 나온다(translate-llm-8). 원문이
+# 번역을 다룰 때(translat*)는 이 표현만으로 거부문이라 하지 않는다. 사과·영어 거부문은
+# 그대로 잡는다.
+_KO_TRANSLATE_NEGATION_RE = re.compile(
+    r"번역(?:을|이|은|할|해)?\s*(?:드릴|제공할|수행할)?\s*수\s*없|번역(?:을|이|은)?\s*불가"
+)
+_SRC_ABOUT_TRANSLATION_RE = re.compile(r"translat", re.IGNORECASE)
+
+
+def _refusal_hit(src: str, out: str) -> bool:
+    if not _REFUSAL_RE.search(out) or _REFUSAL_RE.search(src):
+        return False
+    if _SRC_ABOUT_TRANSLATION_RE.search(src):
+        return bool(_REFUSAL_RE.search(_KO_TRANSLATE_NEGATION_RE.sub(" ", out)))
+    return True
 
 
 # 프롬프트 구조 마커 — 번역 결과에 절대 나올 수 없는 문자열이다. 모델이 프롬프트를
@@ -512,7 +533,7 @@ def untranslated_reason(src: str, out: str, mapping: dict) -> str:
     if _SCAFFOLD_RE.search(out) and not _SCAFFOLD_RE.search(src):
         return "scaffold"
 
-    if _REFUSAL_RE.search(out) and not _REFUSAL_RE.search(src):
+    if _refusal_hit(src, out):
         return "refusal"
 
     residual = _PLACEHOLDER_RE.sub(" ", mask(src)[0])

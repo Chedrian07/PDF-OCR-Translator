@@ -266,6 +266,12 @@ def info(msg: str) -> None:
     print("  ....  " + msg, flush=True)
 
 
+# 하네스 자신의 HTTP 호출도 프록시를 타지 않는다 — 대상은 전부 루프백(목·하네스 백엔드)이다.
+# 셸의 HTTP(S)_PROXY를 urlopen이 그대로 쓰면 127.0.0.1 호출이 프록시로 새거나 막혀,
+# 자식 환경에서 프록시를 지운 것(backend_env)과 어긋난다.
+_LOOPBACK = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def req(method: str, path: str, *, body=None, headers=None, raw=False, timeout=120):
     url = path if path.startswith("http") else BASE + path
     data = None
@@ -278,7 +284,7 @@ def req(method: str, path: str, *, body=None, headers=None, raw=False, timeout=1
             hdrs.setdefault("Content-Type", "application/json")
     r = urllib.request.Request(url, data=data, headers=hdrs, method=method)
     try:
-        with urllib.request.urlopen(r, timeout=timeout) as resp:
+        with _LOOPBACK.open(r, timeout=timeout) as resp:
             payload = resp.read()
             if raw:
                 return resp.status, payload, dict(resp.headers)
@@ -351,11 +357,92 @@ def wait_http(url: str, timeout: float = 90) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            urllib.request.urlopen(url, timeout=3).read()
+            _LOOPBACK.open(url, timeout=3).read()
             return True
         except Exception:
             time.sleep(0.5)
     return False
+
+
+# ─────────────────────── 자식 프로세스 환경 격리 ───────────────────────
+# DISABLE_DOTENV는 .env **자동 로딩**만 끈다. 개발자 셸에 export된 값은 os.environ
+# 복사로 그대로 넘어가므로 따로 지우지 않으면, LLM_OPENAI_API_KEY가 있을 때 [7] C-1
+# 단계가 실키로 api.openai.com을 부르고(과금·문서 본문 반출) PAGE_SEPARATOR·
+# TRANSLATE_REASONING·*_RATE_LIMIT_* 같은 노브가 섞여 CI(.env 없음)와 로컬 결과가
+# 갈린다. 그래서 상속 환경에서 다음을 지운 뒤 하네스 값만 넣는다:
+#   1) 앱이 읽는 모든 노브 — env 키 계약상 .env.example에 전부 문서화돼 있다
+#      (tests/test_ci_ops_contracts.py). 새 노브도 목록 수정 없이 따라온다.
+#   2) 계약 밖에서 코드가 읽는 키(_UNDOCUMENTED_APP_KEYS)와 자격증명처럼 보이는 이름,
+#      LLM 공급자 SDK 접두 변수.
+#   3) 프록시 — 하네스 트래픽은 전부 루프백이다. 프록시가 끼면 목 호출이 밖으로 샌다.
+# PATH·HOME·LANG·TMPDIR·라이브러리 경로 같은 실행 환경 자체는 남긴다.
+ENV_EXAMPLE = REPO / ".env.example"
+_UNDOCUMENTED_APP_KEYS = frozenset({"DATA_DIR", "FRONTEND_DIR", "FAKE_DELAY", "DISABLE_DOTENV"})
+_ENV_EXAMPLE_KEY_RE = re.compile(r"^#? ?([A-Z][A-Z0-9_]*)=", re.MULTILINE)
+_SECRETISH_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)$|SECRET", re.IGNORECASE)
+_PROVIDER_PREFIX_RE = re.compile(
+    r"^(OPENAI|LLM|OLLAMA|ANTHROPIC|AZURE_OPENAI|OPENROUTER|GEMINI|MISTRAL|GROQ)_", re.IGNORECASE
+)
+_PROXY_RE = re.compile(r"^(HTTPS?|ALL|NO|FTP)_PROXY$", re.IGNORECASE)
+# 하네스는 Q&A 공급자를 쓰지 않는다 — 개발자의 로컬 Ollama에도 닿지 않게 버림 포트로 묶는다
+_DISCARD_OLLAMA_URL = "http://127.0.0.1:9"
+
+
+def app_env_keys(example: Path | None = None) -> frozenset[str]:
+    """앱이 읽는 노브 이름 — .env.example의 `KEY=`·`# KEY=` 줄에서 뽑는다."""
+    try:
+        text = (example or ENV_EXAMPLE).read_text(encoding="utf-8")
+    except OSError:
+        return _UNDOCUMENTED_APP_KEYS
+    return frozenset(_ENV_EXAMPLE_KEY_RE.findall(text)) | _UNDOCUMENTED_APP_KEYS
+
+
+def scrubbed_env(base, app_keys: frozenset[str] | None = None) -> dict[str, str]:
+    """상속 환경에서 앱 노브·자격증명·공급자 설정·프록시를 지운 사본."""
+    keys = app_env_keys() if app_keys is None else app_keys
+    return {
+        k: v for k, v in base.items()
+        if k not in keys
+        and not _SECRETISH_RE.search(k)
+        and not _PROVIDER_PREFIX_RE.match(k)
+        and not _PROXY_RE.match(k)
+    }
+
+
+def mock_env(base, fault: str) -> dict[str, str]:
+    """목 LLM 프로세스 환경 — FAULT는 **목**이 읽는 결함 주입 스위치다."""
+    env = scrubbed_env(base)
+    env["FAULT"] = fault
+    # 실제 한국어의 길이 압축률을 재현시킨다(0=길이 보존 옛 동작). 목이 길이를
+    # 보존하면 looks_untranslated()의 길이비 하한 회귀가 하네스에 안 잡힌다.
+    env.setdefault("MOCK_TRANSLATE_RATIO", "0.4")
+    return env
+
+
+def backend_env(base, data_dir: Path, mock_url: str, extra: dict[str, str]) -> dict[str, str]:
+    """하네스 백엔드 환경 — 앱 노브는 전부 여기서 정한 값만 쓴다."""
+    env = scrubbed_env(base)
+    env.update({
+        "DISABLE_DOTENV": "1",
+        "OCR_ENGINE": "textlayer",
+        "OCR_DEVICE": "cpu",
+        "PRELOAD_MODEL": "0",
+        "DATA_DIR": str(data_dir),
+        "ALLOWED_HOSTS": "localhost,127.0.0.1",
+        "OPENAI_BASE_URL": f"{mock_url}/v1",
+        "OPENAI_API_KEY": "sk-mock-translation-key",
+        "OPENAI_MODEL": "mock-model",
+        "TRANSLATE_API_MODE": "chat",
+        "TRANSLATE_CONCURRENCY": "4",
+        "TRANSLATE_TIMEOUT_S": "60",
+        "TRANSLATE_MAX_RETRIES": "1",
+        # C-1 단계는 Q&A 키가 **없을 때**의 동작을 본다 — 공급자도 명시해 둔다
+        "LLM_PROVIDER": "openai-responses",
+        "OLLAMA_BASE_URL": _DISCARD_OLLAMA_URL,
+        "PYTHONUNBUFFERED": "1",
+    })
+    env.update(extra)
+    return env
 
 
 class Servers:
@@ -370,39 +457,17 @@ class Servers:
         py = _python()
         # FAULT는 **목 서버**가 읽는 결함 주입 스위치다 — 백엔드 env로만 넣으면
         # 목에 닿지 않아 [8] 결함 주입 단계가 조용히 무력화된다. 목에도 전달한다.
-        mock_env = dict(os.environ)
-        mock_env["FAULT"] = self.env_extra.get("FAULT", "")
-        # 실제 한국어의 길이 압축률을 재현시킨다(0=길이 보존 옛 동작). 목이 길이를
-        # 보존하면 looks_untranslated()의 길이비 하한 회귀가 하네스에 안 잡힌다.
-        mock_env.setdefault("MOCK_TRANSLATE_RATIO", "0.4")
         self.mock = subprocess.Popen(
             [py, str(MOCK_SERVER), str(MOCK_PORT)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=mock_env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=mock_env(os.environ, self.env_extra.get("FAULT", "")),
         )
         if not wait_http(f"{MOCK}/__stats"):
             raise SystemExit("목 LLM 기동 실패")
 
-        env = dict(os.environ)
-        # .env 자동 로딩이 실키를 끌어오지 않도록 명시적으로 덮어쓰고, 자동 로딩
-        # 자체도 끈다(DISABLE_DOTENV) — 여기서 덮지 않은 키(LLM_OPENAI_API_KEY 등)가
-        # 개발자 .env에 있으면 [7] C-1 단계가 실키로 api.openai.com을 호출하게 된다.
-        env.update({
-            "DISABLE_DOTENV": "1",
-            "OCR_ENGINE": "textlayer",
-            "OCR_DEVICE": "cpu",
-            "PRELOAD_MODEL": "0",
-            "DATA_DIR": str(self.data_dir),
-            "ALLOWED_HOSTS": "localhost,127.0.0.1",
-            "OPENAI_BASE_URL": f"{MOCK}/v1",
-            "OPENAI_API_KEY": "sk-mock-translation-key",
-            "OPENAI_MODEL": "mock-model",
-            "TRANSLATE_API_MODE": "chat",
-            "TRANSLATE_CONCURRENCY": "4",
-            "TRANSLATE_TIMEOUT_S": "60",
-            "TRANSLATE_MAX_RETRIES": "1",
-            "PYTHONUNBUFFERED": "1",
-        })
-        env.update(self.env_extra)
+        # .env 자동 로딩을 끄고(DISABLE_DOTENV) 셸에서 상속된 실키·공급자 설정도
+        # 지운다(backend_env 위 주석) — 하네스는 외부 API를 절대 부르지 않는다.
+        env = backend_env(os.environ, self.data_dir, MOCK, self.env_extra)
         self.api_log = open(WORK / "api.log", "w")
         self.api = subprocess.Popen(
             [py, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(API_PORT)],

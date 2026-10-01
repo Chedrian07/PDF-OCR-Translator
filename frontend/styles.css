@@ -365,6 +365,13 @@ a { color: var(--accent); }
   border-radius: var(--radius-sm);
 }
 
+/* 모델 로드 실패 — 같은 자리를 오류 톤으로 바꿔 '기다리면 된다'는 오해를 막는다 */
+.inline-notice.is-error {
+  color: var(--danger);
+  background: var(--danger-weak);
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+}
+
 #upload-btn { margin-top: 12px; }
 
 /* ---- Options ------------------------------------------------------------ */

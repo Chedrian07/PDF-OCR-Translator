@@ -1474,3 +1474,32 @@ def test_viewer_etags_accept_weak_and_listed_validators(client, sample_pdf):
                 url, header,
             )
         assert client.get(url, headers={"if-none-match": '"viewer-stale"'}).status_code == 200
+
+
+def test_job_list_pages_beyond_the_newest_fifty(client):
+    """최신 50건 고정이라 51번째부터의 잡은 UI에서 보이지도 지워지지도 않았다.
+    기본 응답은 그대로(최신 50건) 두고 has_more·total과 before 커서로 이어 받는다."""
+    store = client.app.state.store
+    created = []
+    for index in range(60):
+        job = store.create(f"doc{index:02d}.pdf", "multi", 200)
+        job.status = "done"
+        job.created_at = f"2026-10-01T00:{index // 60:02d}:{index % 60:02d}+00:00"
+        created.append(job.id)
+    newest_first = list(reversed(created))
+
+    first = client.get("/api/jobs").json()
+    assert [j["job_id"] for j in first["jobs"]] == newest_first[:50]
+    assert first["has_more"] is True and first["total"] == 60
+
+    rest = client.get(f"/api/jobs?before={newest_first[49]}").json()
+    assert [j["job_id"] for j in rest["jobs"]] == newest_first[50:]
+    assert rest["has_more"] is False
+
+    small = client.get(f"/api/jobs?limit=5&before={newest_first[4]}").json()
+    assert [j["job_id"] for j in small["jobs"]] == newest_first[5:10]
+    assert small["has_more"] is True
+
+    assert client.get("/api/jobs?limit=0").status_code == 422
+    assert client.get("/api/jobs?limit=501").status_code == 422
+    assert client.get("/api/jobs?before=j_000000000000").status_code == 422

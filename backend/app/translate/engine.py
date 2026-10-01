@@ -151,6 +151,18 @@ def _fully_covered(src: str, covered: set[str]) -> bool:
     return bool(lines) and all(ln in covered for ln in lines)
 
 
+_SIGNATURE_PUNCT_RE = re.compile(r"[^\w\s]")
+
+
+def _source_signature(src: str) -> str:
+    """축퇴 집계용 원문 서명 — 대소문자·구두점·공백·단어 끝 복수형 s를 정규화한다."""
+    words = _SIGNATURE_PUNCT_RE.sub(" ", src.casefold()).split()
+    return " ".join(
+        w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
+        for w in words
+    )
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -229,6 +241,12 @@ class _TranslationRun:
     unverified_rejects: int = 0     # gate_lock으로 보호 (worker 스레드에서 증가)
     unverified_msg: str = ""
     flights: SingleFlight = field(default_factory=SingleFlight)
+    # 축퇴 스윕의 패스 간 기억 — 정규화 출력 → 그 출력을 받은 (정규화) 원문 서명 집합,
+    # 그리고 이미 축퇴로 판정한 출력. 1차 스윕이 results에서 지운 출력을 2차 스윕이
+    # 잊으면, 2차 패스의 짧은 지연 유닛('Abstract'·arXiv 사이드바) 두 개가 같은 캔드
+    # 응답을 받아도 '원문 2종'이라 통과해 result.{lang}.md로 샜다(실측 replay).
+    output_sources: dict[str, set[str]] = field(default_factory=dict)
+    degenerate_outputs: set[str] = field(default_factory=set)
 
     # ── 문서 상태 (execute 단계에서 채워진다) ────────────────────────────────
     md_text: str = ""
@@ -713,33 +731,41 @@ class _TranslationRun:
         # 서로 다른 원문 여럿이 한 출력으로 수렴하면 그건 번역이 아니므로 원문을 지킨다.
         # 원문은 **전체 유닛**에서 찾는다. targets는 deferred 선별로 줄어들어 있어
         # 여기서 만들면 조회 실패분이 서로 다른 원문처럼 세어져 오탐이 난다.
+        # 집계는 run 전체에 누적한다(output_sources) — 2차 패스 스윕이 1차에서 이미
+        # 축퇴로 판정해 지운 출력을 잊지 않게. 한 번 축퇴로 판정된 출력은 이후 어느
+        # 패스에서 나와도 축퇴다.
         results = self.results
         src_by_id = {u.id: u.src for u in (*self.md_units, *self.lay_units)}
-        by_output: dict[str, set[str]] = {}
         for uid, text in results.items():
             norm = " ".join(text.split())
             src = src_by_id.get(uid)
             if norm and src is not None:
-                by_output.setdefault(norm, set()).add(src)
-        for norm, srcs in by_output.items():
+                self.output_sources.setdefault(norm, set()).add(_source_signature(src))
+        for norm, srcs in self.output_sources.items():
             # 서로 다른 원문 3개 이상이 같은 출력 → 축퇴. 원문이 실제로 같은 유닛
             # (반복되는 표 헤더 등)이 같은 번역을 받는 것은 정상이므로 원문 기준으로 센다.
-            if len(srcs) < 3:
-                continue
-            degenerate = [uid for uid, text in results.items() if " ".join(text.split()) == norm]
-            for uid in degenerate:
-                results.pop(uid, None)
-                if uid not in self.kept_original:
-                    self.kept_original.append(uid)
-                    self.kept_reasons["degenerate-output"] = self.kept_reasons.get("degenerate-output", 0) + 1
-                    self.translated_n = max(0, self.translated_n - 1)
-            # 캐시도 함께 비운다 — 축퇴 출력이 units.json에 남으면 공급자를 고친 뒤
-            # force 없이 재실행해도 같은 손실이 그대로 재사용된다.
-            self.flights.purge(lambda v, _norm=norm: " ".join(v.split()) == _norm)
-            logger.warning(
-                "번역 축퇴 출력 감지: %s (lang=%s, 원문 %d종이 동일 출력 → 원문 유지)",
-                self.job_dir.name, self.lang, len(srcs),
-            )
+            # 대소문자·구두점·복수형만 다른 짧은 라벨('Training epoch'/'epochs')은 같은
+            # 원문으로 친다 — 같은 정답으로 수렴한 정상 번역을 매 실행 재과금하던 오탐.
+            if len(srcs) >= 3 and norm not in self.degenerate_outputs:
+                self.degenerate_outputs.add(norm)
+                logger.warning(
+                    "번역 축퇴 출력 감지: %s (lang=%s, 원문 %d종이 동일 출력 → 원문 유지)",
+                    self.job_dir.name, self.lang, len(srcs),
+                )
+        if not self.degenerate_outputs:
+            self.flush_cache()
+            return
+        known = self.degenerate_outputs
+        degenerate = [uid for uid, text in results.items() if " ".join(text.split()) in known]
+        for uid in degenerate:
+            results.pop(uid, None)
+            if uid not in self.kept_original:
+                self.kept_original.append(uid)
+                self.kept_reasons["degenerate-output"] = self.kept_reasons.get("degenerate-output", 0) + 1
+                self.translated_n = max(0, self.translated_n - 1)
+        # 캐시도 함께 비운다 — 축퇴 출력이 units.json에 남으면 공급자를 고친 뒤
+        # force 없이 재실행해도 같은 손실이 그대로 재사용된다.
+        self.flights.purge(lambda v: " ".join(v.split()) in known)
         self.flush_cache()
 
     # 조립 — 번역된 유닛만 교체(나머지 원문 보존)

@@ -1,20 +1,24 @@
 import {
-  READER_ALIGNMENT_COOLDOWN_MS, READER_DEFAULT_RATIO, READER_FOCUS_RATIO, READER_HYDRATE_RADIUS,
-  READER_KEEP_RADIUS, READER_SYNC_KEY, READER_SYNC_QUIET_MS, READER_ZOOM_KEY, READER_ZOOM_MAX,
-  READER_ZOOM_MIN, katexOptions, readerPosKey,
+  ICON, READER_ALIGNMENT_COOLDOWN_MS, READER_DEFAULT_RATIO, READER_FOCUS_RATIO,
+  READER_HYDRATE_RADIUS, READER_KEEP_RADIUS, READER_SYNC_KEY, READER_SYNC_QUIET_MS,
+  READER_ZOOM_KEY, READER_ZOOM_MAX, READER_ZOOM_MIN, katexOptions, readerPosKey,
 } from './constants.js';
 import {
-  PDF_RETRY_MAX, alignmentBatchPlan, alignmentFailureIsPermanent, blockAtFraction,
+  PDF_RETRY_MAX, addReaderNote, alignmentBatchPlan, alignmentFailureIsPermanent, blockAtFraction,
   busyWaitMessage, clampReaderPage, extractDocPages, langFetchVerdict, livePageImageUrl,
   normalizeAlignmentPayload, overlayInKeepWindow, pdfExportState, pdfProgressLabel,
   pdfReportMessage, pdfRetryDelay, railAnchorFrom, railAnchorTarget, railPagesToRender,
   readerFocusAt,
-  readerHydrationWindow, readerImageUrl, readerRailBandAt, splitInlineMath,
-  translatedHtmlExportState, withLangUrl,
+  readerHydrationWindow, readerImageUrl, readerNoteLabel, readerNotesMarkdown, readerRailBandAt,
+  removeReaderNote, splitInlineMath, translatedHtmlExportState, withLangUrl,
 } from './core.js';
 import { el, state } from './state.js';
-import { h, localGet, localSet, nowMs, setDownload, showToast, typesetMath } from './ui.js';
+import {
+  copyTextToClipboard, downloadTextFile, h, localGet, localSet, nowMs, setDownload, showToast,
+  typesetMath,
+} from './ui.js';
 import { apiGet, fetchTextWithBusyRetry } from './api.js';
+import { loadReaderNotes, saveReaderNotes } from './notes.js';
 import { revertToOriginal, setLang } from './translate.js';
 import { prefillQaPageFromReader } from './qa.js';
 import {
@@ -115,8 +119,7 @@ export function resetReaderForJob() {
   state.readerActiveBlock = '';
   state.readerSelection = '';
   state.readerSelectionPage = 1;
-  state.readerHighlights = [];
-  state.readerCitations = [];
+  state.readerNotes = loadReaderNotes(state.currentJobId); // 잡별로 영속 — 다시 열면 그대로
   state.viewerManifest = null;
   state.viewerNavCollapsed = localGet('uocr-viewer-nav-collapsed') === '1';
   state.viewerRailCollapsed = localGet('uocr-viewer-rail-collapsed') === '1';
@@ -138,6 +141,7 @@ export function resetReaderForJob() {
   updateReaderProgress();
   applyViewerPanelState();
   updateReaderResearchTools();
+  renderReaderNotes();
 }
 
 // 문서 스택(원문 페이지 + 번역 레일)에 딸린 파생 상태만 비운다.
@@ -881,6 +885,7 @@ export function renderRailFlowContent(page, section, body, pages, transient = fa
     }
     typesetMath(body);
     watchRailLateLayout(body);
+    applyStoredHighlights(page, body);
   } else if (pages.length === 1 && readerTotal() > 1) {
     // 서버가 페이지 구분 없이 한 장으로 렌더한 문서 — 본문은 1페이지에 전부 있다.
     body.appendChild(h('p', {
@@ -916,6 +921,7 @@ export function renderRailPage(page) {
       body.appendChild(card);
     }
     renderPageOverlay(page);
+    applyStoredHighlights(page, body);
   } else {
     renderRailFlowContent(page, section, body, pages);
   }
@@ -1608,41 +1614,224 @@ export function openReaderQa(prompt, page = state.readerPage) {
   el.qaInput.focus();
 }
 
+/* ── 인용·하이라이트 (잡별 영속 + 목록·내보내기) ─────────────────────────── */
+// 예전에는 세션 배열에 쌓기만 하고 아무도 읽지 않아, "저장했습니다" 토스트를 본 인용이
+// 잡을 바꾸면 사라졌다(frontend-6). 이제 잡별 localStorage에 남기고, 선택 문장 도구 안
+// 목록에서 페이지로 이동·삭제·Markdown 복사/내보내기를 할 수 있다.
+
+const newReaderNoteId = () =>
+  `n${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+function persistReaderNote(kind, page, text) {
+  const result = addReaderNote(state.readerNotes, {
+    id: newReaderNoteId(), kind, page, lang: readerLangKey(), text, at: Date.now(),
+  });
+  if (!result.note) return null;
+  if (result.added && !saveReaderNotes(state.currentJobId, result.items)) {
+    showToast('이 브라우저 저장 공간에 남기지 못했습니다 — 저장 공간을 확인해 주세요.', 'error');
+    return null;
+  }
+  state.readerNotes = result.items;
+  renderReaderNotes();
+  return result;
+}
+
+// 하이라이트를 칠할 수 있는 텍스트 노드. KaTeX 내부(쪼개면 수식이 깨진다)·카드 머리말·
+// 페이지 번호·버튼·이미 칠한 곳은 건너뛴다.
+function highlightableTextNodes(root, accept) {
+  const out = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement;
+      if (!parent || !node.data.trim()) return NodeFilter.FILTER_REJECT;
+      if (parent.closest('.katex, .reader-map-card-head, .reader-rail-head, .reader-rail-retry-note, '
+        + 'button, mark.reader-highlight')) return NodeFilter.FILTER_REJECT;
+      return accept(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    },
+  });
+  while (walker.nextNode()) out.push(walker.currentNode);
+  return out;
+}
+
+// 텍스트 노드의 [start, end) 조각 하나만 <mark>로 감싼다 — 주변 구조는 그대로다.
+function wrapTextSegment(node, start, end, noteId) {
+  let target = node;
+  if (start > 0) target = target.splitText(start);
+  if (end - start < target.data.length) target.splitText(end - start);
+  const mark = document.createElement('mark');
+  mark.className = 'reader-highlight';
+  if (noteId) mark.dataset.noteId = noteId;
+  target.parentNode.insertBefore(mark, target);
+  mark.appendChild(target);
+  return mark;
+}
+
+// 선택 범위를 텍스트 노드 조각마다 따로 감싼다. 예전 extractContents 폴백은 카드·페이지
+// 경계를 넘는 선택에서 data-block-id·레일 섹션을 복제하고 KaTeX를 반으로 쪼갰다(frontend-10).
+function markRange(range, noteId) {
+  const common = range.commonAncestorContainer;
+  const root = common.nodeType === 1 ? common : common.parentNode;
+  let marked = 0;
+  for (const node of highlightableTextNodes(root, (n) => range.intersectsNode(n))) {
+    const start = node === range.startContainer ? range.startOffset : 0;
+    const end = node === range.endContainer ? range.endOffset : node.data.length;
+    if (start >= end) continue;
+    wrapTextSegment(node, start, end, noteId);
+    marked += 1;
+  }
+  return marked;
+}
+
+// 저장된 하이라이트 문장을 다시 그린 섹션에서 찾아 칠한다. 공백은 무시하고 비교한다 —
+// 블록 경계·줄바꿈이 선택 문자열과 DOM에서 다르게 나타나기 때문이다. 못 찾으면(수식을
+// 가로지른 선택 등) 목록에만 남는다.
+function markStoredText(root, text, noteId) {
+  const needle = String(text || '').replace(/\s+/g, '');
+  if (!needle) return false;
+  const nodes = highlightableTextNodes(root, () => true);
+  let flat = '';
+  const map = [];
+  for (const node of nodes) {
+    const data = node.data;
+    for (let i = 0; i < data.length; i += 1) {
+      if (/\s/.test(data[i])) continue;
+      flat += data[i];
+      map.push({ node, offset: i });
+    }
+  }
+  const at = flat.indexOf(needle);
+  if (at < 0) return false;
+  const first = map[at];
+  const last = map[at + needle.length - 1];
+  const from = nodes.indexOf(first.node);
+  const to = nodes.indexOf(last.node);
+  for (let k = from; k <= to; k += 1) {
+    const node = nodes[k];
+    const start = node === first.node ? first.offset : 0;
+    const end = node === last.node ? last.offset + 1 : node.data.length;
+    if (start < end) wrapTextSegment(node, start, end, noteId);
+  }
+  return true;
+}
+
+// 레일 페이지를 (다시) 그린 직후 그 페이지·언어의 저장된 하이라이트를 되살린다.
+function applyStoredHighlights(page, body) {
+  const notes = state.readerNotes || [];
+  if (!body || !notes.length) return;
+  const lang = readerLangKey();
+  for (const note of notes) {
+    if (note.kind !== 'highlight' || note.page !== page || note.lang !== lang) continue;
+    const already = [...body.querySelectorAll('mark.reader-highlight')]
+      .some((mark) => mark.dataset.noteId === note.id);
+    if (!already) markStoredText(body, note.text, note.id);
+  }
+}
+
+function unwrapMark(mark) {
+  const parent = mark.parentNode;
+  if (!parent) return;
+  while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+  mark.remove();
+  if (typeof parent.normalize === 'function') parent.normalize();
+}
+
 export function highlightReaderSelection() {
   const selection = window.getSelection && window.getSelection();
   if (!selection || selection.isCollapsed || !selection.rangeCount || !state.readerSelection) return;
   const range = selection.getRangeAt(0);
   if (!el.readerContent.contains(range.commonAncestorContainer)) return;
-  const mark = document.createElement('mark');
-  mark.className = 'reader-highlight';
-  try {
-    range.surroundContents(mark);
-  } catch (_) {
-    const fragment = range.extractContents();
-    mark.appendChild(fragment);
-    range.insertNode(mark);
-  }
-  state.readerHighlights.push({
-    page: state.readerSelectionPage,
-    lang: readerLangKey(),
-    text: state.readerSelection,
-  });
+  const page = state.readerSelectionPage;
+  const saved = persistReaderNote('highlight', page, state.readerSelection);
+  markRange(range, saved ? saved.note.id : '');
   selection.removeAllRanges();
   state.readerSelection = '';
   state.readerSelectionPage = state.readerPage;
   updateReaderResearchTools();
+  if (saved) {
+    showToast(saved.added
+      ? `${page}페이지 하이라이트를 저장했습니다.`
+      : '이미 저장한 하이라이트입니다.');
+  }
 }
 
 export function saveReaderCitation() {
   if (!state.readerSelection) return;
   const page = state.readerSelectionPage;
-  state.readerCitations.push({
-    page,
-    lang: readerLangKey(),
-    text: state.readerSelection,
-  });
+  const saved = persistReaderNote('citation', page, state.readerSelection);
   updateReaderResearchTools();
-  showToast(`${page}페이지 인용을 세션에 저장했습니다.`);
+  if (saved) {
+    showToast(saved.added
+      ? `${page}페이지 인용을 저장했습니다 — [선택 문장 도구]에서 보고 Markdown으로 내보낼 수 있습니다.`
+      : '이미 저장한 인용입니다.');
+  }
+}
+
+export function deleteReaderNote(id) {
+  const next = removeReaderNote(state.readerNotes, id);
+  if (next.length === state.readerNotes.length) return;
+  if (!saveReaderNotes(state.currentJobId, next)) {
+    showToast('이 브라우저 저장 공간에 반영하지 못했습니다.', 'error');
+    return;
+  }
+  state.readerNotes = next;
+  for (const mark of el.readerContent.querySelectorAll('mark.reader-highlight')) {
+    if (mark.dataset.noteId === id) unwrapMark(mark);
+  }
+  renderReaderNotes();
+}
+
+function readerNotesTitle() {
+  return (el.viewerFilename && el.viewerFilename.textContent) || state.currentBaseName || '문서';
+}
+
+export async function copyReaderNotes() {
+  if (!state.readerNotes.length) return;
+  const ok = await copyTextToClipboard(readerNotesMarkdown(readerNotesTitle(), state.readerNotes));
+  showToast(ok
+    ? `인용·하이라이트 ${state.readerNotes.length}개를 Markdown으로 복사했습니다.`
+    : '클립보드 복사에 실패했습니다. (HTTPS가 아닌 접속에서는 브라우저가 복사를 제한할 수 있습니다)',
+  ok ? '' : 'error');
+}
+
+export function exportReaderNotes() {
+  if (!state.readerNotes.length) return;
+  downloadTextFile(`${state.currentBaseName || 'document'}.notes.md`,
+    readerNotesMarkdown(readerNotesTitle(), state.readerNotes));
+}
+
+// 선택 문장 도구 안의 저장 목록 — 페이지 순, 페이지 링크·삭제 버튼, 요약 배지.
+export function renderReaderNotes() {
+  const list = el.readerNotesList;
+  if (!list) return;
+  const notes = [...(state.readerNotes || [])].sort((a, b) => a.page - b.page || a.at - b.at);
+  list.textContent = '';
+  for (const note of notes) {
+    const go = h('button', {
+      class: 'reader-note-page', type: 'button', text: `${note.page}페이지`,
+      title: `${note.page}페이지로 이동`,
+    });
+    go.addEventListener('click', () => setReaderPage(note.page));
+    const del = h('button', {
+      class: 'reader-note-del icon-btn-sm', type: 'button',
+      'aria-label': `${readerNoteLabel(note)} 삭제`, title: '삭제', html: ICON.x,
+    });
+    del.addEventListener('click', () => deleteReaderNote(note.id));
+    list.appendChild(h('li', { class: `reader-note kind-${note.kind}`, 'data-note-id': note.id },
+      h('span', { class: 'reader-note-meta' },
+        h('span', { class: 'reader-note-kind', text: note.kind === 'citation' ? '인용' : '하이라이트' }),
+        go,
+        h('span', { class: 'reader-note-lang muted', text: note.lang === 'ko' ? '한국어' : '원문' })),
+      h('q', { class: 'reader-note-text', text: note.text }),
+      del));
+  }
+  const count = notes.length;
+  if (el.readerNotesEmpty) el.readerNotesEmpty.hidden = count > 0;
+  if (el.readerNotesCopy) el.readerNotesCopy.disabled = !count;
+  if (el.readerNotesExport) el.readerNotesExport.disabled = !count;
+  if (el.readerNotesBadge) {
+    el.readerNotesBadge.hidden = !count;
+    el.readerNotesBadge.textContent = count ? `저장 ${count}` : '';
+  }
 }
 
 // 리더 CTA [한국어로 읽기] — 메인 [한국어 번역] 버튼이 보일 때만(=번역 상태

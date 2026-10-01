@@ -159,6 +159,9 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
             result = pdf_worker.run_page(
                 "app.pipeline.pdf_fonts:enrich_page_local", pdf_path, page_index, (page,),
             )
+        except pdf_worker.PdfPageQuarantined:
+            # 앞서 렌더·분석이 상한을 넘은 페이지 — 기다리지 않았으니 이 페이지만 건너뛴다
+            result = (False, page)
         except pdf_worker.PdfWorkerError as error:
             logger.warning("폰트 실측 주입 중단 — %d페이지부터 스탬프만 남김 (%s)",
                            page_index + 1, error)

@@ -796,3 +796,43 @@ def test_archive_is_reused_until_its_contents_change(client, sample_pdf):
     (job_dir / "result.ko.md").write_text("# 늦게 도착한 번역본", encoding="utf-8")
     third = client.get(f"/api/jobs/{jid}/archive")
     assert "result.ko.md" in _zip_names(third.content)
+
+
+# ── PDF 생성 리포트(JSON) — 헤더에는 숫자만, 상세는 /pdf/report로 ─────────────────
+def test_pdf_report_route_serves_the_report_of_the_last_build(client, sample_pdf, monkeypatch):
+    """프런트(reader.js)는 PDF 다운로드 뒤 /pdf/report를 불러 원문 보존 사유·스캔 픽셀
+    지움·주의 문장을 그린다. 라우트가 없으면 매 다운로드가 404였다."""
+    from app.pipeline import artifacts
+
+    _export_env(monkeypatch)
+    jid, job_dir = _ko_layout_job(client, sample_pdf)
+    url = f"/api/jobs/{jid}/pdf/report?lang=ko"
+
+    missing = client.get(url)                      # 빌드 전 — 리포트 없음
+    assert missing.status_code == 404
+    assert "PDF 생성 리포트가 없습니다" in missing.json()["detail"]
+
+    pdf = client.get(f"/api/jobs/{jid}/pdf?lang=ko&view=dual")
+    assert pdf.status_code == 200, pdf.text
+    r = client.get(url)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["job_id"] == jid and body["lang"] == "ko"
+    stored = json.loads(artifacts.export_report(job_dir, "ko").read_text(encoding="utf-8"))
+    assert {key: body[key] for key in stored} == stored    # report() 그대로
+    for key in ("replaced", "kept", "raster_blocks_erased", "listing_lines_replaced",
+                "kept_reasons", "warning_count", "warnings"):
+        assert key in body, key
+    assert pdf.headers["X-UOCR-PDF-Replaced"] == str(body["replaced"])   # 같은 빌드
+    assert pdf.headers["X-UOCR-PDF-Warnings"] == str(body["warning_count"])
+
+    # 손상된 리포트·번역 갱신 무효화 뒤에는 404 — 낡거나 깨진 리포트를 내지 않는다
+    artifacts.export_report(job_dir, "ko").write_text("{깨짐", encoding="utf-8")
+    assert client.get(url).status_code == 404
+    assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200    # 다시 빌드
+    assert client.get(url).status_code == 200
+    artifacts.invalidate_language_artifacts(job_dir, "ko")
+    assert client.get(url).status_code == 404
+
+    assert client.get(f"/api/jobs/{jid}/pdf/report?lang=zz").status_code == 400
+    assert client.get("/api/jobs/j_000000000000/pdf/report?lang=ko").status_code == 404

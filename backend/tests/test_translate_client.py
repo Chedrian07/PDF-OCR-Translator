@@ -6,6 +6,20 @@ from app.translate.client import OpenAICompatClient, _endpoint_url, _normalize_b
 from app.translate.types import TranslateAPIError, TranslateConfig
 
 
+class _FakeResponse:
+    """requests.Response 대역 — 클라이언트는 stream=True로 받아 iter_content로 읽는다."""
+
+    status_code = 200
+    headers: dict = {}
+    payload = b'{"output_text": "ok"}'
+
+    def iter_content(self, chunk_size=None):
+        yield self.payload
+
+    def close(self):
+        pass
+
+
 def _cfg(**kw) -> TranslateConfig:
     base = dict(
         base_url="https://host/v1", api_key="sk-x", model="m",
@@ -35,14 +49,8 @@ def test_base_url_정규화():
 def test_post는_connect와_read_timeout을_분리(timeout_s, expected):
     captured = {}
 
-    class Response:
-        status_code = 200
+    class Response(_FakeResponse):
         headers = {"X-Test": "yes"}
-        text = "unused"
-
-        @staticmethod
-        def json():
-            return {"output_text": "ok"}
 
     class Session:
         @staticmethod
@@ -55,6 +63,7 @@ def test_post는_connect와_read_timeout을_분리(timeout_s, expected):
     status, body, headers = client._post("responses", {"input": "x"})
 
     assert captured["timeout"] == expected
+    assert captured["stream"] is True        # 본문 상한을 강제하려면 직접 읽어야 한다
     assert captured["url"] == "https://host/v1/responses"
     assert status == 200 and body == {"output_text": "ok"}
     assert headers["X-Test"] == "yes"
@@ -67,15 +76,7 @@ def test_request_semaphore는_여러_잡의_실제_HTTP_동시성을_제한():
     active = 0
     peak = 0
     lock = threading.Lock()
-
-    class Response:
-        status_code = 200
-        headers = {}
-        text = "unused"
-
-        @staticmethod
-        def json():
-            return {"output_text": "ok"}
+    Response = _FakeResponse
 
     # 두 요청이 실제로 겹치는지 sleep 타이밍에 맡기면 부하가 큰 CI에서 flaky하다.
     # Barrier(2)로 짝을 이루게 하면 슬롯이 2개일 때만 통과한다(1개면 timeout으로 실패).
@@ -915,3 +916,316 @@ def test_비결정적_오류는_종전대로_일반_API오류():
     with pytest.raises(TranslateAPIError) as exc2:
         c2.complete("s", "u", max_tokens=16)
     assert not isinstance(exc2.value, TranslateUnitRejected)
+
+
+# ── 스트리밍·취소·응답 상한 — 실제 HTTP 서버(프로세스 내, 임시 포트)로 검증 ──────
+# (translate-llm-4, probe:MLX-04, mlx-integration-5, concurrency-10,
+#  gap2-dependency-vuln-reachability-4)
+
+import contextlib  # noqa: E402
+import importlib.util  # noqa: E402
+import json as _json  # noqa: E402
+import pathlib  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+
+_SCRIPTS = pathlib.Path(__file__).resolve().parents[2] / "scripts"
+_SRC_PROMPT = "[번역할 원문]\nThe model is fast and the results are good."
+
+
+def _load_mock():
+    spec = importlib.util.spec_from_file_location("_client_mock_llm", _SCRIPTS / "mock_llm.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@contextlib.contextmanager
+def _serve(handler_cls):
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    srv.daemon_threads = True
+    t = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    t.start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+@pytest.fixture
+def mock_llm():
+    mod = _load_mock()
+    with _serve(mod.Handler) as base:
+        yield mod, base
+
+
+class _Quiet(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *_args):
+        pass
+
+    def _body(self) -> dict:
+        n = int(self.headers.get("Content-Length") or 0)
+        return _json.loads(self.rfile.read(n) or b"{}")
+
+    def _json(self, code: int, obj) -> None:
+        raw = _json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _sse_head(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+
+def _chunk(content=None, finish=None) -> bytes:
+    delta = {} if content is None else {"content": content}
+    obj = {"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+    return f"data: {_json.dumps(obj)}\n\n".encode()
+
+
+def test_chat은_기본으로_SSE_스트리밍을_조립한다(mock_llm):
+    mod, base = mock_llm
+    c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat"))
+    sent = []
+    real_post = c.session.post
+
+    def spy(url, **kw):
+        sent.append(kw["json"])
+        return real_post(url, **kw)
+
+    c.session.post = spy
+    out = c.complete("s", _SRC_PROMPT, max_tokens=100)
+    assert out == mod._translate("The model is fast and the results are good.")
+    assert sent[0]["stream"] is True and sent[0]["stream_options"] == {"include_usage": True}
+    assert c._stream_ok is True and mod.STATS["stream_chunks"] > 3
+
+
+def test_responses와_stream_0은_비스트리밍이다(mock_llm):
+    _mod, base = mock_llm
+    for cfg in (_cfg(base_url=f"{base}/v1", api_mode="responses"),
+                _cfg(base_url=f"{base}/v1", api_mode="chat", stream="off")):
+        c = OpenAICompatClient(cfg)
+        assert c.complete("s", _SRC_PROMPT, max_tokens=100)
+        mode = "responses" if cfg.api_mode == "responses" else "chat"
+        assert "stream" not in c._build_payload(mode, "s", "u", 10, stream=c._use_stream(mode))
+
+
+def test_스트림의_finish_reason_length는_잘림으로_처리한다(mock_llm):
+    from app.translate.types import TranslateOutputTruncated
+
+    _mod, base = mock_llm
+    c = OpenAICompatClient(_cfg(base_url=f"{base}/v1?finish=length", api_mode="chat"))
+    with pytest.raises(TranslateOutputTruncated):
+        c.complete("s", _SRC_PROMPT, max_tokens=100)
+
+
+def test_스트림의_reasoning은_본문에_섞이지_않는다(mock_llm):
+    mod, base = mock_llm
+    c = OpenAICompatClient(_cfg(base_url=f"{base}/v1?reasoning=300", api_mode="chat"))
+    out = c.complete("s", _SRC_PROMPT, max_tokens=100)
+    assert "생각" not in out
+    assert out == mod._translate("The model is fast and the results are good.")
+
+
+def test_스트리밍_취소는_즉시_반환하고_서버_생성을_멈춘다(mock_llm):
+    """취소가 진행 중 HTTP 종료(최대 180초)까지 밀리고 서버는 끊긴 요청도 끝까지
+    생성하던 문제(concurrency-10, probe:MLX-04) — 연결을 끊어 둘 다 막는다."""
+    from app.translate.client import _RequestCancelled
+
+    mod, base = mock_llm
+    cancel = threading.Event()
+    c = OpenAICompatClient(
+        _cfg(base_url=f"{base}/v1?delay=0.05&chunk=2", api_mode="chat"),
+        cancel_check=cancel.is_set,
+    )
+    threading.Timer(0.3, cancel.set).start()
+    t0 = time.monotonic()
+    with pytest.raises(_RequestCancelled):
+        c.complete("s", "[번역할 원문]\n" + "The model is fast. " * 60, max_tokens=100)
+    assert time.monotonic() - t0 < 1.5
+    deadline = time.monotonic() + 3
+    while mod.STATS["stream_aborted"] < 1 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert mod.STATS["stream_aborted"] == 1          # 서버가 끊김을 보고 생성을 멈췄다
+    sent = mod.STATS["stream_chunks"]
+    time.sleep(0.3)
+    assert mod.STATS["stream_chunks"] == sent        # 더 이상 생성하지 않는다
+
+
+def test_비스트리밍_요청도_취소되면_응답을_기다리지_않는다():
+    from app.translate.client import _RequestCancelled
+
+    class Slow(_Quiet):
+        def do_POST(self):  # noqa: N802
+            self._body()
+            time.sleep(3)
+            self._json(200, {"output_text": "늦은 응답"})
+
+    with _serve(Slow) as base:
+        cancel = threading.Event()
+        c = OpenAICompatClient(
+            _cfg(base_url=f"{base}/v1", api_mode="responses"), cancel_check=cancel.is_set,
+        )
+        threading.Timer(0.2, cancel.set).start()
+        t0 = time.monotonic()
+        with pytest.raises(_RequestCancelled):
+            c.complete("s", "u", max_tokens=10)
+        assert time.monotonic() - t0 < 1.0
+
+
+def test_응답_본문_상한을_넘으면_읽기를_멈춘다():
+    """번역 응답에 애플리케이션 수준 크기 상한이 없었다(gap2-…-4)."""
+    big = b"x" * (1024 * 1024 + 10)
+
+    class Declared(_Quiet):
+        def do_POST(self):  # noqa: N802
+            self._body()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(50 * 1024 * 1024))
+            self.end_headers()
+            self.wfile.write(b"{}")  # 선언만 크다 — 읽기 전에 거절돼야 한다
+
+    class Endless(_Quiet):
+        def do_POST(self):  # noqa: N802
+            self._body()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            with contextlib.suppress(OSError):
+                self.wfile.write(big)
+
+    class EndlessStream(_Quiet):
+        def do_POST(self):  # noqa: N802
+            self._body()
+            self._sse_head()
+            with contextlib.suppress(OSError):
+                self.wfile.write(b"data: " + big)   # 개행 없는 거대한 한 줄
+
+    for handler, mode in ((Declared, "responses"), (Endless, "responses"),
+                          (EndlessStream, "chat")):
+        with _serve(handler) as base:
+            c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode=mode,
+                                        max_response_mb=1, max_retries=0))
+            with pytest.raises(TranslateAPIError, match="상한"):
+                c.complete("s", "u", max_tokens=10)
+
+
+def test_스트리밍을_거부하는_서버는_비스트리밍으로_래치한다():
+    seen = []
+
+    class NoStream(_Quiet):
+        def do_POST(self):  # noqa: N802
+            body = self._body()
+            seen.append(bool(body.get("stream")))
+            if body.get("stream"):
+                self._json(400, {"error": {"message": "Unrecognized field: stream_options"}})
+                return
+            self._json(200, {"choices": [{"message": {"content": "번역"},
+                                          "finish_reason": "stop"}]})
+
+    with _serve(NoStream) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat"))
+        assert c.complete("s", "u", max_tokens=10) == "번역"
+        assert c._stream_ok is False and seen == [True, False]
+        assert c.complete("s", "u", max_tokens=10) == "번역"
+        assert seen == [True, False, False]                 # 이후는 비스트리밍 직행
+
+
+def test_stream_1이면_거부돼도_폴백하지_않는다():
+    from app.translate.types import TranslateUnitRejected
+
+    class NoStream(_Quiet):
+        def do_POST(self):  # noqa: N802
+            self._body()
+            self._json(400, {"error": {"message": "stream not supported"}})
+
+    with _serve(NoStream) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat", stream="on"))
+        with pytest.raises(TranslateUnitRejected, match="HTTP 400"):
+            c.complete("s", "u", max_tokens=10)
+
+
+def test_응답_정지는_1회만_재시도하고_유닛_단위_시간초과로_보고한다():
+    """토큰 사이 정지가 timeout_s를 넘으면 ReadTimeout — 같은 긴 생성의 반복이라 재시도는
+    1회뿐이고, 소진되면 '연결 실패'(잡 전체) 대신 TranslateTimeout(유닛 단위)이다."""
+    from app.translate.types import TranslateTimeout, TranslateUnitRejected
+
+    hits = []
+
+    class Stall(_Quiet):
+        def do_POST(self):  # noqa: N802
+            self._body()
+            hits.append(1)
+            self._sse_head()
+            with contextlib.suppress(OSError):
+                self.wfile.write(_chunk("앞부분"))
+                self.wfile.flush()
+                time.sleep(2)
+
+    with _serve(Stall) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat", timeout_s=0.4))
+        c._backoff = lambda headers, attempt: 0.0
+        with pytest.raises(TranslateTimeout, match="TRANSLATE_TIMEOUT_S") as exc:
+            c.complete("s", "u", max_tokens=10)
+    assert isinstance(exc.value, TranslateUnitRejected)
+    assert len(hits) == 2                       # 최초 1 + 재시도 1 (max_retries=3이어도)
+
+
+def test_완료_신호_없이_끊긴_스트림은_연결_오류로_재시도한다():
+    hits = []
+
+    class Cut(_Quiet):
+        def do_POST(self):  # noqa: N802
+            self._body()
+            hits.append(1)
+            self._sse_head()
+            self.wfile.write(_chunk("잘린"))
+            if len(hits) > 1:
+                self.wfile.write(_chunk("완전한 번역", "stop") + b"data: [DONE]\n\n")
+
+    with _serve(Cut) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat", max_retries=1))
+        c._backoff = lambda headers, attempt: 0.0
+        assert c.complete("s", "u", max_tokens=10) == "잘린완전한 번역"
+    assert len(hits) == 2
+
+
+def test_스트림_중간의_오류_이벤트는_API_오류로_올린다():
+    class Err(_Quiet):
+        def do_POST(self):  # noqa: N802
+            self._body()
+            self._sse_head()
+            self.wfile.write(_chunk("부분"))
+            self.wfile.write(b'data: {"error": {"message": "model crashed"}}\n\n')
+
+    with _serve(Err) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat", max_retries=0))
+        with pytest.raises(TranslateAPIError, match="스트림 오류"):
+            c.complete("s", "u", max_tokens=10)
+
+
+def test_stream_설정_검증():
+    from app.translate.types import TranslateError
+
+    base = {"OPENAI_BASE_URL": "https://h/v1", "OPENAI_MODEL": "m"}
+    assert TranslateConfig.from_env(base).stream == "auto"
+    assert TranslateConfig.from_env({**base, "TRANSLATE_STREAM": "0"}).stream == "off"
+    assert TranslateConfig.from_env({**base, "TRANSLATE_STREAM": "1"}).stream == "on"
+    assert TranslateConfig.from_env(base).max_response_mb == 32
+    for name, value in (("TRANSLATE_STREAM", "maybe"), ("TRANSLATE_MAX_RESPONSE_MB", "0"),
+                        ("TRANSLATE_MAX_RESPONSE_MB", "abc")):
+        with pytest.raises(TranslateError, match=name):
+            TranslateConfig.from_env({**base, name: value})

@@ -171,6 +171,18 @@ services:
       - "host.docker.internal:host-gateway"
     security_opt:
       - no-new-privileges:true
+    # ── 컨테이너 하드닝 (CPU 스택 실측 검증: 업로드→OCR→번역→PDF/HTML/레이아웃 내보내기) ──
+    # cap_drop: 비루트(uid 1000)+no-new-privileges라 쓰는 캡이 없다 — 경계 집합도 비운다.
+    # read_only: 쓰기는 /data(볼륨)와 /tmp(tmpfs)뿐이다(docker diff 실측). 침해된 워커가
+    #   컨테이너 레이어에 페이로드를 심어 재시작 뒤에도 남기는 경로를 막는다.
+    # tmpfs /tmp: 업로드 스풀(MAX_UPLOAD_MB)·폰트 서브셋 임시 디렉터리 — MAX_UPLOAD_MB를
+    #   크게 올리면 size도 함께 올린다(메모리 상한에 포함된다).
+    # pids(deploy 아래 — compose가 pids_limit과 deploy.resources.limits를 함께 못 쓴다):
+    #   fork 폭주 차단. torch CPU 스레드 풀(코어 수의 몇 배)을 덮는 여유값이다.
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=2g
     logging: *default-logging
     # 메모리 상한 — 호스트 전체를 OOM으로 끌고 가는 것을 막는 안전판이다.
     # 기본값은 넉넉하게 잡았고 .env에서 조정 가능하다(호스트 RAM보다 작게 둘 것).
@@ -180,6 +192,7 @@ services:
       resources:
         limits:
           memory: ${OCR_CPU_MEM_LIMIT:-24g}
+          pids: 1024   # fork 폭주 차단 — 설명은 ocr-cpu 하드닝 주석 참조
     restart: unless-stopped
 
   ocr-cuda:
@@ -293,12 +306,16 @@ services:
       - "host.docker.internal:host-gateway"
     security_opt:
       - no-new-privileges:true
+    # 하드닝 — 설명은 ocr-cpu 참조. read_only는 CUDA 경로(드라이버 JIT 캐시 등)를 GPU
+    # 호스트에서 검증하기 전까지 걸지 않는다.
+    cap_drop: [ALL]
     logging: *default-logging
     # 메모리 상한 — 설명은 ocr-cpu 참조 (가중치는 VRAM, 여기 RAM은 렌더·조판용)
     deploy:
       resources:
         limits:
           memory: ${OCR_CUDA_MEM_LIMIT:-16g}
+          pids: 1024   # fork 폭주 차단 — 설명은 ocr-cpu 하드닝 주석 참조
     restart: unless-stopped
 
   # ── OvisOCR2 스택 (profile: ovis) ────────────────────────────
@@ -403,6 +420,11 @@ services:
       - "host.docker.internal:host-gateway"
     security_opt:
       - no-new-privileges:true
+    # 하드닝 — ocr-cpu와 같은 이미지·같은 쓰기 경로(/data·/tmp). 설명은 ocr-cpu 참조
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=2g
     depends_on:
       ovisocr2:
         # service_healthy 대신 service_started: 최초 모델 다운로드가 수십 분일 수
@@ -414,6 +436,7 @@ services:
       resources:
         limits:
           memory: ${OCR_WEB_MEM_LIMIT:-8g}
+          pids: 1024   # fork 폭주 차단 — 설명은 ocr-cpu 하드닝 주석 참조
     restart: unless-stopped
 
   ovisocr2:
@@ -449,6 +472,10 @@ services:
       - ovis-hf-cache:/data/hf
     security_opt:
       - no-new-privileges:true
+    # 비루트(uid 1000)+no-new-privileges라 유효 캡이 원래 비어 있다 — 경계 집합도 비운다.
+    # read_only·pids 상한은 vLLM(컴파일 캐시·워커 스레드)을 GPU 호스트에서 검증하기
+    # 전까지 걸지 않는다.
+    cap_drop: [ALL]
     logging: *default-logging
     # 메모리 상한 — 설명은 ocr-cpu 참조 (.env로 조정 가능)
     deploy:
@@ -548,6 +575,11 @@ services:
       - "host.docker.internal:host-gateway"
     security_opt:
       - no-new-privileges:true
+    # 하드닝 — ocr-cpu와 같은 이미지·같은 쓰기 경로(/data·/tmp). 설명은 ocr-cpu 참조
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=2g
     depends_on:
       paddleocr-vl:
         condition: service_started
@@ -557,6 +589,7 @@ services:
       resources:
         limits:
           memory: ${OCR_WEB_MEM_LIMIT:-8g}
+          pids: 1024   # fork 폭주 차단 — 설명은 ocr-cpu 하드닝 주석 참조
     restart: unless-stopped
 
   paddleocr-vl:
@@ -583,6 +616,7 @@ services:
       - paddle-x-cache:/home/app/.paddlex  # PaddleX 캐시 ($HOME 기준 — 비루트 실행)
     security_opt:
       - no-new-privileges:true
+    cap_drop: [ALL]   # 이유·보류 항목은 ovisocr2와 같다
     logging: *default-logging
     # 메모리 상한 — 설명은 ocr-cpu 참조 (.env로 조정 가능)
     deploy:

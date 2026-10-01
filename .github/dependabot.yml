@@ -1,0 +1,83 @@
+# Dependabot — 저잡음 설정: 생태계마다 주 1회, 같은 종류의 갱신은 PR 하나로 묶는다.
+# 보안 업데이트는 주기와 무관하게 오고, 역시 생태계마다 하나로 묶는다.
+#
+# 받지 않는 것 (의도):
+# - transformers·torch·torchvision: 모델 카드 고정이다. 벤더 모델 코드(backend/app/vendor)가
+#   그 API·수치 동작에 묶여 있어 올리려면 패리티 재검증이 필요하다(backend/pyproject.toml 주석).
+#   남은 권고는 CI dependency-audit 잡과 release trivy 게이트가 이유·기한과 함께 관리한다.
+# - vllm/vllm-openai: OvisOCR2 모델 카드 공식 버전(v0.22.1)이다. GPU 호스트 재검증 뒤에만 올린다.
+# - sidecar Python 잠금(services/*/requirements.lock): 검증 시점 날짜 창(--exclude-newer)과
+#   CDN 휠 URL을 쓰는 uv pip compile 결과라 Dependabot이 같은 방식으로 다시 만들 수 없다.
+#   새 권고는 CI dependency-audit 잡이 잡고, 갱신은 lock 머리말의 명령으로 사람이 한다.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 3
+    ignore:
+      - dependency-name: transformers
+      - dependency-name: torch
+      - dependency-name: torchvision
+    groups:
+      backend-security:
+        applies-to: security-updates
+        patterns: ["*"]
+      backend-minor-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+      backend-major:
+        applies-to: version-updates
+        update-types: [major]
+
+  # 워크플로 액션은 커밋 SHA + 버전 주석으로 고정돼 있다 — Dependabot이 둘을 함께 올린다
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 2
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # 베이스 이미지는 태그+digest로 고정돼 있다 — 같은 태그의 digest 갱신(OS 보안 패치 반영)과
+  # 패치 버전을 받는다. 파이썬 마이너(3.12→3.13)는 휠·requires-python이 3.12에 묶여 받지 않는다.
+  - package-ecosystem: docker
+    directories:
+      - /backend
+      - /services/ovisocr2
+      - /services/paddleocr_vl
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 2
+    ignore:
+      - dependency-name: vllm/vllm-openai
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+    groups:
+      base-images:
+        patterns: ["*"]
+
+  # compose 이미지 참조(compose.ollama.yaml의 ollama). 로컬에서 빌드하는 이미지 이름
+  # (unlimited-ocr-web 등)은 레지스트리에 없어 건너뛴다.
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 1
+    ignore:
+      - dependency-name: unlimited-ocr-web
+      - dependency-name: ovisocr2-sidecar
+      - dependency-name: paddleocr-vl-sidecar
+    groups:
+      compose-images:
+        patterns: ["*"]

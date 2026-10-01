@@ -454,6 +454,17 @@ class Servers:
         self.api_log = None
 
     def __enter__(self):
+        try:
+            self._start()
+        except BaseException:
+            # __enter__가 실패하면 with 문은 __exit__을 부르지 않는다. 이미 띄운 목·백엔드가
+            # 고아로 남아 포트를 쥐면, 같은 포트를 받은 다음 실행의 목은 바인드에 실패해
+            # 죽고 하네스는 그 고아(FAULT="")와 대화한다 — FAULT 주입이 전부 무력화됐다(실측).
+            self.__exit__(None, None, None)
+            raise
+        return self
+
+    def _start(self) -> None:
         py = _python()
         # FAULT는 **목 서버**가 읽는 결함 주입 스위치다 — 백엔드 env로만 넣으면
         # 목에 닿지 않아 [8] 결함 주입 단계가 조용히 무력화된다. 목에도 전달한다.
@@ -477,7 +488,6 @@ class Servers:
         if not wait_http(f"{BASE}/api/health", timeout=120):
             print((WORK / "api.log").read_text()[-4000:])
             raise SystemExit("백엔드 기동 실패")
-        return self
 
     def __exit__(self, *exc):
         for p in (self.api, self.mock):

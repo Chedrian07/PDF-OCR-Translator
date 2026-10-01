@@ -2,26 +2,19 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8">
+  <!-- CSP: 업로드 PDF에서 온 문서 조각이 제3자·LAN 주소를 자동 요청하지 못하게 이미지·연결을
+       같은 출처로 묶는다(img-src는 data:·blob:도 허용). 인라인 스크립트는 없다 — 테마
+       부트스트랩은 theme-init.js. style 'unsafe-inline'은 서버 레이아웃 조각의 좌표
+       style 속성 때문에 필요하다. 바꾸면 mock E2E(콘솔 CSP 위반 = 실패)로 확인한다. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="referrer" content="no-referrer">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>PDF OCR Translator — PDF 그대로 읽고 번역하기</title>
   <link rel="stylesheet" href="./styles.css">
   <link rel="stylesheet" href="./vendor/katex/katex.min.css">
-  <script>
-    /* Theme bootstrap: resolve before first paint to avoid a flash.
-       Follows prefers-color-scheme unless the user picked a theme (localStorage). */
-    (function () {
-      try {
-        var t = localStorage.getItem('uocr-theme');
-        if (t !== 'light' && t !== 'dark') {
-          t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-        }
-        document.documentElement.setAttribute('data-theme', t);
-      } catch (e) {
-        document.documentElement.setAttribute('data-theme', 'light');
-      }
-    })();
-  </script>
+  <!-- 테마 부트스트랩 — 첫 페인트 전에 실행돼야 하므로 defer 없이 동기로 읽는다 -->
+  <script src="./theme-init.js"></script>
 </head>
 <body>
   <header class="app-header">

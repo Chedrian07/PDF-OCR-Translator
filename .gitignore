@@ -68,3 +68,7 @@ backend/sample/
 # 문서 OCR 전문이 저장된다. 사내·저작권 문서가 `git add -A` 한 번에 커밋되지 않게
 # 실행 위치(리포 루트·backend/)와 무관하게 무시한다.
 bench_out/
+
+# sidecar 의존성의 원천은 services/*/requirements.in → requirements.lock(해시)이다 —
+# 서비스 디렉터리에서 `uv run`을 하면 생기는 빈 uv.lock이 실제 잠금처럼 다시 커밋되지 않게
+services/*/uv.lock

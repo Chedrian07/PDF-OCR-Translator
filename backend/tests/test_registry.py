@@ -43,6 +43,24 @@ def test_env_mps_alias(monkeypatch):
     assert Settings.from_env().device == "metal"
 
 
+def test_mlx_quant_bits_from_env(monkeypatch):
+    monkeypatch.delenv("OCR_MLX_QUANT_BITS", raising=False)
+    assert Settings.from_env().mlx_quant_bits == 0
+    # 빈 값은 미설정과 같다 (compose·.env의 빈 선택 키 관례)
+    for raw, want in (("8", 8), ("0", 0), (" 8 ", 8), ("", 0)):
+        monkeypatch.setenv("OCR_MLX_QUANT_BITS", raw)
+        assert Settings.from_env().mlx_quant_bits == want
+
+
+@pytest.mark.parametrize("raw", ["4", "16", "-8", "8bit", "1.5"])
+def test_mlx_quant_bits_rejects_other_values_naming_the_variable(monkeypatch, raw):
+    """4비트(숫자 오인식 실측)·오타는 기동 시 변수명과 함께 실패 — 조용히 bf16으로 돌면
+    운영자는 양자화가 켜졌다고 믿는다."""
+    monkeypatch.setenv("OCR_MLX_QUANT_BITS", raw)
+    with pytest.raises(ValueError, match="OCR_MLX_QUANT_BITS"):
+        Settings.from_env()
+
+
 def test_page_output_limits_from_env(monkeypatch):
     monkeypatch.setenv("MAX_PAGE_OUTPUT_CHARS", "12345")
     monkeypatch.setenv("MAX_PAGE_OUTPUT_TOKENS", "4321")

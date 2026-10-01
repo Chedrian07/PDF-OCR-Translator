@@ -265,3 +265,43 @@ def test_cancel_before_request(stub, image_path):
     with pytest.raises(JobCanceled):
         _client(stub.url).parse_page(image_path, 0, "r", {}, cancel)
     assert stub.requests_seen == []  # 요청 자체를 보내지 않는다
+
+
+def test_health_body_cut_midway_maps_to_unavailable():
+    """응답 본문 도중 연결이 끊기면(재기동 중인 sidecar) requests의 ChunkedEncodingError가
+    매핑 없이 새어 나가 준비 대기가 '모델 로드 실패'로 끝났다 — 일시적 오류로 매핑한다."""
+    import socket
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
+    def serve_truncated() -> None:
+        conn, _ = server.accept()
+        try:
+            conn.recv(4096)
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b"Content-Length: 1000\r\n\r\n{\"status\": \"ok\""  # 1000바이트 선언, 15바이트 전송
+            )
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=serve_truncated, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(SidecarUnavailableError) as excinfo:
+            _client(f"http://127.0.0.1:{port}").health()
+        assert excinfo.value.transient  # 준비 대기가 계속 기다린다
+    finally:
+        thread.join(timeout=5)
+        server.close()
+
+
+def test_read_timeout_is_marked_no_same_page_retry():
+    """읽기 타임아웃은 같은 페이지 즉시 재요청 금지 — runner가 재시도 없이 페이지 격리로 간다."""
+    from app.sidecar.client import SidecarTimeoutError
+
+    assert SidecarTimeoutError("x").retry_same_page is False
+    assert getattr(SidecarUnavailableError("x"), "retry_same_page", True) is True

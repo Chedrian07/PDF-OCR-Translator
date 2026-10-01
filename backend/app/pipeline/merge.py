@@ -18,10 +18,12 @@ import json
 import os
 import re
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from .artifacts import layout_has_text_blocks
+from .fidelity import normalize as _comparable_text
 
 _IMG_MULTI = re.compile(r"!\[\]\(images/page_(\d+)_(\d+)\.jpg\)")
 _IMG_SINGLE = re.compile(r"!\[\]\(images/(\d+)\.jpg\)")
@@ -45,12 +47,23 @@ _ALIGN_PROBE_CHARS = 32     # 대조 프로브 길이
 _ALIGN_MIN_PROBE_SRC = 40   # 이보다 짧은 모델 페이지는 정합 판정 대상이 아니다
 _ALIGN_MIN_SCORE = 0.34     # 프로브 적중률이 이 미만이면 매칭으로 인정하지 않는다
 _ALIGN_MIN_PAGE_CHARS = 80  # 물리 페이지 텍스트가 이보다 짧으면 텍스트 레이어 없음
-_NON_WORD = re.compile(r"\W+", re.UNICODE)
+# 정합을 믿기 위한 최소 매칭 비율(모델·물리 페이지 수 중 작은 쪽 기준). 이보다 적게
+# 맞으면 근거가 약하다 — 매칭 안 된 페이지가 앞 페이지에 쌓여 위치 기반보다 나빠진다.
+_ALIGN_MIN_MATCHED_SHARE = 0.5
+_IMAGE_REF = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 
 
 def _align_norm(text: str) -> str:
-    """대조용 정규화 — 공백·구두점·대소문자 차이를 지운다."""
-    return _NON_WORD.sub("", _SPECIAL_TOKEN.sub("", text or "")).lower()
+    """대조용 정규화 — 모델만 내는 표기(그라운딩 토큰·그림 참조·HTML 표 태그·LaTeX
+    명령)와 공백·구두점·대소문자 차이를 지운다(fidelity.normalize와 같은 글자·숫자 비교).
+
+    예전에는 `<|..|>`와 비단어 문자만 지워 표 페이지의 `<table><tr><td>`가 'tabletrtd…'로,
+    `![](images/page_0_1.jpg)`·`\\mathbb`가 글자로 프로브에 남았다. 표·수식·그림 페이지가
+    임계 미만으로 떨어져 앞 페이지에 붙고 제자리는 비었다(실측 TurboQuant 6쪽은 자기
+    물리 페이지에 대해서도 0.33).
+    """
+    text = _SPECIAL_TOKEN.sub(" ", text or "")
+    return _comparable_text(_IMAGE_REF.sub(" ", text))
 
 
 def _probe_score(model_text: str, page_text: str) -> float:
@@ -119,25 +132,77 @@ def align_model_pages(model_texts: list[str], page_texts: list[str]) -> list[int
     return out
 
 
+def assign_slots(
+    mapping: list[int | None],
+    num_pages: int,
+    score: "Callable[[int, int], float] | None" = None,
+) -> list[int]:
+    """정합 결과(모델 페이지 k → 물리 슬롯 또는 None)를 모든 모델 페이지의 슬롯으로 채운다.
+
+    1. 단조 갭 채우기: 앞뒤 매칭(또는 청크 양 끝) 사이의 미매칭 모델 페이지 수가 그
+       사이 빈 슬롯 수와 같으면 순서대로 채운다 — 표·수식 페이지가 대조에 실패해도
+       양옆이 맞으면 제자리를 찾는다(예: [0, None, 2] → 가운데는 1).
+    2. 그래도 남은 미매칭 페이지는 **버리지 않고** 이웃 매칭 페이지에 붙인다. 기본은
+       앞쪽(앞이 없으면 첫 슬롯)이고, score(k, slot)가 주어지면 연속 구간을 앞·뒤로 한
+       번만 나누는 분할점 중 점수 합이 가장 큰 쪽을 고른다 — 둘로 쪼개진 페이지의 앞
+       절반이 이전 페이지에 붙던 것을 막는다(순서는 단조로 유지된다).
+    내용 손실 없이 물리 페이지 수를 정확히 지킨다.
+    """
+    n = len(mapping)
+    slots: list[int | None] = [
+        m if m is not None and 0 <= m < num_pages else None for m in mapping
+    ]
+    anchors = [(k, slots[k]) for k in range(n) if slots[k] is not None]
+    bounds = [(-1, -1), *anchors, (n, num_pages)]
+    for (ka, sa), (kb, sb) in zip(bounds, bounds[1:]):
+        gap_models = range(ka + 1, kb)
+        gap_slots = range(sa + 1, sb)
+        if len(gap_models) and len(gap_models) == len(gap_slots):
+            for k, slot in zip(gap_models, gap_slots):
+                slots[k] = slot
+
+    k = 0
+    while k < n:
+        if slots[k] is not None:
+            k += 1
+            continue
+        run_end = k
+        while run_end < n and slots[run_end] is None:
+            run_end += 1
+        run = list(range(k, run_end))
+        prev = next((slots[i] for i in range(k - 1, -1, -1) if slots[i] is not None), None)
+        nxt = slots[run_end] if run_end < n else None
+        before = prev if prev is not None else 0
+        split = len(run)  # 분할점: run[:split]은 앞, run[split:]은 뒤
+        if score is not None and nxt is not None and nxt != before:
+            best = None
+            for t in range(len(run), -1, -1):  # 동점이면 앞쪽(예전 동작)을 고른다
+                total = sum(score(i, before) for i in run[:t]) + sum(
+                    score(i, nxt) for i in run[t:]
+                )
+                if best is None or total > best:
+                    best, split = total, t
+        for pos, i in enumerate(run):
+            slots[i] = before if pos < split else nxt
+        k = run_end
+    return [int(slot) for slot in slots]
+
+
+def _place(items: list, slots: list[int], num_pages: int, joiner: str) -> list:
+    """슬롯 배정대로 항목들을 물리 페이지 자리에 모은다(같은 슬롯은 joiner로 잇는다)."""
+    placed: list[list] = [[] for _ in range(num_pages)]
+    for item, target in zip(items, slots):
+        if 0 <= target < num_pages:
+            placed[target].append(item)
+    return [joiner.join(str(x) for x in s) if s else "" for s in placed]
+
+
 def place_by_alignment(
     items: list, mapping: list[int | None], num_pages: int, joiner: str
 ) -> list:
-    """정합 결과대로 모델 페이지들을 물리 페이지 자리에 배치한다.
-
-    매칭되지 않은 모델 페이지는 **버리지 않고** 바로 앞의 매칭 페이지에 붙인다
-    (앞이 없으면 첫 페이지). 내용 손실 없이 물리 페이지 수를 정확히 지킨다.
-    """
-    slots: list[list] = [[] for _ in range(num_pages)]
-    cursor = 0
-    for k, item in enumerate(items):
-        target = mapping[k] if k < len(mapping) else None
-        if target is None:
-            target = cursor
-        else:
-            cursor = target
-        if 0 <= target < num_pages:
-            slots[target].append(item)
-    return [joiner.join(str(x) for x in s) if s else "" for s in slots]
+    """정합 결과대로 모델 페이지들을 물리 페이지 자리에 배치한다(`assign_slots` 규칙)."""
+    padded = list(mapping[: len(items)]) + [None] * max(0, len(items) - len(mapping))
+    return _place(items, assign_slots(padded, num_pages), num_pages, joiner)
 
 
 def split_pages(markdown: str) -> list[str]:
@@ -456,17 +521,28 @@ class IncrementalMerger:
 
     def _align_chunk_pages(
         self, chunk: "ChunkResult", model_pages: list[str]
-    ) -> list[int | None] | None:
-        """모델 페이지 → 물리 페이지 정합. 정합할 수 없으면 None(기존 동작 유지)."""
+    ) -> tuple[list[int], int] | None:
+        """모델 페이지 → 물리 슬롯(모든 모델 페이지)과 매칭 수. 정합할 수 없으면 None
+        (호출자는 위치 기반 배치로 돌아간다)."""
         if chunk.single or chunk.num_pages <= 1 or len(model_pages) <= 1:
             return None
         page_texts = self._source_page_texts(chunk)
         if not page_texts:
             return None
-        mapping = align_model_pages([_align_norm(p) for p in model_pages], page_texts)
-        if not any(m is not None for m in mapping):
-            return None  # 대조가 전부 실패 — 근거 없는 재배치는 하지 않는다
-        return mapping
+        model_texts = [_align_norm(p) for p in model_pages]
+        mapping = align_model_pages(model_texts, page_texts)
+        matched = sum(1 for m in mapping if m is not None)
+        if matched == 0 or matched < min(len(model_pages), chunk.num_pages) * (
+            _ALIGN_MIN_MATCHED_SHARE
+        ):
+            # 대조가 (거의) 실패 — 근거가 약한 재배치는 위치 기반보다 나빠질 수 있다
+            # (매칭 안 된 페이지가 앞 페이지에 쌓이고 제자리가 빈다)
+            return None
+        slots = assign_slots(
+            mapping, chunk.num_pages,
+            score=lambda k, slot: _probe_score(model_texts[k], page_texts[slot]),
+        )
+        return slots, matched
 
     def _ingest_layout(
         self, chunk: ChunkResult, raw_pages: list, slot_source: list | None = None,
@@ -642,24 +718,20 @@ class IncrementalMerger:
         # **layout이 없는 파일을 가리키고 실제 파일은 고아가 된다.** 같은 k를 쓴다.
         slot_source: list[int | None] = list(range(chunk.num_pages))
         if len(pages) != chunk.num_pages or len(raw_pages) != chunk.num_pages:
-            mapping = self._align_chunk_pages(chunk, pages)
-            if mapping is not None:
+            aligned = self._align_chunk_pages(chunk, pages)
+            if aligned is not None:
+                slots, placed = aligned
                 slot_source = [None] * chunk.num_pages
-                for model_index, slot in enumerate(mapping):
-                    if slot is None or not 0 <= slot < chunk.num_pages:
-                        continue
+                for model_index, slot in enumerate(slots):
                     if slot_source[slot] is None:   # 합쳐진 경우 첫 모델 페이지 기준
                         slot_source[slot] = model_index
-                placed = sum(1 for m in mapping if m is not None)
-                pages = place_by_alignment(pages, mapping, chunk.num_pages, "\n\n")
+                pages = _place(pages, slots, chunk.num_pages, "\n\n")
                 if raw_pages:
-                    padded = list(raw_pages[: len(mapping)])
-                    padded += [""] * (len(mapping) - len(padded))
-                    raw_pages = place_by_alignment(
-                        padded, mapping, chunk.num_pages, "\n"
-                    )
+                    padded = list(raw_pages[: len(slots)])
+                    padded += [""] * (len(slots) - len(padded))
+                    raw_pages = _place(padded, slots, chunk.num_pages, "\n")
                 notes.append(
-                    f"{chunk.start_page}페이지 청크: 페이지 마커 {len(mapping)}개 "
+                    f"{chunk.start_page}페이지 청크: 페이지 마커 {len(slots)}개 "
                     f"(기대 {chunk.num_pages}) — 원본 본문과 대조해 "
                     f"{placed}개 페이지를 제자리에 배치"
                 )

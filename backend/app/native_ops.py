@@ -59,24 +59,49 @@ def banned_ngram_tokens(sequence, ngram_size: int, window: int) -> list[int]:
 
 
 class TorchSlidingWindowNoRepeatNgram:
-    """CUDA/MPS 상주 no-repeat-ngram — 호스트 동기화·전송 없이 인그래프로 동작."""
+    """CUDA/MPS 상주 no-repeat-ngram — 호스트 동기화·전송 없이 인그래프로 동작.
 
-    def __init__(self, ngram_size: int, window: int) -> None:
+    static_shape=True(MPS 기본): 창을 항상 ``window`` 길이로 고정한다. 시퀀스가 창보다
+    짧으면 앞을 서로 다른 음수 센티널(-1, -2, …)로 채운다 — MPS는 입력 shape마다
+    MPSGraph를 새로 컴파일·캐시하므로, 길이가 토큰마다 변하는 ``seq[-w:]``는 창이 찰
+    때까지(멀티 1024토큰) 스텝마다 새 그래프를 만들었다(M4 Max 실측: 새 길이당 RSS
+    ~2.9MB·첫 실행 ~5ms, 1쪽 청크 하나에 ~1GB가 영구히 남음 — audit gap1-metal-real-e2e-4).
+    의미론은 그대로다: 토큰 id는 0 이상이라 센티널이 낀 (n-1)-프리픽스는 실제 프리픽스와
+    일치할 수 없고, 센티널로 시작하는 창은 무효 처리해 n=1에서도 밴 후보가 되지 않는다.
+    """
+
+    def __init__(self, ngram_size: int, window: int, *, static_shape: bool = False) -> None:
         if ngram_size < 1 or window < 1:
             raise ValueError("ngram_size와 window는 1 이상이어야 합니다")
         self.ngram_size = ngram_size
         self.window = window
+        self.static_shape = bool(static_shape)
+        self._pad = None  # 디바이스별 센티널 캐시 [window] (-1..-window)
+
+    def _segment(self, seq):
+        """밴 검사 대상 창 — static_shape면 항상 [window] 길이(앞쪽 센티널 패딩)."""
+        import torch
+
+        seg = seq[-self.window:]
+        missing = self.window - seg.shape[0]
+        if not self.static_shape or missing <= 0:
+            return seg
+        pad = self._pad
+        if pad is None or pad.device != seq.device:
+            pad = -torch.arange(1, self.window + 1, dtype=seq.dtype, device=seq.device)
+            self._pad = pad
+        return torch.cat([pad[:missing], seg])
 
     def __call__(self, input_ids, scores):
         import torch
 
-        n, w = self.ngram_size, self.window
+        n = self.ngram_size
         vocab = scores.shape[-1]
         for b in range(input_ids.shape[0]):
             seq = input_ids[b]
             if seq.shape[0] < n:
                 continue
-            seg = seq[-w:]
+            seg = self._segment(seq)
             m = seg.shape[0] - n + 1
             if m <= 0:
                 continue
@@ -85,6 +110,9 @@ class TorchSlidingWindowNoRepeatNgram:
                 match = (unf[:, :-1] == seg[-(n - 1):]).all(dim=1)
             else:
                 match = torch.ones(m, dtype=torch.bool, device=seq.device)
+            if self.static_shape:
+                # 센티널로 시작하는 창 = 시퀀스 밖에서 시작한 ngram → 무효 (레퍼런스와 동일)
+                match = match & (unf[:, 0] >= 0)
             # 비매치 후보는 vocab 번째(버림 슬롯)로 스캐터 → 분기/동기화 없이 마스크 구성
             cand = unf[:, -1]
             idx = torch.where(match, cand, torch.full_like(cand, vocab))
@@ -231,7 +259,10 @@ def make_ngram_logits_processor(ngram_size: int, window: int, device_type: str =
 
     force_host = os.environ.get("OCR_NGRAM_HOST", "").strip().lower() in ("1", "true", "yes", "on")
     if device_type in ("cuda", "mps") and not force_host:
-        return [TorchSlidingWindowNoRepeatNgram(ngram_size, window)]
+        # MPS는 shape별 그래프 컴파일·캐시라 창 길이를 고정한다(위 클래스 독스트링).
+        # CUDA 커널은 shape 무관이라 기존 동적 슬라이스 그대로.
+        return [TorchSlidingWindowNoRepeatNgram(
+            ngram_size, window, static_shape=(device_type == "mps"))]
     proc = HostSlidingWindowNoRepeatNgram(ngram_size, window)
     if force_host:
         # 절연 레버로 강제된 프로세서는 CUDA 그래프 대체 금지 마커 — 그래프 경로가

@@ -52,6 +52,10 @@ MuPDF C 호출은 GIL을 쥔 채 돌고(`nm -u _mupdf.so`에 PyEval_SaveThread�
 - 작업마다 `signal.alarm(상한 + 여유)`를 건다. SIGALRM 기본 동작은 커널이 프로세스를 끝내는
   것이라 GIL이 필요 없다 — 부모가 SIGKILL로 사라져 아무도 죽여 주지 않아도 적대적 작업이 영원히
   CPU를 태우지 않는다.
+- 자격 증명처럼 보이는 환경 변수(…KEY·…TOKEN·…SECRET·…PASSWORD — 번역·Q&A API 키, HF 토큰)를
+  기동 즉시 지운다. 워커는 비밀이 필요 없고, MuPDF 메모리 결함(예: CVE-2026-3308)으로 워커가
+  장악돼도 키를 읽지 못하게 하는 심층 방어다. 워커는 자원·장애 격리 경계이지 권한 샌드박스가
+  아니다(같은 사용자·같은 파일 시스템).
 - Linux에서는 /proc/self/oom_score_adj를 1000으로 올려 메모리 압박 시 커널이 서버가 아니라
   워커를 먼저 고르게 한다. PDF_WORKER_MEM_LIMIT_MB(>0)면 RLIMIT_AS도 건다(macOS는 커널이
   RLIMIT_AS를 강제하지 않아 건너뛴다).
@@ -75,6 +79,7 @@ import math
 import multiprocessing
 import os
 import pickle
+import re
 import shutil
 import signal
 import sys
@@ -465,6 +470,16 @@ def _prefer_oom_kill() -> None:
         Path("/proc/self/oom_score_adj").write_text("1000", encoding="ascii")
 
 
+# 워커에서 지울 환경 변수 이름 — 대소문자 무시, 이름 어디에든 들어 있으면
+_SECRET_ENV_NAME = re.compile(r"(KEY|TOKEN|SECRET|PASSW(OR)?D|CREDENTIAL)", re.IGNORECASE)
+
+
+def _drop_secret_env() -> None:
+    """(워커) 자격 증명처럼 보이는 환경 변수를 지운다 — PDF 작업에는 필요 없다."""
+    for name in [key for key in os.environ if _SECRET_ENV_NAME.search(key)]:
+        os.environ.pop(name, None)
+
+
 _SCRATCH_PREFIX = "pdfocr-worker-"
 
 
@@ -538,6 +553,7 @@ def _child_main(conn, pool_name: str, mem_limit_mb: int, log_level: int) -> None
     """워커 프로세스 본체 — 작업을 하나씩 받아 실행하고 결과를 돌려준다."""
     global _IN_WORKER
     _IN_WORKER = True
+    _drop_secret_env()
     with contextlib.suppress(ValueError, OSError, AttributeError):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGALRM, signal.SIG_DFL)

@@ -1555,6 +1555,83 @@ def test_회전_페이지에서도_원문_글리프가_리댁션된다(
         assert page_rect.contains(rect), (text, rect, page_rect)
 
 
+@pytest.mark.parametrize("rotation", [90, 180, 270])
+def test_회전_페이지의_한_줄_번역도_원문_크기로_화면에_가로로_놓인다(
+    tmp_path: Path,
+    real_cjk_fontfile: str,
+    rotation: int,
+):
+    """가로 표·그림 페이지(/Rotate)의 한 줄 블록이 최후 수단 축소로 떨어지지 않는다.
+
+    예전에는 회전 페이지에서 한 줄 경로를 통째로 꺼서, 얕은 OCR 상자의 모든 줄이
+    textbox 경로에서 들어가지 못하고 0.7배 안팎 '축소 배치' 경고와 함께 찍혔다.
+    """
+    import fitz
+
+    job_dir = tmp_path / f"rotated-single-line-{rotation}"
+    job_dir.mkdir()
+    source = fitz.open()
+    page = source.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    page.set_rotation(rotation)
+    display_width, display_height = page.rect.width, page.rect.height
+    lines = [
+        (fitz.Point(60, 80), "Table 3 reports accuracy across all evaluated datasets."),
+        (fitz.Point(60, 200), "Our approach consistently outperforms the strongest baseline."),
+    ]
+    blocks = []
+    for point, text in lines:
+        page.insert_text(
+            point * page.derotation_matrix, text,
+            fontsize=10, fontname="tiro", rotate=rotation,
+        )
+        width = fitz.get_text_length(text, "tiro", 10)
+        shown = fitz.Rect(point.x - 1, point.y - 10, point.x + width + 1, point.y + 3)
+        blocks.append({
+            "type": "text",
+            "bbox": _layout_bbox(
+                shown, page_width=display_width, page_height=display_height,
+            ),
+            "content": text,
+        })
+    source.save(job_dir / "source.pdf")
+    source.close()
+    _write_layout_pair(
+        job_dir,
+        blocks,
+        ["표 3은 모든 데이터셋의 정확도를 보고한다.", "제안 방법은 가장 강한 기준선을 앞선다."],
+        page_width=display_width,
+        page_height=display_height,
+    )
+
+    result = build_translated_pdf(job_dir, "ko", fontfile=real_cjk_fontfile)
+    assert result.replaced == 2, result.report()
+    assert not any("축소 배치" in warning for warning in result.warnings), result.warnings
+    with fitz.open(result.path) as exported:
+        page = exported[0]
+        extracted = page.get_text().replace("\xa0", " ")
+        korean = [
+            span for span in _span_entries(page)
+            if any("가" <= char <= "힣" for char in span["text"])
+        ]
+        shown_rects = []
+        for span in korean:
+            shown = fitz.Rect(span["bbox"]) * page.rotation_matrix
+            shown.normalize()
+            shown_rects.append(shown)
+
+    assert len(korean) == 2, korean
+    for span, shown in zip(korean, shown_rects):
+        # 원문 10pt에 본문 보정 3%만 더한 크기 — 축소 사다리를 타지 않았다.
+        assert span["size"] == pytest.approx(10 * 1.03, abs=0.05), span
+        # 화면에서 가로로 읽힌다(폭이 높이보다 훨씬 크다).
+        assert shown.width > shown.height * 3, shown
+    for (point, _text), shown in zip(sorted(lines, key=lambda item: item[0].y), sorted(shown_rects, key=lambda r: r.y0)):
+        # 원문 줄과 같은 화면 위치에서 시작한다.
+        assert abs(shown.x0 - (point.x - 1)) < 2.0, shown
+        assert shown.y0 < point.y < shown.y1 + 3.0, shown
+    assert "Table 3 reports" not in extracted, extracted
+
+
 def _span(text: str, x0: float, baseline: float, size: float = 9.0):
     """`_reflow_flattened_text` 단위 테스트용 원문 span."""
     import fitz

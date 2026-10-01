@@ -12,10 +12,16 @@ import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from ..engine.base import EngineError, JobCanceled, OCREngine, RepetitiveOutputError
+from ..engine.base import (
+    EngineError,
+    JobCanceled,
+    OCREngine,
+    OutputLimitError,
+    RepetitiveOutputError,
+)
 from .fidelity import PageFidelity, evaluate_layout_pages, evaluate_raw_page
 from .layout import blocks_to_raw
-from .merge import ChunkResult, IncrementalMerger
+from .merge import ChunkResult, IncrementalMerger, keep_leading_pages, split_pages
 from .pdf import extract_embedded_page_markdown, render_pdf_pages
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -324,6 +330,34 @@ def _detach(error: BaseException) -> BaseException:
     return error
 
 
+def _failure_reason(error: BaseException) -> str:
+    """사용자 경고에 쓰는 실패 사유 — 원인(특히 MAX_LENGTH)을 이름으로 드러낸다."""
+    if isinstance(error, OutputLimitError):
+        return "MAX_LENGTH 도달(출력 잘림)"
+    if isinstance(error, RepetitiveOutputError):
+        return "반복/출력 상한 감지"
+    return "변환 실패"
+
+
+def _completed_pages(error: BaseException, num_pages: int) -> tuple[int, str]:
+    """MAX_LENGTH에서 잘린 multi 출력 중 **끝까지 생성된** 앞 페이지 수와 그 마크다운.
+
+    엔진이 OutputLimitError.partial_output에 run_multi 형식(`<PAGE>` 구분, 산출물은
+    out_dir에 있음)의 출력을 실어 주면, 마지막 세그먼트(잘린 페이지)를 뺀 앞 페이지는
+    그대로 살린다. 판단할 수 없으면 (0, "") — 청크 전체를 페이지별로 다시 처리한다.
+    """
+    if not isinstance(error, OutputLimitError):
+        return 0, ""
+    partial = getattr(error, "partial_output", None)
+    if not isinstance(partial, str) or "<PAGE>" not in partial:
+        return 0, ""
+    segments = split_pages(partial)
+    keep = len(segments) - 1
+    if not 0 < keep < num_pages:
+        return 0, ""
+    return keep, "<PAGE>\n" + "\n<PAGE>\n".join(segments[:keep])
+
+
 def _add_failed_chunk(
     merger: IncrementalMerger,
     work_dir: Path,
@@ -350,7 +384,7 @@ def _add_failed_chunk(
             sink.emit_page(start_page + offset, _FAILED_PAGE_MD)
     span = _page_span(start_page, num_pages)
     merger.warnings.append(
-        f"{span}: 변환 실패로 플레이스홀더 삽입 ({err.__class__.__name__}: {str(err)[:200]})"
+        f"{span}: {_failure_reason(err)}로 플레이스홀더 삽입 ({_error_summary(err)})"
     )
 
 
@@ -402,6 +436,23 @@ def execute_job(
             # Unlimited는 None → 기존 PAGES_PER_CHUNK.
             chunk_size = caps.preferred_chunk_size or settings.pages_per_chunk
         chunk_size = max(1, chunk_size)
+        page_tokens = settings.max_page_output_tokens or 0
+        if (
+            chunk_size > 1
+            and caps.stream_granularity == "token"
+            and page_tokens
+            and settings.max_length < chunk_size * page_tokens
+        ):
+            # 청크 하나가 공유하는 총 길이 상한이 '페이지 상한 × 페이지 수'보다 작다 —
+            # 페이지마다 상한 안의 정상 출력이라도 청크 꼬리가 MAX_LENGTH에서 잘린다.
+            # 잘리면 OutputLimitError → 잘린 페이지부터 페이지별 재처리로 복구되지만,
+            # 그만큼 시간을 더 쓰므로 설정 조합을 알린다(프롬프트 길이는 별도로 더 든다).
+            logger.warning(
+                "MAX_LENGTH(%d)가 청크의 최악 생성 예산(%d쪽 × MAX_PAGE_OUTPUT_TOKENS %d = "
+                "%d)보다 작습니다 — 출력이 긴 청크는 꼬리 페이지가 잘려 페이지별로 다시 "
+                "처리됩니다. MAX_LENGTH를 늘리거나 PAGES_PER_CHUNK를 줄이세요.",
+                settings.max_length, chunk_size, page_tokens, chunk_size * page_tokens,
+            )
         chunks = _chunked(pages, chunk_size)
         job.progress.update(total_pages=total, total_chunks=len(chunks), current_page=0)
         store.save(job)
@@ -448,8 +499,12 @@ def execute_job(
             # 같은 페이지 세그먼트로 다시 넣는다.
             sink.rewind_to(page_number, "PDF 텍스트 레이어로 복구")
             sink.emit_page(page_number, page_md)
+            cause = (
+                _failure_reason(error) if isinstance(error, RepetitiveOutputError)
+                else "OCR 실패"
+            )
             message = (
-                f"{page_number}페이지: single OCR 실패 후 PDF 내장 텍스트 레이어로 복구 "
+                f"{page_number}페이지: {cause} 후 PDF 내장 텍스트 레이어로 복구 "
                 f"(이미지·정밀 레이아웃 제외; {error.__class__.__name__}: "
                 f"{str(error)[:160]})"
             )
@@ -687,33 +742,67 @@ def execute_job(
                     merger.warnings.append(f"{pno}페이지: {note}")
                     logger.info("%d페이지 충실도 게이트: %s", pno, note)
 
-            def _recover_unsafe_generation_chunk(
-                generation_error: RepetitiveOutputError,
-            ) -> tuple[bool, Exception]:
-                """반복/상한 초과 multi 산출물을 버리고 페이지별 single 재처리."""
+            def _gate(gate_start: int, gate_pages: list[Path]) -> None:
+                """충실도 게이트 — **선택적 개선**이다. 여기서 난 IO 오류가 이미 완주한
+                청크를 error로 만들면 안 된다. 취소만 그대로 전파한다."""
+                try:
+                    _repair_low_fidelity_pages(gate_start, gate_pages, work_dir)
+                except JobCanceled:
+                    raise
+                except Exception as gate_error:  # noqa: BLE001 — 게이트 단위 격리
+                    logger.warning(
+                        "충실도 게이트 실패 (%s) — 원래 결과를 유지하고 계속",
+                        _error_summary(gate_error),
+                    )
+                    merger.warnings.append(
+                        f"{_page_span(gate_start, len(gate_pages))}: 충실도 게이트가 "
+                        f"실패해 건너뛰었습니다 ({gate_error.__class__.__name__})"
+                    )
+
+            def _recover_chunk_per_page(chunk_error: Exception) -> tuple[bool, Exception]:
+                """multi 청크의 실패를 페이지 단위로 격리한다.
+
+                순서는 페이지별 single(1회 재시도) → PDF 텍스트 레이어 → 플레이스홀더다.
+                반복·출력 상한(RepetitiveOutputError)뿐 아니라 일반 예외(8쪽 prefill OOM,
+                벤더가 특정 페이지에서 내는 예외)도 이 길로 온다 — 예전에는 재시도까지
+                실패하면 청크 전 페이지가 플레이스홀더가 됐다(per_page 모드라면 텍스트
+                레이어로 살았을 페이지까지). MAX_LENGTH에서 잘린 청크(OutputLimitError)는
+                끝까지 생성된 앞 페이지를 그대로 살리고 잘린 페이지부터만 다시 처리한다.
+                """
                 if cancel.is_set():
                     raise JobCanceled()
                 span = _page_span(start_page, len(chunk))
-                logger.warning(
-                    "%s multi OCR 비정상 생성 감지 — 페이지별 재처리: %s",
-                    span,
-                    str(generation_error)[:200],
-                )
-                merger.warnings.append(
-                    f"{span}: 반복/출력 상한 감지로 페이지별 재처리 "
-                    f"({str(generation_error)[:200]})"
-                )
+                keep, kept_md = _completed_pages(chunk_error, len(chunk))
+                if isinstance(chunk_error, OutputLimitError):
+                    head = "MAX_LENGTH 도달로 출력이 잘려 페이지별 재처리"
+                    if keep:
+                        head += f"(끝까지 생성된 앞 {keep}쪽은 유지)"
+                elif isinstance(chunk_error, RepetitiveOutputError):
+                    head = "반복/출력 상한 감지로 페이지별 재처리"
+                else:
+                    head = f"청크 변환 실패로 페이지별 재처리 ({chunk_error.__class__.__name__})"
+                logger.warning("%s: %s — %s", span, head, str(chunk_error)[:200])
+                merger.warnings.append(f"{span}: {head} ({str(chunk_error)[:200]})")
 
-                # multi와 single은 이미지/레이아웃 파일명 규약이 다르다. 부분 multi
-                # 결과를 병합하지 않도록 제거하고 페이지마다 독립 디렉터리를 쓴다.
-                shutil.rmtree(work_dir, ignore_errors=True)
-                # 라이브 스트림도 청크 시작으로 되돌린다 — 폐기한 multi 출력이
-                # 남으면 재처리분과 중복되고(박스 2배), 상한에서 잘린 <table>이
-                # 뒤 내용을 통째로 삼킨 미리보기가 그대로 굳는다.
-                sink.rewind_to(start_page, "반복/출력 상한 감지 — 페이지별 재처리")
+                if keep:
+                    # 잘린 페이지·시작 못 한 페이지의 산출물만 지우고 앞 페이지는 병합한다.
+                    keep_leading_pages(work_dir, keep)
+                    sink.rewind_to(start_page + keep, "MAX_LENGTH 도달 — 잘린 페이지부터 재처리")
+                    merger.add_chunk(ChunkResult(work_dir, start_page, keep, kept_md))
+                    _gate(start_page, chunk[:keep])
+                else:
+                    # multi와 single은 이미지/레이아웃 파일명 규약이 다르다. 부분 multi
+                    # 결과를 병합하지 않도록 제거하고 페이지마다 독립 디렉터리를 쓴다.
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                    # 라이브 스트림도 청크 시작으로 되돌린다 — 폐기한 multi 출력이
+                    # 남으면 재처리분과 중복되고(박스 2배), 상한에서 잘린 <table>이
+                    # 뒤 내용을 통째로 삼킨 미리보기가 그대로 굳는다.
+                    sink.rewind_to(start_page, f"{_failure_reason(chunk_error)} — 페이지별 재처리")
                 failed_pages = 0
-                last_error: Exception = generation_error
+                last_error: Exception = chunk_error
                 for local_page, image_path in enumerate(chunk):
+                    if local_page < keep:
+                        continue
                     if cancel.is_set():
                         raise JobCanceled()
                     global_page = start_page + local_page
@@ -750,11 +839,32 @@ def execute_job(
                         merger.add_chunk(
                             ChunkResult(page_dir, global_page, 1, page_md, single=True)
                         )
-                return failed_pages == len(chunk), last_error
+                # 청크가 '전부 실패'인지는 페이지별로 다시 처리한 페이지만 본다 — 살린
+                # 앞 페이지가 있으면 부분 성공이다.
+                return keep == 0 and failed_pages == len(chunk), last_error
+
+            def _recover_single_page_chunk(page_error: Exception) -> bool:
+                """1쪽 청크의 최종 실패 — 같은 페이지의 다른 OCR 호출 대신 텍스트 레이어부터.
+
+                per_page 모드든 multi 모드의 1쪽 청크(sidecar 엔진 기본 구성)든 같다.
+                복구하지 못하면 플레이스홀더로 보정하고 False."""
+                if _try_embedded_text_fallback(start_page, work_dir, page_error):
+                    return True
+                logger.warning(
+                    "청크 %d/%d 최종 실패 (%s) — 플레이스홀더로 보정 후 계속",
+                    ci + 1, len(chunks), _error_summary(page_error),
+                )
+                shutil.rmtree(work_dir, ignore_errors=True)
+                sink.rewind_to(start_page, f"{_failure_reason(page_error)} — 페이지 변환 실패")
+                _add_failed_chunk(
+                    merger, work_dir, start_page, len(chunk), job.mode == "per_page",
+                    page_error, sink,
+                )
+                return False
 
             # 청크 단위 격리: 한 청크가 죽어도(OOM·벤더 예외 등) 잡 전체를 죽이지
-            # 않는다 — 캐시 해제 후 1회 재시도, 그래도 실패하면 플레이스홀더로
-            # 보정하고 계속. 취소(JobCanceled)는 절대 삼키지 않고 그대로 전파.
+            # 않는다 — 캐시 해제 후 1회 재시도, 그래도 실패하면 페이지 단위로 격리해
+            # 복구하고 계속. 취소(JobCanceled)는 절대 삼키지 않고 그대로 전파.
             # 재시도는 엔진 실행만 감싼다 — add_chunk는 비멱등(pages_md 확장)이라
             # 재시도에 포함하면 병합 도중 실패 시 페이지가 중복 병합될 수 있다.
             md: str | None = None
@@ -767,50 +877,19 @@ def execute_job(
                 )
             except JobCanceled:
                 raise
-            except RepetitiveOutputError as repetition_error:
-                if job.mode != "per_page":
-                    all_failed, last_error = _recover_unsafe_generation_chunk(
-                        repetition_error
-                    )
+            except Exception as chunk_error:  # noqa: BLE001 — 청크 단위 격리
+                if job.mode == "per_page" or (
+                    len(chunk) == 1 and not isinstance(chunk_error, RepetitiveOutputError)
+                ):
+                    # 1쪽 청크: 텍스트 레이어부터(반복 생성은 multi 모드면 아래 single 재처리)
+                    if not _recover_single_page_chunk(chunk_error):
+                        failed_chunks += 1
+                        last_chunk_error = _detach(chunk_error)
+                else:
+                    all_failed, last_error = _recover_chunk_per_page(chunk_error)
                     if all_failed:
                         failed_chunks += 1
                         last_chunk_error = _detach(last_error)
-                else:
-                    if not _try_embedded_text_fallback(
-                        start_page, work_dir, repetition_error
-                    ):
-                        failed_chunks += 1
-                        last_chunk_error = _detach(repetition_error)
-                        sink.rewind_to(start_page, "반복/출력 상한 감지")
-                        _add_failed_chunk(
-                            merger, work_dir, start_page, len(chunk), True,
-                            repetition_error, sink,
-                        )
-            except Exception as chunk_error:  # noqa: BLE001 — 청크 단위 격리
-                recovered = job.mode == "per_page" and _try_embedded_text_fallback(
-                    start_page, work_dir, chunk_error
-                )
-                if not recovered:
-                    logger.warning(
-                        "청크 %d/%d 최종 실패 (%s: %s) — 플레이스홀더로 보정 후 계속",
-                        ci + 1,
-                        len(chunks),
-                        chunk_error.__class__.__name__,
-                        str(chunk_error)[:200],
-                    )
-                    failed_chunks += 1
-                    last_chunk_error = _detach(chunk_error)
-                    shutil.rmtree(work_dir, ignore_errors=True)
-                    sink.rewind_to(start_page, "청크 변환 실패")
-                    _add_failed_chunk(
-                        merger,
-                        work_dir,
-                        start_page,
-                        len(chunk),
-                        job.mode == "per_page",
-                        chunk_error,
-                        sink,
-                    )
             # 엔진이 남긴 정화/절단 경고를 잡 warnings로 승격 — 내용이 빠졌는데
             # 조용히 done이 되지 않게 한다 (sidecar 엔진의 bbox 폐기·상한 절단 등).
             # 페이지 범위는 여기서 붙인다 (엔진은 전역 번호를 모른다).
@@ -835,21 +914,7 @@ def execute_job(
                                 1 if job.mode == "per_page" else len(chunk),
                                 md, single=job.mode == "per_page")
                 )
-                # 복구는 **선택적 개선**이다 — 여기서 난 IO 오류가 이미 완주한 잡을
-                # error로 만들면 안 된다. 취소만 그대로 전파한다.
-                try:
-                    _repair_low_fidelity_pages(start_page, chunk, work_dir)
-                except JobCanceled:
-                    raise
-                except Exception as gate_error:  # noqa: BLE001 — 게이트 단위 격리
-                    logger.warning(
-                        "충실도 게이트 실패 (%s: %s) — 원래 결과를 유지하고 계속",
-                        gate_error.__class__.__name__, str(gate_error)[:200],
-                    )
-                    merger.warnings.append(
-                        f"{_page_span(start_page, len(chunk))}: 충실도 게이트가 실패해 "
-                        f"건너뛰었습니다 ({gate_error.__class__.__name__})"
-                    )
+                _gate(start_page, chunk)
             sink.flush()
             # 취소돼도 이 청크의 부분 출력까지는 병합 후에 중단한다
             if cancel.is_set():

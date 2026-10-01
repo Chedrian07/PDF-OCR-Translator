@@ -945,8 +945,19 @@ def _backfill_layout_fonts(job, pages: list, lang: str | None = None, st=None) -
         pass  # 백필 실패는 렌더를 막지 않는다 (폴백 휴리스틱으로 표시)
 
 
+# 좌표 텍스트 블록이 하나도 없는 layout(그림 전용 엔진의 옛 잡·전면 스캔)의 404 문구
+_NO_TEXT_LAYOUT = (
+    "이 잡에는 좌표 텍스트 레이아웃이 없습니다 (그림 전용 엔진·스캔 문서) — "
+    "텍스트 보기(/html)를 사용하세요"
+)
+
+
 def _load_layout_pages(job, lang: str | None = None, st=None) -> list:
-    """lang=None이면 원본 layout.json, lang이면 번역본 layout.{lang}.json을 로드."""
+    """lang=None이면 원본 layout.json, lang이면 번역본 layout.{lang}.json을 로드.
+
+    텍스트 블록이 없는 layout(image 블록뿐 — figure_only 엔진의 옛 잡, 전면 스캔)은
+    파일이 없는 것과 같게 404다(artifacts.layout_has_text_blocks — has_layout·내보내기와
+    같은 기준). 그대로 쓰면 /layout·/alignment·/outline이 OCR 텍스트 없는 캔버스를 낸다."""
     if lang is not None:
         p = artifacts.layout(job.dir, lang)
         missing = "한국어 번역본이 없습니다 — 먼저 번역을 실행하세요"
@@ -960,6 +971,8 @@ def _load_layout_pages(job, lang: str | None = None, st=None) -> list:
         assert isinstance(pages, list)
     except Exception as e:
         raise HTTPException(500, "레이아웃 데이터를 읽을 수 없습니다") from e
+    if not artifacts.layout_has_text_blocks(pages):
+        raise HTTPException(404, _NO_TEXT_LAYOUT)
     # 번역본 페이지는 번역 시점의 fonts_v 스탬프를 복사해 온다 — 보통은 최신이라
     # no-op이지만, 번역 뒤 ENRICH_VERSION이 오르면 번역본만 구버전으로 남는다.
     # 각 산출물을 자기 경로에 백필해 원문/번역 뷰가 같은 폰트 메타를 쓰게 한다.
@@ -997,7 +1010,13 @@ def _warm_export_pdf(st, job, lang: str) -> bool:
 
     캐시가 비는 순간(번역 완료·폰트 백필로 레이아웃 mtime 상승)마다 부른다.
     실패·경합은 조용히 넘어간다 — 사용자의 클릭이 같은 경로로 다시 시도한다.
+    좌표 텍스트 레이아웃이 없는 잡(/pdf가 409)은 예열하지 않는다 — 빌더가 매번 실패해
+    번역이 끝날 때마다 'PDF 예열 실패' 경고와 traceback만 남겼다.
     """
+    if not (
+        artifacts.has_usable_layout(job.dir) and artifacts.has_usable_layout(job.dir, lang)
+    ):
+        return False
     try:
         return derived.warm_translated_pdf_async(
             job, lang, st.settings, build=build_translated_pdf,
@@ -1070,8 +1089,9 @@ def job_document_download(request: Request, job_id: str, lang: str | None = None
         text = _translated_markdown_or_404(job, lang)
     else:
         text, _partial = _read_markdown(job)  # 미완료 잡도 부분 결과 내보내기 허용(/markdown과 동일)
-    layout_path = artifacts.layout(job.dir, lang)
-    if job.status == "done" and layout_path.is_file():
+    # 파일 존재가 아니라 '텍스트 블록이 있는가'로 고른다 — image 블록뿐인 옛 figure_only
+    # 잡이 OCR 텍스트 없는 facsimile로 나가지 않고 읽기용 semantic HTML로 폴백한다.
+    if job.status == "done" and artifacts.has_usable_layout(job.dir, lang):
         pages = _load_layout_pages(job, lang, _state(request))
         try:
             pages_dir = _try_facsimile_pages(job, pages, lang, st.settings)
@@ -1156,10 +1176,10 @@ def job_page_image(
     if lang is not None:
         _check_lang(lang)
         _translated_markdown_or_404(job, lang)
-    layout_path = artifacts.layout(job.dir, lang)
-    if not layout_path.is_file():
-        # figure_only 엔진은 번역 텍스트 좌표가 없어 최종 페이지 합성이 불가능하다.
-        # 기존 원본 페이지를 유지하고 오른쪽 semantic 번역문을 계속 제공한다.
+    if not artifacts.has_usable_layout(job.dir, lang):
+        # figure_only 엔진은 번역 텍스트 좌표가 없어 최종 페이지 합성이 불가능하다
+        # (옛 잡의 image 블록뿐인 layout도 같다). 기존 원본 페이지를 유지하고 오른쪽
+        # semantic 번역문을 계속 제공한다.
         path = artifacts.page_image(artifacts.pages_dir(job.dir), page_number)
         if page_number < 1 or not path.is_file():
             raise HTTPException(404, "페이지 이미지를 찾을 수 없습니다")
@@ -1383,8 +1403,10 @@ def job_viewer_manifest(
     if _etag_matches(request, headers["ETag"]):
         return Response(status_code=304, headers=headers)
 
-    source_layout = artifacts.layout(job.dir)
-    target_layout = artifacts.layout(job.dir, lang) if lang else source_layout
+    # 좌표 기능은 파일 존재가 아니라 텍스트 블록이 있는 layout일 때만 켠다(has_layout과
+    # 같은 기준) — image 블록뿐인 옛 figure_only 잡에 빈 정렬·개요를 약속하지 않는다.
+    source_layout_ok = artifacts.has_usable_layout(job.dir)
+    target_layout_ok = artifacts.has_usable_layout(job.dir, lang) if lang else source_layout_ok
     source_images = sorted(artifacts.pages_dir(job.dir).glob("page_*.png"))
     page_count = 0
     try:
@@ -1420,11 +1442,11 @@ def job_viewer_manifest(
             # 원문 이미지를 한국어 이미지로 잘못 라벨링하는 200 fallback을 막는다.
             "translated_page_image": bool(
                 lang
-                and target_layout.is_file()
+                and target_layout_ok
                 and artifacts.facsimile_marker(job.dir, lang).is_file()
             ),
-            "alignment": source_layout.is_file() and target_layout.is_file(),
-            "outline": target_layout.is_file(),
+            "alignment": source_layout_ok and target_layout_ok,
+            "outline": target_layout_ok,
         },
         # 품질 상태는 실제 품질 저하(warnings)로만 정한다. 처리 경위·안내(notices — 페이지
         # 단위 엔진 안내, 페이지별 재처리로 복구됨, 충실도 재처리 채택·측정 한계)까지 세면
@@ -1678,8 +1700,9 @@ def job_pdf(
     if job.status != "done":
         raise HTTPException(409, "아직 변환이 완료되지 않았습니다")
     _translated_markdown_or_404(job, lang)
-    trans_layout = artifacts.layout(job.dir, lang)
-    if not artifacts.layout(job.dir).is_file() or not trans_layout.is_file():
+    # 파일 존재가 아니라 텍스트 블록으로 판정한다 — image 블록뿐인 옛 figure_only 잡이
+    # 409 대신 번역되지 않은 원문 PDF를 내던 경로다.
+    if not artifacts.has_usable_layout(job.dir) or not artifacts.has_usable_layout(job.dir, lang):
         raise HTTPException(
             409,
             "이 잡에는 좌표 레이아웃이 없어 PDF 내보내기를 지원하지 않습니다"

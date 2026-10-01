@@ -34,9 +34,13 @@ ENV PYTHONUNBUFFERED=1 \
 # 쪽이라 backend보다 신뢰 경계가 바깥이다. uid는 backend/Dockerfile과 동일한 1000.
 # ⚠ 볼륨 소유권: 이미지 안에서 /data/hf를 미리 만들고 chown해야 Docker가 **비어 있는**
 #   named volume을 초기화할 때 uid 1000 소유로 만든다. 이미 root 소유 내용이 들어 있는
-#   기존 볼륨(ovis-hf-cache)은 자동으로 바뀌지 않으므로 한 번만 손봐야 한다:
-#     docker run --rm -v ovis-hf-cache:/v alpine chown -R 1000:1000 /v
-#   (모델을 다시 받아도 되면 `docker volume rm ovis-hf-cache`로 대체 가능)
+#   기존 볼륨은 자동으로 바뀌지 않으므로 한 번만 손봐야 한다. 볼륨 이름을 추측하지 말고
+#   compose로 실행한다 — 실제 이름에는 프로젝트 접두사가 붙어(`<PROJECT>_ovis-hf-cache`)
+#   `docker run -v ovis-hf-cache:…`는 엉뚱한 빈 볼륨을 새로 만들고 exit 0으로 끝난다:
+#     docker compose --profile ovis run --rm --no-deps --user 0 --cap-add CHOWN \
+#       --cap-add DAC_OVERRIDE --entrypoint chown ovisocr2 -R 1000:1000 /data/hf
+#   (compose가 cap_drop: [ALL]을 걸어 두므로 root라도 이 실행에만 두 캡을 돌려준다.
+#    모델을 다시 받아도 되면 `docker volume rm <PROJECT>_ovis-hf-cache`로 대체 가능)
 # 베이스(vLLM) 이미지가 이미 uid 1000을 갖고 있을 수 있어 생성은 조건부로,
 # USER는 이름이 아닌 uid로 지정한다. HOME은 위 ENV가 passwd 항목보다 우선한다.
 RUN if ! getent passwd 1000 >/dev/null; then \

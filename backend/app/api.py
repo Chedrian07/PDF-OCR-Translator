@@ -1765,6 +1765,24 @@ def job_pdf(
         out, media_type="application/pdf", filename=f"{stem}.{lang}.pdf", headers=headers)
 
 
+@router.get("/jobs/{job_id}/pdf/report")
+def job_pdf_report(request: Request, job_id: str, lang: str = "ko") -> dict:
+    """마지막 번역 PDF 빌드의 생성 리포트(export.{lang}.report.json). 없으면 404.
+
+    /pdf 응답 헤더(X-UOCR-PDF-*)에는 숫자만 싣는다 — 원문 보존 사유(kept_reasons)·스캔
+    픽셀 지움(raster_blocks_erased)·주의 문장(warnings, 앞 50건)은 이 JSON으로만 나간다
+    (프런트 reader.js가 다운로드 뒤 상세 목록을 그린다). 리포트는 PdfExportResult.report()
+    그대로라 경로·본문이 없고, 번역 완료 무효화가 지우므로 낡은 빌드의 것은 나가지 않는다.
+    단일·대조 PDF는 같은 번역 PDF 빌드에서 나오므로 리포트도 하나다.
+    """
+    job = _get_job(request, job_id)
+    _check_lang(lang)
+    report = derived._load_pdf_export_report(job, lang)
+    if not report:
+        raise HTTPException(404, "PDF 생성 리포트가 없습니다 — 번역 PDF를 먼저 내보내세요")
+    return {"job_id": job_id, "lang": lang, **report}
+
+
 @router.post("/jobs/{job_id}/cancel", status_code=202)
 def cancel_job(request: Request, job_id: str) -> dict:
     """삭제 없이 중단 — 부분 결과(result.md, 완료된 청크의 이미지)는 보존된다.

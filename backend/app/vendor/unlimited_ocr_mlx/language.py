@@ -201,16 +201,22 @@ class LanguageModel(nn.Module):
         return self.model.layers
 
     def sanitize(self, weights: dict[str, mx.array]) -> dict[str, mx.array]:
-        """전문가별 gate/up/down 가중치 64개를 switch_mlp 스택 [E, out, in]으로 묶는다."""
-        prefix_root = "language_model.model.layers"
-        for layer_idx in range(self.config.num_hidden_layers):
-            prefix = f"{prefix_root}.{layer_idx}"
-            for name in ("gate_proj", "down_proj", "up_proj"):
-                first = f"{prefix}.mlp.experts.0.{name}.weight"
-                if first in weights:
-                    to_join = [
-                        weights.pop(f"{prefix}.mlp.experts.{e}.{name}.weight")
-                        for e in range(self.config.n_routed_experts)
-                    ]
-                    weights[f"{prefix}.mlp.switch_mlp.{name}.weight"] = mx.stack(to_join)
-        return weights
+        return stack_experts(weights, self.config)
+
+
+def stack_experts(weights: dict[str, mx.array], config: TextConfig) -> dict[str, mx.array]:
+    """전문가별 gate/up/down 가중치(E개)를 switch_mlp 스택 [E, out, in]으로 묶는다.
+
+    키는 매핑 후 이름(language_model.model.layers.*) 기준 — model.sanitize가 부른다."""
+    prefix_root = "language_model.model.layers"
+    for layer_idx in range(config.num_hidden_layers):
+        prefix = f"{prefix_root}.{layer_idx}"
+        for name in ("gate_proj", "down_proj", "up_proj"):
+            first = f"{prefix}.mlp.experts.0.{name}.weight"
+            if first in weights:
+                to_join = [
+                    weights.pop(f"{prefix}.mlp.experts.{e}.{name}.weight")
+                    for e in range(config.n_routed_experts)
+                ]
+                weights[f"{prefix}.mlp.switch_mlp.{name}.weight"] = mx.stack(to_join)
+    return weights

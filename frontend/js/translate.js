@@ -1,7 +1,9 @@
-import { rateLimitNotice, translateKeptSummary, translateUiStateFor, withLangUrl } from './core.js';
+import {
+  rateLimitNotice, translateKeptSummary, translateUiStateFor, translateWarnings, withLangUrl,
+} from './core.js';
 import { el, state } from './state.js';
 import {
-  applyRetryLock, lockRetry, parseEventData, retryLockRemaining, safeParse, setDownload,
+  applyRetryLock, h, lockRetry, parseEventData, retryLockRemaining, safeParse, setDownload,
   showToast,
 } from './ui.js';
 import { POLL_TIMEOUT_MS, apiGet } from './api.js';
@@ -63,7 +65,8 @@ export function applyTranslateAvailability() {
 }
 
 // 번역 결과 요약 칩 — 원문 그대로 남은 문단 수와 사유를 결과 툴바·뷰어 양쪽에 노출.
-// null이면 숨김(번역 없음·리포트 없는 구버전 잡).
+// null이면 숨김(번역 없음·리포트 없는 구버전 잡). 번역 참고 사항(warnings)은 결과 화면의
+// 흐린 접이식 목록으로 함께 갱신한다.
 export function renderTranslateSummary(data) {
   const summary = translateKeptSummary(data);
   state.translateSummary = summary;
@@ -75,6 +78,21 @@ export function renderTranslateSummary(data) {
     node.title = `${summary.detail}\n(클릭하면 자세히)`;
     node.classList.toggle('is-warn', summary.tone === 'warn');
   }
+  renderTranslateWarnings(translateWarnings(data));
+}
+
+// 번역 참고 사항 목록 — 없으면(필드 부재 포함) 숨긴다. 펼침 상태는 사용자가 정한다.
+function renderTranslateWarnings(items) {
+  const box = el.translateWarnings;
+  if (!box) return;
+  el.translateWarningsList.textContent = '';
+  box.hidden = items.length === 0;
+  if (!items.length) {
+    box.open = false;
+    return;
+  }
+  el.translateWarningsSummary.textContent = `번역 참고 사항 ${items.length}건`;
+  for (const text of items) el.translateWarningsList.appendChild(h('li', { text }));
 }
 
 // 사유별 집계는 report.json에만 있다 — state 조회가 이를 병합해 돌려준다.

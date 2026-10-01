@@ -1,7 +1,7 @@
 import { ICON, readerPosKey } from './constants.js';
 import {
-  armTransition, clampReaderPage, fmtTime, groundAnnounce, jobModelChip, jobRowSignature,
-  parseViewerSearch, progressPhaseText, statusLabel,
+  armTransition, clampReaderPage, fmtTime, groundAnnounce, jobModelChip, jobNotices,
+  jobRowSignature, parseViewerSearch, progressPhaseText, statusLabel, warningSegments,
 } from './core.js';
 import { armTimers, el, state } from './state.js';
 import { h, isTerminal, localGet, localRemove, showToast } from './ui.js';
@@ -12,8 +12,11 @@ import {
 } from './live.js';
 import { startStream, teardownConnections } from './sse.js';
 import { renderError, renderPartialResult, renderResult } from './results.js';
-import { readerTotal, resetReaderForJob } from './reader.js';
+import {
+  readerIsActive, readerLangKey, readerTotal, resetReaderForJob, setReaderPage,
+} from './reader.js';
 import { closeViewer, openViewer } from './viewer.js';
+import { activateTab } from './tabs.js';
 
 /* ============================ Job history ============================ */
 
@@ -163,6 +166,8 @@ export function jobListItem(job) {
   const chip = h('span', { class: `chip chip-${status}`, text: statusLabel(job) });
   const time = h('span', { class: 'ji-time muted', text: fmtTime(job.created_at) });
   const sub = h('span', { class: 'ji-sub' }, chip, time);
+  const warn = jobListWarnBadge(jobNotices(job).warnings.length);
+  if (warn) sub.appendChild(warn);
 
   // 잡 열기·삭제를 형제 버튼으로 분리 — role="button" li 안에 버튼을 중첩하면
   // 스크린리더가 내부 삭제 버튼에 진입할 수 없다(중첩 인터랙티브 컨트롤 금지).
@@ -192,8 +197,14 @@ export function jobListItem(job) {
   item.dataset.jobId = job.job_id;
   if (read) item.appendChild(read);
   item.appendChild(del);
-  item._row = { name, chip, time, read, del };
+  item._row = { name, chip, time, read, del, sub, warn };
   return item;
+}
+
+// 목록 줄의 품질 경고 표시 — 결과를 열기 전에도 저품질 변환을 알아볼 수 있게.
+function jobListWarnBadge(count) {
+  if (!count) return null;
+  return h('span', { class: 'ji-warn', text: `주의 ${count}`, title: `변환 품질 경고 ${count}건` });
 }
 
 // 재사용하는 줄의 바뀐 필드만 고친다 — 버튼 노드는 그대로라 포커스·무장이 유지된다.
@@ -207,6 +218,10 @@ export function updateJobListItem(item, job) {
   row.chip.className = `chip chip-${status}`;
   row.chip.textContent = statusLabel(job);
   row.time.textContent = fmtTime(job.created_at);
+  const warnCount = jobNotices(job).warnings.length;
+  if (row.warn) row.warn.remove();
+  row.warn = jobListWarnBadge(warnCount);
+  if (row.warn) row.sub.appendChild(row.warn);
   row.del.setAttribute('aria-label', `"${fname}" 삭제`);
   if (status === 'done' && !row.read) {
     row.read = jobReadButton(job, fname);
@@ -366,6 +381,8 @@ export async function openJob(id, options = {}) {
   state.displayedStatus = null;
   state.displayedPhase = null;
   state.queuePos = null; // 이전 잡의 대기열 위치가 새 잡 칩에 새지 않도록
+  state.jobWarningsOpen = false;
+  renderJobWarnings(null); // 이전 잡의 경고가 새 잡 헤더에 남지 않게
   state.previewLoaded = false;
   state.markdownLoaded = false;
   state.docLayoutLoaded = false;
@@ -443,6 +460,8 @@ export function renderJob(job) {
     }
   }
 
+  renderJobWarnings(job);
+
   const running = job.status === 'queued' || job.status === 'running';
   const done = job.status === 'done';
   const canceled = job.status === 'canceled';
@@ -479,6 +498,83 @@ export function renderJob(job) {
     else renderPartialResult(job);
   }
   if (failed) renderError(job.error, false);
+}
+
+/* ============================ 잡 품질 경고 ============================ */
+// 헤더 칩('주의 N건' — 경고 없이 참고만 있으면 '참고 N건')과 펼침 목록. 서버는 실패
+// 플레이스홀더·텍스트 레이어 복구·충실도 예산 소진·페이지 경계 불일치를 warnings에
+// 남기는데, 예전에는 어디에도 보이지 않아 저품질 결과가 초록 '완료'로만 보였다.
+export function renderJobWarnings(job) {
+  const chip = el.jobWarningsChip;
+  if (!chip) return;
+  const { warnings, notices } = jobNotices(job);
+  if (!warnings.length && !notices.length) {
+    chip.hidden = true;
+    chip.textContent = '';
+    el.jobWarningsList.textContent = '';
+    el.jobNoticesList.textContent = '';
+    el.jobNotices.hidden = true;
+    applyJobWarningsOpen();
+    return;
+  }
+  // 'N페이지' 링크는 리더가 있는 완료 잡에서만 — 그 밖에는 평문으로 둔다.
+  const linkPages = !!job && job.status === 'done';
+  chip.hidden = false;
+  chip.textContent = warnings.length ? `주의 ${warnings.length}건` : `참고 ${notices.length}건`;
+  chip.classList.toggle('chip-warn', warnings.length > 0);
+  chip.classList.toggle('chip-note', warnings.length === 0);
+  chip.title = warnings.length
+    ? '변환 품질 경고가 있습니다 — 눌러서 목록 보기'
+    : '변환 참고 사항이 있습니다 — 눌러서 목록 보기';
+  fillJobNoteList(el.jobWarningsList, warnings, linkPages);
+  fillJobNoteList(el.jobNoticesList, notices, linkPages);
+  el.jobNotices.hidden = notices.length === 0;
+  applyJobWarningsOpen();
+}
+
+export function toggleJobWarnings() {
+  state.jobWarningsOpen = !state.jobWarningsOpen;
+  applyJobWarningsOpen();
+}
+
+function applyJobWarningsOpen() {
+  const open = state.jobWarningsOpen && !el.jobWarningsChip.hidden;
+  el.jobWarnings.hidden = !open;
+  el.jobWarningsChip.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function fillJobNoteList(list, items, linkPages) {
+  list.textContent = '';
+  for (const text of items) {
+    const item = h('li', null);
+    for (const seg of warningSegments(text)) {
+      if (seg.type === 'page' && linkPages) {
+        const link = h('button', {
+          class: 'warning-page-link', type: 'button', text: seg.value,
+          title: `${seg.page}페이지를 읽기 탭에서 열기`,
+        });
+        link.addEventListener('click', () => openWarningPage(seg.page));
+        item.appendChild(link);
+      } else {
+        item.appendChild(document.createTextNode(seg.value));
+      }
+    }
+    list.appendChild(item);
+  }
+}
+
+// 경고가 가리키는 페이지를 리더에서 연다. 본문이 아직 없으면 착지 페이지만 정해 두고
+// 리더 로더(renderReaderDocument)가 그 페이지로 스크롤하게 한다.
+export function openWarningPage(page) {
+  if (state.displayedStatus !== 'done') return;
+  const target = clampReaderPage(page, readerTotal());
+  if (!readerIsActive()) {
+    state.readerPage = target;
+    activateTab('reader');
+  }
+  if (state.readerPages[readerLangKey()]) setReaderPage(target);
+  else state.readerPage = target;
+  if (el.readerPagePane) el.readerPagePane.focus({ preventScroll: false });
 }
 
 export function hasLiveContent() {

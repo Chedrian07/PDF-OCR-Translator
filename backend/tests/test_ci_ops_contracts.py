@@ -98,6 +98,8 @@ SERVICE_SCOPED: dict[str, frozenset[str]] = {
     "OCR_FAST_DECODE": _UNLIMITED_ONLY,
     "PAGES_PER_CHUNK": _UNLIMITED_ONLY,
     "OCR_CPU_THREADS": frozenset({"ocr-cpu"}),  # CUDA 스택은 torch CPU 스레드가 무의미
+    # MLX 엔진은 macOS 호스트 네이티브 전용(컨테이너에는 Metal이 없다) — 어느 서비스도 소비하지 않는다
+    "OCR_MLX_QUANT_BITS": frozenset(),
     "OCR_SIDECAR_URL": _SIDECAR_ONLY,
     "OCR_SIDECAR_CONNECT_TIMEOUT_S": _SIDECAR_ONLY,
     "OCR_SIDECAR_READ_TIMEOUT_S": _SIDECAR_ONLY,

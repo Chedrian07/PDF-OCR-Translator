@@ -1187,6 +1187,9 @@ if (VERIFY_MOCK_LLM) {
       && pdfReport.items.some((t) => t.startsWith('1페이지:') && t.includes('이미지 픽셀이라 지우지 못함'))
       && pdfReport.toast.includes('스캔 원문 3개 블록 지움'),
     JSON.stringify(pdfReport));
+  // 문서용 — 결과 툴바 아래 번역 참고 사항·PDF 생성 리포트(둘 다 펼친 상태)
+  await page.locator('#translate-warnings').scrollIntoViewIfNeeded().catch(() => {});
+  await page.screenshot({ path: path.join(OUT, 'result-notes.png') });
   await page.unroute('**/api/jobs/*/pdf/report*', pdfReportRoute);
 
   await page.click('button[data-tab="qa"]');

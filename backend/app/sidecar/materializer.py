@@ -10,6 +10,9 @@ sidecar 응답에는 파일 경로·이미지 바이너리가 없다. 이 모듈
   문법을 normalized block에서 **합성**한다. inline det 문법만 사용해
   (`<|det|>label [x1,y1,x2,y2]<|/det|>내용`) 문서 순서 == crop_index 순서를
   보장한다 — 저장에 성공한 image 블록만 문법에 넣는다(크롭 파일과 1:1).
+  텍스트 bbox를 주는 엔진(layout_capability="full")만 쓴다. figure_only 엔진이
+  쓰면 image 블록뿐인 layout.json이 생겨 잡이 has_layout으로 보이고, HTML·PDF
+  내보내기가 OCR·번역 텍스트 없이 원문 래스터만 낸다(write_raw=False).
 
 markdown의 `[[FIGURE:n]]` placeholder는 여기서만 `![](images/…)`로 치환된다.
 """
@@ -54,9 +57,11 @@ def _norm_to_px(v: int, size: int) -> int:
 class ChunkMaterializer:
     """한 청크(작업 디렉터리)의 산출물 생성기. 단일 워커 스레드 전용."""
 
-    def __init__(self, out_dir: Path, single: bool) -> None:
+    def __init__(self, out_dir: Path, single: bool, write_raw: bool = True) -> None:
         self.out_dir = out_dir
         self.single = single
+        # raw_pages.json(좌표 layout의 원천) 기록 여부 — 텍스트 bbox가 없는 엔진은 끈다
+        self.write_raw = write_raw
         self.images_dir = out_dir / "images"
         self.images_dir.mkdir(parents=True, exist_ok=True)
         self.boxes: dict[str, dict] = {}
@@ -170,10 +175,14 @@ class ChunkMaterializer:
         return markdown.strip()
 
     def finalize(self) -> None:
-        """boxes.json·raw_pages.json 기록 (원자적 교체 — merge와 동일 패턴)."""
+        """boxes.json·raw_pages.json 기록 (원자적 교체 — merge와 동일 패턴).
+
+        boxes.json(그림 상대 폭)은 엔진과 무관하게 남긴다. raw_pages.json은
+        write_raw일 때만 — 없으면 merge가 좌표 layout을 만들지 않는다."""
         if self.boxes:
             self._atomic_json(self.out_dir / "boxes.json", self.boxes)
-        self._atomic_json(self.out_dir / "raw_pages.json", {"pages": self.raw_pages})
+        if self.write_raw:
+            self._atomic_json(self.out_dir / "raw_pages.json", {"pages": self.raw_pages})
 
     @staticmethod
     def _atomic_json(path: Path, obj: object) -> None:

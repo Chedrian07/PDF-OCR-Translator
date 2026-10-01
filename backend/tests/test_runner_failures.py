@@ -637,3 +637,60 @@ def test_max_length_smaller_than_chunk_budget_is_logged(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="app.pipeline.runner"):
         execute_job(job2, store, broker, engine, settings, threading.Event())
     assert not any("MAX_LENGTH(" in r.message for r in caplog.records)
+
+
+# ── 취소 ─────────────────────────────────────────────────────────────────
+
+
+class CancelMidChunkEngine(FakeEngine):
+    """multi 도중 취소가 들어오면(엔진은 부분 출력을 정상 반환한다) 앞 두 쪽만 낸다."""
+
+    def __init__(self, cancel_event):
+        super().__init__(delay=0.0)
+        self.cancel_event = cancel_event
+        self.single_calls = 0
+
+    def run_multi(self, image_paths, out_dir, sink, cancel):
+        md = super().run_multi(image_paths[:2], out_dir, sink, cancel)
+        self.cancel_event.set()
+        return md
+
+    def run_single(self, image_path, out_dir, sink, cancel):
+        self.single_calls += 1
+        return super().run_single(image_path, out_dir, sink, cancel)
+
+
+def test_canceled_chunk_skips_marker_correction_and_the_fidelity_gate(tmp_path):
+    """취소한 잡에 '페이지 마커 2개(기대 8)'·'충실도 미달·예산 부족' 같은 품질 경고가
+    영구 기록되고, 진행률이 청크 끝(8쪽)으로 뛰고, 게이트가 되감기·재처리를 하던 문제."""
+    import queue
+
+    from tests.test_fidelity_gate import make_texty_pdf
+
+    cancel = threading.Event()
+    engine = CancelMidChunkEngine(cancel)
+    store = JobStore(tmp_path / "jobs")
+    broker = EventBroker()
+    job = store.create("doc.pdf", "multi", dpi=72)
+    (job.dir / "source.pdf").write_bytes(make_texty_pdf(8))  # 게이트가 판정할 수 있는 문서
+    settings = Settings(
+        engine="fake", device="cpu", data_dir=tmp_path / "data",
+        preload_model=False, fake_delay=0.0, pages_per_chunk=8,
+    )
+    q = broker.subscribe(job.id)
+    engine.load()
+    execute_job(job, store, broker, engine, settings, cancel)
+    events = []
+    while True:
+        try:
+            events.append(q.get_nowait())
+        except queue.Empty:
+            break
+
+    assert job.status == "canceled"
+    assert engine.single_calls == 0                  # 게이트 재처리 없음
+    assert [e for e, _ in events if e == "reset"] == []
+    assert job.warnings == ["1–8페이지: 취소로 중단된 청크 — 생성된 부분까지만 병합했습니다"]
+    assert job.progress["current_page"] <= 2         # 실제로 처리한 페이지까지만
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert "페이지 1" in md and "페이지 2" in md     # 부분 결과는 보존된다

@@ -14,8 +14,24 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 from .config import PIPELINE_VERSION, PaddleConfig
+from .lifecycle import PermanentLoadError, is_engine_dead
 
 logger = logging.getLogger(__name__)
+
+# 끈적한(sticky) CUDA 오류 — 컨텍스트가 망가져 같은 프로세스의 이후 GPU 작업이 전부
+# 실패한다. 회복 수단은 프로세스 재시작뿐이다(소문자 부분 일치, 예외 체인 전체를 본다).
+# OOM(ResourceExhaustedError)은 여기 없다 — 해상도 강등 재시도로 풀리는 일시 상태다.
+_CUDA_FATAL_MARKERS = (
+    "illegal memory access",
+    "unspecified launch failure",
+    "device-side assert",
+    "illegal instruction",
+    "misaligned address",
+    "uncorrectable ecc",
+)
+# 연속 추론 실패 임계 — 넘으면 health를 웨지 신고(status=error, 모델 유지)로 바꾼다
+_WEDGE_THRESHOLD = 3
+_WEDGE_PREFIX = "엔진 비정상: "
 
 
 class PaddleModel:
@@ -35,7 +51,13 @@ class PaddleModel:
         self._pipeline = None
         # 파이프라인을 소유하는 유일한 스레드 — 생성·워밍업·추론이 모두 여기서 돈다
         self._owner = ThreadPoolExecutor(max_workers=1, thread_name_prefix="paddle-infer")
+        # load_error: 확정된 실패만(재시도 소진·결정적 실패·웨지 신고) — health status=error.
+        # load_retry: 일시적 로드 실패 뒤 재시도 대기 중인 상태(health에 그대로 노출).
+        # restart_required: CUDA 컨텍스트가 망가져 컨테이너 재시작만 남은 상태.
         self.load_error: str | None = None
+        self.load_retry: dict | None = None
+        self.restart_required = False
+        self._infer_failures = 0  # 연속 추론 실패 수 (성공 시 리셋)
         # 로드 시점에 1회 수집한 GPU 정보 — health가 요청마다 paddle CUDA API를
         # 호출하지 않게 한다 (아래 warmup 주석 참조).
         self.gpu_name: str | None = None
@@ -55,14 +77,17 @@ class PaddleModel:
         snapshot_download(repo_id=self.cfg.model_id, revision=self.cfg.model_revision)
 
     def load(self) -> None:
-        """소유 스레드에서 파이프라인을 만들고 워밍업까지 끝낸다 (호출자는 대기)."""
+        """소유 스레드에서 파이프라인을 만들고 워밍업까지 끝낸다 (호출자는 대기).
+
+        1회 시도다 — 실패는 예외로 전파하고, 재시도·load_error 확정은 호출자
+        (lifecycle.supervise_load) 몫이다. 여기서 load_error를 세우면 재시도 대기 중에도
+        health가 status=error가 되어 backend가 잡을 즉시 하드 실패시킨다."""
         try:
             self._pin_revision()  # 네트워크 IO — paddle 미접촉이라 어느 스레드든 무방
             self._owner.submit(self._load_in_owner).result()
             self.load_error = None
-        except Exception as e:
-            self.load_error = f"{e.__class__.__name__}: {e}"[:500]
-            logger.exception("PaddleOCR-VL 로딩 실패")
+        except Exception:
+            logger.warning("PaddleOCR-VL 로딩 시도 실패", exc_info=True)
             raise
 
     def _require_cuda(self) -> None:
@@ -76,14 +101,15 @@ class PaddleModel:
             return
         import paddle
 
+        # 아래 두 가드는 기다려도 풀리지 않는다 — 로드 재시도 대상이 아니다
         if not paddle.device.is_compiled_with_cuda():
-            raise RuntimeError(
+            raise PermanentLoadError(
                 "PADDLEOCR_DEVICE=gpu이지만 이 paddle 빌드는 CUDA를 지원하지 않습니다 "
                 "(CPU 빌드로 설치됨). services/paddleocr_vl/Dockerfile의 "
                 "paddlepaddle-gpu(cu129) 설치를 확인하세요."
             )
         if paddle.device.cuda.device_count() < 1:
-            raise RuntimeError(
+            raise PermanentLoadError(
                 "PADDLEOCR_DEVICE=gpu이지만 CUDA 디바이스가 보이지 않습니다 — "
                 "compose의 `gpus: all`과 nvidia-container-toolkit, 호스트 드라이버를 확인하세요. "
                 "CPU로 조용히 강등하지 않고 실패합니다(RTX 5070 Ti 전용 배포)."
@@ -159,7 +185,43 @@ class PaddleModel:
         effective_max = max_pixels or self.cfg.max_pixels
         if effective_max is not None:
             kwargs["max_pixels"] = effective_max
-        return self._owner.submit(self._predict_in_owner, image_path, kwargs).result()
+        try:
+            data = self._owner.submit(self._predict_in_owner, image_path, kwargs).result()
+        except Exception as e:
+            self._note_infer_failure(e)
+            raise
+        self._note_infer_success()
+        return data
+
+    def _note_infer_failure(self, e: Exception) -> None:
+        """추론 실패 집계 — 고착된 CUDA 오류에도 health가 계속 ok였다(감사 sidecar-7).
+
+        - 끈적한 CUDA 오류: 같은 프로세스에서는 회복할 수 없다 — 파이프라인을 버리고
+          restart_required를 세운다. 호출자가 503을 돌려준 뒤 프로세스를 끝내고
+          (lifecycle.schedule_restart) backend는 재기동을 기다려 그 페이지를 다시 보낸다.
+          load_error는 비운다 — status=error+미로드는 backend가 잡을 즉시 실패시킨다.
+        - 연속 실패 임계: 오탐일 수 있어 파이프라인은 유지하고 load_error(웨지 신고)만
+          세운다. 다음 성공이 자동으로 복구한다(OvisOCR2 sidecar와 같은 규칙)."""
+        self._infer_failures += 1
+        if is_engine_dead(e, _CUDA_FATAL_MARKERS):
+            self._pipeline = None
+            self.restart_required = True
+            self.load_error = None
+            logger.error("복구 불가 CUDA 오류 (%s: %s) — 컨테이너 재시작이 필요합니다",
+                         e.__class__.__name__, str(e)[:200])
+            return
+        if self._infer_failures >= _WEDGE_THRESHOLD:
+            reason = f"연속 {self._infer_failures}회 추론 실패"
+            self.load_error = (
+                f"{_WEDGE_PREFIX}{reason} — 마지막 오류 {e.__class__.__name__}: {e}"[:500]
+            )
+            logger.error("PaddleOCR-VL 파이프라인 비정상 판정 (%s) — health를 error로 전환",
+                         reason)
+
+    def _note_infer_success(self) -> None:
+        self._infer_failures = 0
+        if self.load_error and self.load_error.startswith(_WEDGE_PREFIX):
+            self.load_error = None  # 웨지 오탐 자동 복구 (로드 시점 오류는 건드리지 않음)
 
     def _predict_in_owner(self, image_path: str, kwargs: dict) -> dict:
         results = list(self._pipeline.predict(image_path, **kwargs))

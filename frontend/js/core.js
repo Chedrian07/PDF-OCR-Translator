@@ -808,6 +808,24 @@ export function readerNotesPruneKeys(entries, keepKey, maxJobs) {
   return others.slice(Math.max(0, cap - 1)).map((e) => e.key);
 }
 
+// 서버가 렌더한 문서 조각 속 이미지 주소를 그대로 불러도 되는가 (순수 — tests/에서 검증).
+// OCR·텍스트 레이어 마크다운의 ![](https://tracker.example/p.png)는 그대로 <img>가 되어,
+// 문서를 여는 순간 사용자 IP·열람 시각을 제3자(또는 LAN 기기)에 알린다(frontend-3).
+// 같은 출처(서버가 다시 쓴 /api/jobs/…/files/images/…)와 data:image·blob:만 허용한다.
+export function imageSrcAllowed(src, pageOrigin) {
+  const raw = String(src == null ? '' : src).trim();
+  if (!raw) return true; // 빈 src는 요청을 만들지 않는다
+  if (/^data:image\//i.test(raw) || /^blob:/i.test(raw)) return true;
+  let url;
+  try {
+    url = new URL(raw, `${pageOrigin}/`);
+  } catch (_) {
+    return false;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+  return url.origin === pageOrigin;
+}
+
 // 원문·한국어 대조 PDF 내보내기 버튼 노출 판정.
 // 보임 ⇔ 잡 done ∧ 번역 done ∧ hasLayout !== false (필드 부재는 fail-open —
 // 서버 409가 최후 방어). 번역이 없어 숨겨질 때는 그대로 숨김 유지 — 다음 행동

@@ -30,7 +30,7 @@ import {
   onPageImgError, onPageImgLoad, onPreviewScroll, onStreamScroll, pageNav, updateLeftPane,
 } from './js/live.js';
 import {
-  armDelete, deleteJob, openJob, refreshJobs, requestCancel, showEmptyState,
+  armDelete, deleteJob, openJob, pollJobs, refreshJobs, requestCancel, showEmptyState,
 } from './js/jobs.js';
 import { teardownConnections } from './js/sse.js';
 import { cancelTranslate, setLang, startTranslate } from './js/translate.js';
@@ -348,7 +348,7 @@ function init() {
     const id = jobIdFromHash(location.hash);
     if (id) openJob(id);
   });
-  state.jobsTimer = setInterval(refreshJobs, 5000);
+  state.jobsTimer = setInterval(pollJobs, 5000); // 이전 갱신이 진행 중이면 그 틱은 건너뛴다
 
   window.addEventListener('beforeunload', teardownConnections);
 }

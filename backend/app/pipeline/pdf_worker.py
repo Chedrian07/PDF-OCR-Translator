@@ -42,7 +42,8 @@ MuPDF C 호출은 GIL을 쥔 채 돌고(`nm -u _mupdf.so`에 PyEval_SaveThread�
 ## 워커 프로세스
 
 - 이 모듈과 작업 모듈만 임포트한다(app.pipeline.pdf·fidelity·pdf_fonts·pdf_export·
-  engine.textlayer — torch·mlx·app.main·설정/LLM 계층은 끌어오지 않는다).
+  engine.textlayer — torch·mlx·app.main·설정/LLM 계층은 끌어오지 않는다). 부모의
+  `__main__`도 다시 실행하지 않는다(_spawn_without_main 참조).
 - 로그는 stderr로(서버 콘솔·docker logs에 그대로 섞인다), 프로세스 이름(pdf-ocr-1 등)을 붙인다.
 - SIGINT는 무시한다(개발 서버 Ctrl+C는 부모가 정리한다).
 - 임시 파일(tempfile — 폰트 서브셋 등)은 워커 전용 디렉터리(시스템 임시 경로의
@@ -83,6 +84,7 @@ import time
 import traceback
 from collections import OrderedDict
 from multiprocessing import connection as mp_connection
+from multiprocessing import spawn as mp_spawn
 from pathlib import Path
 from typing import Any, Callable
 
@@ -594,6 +596,34 @@ _TASK_IDS = itertools.count(1)
 _SPAWN_LOCK = threading.Lock()
 
 
+@contextlib.contextmanager
+def _spawn_without_main():
+    """spawn 자식이 부모의 `__main__`을 다시 실행하지 않게 한다(_SPAWN_LOCK 안에서만).
+
+    multiprocessing spawn은 메인 모듈에 정의된 객체를 풀 수 있도록 자식에서 부모의 메인
+    스크립트를 `__mp_main__`으로 다시 실행한다. 이 워커는 그것이 필요 없다 — 대상
+    (_child_main)은 이 모듈에 있고 작업은 '모듈:함수' 이름으로 임포트한다. 다시 실행하면
+    `uvicorn` 콘솔 스크립트(Docker CMD·make dev)는 워커마다 uvicorn·click·watchfiles·anyio
+    (약 200개 모듈, -X importtime 실측)를 싣고, 가드 없는 스크립트는 자식에서 앱을 또 만든다.
+    준비 데이터에서 메인 모듈 항목만 빼고 나머지(sys.path·cwd·authkey)는 그대로 쓴다."""
+    original = getattr(mp_spawn, "get_preparation_data", None)
+    if original is None:  # pragma: no cover — CPython 내부 변화 시 기본 동작
+        yield
+        return
+
+    def _prepare(name):
+        data = original(name)
+        data.pop("init_main_from_path", None)
+        data.pop("init_main_from_name", None)
+        return data
+
+    mp_spawn.get_preparation_data = _prepare
+    try:
+        yield
+    finally:
+        mp_spawn.get_preparation_data = original
+
+
 def _child_log_level() -> int:
     return logging.getLogger().getEffectiveLevel()
 
@@ -612,7 +642,7 @@ class _WorkerProcess:
             name=self.name,
             daemon=True,
         )
-        with _SPAWN_LOCK:
+        with _SPAWN_LOCK, _spawn_without_main():
             self.process.start()
         child_conn.close()
         self.conn = parent_conn

@@ -66,12 +66,13 @@ MLX_QUANT_BITS = (0, 8)
 def mlx_unavailable_reason() -> str | None:
     """MLX 엔진을 쓸 수 없는 이유(사용자 노출 문구) — 쓸 수 있으면 None.
 
-    플랫폼을 먼저 본다 — Apple Silicon이 아니면 mlx를 임포트조차 하지 않는다."""
+    플랫폼을 먼저 본다 — Apple Silicon이 아니면 mlx를 임포트조차 하지 않는다.
+    registry의 auto 판정 로그와 OCR_DEVICE=mlx의 로드 오류가 같은 문구를 쓴다."""
     machine = platform.machine()
     if sys.platform != "darwin" or machine != "arm64":
         return (
-            f"MLX는 Apple Silicon(macOS arm64) 로컬 실행 전용입니다 (현재 {sys.platform}/{machine}) — "
-            "Docker·Linux에서는 OCR_DEVICE=cpu 또는 cuda를 쓰세요"
+            f"MLX는 Apple Silicon(macOS arm64) 로컬 실행 전용입니다 (현재 {sys.platform}/{machine}"
+            " — Docker 컨테이너에는 Metal이 없다)"
         )
     try:
         import mlx.core as mx
@@ -82,7 +83,7 @@ def mlx_unavailable_reason() -> str | None:
     except Exception as e:  # noqa: BLE001
         return f"Metal 상태를 확인할 수 없습니다 ({type(e).__name__}: {e})"
     if not available:
-        return "Metal GPU를 사용할 수 없습니다 (가상 머신·원격 세션 등) — OCR_DEVICE=cpu를 쓰세요"
+        return "Metal GPU를 사용할 수 없습니다 (가상 머신·원격 세션 등)"
     return None
 
 
@@ -224,7 +225,10 @@ class UnlimitedMLXEngine(OCREngine):
     def _load_locked(self) -> None:
         why = mlx_unavailable_reason()
         if why is not None:
-            raise EngineError(f"OCR_DEVICE=mlx 이지만 MLX를 사용할 수 없습니다: {why}")
+            raise EngineError(
+                f"OCR_DEVICE=mlx 이지만 MLX를 사용할 수 없습니다: {why}. "
+                "OCR_DEVICE=auto(기본)는 쓸 수 있는 디바이스(cuda→metal→cpu)를 고릅니다"
+            )
         model, tokenizer = self._load_weights()
         eos_text = tokenizer.decode([tokenizer.eos_token_id], skip_special_tokens=False)
         self._warmup(model, tokenizer)

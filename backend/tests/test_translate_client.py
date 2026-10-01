@@ -1071,6 +1071,27 @@ def test_chat은_기본으로_SSE_스트리밍을_조립한다(mock_llm):
     assert c._stream_ok is True and mod.STATS["stream_chunks"] > 3
 
 
+def test_mlx_lm식_소문자_헤더와_keepalive_주석도_스트림으로_읽는다():
+    """mlx_lm.server는 'Content-type'(소문자 t)을 보내고 prefill 동안 ': keepalive' 주석을
+    먼저 쓴다 — 실서버 검증에서 SSE 판정이 빗나가 파싱 실패가 났던 형태."""
+
+    class MlxLike(_Quiet):
+        def do_POST(self):  # noqa: N802
+            self._body()
+            self.send_response(200)
+            self.send_header("Content-type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            self.wfile.write(b": keepalive 555/590\n\n: keepalive 590/590\n\n")
+            self.wfile.write(_chunk("번역") + _chunk("문입니다", "stop") + b"data: [DONE]\n\n")
+
+    with _serve(MlxLike) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat"))
+        assert c.complete("s", "u", max_tokens=10) == "번역문입니다"
+    assert OpenAICompatClient(_cfg())._backoff({"retry-after": "2"}, 0) == 2.0
+
+
 def test_responses와_stream_0은_비스트리밍이다(mock_llm):
     _mod, base = mock_llm
     for cfg in (_cfg(base_url=f"{base}/v1", api_mode="responses"),

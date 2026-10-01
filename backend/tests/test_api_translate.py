@@ -849,6 +849,32 @@ def test_translate_state에_사유별_집계가_병합된다(client, sample_pdf,
     assert body["skip_reasons"] == {"references": 2, "already-korean": 1}
     assert body["kept_reasons"] == {"gate-rejected": 1}
     assert body["reference_rule"]["md_only"] == 0
+    # 리포트 경고도 같은 폴링으로 보인다 — 예전에는 /translate/report를 따로 열어야 했다
+    assert body["warnings"] == ["참고문헌 규칙 불일치"]
+
+
+def test_translate_state의_warnings는_있을_때만_문자열_목록으로_붙는다(client, sample_pdf, settings):
+    jid = _done_job(client, sample_pdf)
+    tdir = _write_report(settings, jid)
+    report_path = tdir / "report.json"
+
+    for empty in ([], None, "문자열 하나", ["", "   ", 3, None]):
+        report_path.write_text(
+            json.dumps({**_REPORT, "warnings": empty}, ensure_ascii=False), encoding="utf-8",
+        )
+        assert "warnings" not in _tstate(client, jid), empty
+
+    many = [f"경고 {i} " + "가" * 2000 for i in range(80)] + [7]
+    report_path.write_text(json.dumps({**_REPORT, "warnings": many}, ensure_ascii=False),
+                           encoding="utf-8")
+    warnings = _tstate(client, jid)["warnings"]
+    assert len(warnings) == 50                       # 상태 폴링 응답이 부풀지 않게 상한
+    assert all(isinstance(w, str) and len(w) <= 1000 for w in warnings)
+    assert warnings[0].startswith("경고 0 ")
+
+    # 리포트가 없으면(번역을 끝낸 적 없음) 경고도 없다
+    report_path.unlink()
+    assert "warnings" not in _tstate(client, jid)
 
 
 def test_translate_report_지원하지_않는_언어는_400(client, sample_pdf, settings):

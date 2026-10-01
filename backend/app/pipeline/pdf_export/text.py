@@ -100,10 +100,13 @@ _LATEX_FRACTIONS = frozenset({"frac", "dfrac", "tfrac", "cfrac"})
 _LATEX_BINOMIALS = frozenset({"binom", "dbinom", "tbinom"})
 # 조판 파이프라인이 **원문에 없던** 문자를 만들어 내는 나머지 경로의 치역 — 서브셋
 # 문자 집합(subset._substitution_range)이 이것을 포함해야 서브셋이 조판을 바꾸지 않는다.
+# 참고문헌 미세 교정이 원문(`T\"ulu 3:`로 깨진 bib)을 바로잡아 그리는 문자열.
+_TULU_MICROFIX = "Tülu 3:"
 _GENERATED_SYMBOLS = "".join((
     "√•",
     "".join(_LATEX_BLACKBOARD.values()),
     "".join(_LATEX_ACCENTS.values()),
+    _TULU_MICROFIX,
 ))
 # NFKD \ud638\ud658 \ubd84\ud574\uac00 \uc5c6\uc5b4 `_portable_text_for_font`\uc758 \uc77c\ubc18 \uacbd\ub85c\ub85c\ub294 ASCII\uae4c\uc9c0
 # \ub0b4\ub824\uac00\uc9c0 \uc54a\ub294 \uae30\ud638\ub4e4. \ubaa8\uc591\uc774 \uc0ac\uc2e4\uc0c1 \uac19\uc740 ASCII \ub300\uccb4\ub9cc \ub123\ub294\ub2e4.

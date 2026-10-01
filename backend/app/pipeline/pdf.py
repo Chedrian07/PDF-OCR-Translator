@@ -146,10 +146,44 @@ def probe_pdf(pdf_path: Path, max_pages: int) -> int:
                     f"페이지 {i + 1}의 크기({r.width:.0f}×{r.height:.0f}pt)가 "
                     f"한 변 상한({MAX_PAGE_SIDE_PT}pt)을 초과합니다"
                 )
+        _check_page_complexity(fitz, doc, n)
         return n
     finally:
         doc.close()
         drain_mupdf_warnings("업로드 검증")
+
+
+def _check_page_complexity(fitz, doc, page_count: int) -> None:
+    """업로드 복잡도 게이트 — 페이지가 그리게 하는 콘텐츠와 중첩 XObject 호출을 렌더 없이 센다.
+
+    페이지 수·한 변 길이만 보던 검증을 수 KB짜리 중첩 Form XObject PDF(리프 그리기 10^12회)와
+    평면 대량 path 페이지가 그대로 통과해 렌더·분석이 폭주했다(감사 security-2·gap3-…-2).
+    상한(PDF_MAX_PAGE_CONTENT_MB·PDF_MAX_PAGE_XOBJECT_CALLS — pdf_worker)을 넘으면 사용자
+    메시지를 담은 ValueError(ContentTooComplex)로 거부한다 → API 400. 분석 자체가 실패한
+    페이지는 거부하지 않는다 — 깨진 페이지는 렌더 단계가 흰 페이지로 격리하는 기존 계약이다."""
+    from . import pdf_worker
+    from .pdf_complexity import ComplexityScanner, ContentTooComplex
+
+    max_bytes = pdf_worker.max_page_content_bytes()
+    max_calls = pdf_worker.max_page_xobject_calls()
+    if not (max_bytes or max_calls) or not doc.is_pdf:
+        return
+    try:
+        scanner = ComplexityScanner(
+            fitz, doc, max_content_bytes=max_bytes, max_xobject_calls=max_calls,
+        )
+    except Exception as error:  # noqa: BLE001 — 저수준 API 변화가 업로드를 막지 않게
+        logger.warning("업로드 복잡도 검사를 건너뜁니다 (%s: %s)",
+                       error.__class__.__name__, str(error)[:200])
+        return
+    for index in range(page_count):
+        try:
+            scanner.check(index)
+        except ContentTooComplex:
+            raise
+        except Exception as error:  # noqa: BLE001 — 페이지 단위 격리
+            logger.info("%d페이지 복잡도 검사 실패 — 렌더 단계 격리에 맡김 (%s: %s)",
+                        index + 1, error.__class__.__name__, str(error)[:200])
 
 
 def _escape_markdown_line(line: str) -> str:

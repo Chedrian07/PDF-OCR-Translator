@@ -370,10 +370,32 @@ body { background: #eceef2; font-family: system-ui, -apple-system, 'Apple SD Got
 }
 """
 
+# standalone 내려받기 파일은 디스크에서 열려 HTTP 헤더(서버 CSP)를 하나도 받지 못한다.
+# 문서 안의 모든 자원(KaTeX css·js·woff2, 크롭·페이지 이미지)은 data: URI·인라인이므로
+# 바깥 출처를 전부 막아도 렌더에는 지장이 없다 — 업로드 PDF에서 온 본문이 파일을 연
+# 사람의 IP·열람 사실을 제3자·LAN 주소로 흘리는 경로(이미지 비컨 등)를 meta CSP로 끊고,
+# 링크를 눌러도 Referer(이 파일을 내준 주소)를 싣지 않는다.
+# 순서가 중요하다 — meta CSP는 그 뒤에 나오는 <style>·<script>에만 적용되므로 charset
+# 바로 다음에 둔다.
+STANDALONE_CSP = (
+    "default-src 'none'; img-src data: blob:; font-src data:; "
+    "style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+)
+_STANDALONE_HEAD_META = (
+    f'<meta http-equiv="Content-Security-Policy" content="{STANDALONE_CSP}">\n'
+    '<meta name="referrer" content="no-referrer">\n'
+)
+
+# 내려받기 파일의 KaTeX 옵션 — ⚠ SYNC: frontend/js/constants.js katexOptions와 같아야 한다
+# (test_layout이 대조). 수식 TeX는 업로드 PDF(OCR·텍스트 레이어)에서 온 신뢰할 수 없는
+# 입력이다: maxSize(em)가 \rule{2000em}{2000em} 같은 거대 박스를, maxExpand가 무한 매크로
+# 루프를 묶고, trust·strict를 명시해 오염된 Object.prototype이 기본값을 덮어 \href 등이
+# 살아나는 경로(GHSA-238p-pmpm-9mq7)를 버전과 무관하게 끊는다.
+_KATEX_OPTIONS_JS = "throwOnError:false,maxSize:10,maxExpand:1000,strict:'ignore',trust:false"
 _TYPESET_JS = (
     "document.querySelectorAll('.math-inline,.math-display').forEach(function(e){"
     "try{katex.render(e.textContent,e,{displayMode:e.classList.contains('math-display'),"
-    "throwOnError:false});}catch(_){}});"
+    f"{_KATEX_OPTIONS_JS}}});}}catch(_){{}}}});"
 )
 
 
@@ -470,6 +492,7 @@ def render_layout_standalone(
     facsimile: bool = False,
 ) -> str:
     """이미지 base64·KaTeX 인라인의 완전 자립형 HTML 문서 — 오프라인에서 그대로 열림.
+    바깥 출처는 meta CSP(STANDALONE_CSP)로 전부 막는다 — 필요한 자원은 모두 파일 안에 있다.
     lang을 주면 <html>·<main>에 lang 속성을 부여해 번역본에 `[lang="ko"] .layout-block`
     (한글 서리프·word-break) 규칙이 적용된다. 원본(lang=None)에는 lang을 붙이지 않아
     비한국어 문서에 한글 타이포가 잘못 적용되는 것을 막는다."""
@@ -497,6 +520,7 @@ def render_layout_standalone(
     lang_attr = f' lang="{lang}"' if lang else ""
     return (
         f'<!doctype html>\n<html{lang_attr}>\n<head>\n<meta charset="utf-8">\n'
+        f"{_STANDALONE_HEAD_META}"
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"<title>{escapeHtml(title)}</title>\n"
         f"<style>{_STANDALONE_CSS}</style>\n{katex}\n{fitter}\n</head>\n"
@@ -550,7 +574,8 @@ def render_document_standalone(
     lang: str | None = None,
 ) -> str:
     """문서 뷰(/html과 동일 렌더 결과)를 완전 자립형 HTML로 — 이미지 base64·KaTeX
-    인라인. inner_html은 신뢰 경로(render_document_html 출력)만 받는다."""
+    인라인, 바깥 출처는 meta CSP(STANDALONE_CSP)로 차단. inner_html은 신뢰 경로
+    (render_document_html 출력)만 받는다."""
     body = _DOC_IMG_SRC.sub(
         lambda m: f'src="{_image_data_uri(job_dir, m.group(1))}"', inner_html,
     )
@@ -558,6 +583,7 @@ def render_document_standalone(
     lang_attr = f' lang="{lang}"' if lang else ""
     return (
         f'<!doctype html>\n<html{lang_attr}>\n<head>\n<meta charset="utf-8">\n'
+        f"{_STANDALONE_HEAD_META}"
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"<title>{escapeHtml(title)}</title>\n"
         f"<style>{_DOCUMENT_CSS}</style>\n{katex}\n</head>\n"

@@ -1,0 +1,23 @@
+# PaddleOCR-VL sidecar 최상위 고정 — requirements.lock(전이 의존성·해시까지 고정한
+# 실제 잠금)의 입력이다. 여기를 바꾸면 requirements.lock 머리말의 명령으로 다시 만든다.
+
+# paddlepaddle-gpu: PyPI에는 2.6.2까지만 있고 cu129 빌드가 없다. 공식 cu129 인덱스가
+# 가리키는 CDN 휠을 URL로 직접 고정한다 — 그 인덱스는 numpy·pillow·anyio 등도 미러로
+# 서빙해서 추가 인덱스로 걸면 다른 패키지까지 출처가 섞인다(인덱스 혼동).
+# 공식 NVIDIA Blackwell 가이드 최소 3.2.1, 3.3.1은 RTX 5070 Ti 실측 검증 버전이다.
+paddlepaddle-gpu @ https://paddle-whl.cdn.bcebos.com/stable/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.3.1-cp312-cp312-linux_x86_64.whl
+# paddleocr 3.6.x = PaddleOCR-VL-1.6 동봉 버전 (paddlex[ocr,genai-client]>=3.6,<3.7)
+paddleocr[doc-parser]==3.6.0
+# 웹 계층 — backend/uv.lock과 같은 버전으로 맞춘다(업로드·폼 파서 상한 동작을 서비스 간 일치)
+fastapi==0.139.0
+uvicorn==0.50.2
+python-multipart==0.0.32
+# revision 고정 스냅샷 다운로드에 직접 사용 (app/model.py::_pin_revision)
+huggingface_hub==1.24.0
+
+# 보안 하한 — 재생성 시 아래로 내려가지 않게 (backend tests/test_dependency_floor.py와 같은 근거)
+starlette>=1.3.1     # GHSA-82w8-qh3p-5jfq: urlencoded 폼 상한 무시 → /v1/parse DoS
+urllib3>=2.8.0       # CVE-2026-97689(chunked 무제한 버퍼링)·CVE-2026-97688·CVE-2026-97687
+anyio>=4.14.2        # CVE-2026-63374·CVE-2026-63349
+pillow>=12.3.0       # crop/paste 좌표 오버플로 OOB 쓰기 등 12.2.0·12.3.0 HIGH 권고
+h11>=0.16.0          # CVE-2025-43859(청크 트레일러 요청 밀반입)

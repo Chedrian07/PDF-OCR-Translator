@@ -98,6 +98,12 @@ class SingleFlight:
         with self._cache_lock:
             return dict(self.cache)
 
+    def discard(self, key: str) -> None:
+        """키 하나를 캐시에서 지우고 이전 캐시 재사용 계측에서도 뺀다(재검증 탈락용)."""
+        with self._cache_lock:
+            self.cache.pop(key, None)
+            self.prior_hits.discard(key)
+
     def purge(self, matches: Callable[[str], bool]) -> None:
         """값이 조건에 맞는 캐시 항목을 제거한다 (축퇴 출력 무효화용)."""
         with self._cache_lock:

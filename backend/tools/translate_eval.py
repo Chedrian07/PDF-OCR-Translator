@@ -510,7 +510,10 @@ def run_judge(
     """표본 유닛을 평가자 모델로 채점하고 집계한다.
 
     client가 None이면 cfg(있으면 judge_model로 교체)로 OpenAICompatClient 생성.
-    파싱/호출 실패 유닛은 건너뛰고 failed로 센다.
+    파싱/호출 실패 유닛은 건너뛰고 failed로 세며, 사유(예외 종류)별 건수를
+    failed_reasons에 남긴다 — 종전에는 실패가 조용히 failed 숫자로만 남았다.
+    예산은 번역과 같은 reasoning effort 연동 값(cfg.max_output_tokens)이다. 고정
+    1000토큰은 thinking 채점 모델에서 전부 잘려 judged=0이 됐다(translate-llm-19).
     """
     if judge_model:
         cfg = dataclasses.replace(cfg, model=judge_model)
@@ -520,15 +523,18 @@ def run_judge(
     sample = build_judge_sample(rec, sample_size)
     per_unit: list[dict] = []
     failed = 0
+    failed_reasons: dict[str, int] = {}
     for uid in sample:
         src = rec.by_id[uid].src
         trans = rec.found[uid]
         user = f"[원문]\n{src}\n\n[번역]\n{trans}"
         try:
-            raw = client.complete(JUDGE_SYSTEM, user, max_tokens=1000)
+            raw = client.complete(JUDGE_SYSTEM, user, max_tokens=cfg.max_output_tokens)
             data = parse_judge_json(raw)
-        except Exception:
+        except Exception as e:  # noqa: BLE001 — 표본 하나의 실패는 집계만 한다
             failed += 1
+            reason = type(e).__name__
+            failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
             continue
         name_errors = data.get("name_errors") or []
         if not isinstance(name_errors, list):
@@ -552,6 +558,7 @@ def run_judge(
         "sample_size": len(sample),
         "judged": len(per_unit),
         "failed": failed,
+        "failed_reasons": failed_reasons,
         "avg_fidelity": _avg("fidelity"),
         "avg_fluency": _avg("fluency"),
         "avg_terminology": _avg("terminology"),
@@ -630,6 +637,9 @@ def format_summary(report: dict) -> str:
         j = report["judge"]
         lines.append(f"\n[LLM 채점]  (표본 {j['sample_size']} · 채점 {j['judged']} · "
                      f"실패 {j['failed']})")
+        if j.get("failed_reasons"):
+            reasons = ", ".join(f"{k} {v}건" for k, v in sorted(j["failed_reasons"].items()))
+            lines.append(f"  실패 사유: {reasons}")
         lines.append(f"  fidelity {j['avg_fidelity']} · fluency {j['avg_fluency']} · "
                      f"terminology {j['avg_terminology']}")
         lines.append(f"  누락(omission) {j['omission_count']}건 · "

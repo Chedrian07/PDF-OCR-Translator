@@ -322,3 +322,174 @@ def test_protected_token_count_uses_the_real_masker():
     text = "See Figure 3 and [12] at https://example.com/x for details."
     assert verify_e2e.protected_token_count(text) == 3
     assert verify_e2e.protected_token_count("plain sentence") == 0
+
+
+# ─────────────────── 컨테이너 하드닝 (감사 security-6·infra-docs-13) ───────────────────
+# CPU 스택 실측으로 검증한 하드닝이 새 서비스 추가·리팩터에서 조용히 빠지지 않게 한다.
+
+ALL_COMPOSE_SERVICES = (*BACKEND_SERVICES, "ovisocr2", "paddleocr-vl")
+# 같은 CPU 이미지를 쓰는 백엔드 — 쓰기 경로가 /data·/tmp뿐임을 실측했다(read_only 대상).
+# ocr-cuda·sidecar는 GPU 호스트에서 검증하기 전까지 read_only를 걸지 않는다.
+READ_ONLY_SERVICES = ("ocr-cpu", "ocr-ovis", "ocr-paddle")
+
+
+@pytest.mark.parametrize("svc", ALL_COMPOSE_SERVICES)
+def test_every_compose_service_drops_all_capabilities(compose, svc):
+    spec = compose["services"][svc]
+    assert spec.get("cap_drop") == ["ALL"], f"{svc}: cap_drop: [ALL] 누락"
+    assert "no-new-privileges:true" in spec.get("security_opt", []), f"{svc}: no-new-privileges 누락"
+
+
+@pytest.mark.parametrize("svc", READ_ONLY_SERVICES)
+def test_cpu_image_backends_run_with_a_read_only_root(compose, svc):
+    spec = compose["services"][svc]
+    assert spec.get("read_only") is True, f"{svc}: read_only 누락"
+    tmpfs = spec.get("tmpfs", [])
+    assert any(str(t).startswith("/tmp:") for t in tmpfs), f"{svc}: /tmp tmpfs가 없으면 업로드 스풀이 실패한다"
+    assert any("/data" in str(v) for v in spec.get("volumes", [])), f"{svc}: /data는 볼륨이어야 쓴다"
+
+
+@pytest.mark.parametrize("svc", BACKEND_SERVICES)
+def test_backends_cap_process_count(compose, svc):
+    limits = compose["services"][svc]["deploy"]["resources"]["limits"]
+    assert int(limits.get("pids", 0)) > 0, f"{svc}: pids 상한 누락(fork 폭주 차단)"
+
+
+@pytest.mark.parametrize("svc", BACKEND_SERVICES)
+def test_hardening_keeps_the_owner_network_defaults(compose, svc):
+    """하드닝은 노출 기본값을 바꾸지 않는다 — 0.0.0.0 게시·ALLOWED_HOSTS='*'는 소유자 결정이다."""
+    spec = compose["services"][svc]
+    assert any(str(p).startswith("${BIND_HOST:-0.0.0.0}:") for p in spec["ports"]), spec["ports"]
+    assert spec["environment"]["ALLOWED_HOSTS"] == "${ALLOWED_HOSTS:-*}"
+
+
+_FROM_RE = re.compile(r"^FROM\s+(\S+)", re.MULTILINE)
+DOCKERFILES = ("backend/Dockerfile", "services/ovisocr2/Dockerfile", "services/paddleocr_vl/Dockerfile")
+
+
+@pytest.mark.parametrize("path", DOCKERFILES)
+def test_base_images_are_pinned_by_digest(path):
+    """가변 태그는 재빌드마다 OS·툴체인이 바뀌어 같은 버전 라벨에 다른 이미지가 나간다."""
+    text = (REPO / path).read_text(encoding="utf-8")
+    images = _FROM_RE.findall(text)
+    assert images, f"{path}: FROM을 못 찾았다"
+    unpinned = [i for i in images if not re.search(r"@sha256:[0-9a-f]{64}$", i)]
+    assert not unpinned, f"{path}: digest 미고정 베이스 {unpinned}"
+
+
+@pytest.mark.parametrize("path", ("backend/Dockerfile", "services/paddleocr_vl/Dockerfile"))
+def test_digest_pinned_debian_bases_still_get_security_updates(path):
+    """digest 고정만 하면 OS 보안 패치가 영구 동결된다 — apt-get upgrade와 반드시 함께 간다."""
+    assert "apt-get upgrade -y" in (REPO / path).read_text(encoding="utf-8")
+
+
+def test_runtime_image_code_is_read_only_and_shutdown_is_bounded():
+    df = (REPO / "backend" / "Dockerfile").read_text(encoding="utf-8")
+    copies = [line for line in df.splitlines() if line.startswith("COPY") and "/srv/" in line]
+    assert copies and not any("--chown" in c for c in copies), f"앱 코드가 실행 사용자 소유다: {copies}"
+    assert "UV_COMPILE_BYTECODE=1" in df and "compileall" in df, "바이트코드 사전 컴파일이 빠졌다"
+    assert re.search(r"^USER app$", df, re.MULTILINE)
+    # 열린 SSE가 graceful shutdown을 막아 SIGKILL(137)로 죽던 문제(감사 concurrency-11)
+    assert "--timeout-graceful-shutdown" in df
+
+
+@pytest.mark.parametrize("svc", ("ovisocr2", "paddleocr_vl"))
+def test_sidecar_locks_are_hashed_and_installed_with_hash_checking(svc):
+    base = REPO / "services" / svc
+    lock = (base / "requirements.lock").read_text(encoding="utf-8")
+    reqs = re.findall(r"^([A-Za-z0-9._-]+)(?:==| @ )", lock, re.MULTILINE)
+    assert reqs, "requirements.lock에 고정된 요구사항이 없다"
+    blocks = re.split(r"\n(?=[A-Za-z0-9])", lock.split("\n", 1)[1] if lock.startswith("#") else lock)
+    unhashed = [b.split()[0] for b in blocks if re.match(r"[A-Za-z0-9]", b) and "--hash=sha256:" not in b]
+    assert not unhashed, f"해시 없는 요구사항: {unhashed}"
+    df = (base / "Dockerfile").read_text(encoding="utf-8")
+    assert "--require-hashes" in df and "--no-deps" in df and "requirements.lock" in df
+
+
+# ─────────────────── 공급망 — CI·릴리스 게이트 (감사 gap2-8·infra-docs-16~19) ───────────────────
+
+WORKFLOWS = sorted((REPO / ".github" / "workflows").glob("*.yml"))
+
+
+@pytest.mark.parametrize("wf", WORKFLOWS, ids=lambda p: p.name)
+def test_every_action_is_pinned_to_a_full_commit_sha(wf):
+    """태그는 다른 커밋으로 다시 밀릴 수 있다 — 버전은 주석으로만 남긴다."""
+    uses = re.findall(r"^\s*-?\s*uses:\s*(\S+)", wf.read_text(encoding="utf-8"), re.MULTILINE)
+    assert uses, f"{wf.name}: uses를 못 찾았다"
+    loose = [u for u in uses if not u.startswith("./") and not re.search(r"@[0-9a-f]{40}$", u)]
+    assert not loose, f"{wf.name}: SHA 미고정 액션 {loose}"
+
+
+def test_ci_audits_dependencies_without_silent_skips(ci):
+    script = _job_script(ci["jobs"]["dependency-audit"])
+    assert "pip-audit" in script and "--extra cpu" in script
+    # torch '+cpu' 같은 로컬 버전은 PyPI에 없어 '감사 불가'로 조용히 빠진다 — --strict가 막는다
+    assert "--strict" in script
+    for svc in ("ovisocr2", "paddleocr_vl"):
+        assert svc in script, f"sidecar 잠금 {svc}를 감사하지 않는다"
+
+
+def test_ci_builds_and_smokes_the_image_without_pushing(ci):
+    job = ci["jobs"]["docker-image"]
+    build = next(s for s in job["steps"] if "build-push-action" in str(s.get("uses", "")))
+    assert build["with"]["push"] is False and build["with"]["file"] == "backend/Dockerfile"
+    assert "scripts/smoke_image.sh" in _job_script(job)
+
+
+@pytest.fixture(scope="module")
+def release() -> dict:
+    yaml = pytest.importorskip("yaml", reason="PyYAML 없음 — 릴리스 계약 검사 생략")
+    return yaml.safe_load((REPO / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+
+
+def test_release_scans_the_image_before_pushing(release):
+    steps = release["jobs"]["publish-images"]["steps"]
+    runs = [str(s.get("run", "")) for s in steps]
+    scan = next(i for i, r in enumerate(runs) if "trivy" in r)
+    push = next(i for i, r in enumerate(runs) if "docker push" in r)
+    assert scan < push, "취약점 스캔이 push 뒤에 있다"
+    assert "--exit-code 1" in runs[scan] and "--ignorefile" in runs[scan]
+    assert re.search(r"aquasec/trivy:[\w.]+@sha256:[0-9a-f]{64}", runs[scan]), "trivy 이미지 digest 미고정"
+
+
+def test_release_waits_for_ci_and_ships_checksummed_assets(release):
+    verify = "\n".join(str(s.get("run", "")) for s in release["jobs"]["verify-release"]["steps"])
+    assert "sleep" in verify and "status != \"completed\"" in verify, "CI 진행 중이면 기다려야 한다"
+    build = next(s for s in release["jobs"]["publish-images"]["steps"]
+                 if "build-push-action" in str(s.get("uses", "")))
+    assert "cache-to" not in build["with"], "태그 ref 캐시는 다음 태그에서 복원되지 않는다"
+    assets = release["jobs"]["release-assets"]
+    assert assets["permissions"] == {"contents": "write"}
+    assert "SHA256SUMS" in _job_script(assets) and "gh release upload" in _job_script(assets)
+
+
+def test_accepted_image_advisories_carry_a_reason_and_expiry():
+    yaml = pytest.importorskip("yaml")
+    entries = yaml.safe_load((REPO / ".github/trivyignore.yaml").read_text(encoding="utf-8"))
+    for e in entries["vulnerabilities"]:
+        assert e.get("statement") and e.get("expired_at"), f"{e['id']}: 이유·재검토 기한 누락"
+        assert e.get("purls"), f"{e['id']}: purl로 현재 고정 버전에만 걸어야 한다"
+
+
+# ─────────────────── 문서·스크립트 드리프트 ───────────────────
+
+def test_security_policy_does_not_contradict_the_compose_wiring(compose):
+    """SECURITY.md만 'compose가 남용 방어 변수를 전달하지 않는다'고 적어 운영자가 .env 조정을
+    포기하게 만들었다(감사 security-5·infra-docs-10). 문서의 변수는 실제로 전달돼야 한다."""
+    text = (REPO / "SECURITY.md").read_text(encoding="utf-8")
+    assert "do not thread" not in text
+    for key in ("QA_RATE_LIMIT_PER_MIN", "QA_MAX_CONCURRENT",
+                "TRANSLATE_RATE_LIMIT_PER_MIN", "TRANSLATE_MAX_ACTIVE"):
+        assert key in text
+        for svc in BACKEND_SERVICES:
+            assert key in compose["services"][svc]["environment"], f"{svc}: {key}"
+
+
+def test_scripts_do_not_import_the_legacy_fitz_module():
+    """app 코드와 같은 규칙 — PyMuPDF 1.28+는 `import fitz` 때 폐지 경고를 찍는다."""
+    offenders = [
+        f"{p.name}:{n}" for p in sorted(SCRIPTS.glob("*.py"))
+        for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+        if re.match(r"\s*(import fitz\b|from fitz\b)", line)
+    ]
+    assert not offenders, f"레거시 fitz 임포트: {offenders}"

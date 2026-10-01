@@ -811,7 +811,8 @@ if (layoutCap !== 'figure_only') {
 }
 
 // (f) SSE 첫 연결이 비-200(프록시 502)이면 기다리지 않고 바로 상태 폴링으로 강등한다(frontend-1).
-{
+//     새 PDF를 하나 더 변환하므로 즉시 끝나는 FakeEngine 하네스에서만 돈다(실 모델은 수 분).
+if (health.engine === 'fake') {
   const sseCtx = await freshContext();
   let uploadedId = '';
   let fakedRunning = false;

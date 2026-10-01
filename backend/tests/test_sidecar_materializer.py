@@ -101,6 +101,24 @@ def test_raw_pages_layout_roundtrip(tmp_path, page_image):
     assert "<table>" in blocks[3]["content"]
 
 
+def test_figure_only_engine_skips_raw_pages_but_keeps_boxes(tmp_path, page_image):
+    """write_raw=False(figure_only 엔진)면 raw_pages.json을 쓰지 않는다 — image
+    det뿐인 원출력이 layout.json이 되어 내보내기가 텍스트를 잃던 근본 원인. 그림
+    상대 폭(boxes.json)과 크롭·오버레이는 그대로 남긴다."""
+    out = tmp_path / "chunk_00"
+    mat = ChunkMaterializer(out, single=False, write_raw=False)
+    md = mat.add_page(
+        _page("본문\n\n[[FIGURE:0]]", [_figure(0, [100, 200, 800, 700], 0)]),
+        page_image, local_page=0,
+    )
+    mat.finalize()
+
+    assert not (out / "raw_pages.json").exists()
+    assert (out / "images" / "page_0_0.jpg").is_file()
+    assert "page_0_0.jpg" in json.loads((out / "boxes.json").read_text(encoding="utf-8"))
+    assert "![](images/page_0_0.jpg)" in md
+
+
 def test_placeholder_without_figure_removed(tmp_path, page_image):
     out = tmp_path / "c"
     mat = ChunkMaterializer(out, single=True)

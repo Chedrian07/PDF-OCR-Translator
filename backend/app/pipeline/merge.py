@@ -21,6 +21,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from .artifacts import layout_has_text_blocks
+
 _IMG_MULTI = re.compile(r"!\[\]\(images/page_(\d+)_(\d+)\.jpg\)")
 _IMG_SINGLE = re.compile(r"!\[\]\(images/(\d+)\.jpg\)")
 _FILE_MULTI = re.compile(r"^page_(\d+)_(\d+)\.jpg$")
@@ -301,7 +303,8 @@ class IncrementalMerger:
         self.figure_boxes: dict[str, dict] = {}
         # 레이아웃 뷰용 페이지 블록 (벤더 P14의 raw_pages.json → layout.json)
         self.layout_pages: list[dict] = []
-        # 좌표 데이터를 실제로 받은 청크가 하나라도 있었는가 (없으면 layout.json 미생성)
+        # 텍스트 블록 좌표를 실제로 받은 페이지가 하나라도 있었는가
+        # (없으면 layout.json 미생성 — image 블록만으로는 세우지 않는다)
         self.has_layout_data = False
 
     # ── 파일 이동 ──────────────────────────────────────────────
@@ -377,6 +380,10 @@ class IncrementalMerger:
             return (1000, 1414)  # A4 비율 폴백
 
     def _load_raw_pages(self, chunk: ChunkResult) -> list:
+        """청크의 raw_pages.json(벤더 P14 계약). 좌표 데이터 **유무** 판정은 여기서
+        하지 않는다 — `['']`나 image det뿐인 원출력도 비어 있지 않은 리스트라, 여기서
+        has_layout_data를 세우면 텍스트 좌표가 없는 잡도 layout.json을 남긴다.
+        판정은 파싱된 블록을 보는 `_note_layout_data`가 맡는다."""
         raw_path = chunk.chunk_dir / "raw_pages.json"
         if not raw_path.is_file():
             return []
@@ -386,8 +393,17 @@ class IncrementalMerger:
             return []
         if not isinstance(raw_pages, list) or not raw_pages:
             return []
-        self.has_layout_data = True
         return raw_pages
+
+    def _note_layout_data(self, pages: list[dict]) -> None:
+        """파싱된 페이지에 텍스트 블록이 있으면 '좌표 데이터를 받았다'로 기록한다.
+
+        image 블록만 있는 페이지(figure_only 엔진·그림 전용 페이지)나 빈 페이지만으로는
+        layout.json을 만들지 않는다 — 그런 layout은 facsimile HTML·번역 PDF에서 원문
+        래스터만 남기는 '텍스트 없는 레이아웃'이다(artifacts.has_usable_layout과 같은 기준).
+        """
+        if not self.has_layout_data and layout_has_text_blocks(pages):
+            self.has_layout_data = True
 
     def _source_page_texts(self, chunk: "ChunkResult") -> list[str]:
         """이 청크가 덮는 물리 페이지들의 원본 텍스트 (정합 대조용, 정규화됨).
@@ -460,6 +476,7 @@ class IncrementalMerger:
             page = {"page": g, "width": w, "height": h, "blocks": blocks}
             new_pages.append(page)
             self.layout_pages.append(page)
+        self._note_layout_data(new_pages)
         # 원본 PDF 텍스트 레이어의 실측 폰트 크기를 이번 청크 페이지들에 주입.
         # (청크마다 pdf 재오픈 — ms 수준이라 무방. enrichment 실패는 잡을 깨지 않음.)
         try:
@@ -469,9 +486,9 @@ class IncrementalMerger:
         except Exception:
             pass
         if self.has_layout_data and self.layout_pages:
-            # 좌표 데이터를 한 번도 받지 못한 잡(figure_only 엔진)은 layout.json을
-            # 만들지 않는다 — has_layout=false로 남아야 레이아웃 뷰/PDF 내보내기가
-            # 빈 캔버스를 제안하지 않는다.
+            # 텍스트 좌표를 한 번도 받지 못한 잡(figure_only 엔진·전면 스캔)은
+            # layout.json을 만들지 않는다 — has_layout=false로 남아야 레이아웃 뷰/PDF
+            # 내보내기가 텍스트 없는 캔버스를 제안하지 않는다.
             # 원자적 교체 — 크래시/재시작 타이밍에 layout.json이 파손된 채 남아
             # /layout이 500을 내는 일이 없게 (result.md의 _write_partial과 동일 패턴)
             _atomic_write_json(self.job_dir / "layout.json", self.layout_pages)
@@ -555,8 +572,7 @@ class IncrementalMerger:
                     at = i
                     break
             self.layout_pages.insert(at, page)
-        if blocks:
-            self.has_layout_data = True
+        self._note_layout_data([page])
         if self.has_layout_data and self.layout_pages:
             _atomic_write_json(self.job_dir / "layout.json", self.layout_pages)
 

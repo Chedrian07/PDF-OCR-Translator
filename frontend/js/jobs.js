@@ -17,6 +17,7 @@ import {
 } from './reader.js';
 import { closeViewer, openViewer } from './viewer.js';
 import { activateTab } from './tabs.js';
+import { forgetReaderNotes } from './notes.js';
 
 /* ============================ Job history ============================ */
 
@@ -303,6 +304,9 @@ export async function deleteJob(id) {
   }
   removeJobFromList(id);
   localRemove(readerPosKey(id)); // 이어읽기 위치도 함께 정리 (localStorage 누수 방지)
+  // 사용자가 지운 잡의 인용·하이라이트도 함께 지운다. (404처럼 서버 쪽 사정으로 안 보이는
+  // 경우는 일시적일 수 있어 남겨 두고, 보관 잡 수 상한이 결국 정리한다.)
+  forgetReaderNotes(id);
   if (state.currentJobId === id) {
     teardownConnections();
     state.currentJobId = null;

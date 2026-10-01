@@ -49,9 +49,13 @@ ENV PYTHONUNBUFFERED=1 \
 # ⚠ PaddleX 캐시는 $HOME/.paddlex이므로 root가 아닌 /home/app/.paddlex가 된다 —
 #   docker-compose.yml의 paddle-x-cache 마운트 경로도 함께 바뀌었다.
 # ⚠ 볼륨 소유권: 비어 있는 named volume은 이 chown 결과(uid 1000)를 물려받지만,
-#   이미 root 소유로 채워진 기존 볼륨은 자동으로 바뀌지 않는다. 한 번만:
-#     docker run --rm -v paddle-hf-cache:/a -v paddle-x-cache:/b alpine \
-#       chown -R 1000:1000 /a /b
+#   이미 root 소유로 채워진 기존 볼륨은 자동으로 바뀌지 않는다. 한 번만 — 볼륨 이름을
+#   추측하지 말고 compose로 실행한다(실제 이름은 `<PROJECT>_paddle-hf-cache`처럼 접두사가
+#   붙어 `docker run -v paddle-hf-cache:…`는 빈 볼륨을 새로 만들고 exit 0으로 끝난다):
+#     docker compose --profile paddle run --rm --no-deps --user 0 --cap-add CHOWN \
+#       --cap-add DAC_OVERRIDE --entrypoint chown paddleocr-vl \
+#       -R 1000:1000 /data/hf /home/app/.paddlex
+#   (compose가 cap_drop: [ALL]을 걸어 두므로 root라도 이 실행에만 두 캡을 돌려준다)
 RUN useradd --uid 1000 --home-dir /home/app --create-home app \
     && mkdir -p /data/hf /home/app/.paddlex \
     && chown -R 1000:1000 /data /home/app /srv/paddleocr_vl

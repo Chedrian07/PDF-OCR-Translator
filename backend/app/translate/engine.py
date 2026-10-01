@@ -366,6 +366,7 @@ class _TranslationRun:
         게이트 거부는 사유별로 집계한다 — 래더가 흡수해 최종적으로 번역에
         성공한 건도 세므로 "오탐이 얼마나 비쌌나"가 report.json에 남는다.
         """
+        self._note_output(src, restored)
         if missing or dup or not restored.strip():
             return False
         reason = untranslated_reason(src, restored, mapping)
@@ -374,6 +375,20 @@ class _TranslationRun:
                 self.gate_reasons[reason] = self.gate_reasons.get(reason, 0) + 1
             return False
         return True
+
+    def _note_output(self, src: str, out: str) -> None:
+        """축퇴 판정 증거 — 게이트 통과 여부와 무관하게 모든 모델 출력을 원문별로 모은다.
+
+        고장 난 공급자가 모든 요청에 같은 문자열을 줄 때, 대부분은 유닛 게이트가 거부하고
+        짧은 조각 두어 개만 통과한다. 통과분만 세면 '서로 다른 원문 3개' 기준에 못 미쳐
+        그 두 개가 산출물에 남았다(verify_e2e 4쪽 fault=summary 실측). 같은 문자열이 서로
+        다른 원문 여럿에 대한 응답이었다는 사실 자체가 축퇴의 증거다.
+        """
+        norm = " ".join(out.split())
+        if not norm:
+            return
+        with self.gate_lock:
+            self.output_sources.setdefault(norm, set()).add(_source_signature(src))
 
     def _translate_fragment(
         self, src, pairs, first, ctx, stats, keep=None, unit_kind: str = "",

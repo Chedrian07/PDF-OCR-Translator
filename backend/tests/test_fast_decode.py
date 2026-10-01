@@ -400,3 +400,54 @@ def test_moe_kill_switch_parse_matches_vendor(monkeypatch):
         monkeypatch.setenv("OCR_MOE_FUSED", value)
         probe = _Probe()
         assert _moe_fused_enabled() is DeepseekV2MoE._fused_env_enabled(probe), value
+
+
+# ── MPS 오토릴리스 풀 배선 (gap1-metal-real-e2e-1) — MPS 없이 스파이로 검증 ──
+
+def _spy_pool(events):
+    import contextlib
+
+    @contextlib.contextmanager
+    def pool(enabled=True):
+        events.append(("enter", enabled))
+        try:
+            yield
+        finally:
+            events.append(("exit", enabled))
+
+    return pool
+
+
+def test_needs_autorelease_pool_only_for_mps_tensors():
+    from app.engine.fast_decode import _needs_autorelease_pool
+
+    assert _needs_autorelease_pool(SimpleNamespace(device=SimpleNamespace(type="mps"))) is True
+    assert _needs_autorelease_pool(torch.zeros(1, dtype=torch.long)) is False
+    assert _needs_autorelease_pool(SimpleNamespace(device=SimpleNamespace(type="cuda"))) is False
+    assert _needs_autorelease_pool(object()) is False
+
+
+def test_mps_decode_drains_autorelease_pool_every_step(monkeypatch):
+    """MPS 입력이면 프롬프트 put + 디코드 스텝(프리필 포함)마다 풀을 1회씩 push/pop —
+    끝나지 않는 워커 스레드에 ObjC 객체가 토큰당 ~25KB씩 쌓이던 누수의 회귀 방지."""
+    import app.engine.fast_decode as fd
+
+    events: list = []
+    monkeypatch.setattr(fd, "autorelease_pool", _spy_pool(events))
+    monkeypatch.setattr(fd, "_needs_autorelease_pool", lambda ids: True)
+    model = StubModel(eos_after=10)
+    out = _run(model, block=4, streamer=StubStreamer())
+
+    assert int(out[0, -1]) == EOS  # 출력 계약 불변
+    enters = [e for e in events if e[0] == "enter"]
+    assert enters == [("enter", True)] * (model.steps + 1)
+    assert events.count(("exit", True)) == len(enters)  # 짝이 맞음(LIFO, 누락 없음)
+
+
+def test_cpu_decode_keeps_pool_disabled(monkeypatch):
+    import app.engine.fast_decode as fd
+
+    events: list = []
+    monkeypatch.setattr(fd, "autorelease_pool", _spy_pool(events))
+    _run(StubModel(eos_after=6), block=4, streamer=StubStreamer())
+    assert events and all(enabled is False for _, enabled in events)

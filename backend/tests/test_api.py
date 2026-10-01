@@ -1055,6 +1055,13 @@ def _limited_app(tmp_path, max_upload_mb: int = 1):
     return TestClient(create_app(settings)), settings
 
 
+def _job_entries(jobs_dir: Path) -> list[str]:
+    """jobs 디렉터리의 잡 항목 — 단일 소유자 락 파일(.owner.lock)은 잡이 아니다."""
+    from app.owner_lock import LOCK_FILE_NAME
+
+    return [p.name for p in jobs_dir.iterdir() if p.name != LOCK_FILE_NAME]
+
+
 def test_upload_over_limit_rejected_before_spooling(tmp_path, sample_pdf, monkeypatch):
     """상한 초과 Content-Length는 폼 파싱 전에 413 — 스풀 임시 파일도, 잡 디렉터리도
     만들어지지 않는다(무인증 서비스의 디스크 소진 벡터)."""
@@ -1074,7 +1081,7 @@ def test_upload_over_limit_rejected_before_spooling(tmp_path, sample_pdf, monkey
         assert "1MB" in r.json()["detail"]
         assert spooled == []                                  # 본문이 디스크에 닿지 않았다
         assert client.get("/api/jobs").json()["jobs"] == []   # 유령 잡 없음
-        assert list(settings.jobs_dir.iterdir()) == []
+        assert _job_entries(settings.jobs_dir) == []
 
 
 def test_upload_exactly_at_limit_is_accepted(tmp_path, sample_pdf):
@@ -1112,7 +1119,7 @@ def test_upload_over_limit_without_content_length(tmp_path, sample_pdf):
         )
         assert r.status_code == 413
         assert "content-length" not in {k.lower() for k in r.request.headers}
-        assert list(settings.jobs_dir.iterdir()) == []
+        assert _job_entries(settings.jobs_dir) == []
 
 
 def test_upload_body_limit_middleware_cuts_streaming_body():

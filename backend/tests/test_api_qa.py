@@ -479,3 +479,69 @@ def test_health_qa_available_false_without_key(client):
     # 로컬 ollama가 기본이면 데몬 상태를 헬스에서 동기 조회할 수 없어 True 유지
     client.app.state.settings.llm_provider = "ollama"
     assert client.get("/api/health").json()["qa_available"] is True
+
+
+# ── local-openai (루프백 OpenAI 호환 서버) — mlx-integration-11, infra-docs-15 ──
+
+def _real_router_with_local(handler):
+    """실제 LlmRouter + local-openai 클라이언트(MockTransport) — api.py는 그대로 둔다."""
+    import httpx
+
+    from app.llm.providers import LlmRouter, LocalOpenAIClient, OllamaClient, OpenAIClient
+
+    def dead(request):
+        raise httpx.ConnectError("down")
+
+    return LlmRouter(
+        openai=OpenAIClient(
+            api_key="", base_url="https://api.openai.test/v1", responses_models=("r",),
+            chat_models=("c",), default_responses_model="r", default_chat_model="c",
+            transport=httpx.MockTransport(dead),
+        ),
+        ollama=OllamaClient("http://127.0.0.1:11434", "qwen3:8b",
+                            transport=httpx.MockTransport(dead)),
+        default_provider="local-openai",
+        default_reasoning_effort="low",
+        local_openai=LocalOpenAIClient(
+            "http://127.0.0.1:1235/v1", default_model="qwen-local",
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+
+def test_providers_카탈로그에_구성된_local_openai가_광고된다(client):
+    import httpx
+
+    def handler(request):
+        return httpx.Response(200, json={"data": [{"id": "qwen-local"}]})
+
+    client.app.state.llm_router = _real_router_with_local(handler)
+    r = client.get("/api/providers")
+    assert r.status_code == 200
+    entry = next(p for p in r.json()["providers"] if p["id"] == "local-openai")
+    assert entry["available"] is True and entry["remote"] is False
+    assert entry["default_model"] == "qwen-local"
+
+
+def test_기본_공급자가_local_openai면_질문이_로컬_서버로_간다(client, sample_pdf):
+    """POST /qa의 provider 생략 → 서버 기본(LLM_PROVIDER=local-openai) — 원문이 루프백으로만
+    나가고 응답은 local_only로 표시된다(api.py 변경 없이 기본 공급자로 동작)."""
+    import httpx
+
+    seen = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"model": "qwen-local", "choices": [
+            {"message": {"content": "로컬 답변", "reasoning_content": "secret trace"}}]})
+
+    client.app.state.llm_router = _real_router_with_local(handler)
+    client.app.state.settings.llm_provider = "local-openai"
+    jid = _done_job(client, sample_pdf)
+    r = client.post(f"/api/jobs/{jid}/qa", json={"question": "요점?", "thinking": False})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["answer"] == "로컬 답변" and "secret" not in json.dumps(body)
+    assert body["provider"] == "local-openai" and body["local_only"] is True
+    assert seen["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "[Page 1]" in seen["messages"][1]["content"]

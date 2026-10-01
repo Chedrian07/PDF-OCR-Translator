@@ -4,7 +4,7 @@ import {
 } from './constants.js';
 import {
   PAGE_MARKER, createGroundState, groundDrain, groundPush, livePageImageUrl, normalizeLabel,
-  planPreviewRender, renderPagesInOrder, replayExtendsRaw, streamPaneTrimCount,
+  parseRetryAfter, planPreviewRender, renderPagesInOrder, replayExtendsRaw, streamPaneTrimCount,
   syncedStreamPageNo, truncateRawToPage,
 } from './core.js';
 import { el, state } from './state.js';
@@ -20,6 +20,7 @@ export function resetLiveState() {
   state.previewTimer = 0;
   state.previewDirty = false;
   state.previewFails = 0;
+  state.previewRetryAt = 0;
   state.previewStopped = false;
   state.previewPageCache = [];
   state.previewPageNodes = [];
@@ -435,17 +436,23 @@ export function retryPageImageIfNeeded() {
 
 /* ============================ Live rendered preview (right pane) ============================ */
 
+// 다음 렌더까지의 지연 — 서버가 429로 "잠시 뒤"라고 한 시각(previewRetryAt)보다 앞당기지 않는다.
+function previewDelay(base) {
+  return Math.max(base, (state.previewRetryAt || 0) - Date.now());
+}
+
 export function schedulePreviewRender() {
   if (state.previewStopped) return;
   state.previewDirty = true;
   if (state.previewTimer || state.previewInFlight) return;
-  state.previewTimer = setTimeout(runPreviewRender, 600);
+  state.previewTimer = setTimeout(runPreviewRender, previewDelay(600));
 }
 
 export function maybeReschedulePreview() {
   if (state.previewDirty && state.currentJobId && !state.previewStopped &&
       !state.previewTimer && !state.previewInFlight) {
-    state.previewTimer = setTimeout(runPreviewRender, state.previewFails >= 4 ? 3000 : 600);
+    state.previewTimer = setTimeout(runPreviewRender,
+      previewDelay(state.previewFails >= 4 ? 3000 : 600));
   }
 }
 
@@ -469,8 +476,9 @@ export function appendPreviewFragment(html, withSep) {
   return nodes;
 }
 
-// 413(서버 2MB 상한) 또는 연속 실패 시 라이브 프리뷰를 중단하고 원인에 맞는
+// 413(서버 본문 상한 256KiB) 또는 연속 실패 시 라이브 프리뷰를 중단하고 원인에 맞는
 // 한 줄 안내를 남긴다(일시 장애 중단에 '문서가 커서'라고 표시하지 않도록).
+// 429(레이트리밋·동시 렌더 상한)는 실패가 아니다 — Retry-After만큼 쉬고 이어 간다.
 // 잡 완료 후 결과 탭(/html) 렌더는 이와 무관하게 기존 경로로 동작한다.
 export function stopLivePreview(message) {
   state.previewStopped = true;
@@ -486,7 +494,7 @@ export function stopLivePreview(message) {
 // Throttled, latest-wins (queue of 1): at most one cycle in flight; tokens
 // arriving mid-flight mark it dirty and exactly one follow-up is scheduled.
 // 증분 렌더: 확정 페이지는 최초 1회만 POST해 HTML을 캐시하고, 이후에는
-// 미확정 꼬리만 재전송한다 — 누적 전체 재전송(O(n²)·2MB 413 루프)을 피한다.
+// 미확정 꼬리만 재전송한다 — 누적 전체 재전송(O(n²)·256KiB 413 루프)을 피한다.
 // 백로그(중간에 연 잡의 확정 페이지들)는 몇 장씩 겹쳐 보내고 받은 순서대로 바로
 // 반영한다 — 실패하면 그 앞까지는 남기고 다음 사이클이 실패한 페이지부터 잇는다.
 export async function runPreviewRender() {
@@ -494,6 +502,12 @@ export async function runPreviewRender() {
   if (state.previewInFlight || !state.previewDirty || state.previewStopped) return;
   const id = state.currentJobId;
   if (!id) { state.previewDirty = false; return; }
+  // 429 대기 중에 다른 경로(replay·reset 재예약)가 앞당긴 실행 — 남은 시간만큼 미룬다.
+  const wait = previewDelay(0);
+  if (wait > 0) {
+    state.previewTimer = setTimeout(runPreviewRender, wait);
+    return;
+  }
   const gen = state.liveGen;
   state.previewDirty = false;
 
@@ -517,9 +531,16 @@ export async function runPreviewRender() {
     state.previewTailMd = '';
     state.previewTailSep = false;
   };
+  // 429의 Retry-After(초) — 같은 사이클에 여러 장이 막히면 가장 긴 대기를 따른다.
+  let throttleS = 0;
+  const post = async (md) => {
+    const r = await postPreviewRender(id, md);
+    if (r && r.status === 429) throttleS = Math.max(throttleS, parseRetryAfter(r.retryAfter));
+    return r;
+  };
   const outcome = await renderPagesInOrder(
     plan.newPages,
-    (p) => postPreviewRender(id, p.md),
+    (p) => post(p.md),
     (p, html) => {
       dropTail();
       state.previewPageCache.push(html); // p.idx === 캐시 길이 (순서 보장)
@@ -536,7 +557,7 @@ export async function runPreviewRender() {
   let failStatus = outcome.failStatus; // -1 = 실패 없음
   let tailHtml = '';
   if (failStatus < 0 && plan.tailChanged && plan.tailMd) {
-    const r = await postPreviewRender(id, plan.tailMd);
+    const r = await post(plan.tailMd);
     if (!isCurrent()) { // 잡 전환 가드
       state.previewInFlight = false;
       maybeReschedulePreview();
@@ -547,6 +568,16 @@ export async function runPreviewRender() {
   }
   state.previewInFlight = false;
 
+  // 서버 남용 방어(크기 가중 레이트리밋·동시 렌더 4개 상한)가 한 장이라도 막았으면 다음
+  // 요청은 Retry-After 뒤에만 보낸다(앞 페이지가 다른 이유로 실패한 사이클이어도).
+  if (throttleS > 0) state.previewRetryAt = Date.now() + throttleS * 1000;
+  if (failStatus === 429) {
+    // 장애가 아니라 "천천히"다 — 연속 실패(5회 중단)에 세지 않고, 받은 페이지는 둔 채
+    // 대기가 끝나면 막힌 페이지부터 잇는다.
+    state.previewDirty = true;
+    maybeReschedulePreview();
+    return;
+  }
   if (failStatus >= 0) {
     state.previewFails += 1;
     state.previewDirty = true; // 전송하지 못한 조각은 다음 사이클에 재시도(받은 페이지는 유지)

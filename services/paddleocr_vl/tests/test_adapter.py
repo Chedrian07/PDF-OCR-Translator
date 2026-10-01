@@ -7,11 +7,12 @@ fixture는 공식 문서(PaddleOCR 3.6.x PaddleOCRVL 결과 스키마)에 기록
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 
-from app.adapter import BBOX_MAX, MAX_FIGURES, adapt_page
+from app.adapter import BBOX_MAX, MAX_FIGURES, adapt_page, escape_literal_placeholders
 
 FIXTURES = Path(__file__).parent / "fixtures"
 PAGE_W, PAGE_H = 1240, 1754
@@ -227,3 +228,58 @@ def test_block_order_none_falls_back_to_list_order():
     ]}}
     page = adapt_page(data, 1000, 1000)
     assert page["markdown"].index("첫째") < page["markdown"].index("둘째")
+
+
+# ── 본문의 리터럴 placeholder (감사 sidecar-9) ──────────────────────────────
+
+# backend protocol.FIGURE_PLACEHOLDER_RE와 같은 문법 — 여기에 걸리는 것만 figure 자리가 된다
+_PLACEHOLDER_RE = re.compile(r"\[\[FIGURE:(\d{1,3})\]\]")
+
+
+def _literal_page() -> dict:
+    return {"res": {"parsing_res_list": [
+        {"block_bbox": [0, 0, 900, 80], "block_label": "doc_title",
+         "block_content": "Using [[FIGURE:0]] markers", "block_id": 0, "block_order": 0},
+        {"block_bbox": [0, 100, 900, 300], "block_label": "text",
+         "block_content": "The app syntax is [[FIGURE:0]] in prose.", "block_id": 1, "block_order": 1},
+        {"block_bbox": [0, 320, 900, 600], "block_label": "image",
+         "block_content": "", "block_id": 2, "block_order": 2},
+        {"block_bbox": [0, 620, 900, 800], "block_label": "table",
+         "block_content": "<table><tr><td>[[FIGURE:1]]</td></tr></table>",
+         "block_id": 3, "block_order": 3},
+    ]}}
+
+
+def test_literal_placeholder_in_block_text_is_escaped_in_markdown():
+    """앱 문법을 설명하는 문서의 `[[FIGURE:0]]`이 진짜 그림 자리를 가로채면 안 된다."""
+    page = adapt_page(_literal_page(), 1000, 1000)
+    md = page["markdown"]
+    # 남는 placeholder는 image 블록이 만든 진짜 자리 하나뿐 — 그 줄을 혼자 차지한다
+    assert [m.group(0) for m in _PLACEHOLDER_RE.finditer(md)] == ["[[FIGURE:0]]"]
+    assert "\n\n[[FIGURE:0]]\n\n" in md
+    assert md.startswith("# Using &#91;&#91;FIGURE:0]] markers")
+    assert "The app syntax is &#91;&#91;FIGURE:0]] in prose." in md
+    assert "<td>&#91;&#91;FIGURE:1]]</td>" in md
+
+
+def test_block_content_keeps_the_literal_text():
+    """블록 content는 placeholder로 해석되지 않는다 — 레이아웃·PDF가 `&#91;`를 글자로
+    보이지 않게 원문 그대로 둔다."""
+    page = adapt_page(_literal_page(), 1000, 1000)
+    contents = [b["content"] for b in page["blocks"] if b["type"] != "image"]
+    assert contents == [
+        "Using [[FIGURE:0]] markers",
+        "The app syntax is [[FIGURE:0]] in prose.",
+        "<table><tr><td>[[FIGURE:1]]</td></tr></table>",
+    ]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("[[FIGURE:1]]", "&#91;&#91;FIGURE:1]]"),
+    ("[[[FIGURE:1]]", "[&#91;&#91;FIGURE:1]]"),
+    ("[[figure:1]] [ [FIGURE:1]]", "[[figure:1]] [ [FIGURE:1]]"),  # placeholder 문법이 아니다
+])
+def test_escape_leaves_no_placeholder_syntax(text, expected):
+    out = escape_literal_placeholders(text)
+    assert out == expected
+    assert "[[FIGURE:" not in out

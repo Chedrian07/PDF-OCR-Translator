@@ -192,9 +192,11 @@ export async function loadReader() {
     }
     return pending;
   }
-  const load = loadReaderHtml(id, lang, state.openGen).finally(() => {
-    readerHtmlLoads.delete(key);
-  });
+  // fetch가 끝나는 즉시(렌더 전) 키를 놓는다 — 그 뒤의 호출은 캐시 적중이나 새 로드로
+  // 가야지, 이미 끝난 로더에 합류해 막 그려진 레일 위에 스피너를 덮으면 안 된다.
+  let load = null;
+  const release = () => { if (readerHtmlLoads.get(key) === load) readerHtmlLoads.delete(key); };
+  load = loadReaderHtml(id, lang, state.openGen, release);
   readerHtmlLoads.set(key, load);
   return load;
 }
@@ -244,18 +246,23 @@ function showReaderLoadError(ko) {
   el.readerContent.appendChild(box);
 }
 
-async function loadReaderHtml(id, lang, gen) {
+async function loadReaderHtml(id, lang, gen, release) {
   const ko = lang === 'ko';
   const isCurrent = () => state.currentJobId === id && state.currentLang === lang
     && state.openGen === gen;
   showReaderLoading('논문 본문과 페이지 구조를 불러오는 중…');
-  const r = await fetchTextWithBusyRetry(withLangUrl(`/api/jobs/${id}/html`, lang), {
-    accept: 'text/html',
-    isCurrent,
-    onWait: (seconds, attempt, max) => {
-      if (isCurrent()) showReaderLoading(busyWaitMessage(ko ? '한국어 본문' : '본문', seconds, attempt, max));
-    },
-  });
+  let r;
+  try {
+    r = await fetchTextWithBusyRetry(withLangUrl(`/api/jobs/${id}/html`, lang), {
+      accept: 'text/html',
+      isCurrent,
+      onWait: (seconds, attempt, max) => {
+        if (isCurrent()) showReaderLoading(busyWaitMessage(ko ? '한국어 본문' : '본문', seconds, attempt, max));
+      },
+    });
+  } finally {
+    release();
+  }
   if (!isCurrent()) return; // 잡/언어 전환 → 최신 로더에 위임
   el.viewerRoot.removeAttribute('aria-busy');
   el.readerPageInput.disabled = false;

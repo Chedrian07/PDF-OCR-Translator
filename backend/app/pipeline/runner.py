@@ -608,6 +608,10 @@ def execute_job(
                 threshold = settings.ocr_fidelity_threshold
                 if threshold <= 0 or job.mode == "per_page":
                     return
+                if cancel.is_set():
+                    # 취소된 잡은 평가·되감기·예산 경고를 하지 않는다(헛된 MuPDF 분석과
+                    # 오해를 부르는 '충실도 미달' 경고를 남기지 않게)
+                    return
                 # 게이트가 원리상 도움이 될 수 없는 엔진은 건너뛴다.
                 #  · 텍스트 bbox를 안 주는 엔진(figure_only/none)은 블록 내용이 비어
                 #    전 페이지가 0.00으로 나온다 — 전량 오탐이다.
@@ -628,7 +632,10 @@ def execute_job(
                 if not layout:
                     return
                 scored = {
-                    r.page: r for r in evaluate_layout_pages(source_pdf, layout)
+                    r.page: r
+                    for r in evaluate_layout_pages(
+                        source_pdf, layout, should_cancel=cancel.is_set
+                    )
                 }
                 degraded = sorted(
                     pno for pno, r in scored.items()
@@ -905,6 +912,23 @@ def execute_job(
                     logger.warning("잡 %s: 경고 상한 도달 — 이후 경고는 로그에만 남습니다", job.id)
                 else:
                     logger.warning("잡 %s 경고(생략됨): %s: %s", job.id, span, warning)
+            if md is not None and cancel.is_set():
+                # 엔진은 취소돼도 그때까지의 부분 출력을 정상 반환한다. 그 부분까지만
+                # 병합하고 곧바로 끝낸다 — 모자란 마커를 채우면(finish_chunk) 진행률이
+                # 실제(2~3쪽)와 달리 청크 끝으로 뛰고, 마커 보정·충실도 게이트는 '모델이
+                # 페이지를 놓쳤다'·'재처리 예산 부족' 같은 엉뚱한 품질 경고를 영구히 남긴다.
+                sink.flush()
+                merger.add_chunk(
+                    ChunkResult(work_dir, start_page,
+                                1 if job.mode == "per_page" else len(chunk),
+                                md, single=job.mode == "per_page"),
+                    warn=False,
+                )
+                merger.warnings.append(
+                    f"{_page_span(start_page, len(chunk))}: 취소로 중단된 청크 — "
+                    "생성된 부분까지만 병합했습니다"
+                )
+                raise JobCanceled()
             if md is not None:
                 # 모델이 마커를 덜 냈으면 채워 세그먼트 수를 페이지 수에 맞춘다
                 sink.finish_chunk()

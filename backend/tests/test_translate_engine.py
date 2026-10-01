@@ -1507,3 +1507,30 @@ def test_루프_출력은_repair_없이_거부되고_캐시되지_않는다(tmp_
     assert loop not in out
     cache = json.loads((tmp_path / "translations/ko/units.json").read_text(encoding="utf-8"))
     assert loop not in cache.values()
+
+
+def test_성공_이후_응답_정지는_유닛_단위로_강등돼_분할로_복구된다(tmp_path, cfg):
+    """느린 로컬 유닛 하나의 타임아웃이 잡 전체 실패로 번지던 경로(translate-llm-4)."""
+    from dataclasses import replace
+
+    from app.translate.types import TranslateTimeout
+
+    class StallingClient(_TruncatingClient):
+        def complete(self, system, user, *, max_tokens):
+            src = _marker(user)
+            if src is not None and len(src) > self.limit:
+                self.calls += 1
+                raise TranslateTimeout("번역 API 응답 시간 초과 — 180초 동안 응답이 없었습니다")
+            return super().complete(system, user, max_tokens=max_tokens)
+
+    md = _SHORT_PARA + "\n\n" + _LONG_PARA + "\n"
+    res, report, out = _run_md(tmp_path, replace(cfg, concurrency=1), md, StallingClient())
+    assert res.status == "done" and res.kept_original == [] and report["split"] == 1
+    assert out == ko_expected(md)
+
+    other = tmp_path / "b"
+    other.mkdir()
+    stuck = StallingClient(limit=60)                    # 반쪽도 멈추면 timeout 사유로 유지
+    _res2, report2, out2 = _run_md(other, replace(cfg, concurrency=1), md, stuck)
+    assert report2["kept_reasons"] == {"timeout": 1}
+    assert _LONG_PARA in out2

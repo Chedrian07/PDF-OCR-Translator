@@ -6,9 +6,12 @@
 
     cd backend && uv run python ../scripts/smoke_paddleocr_vl_5070ti.py
     # 한국어 문서 검증: --pdf ko-doc.pdf 로 실제 한국어 PDF를 지정 권장
+    # 텍스트 레이어가 없는 한국어 스캔본: --pdf scan.pdf --expect-korean
 
 확인 항목: health → 모델 로드 대기 → 변환 → Markdown/layout(전체 블록)/figure/
-table/formula → peak VRAM/처리 시간/OOM. 종료 코드 0 = 통과.
+table/formula/한국어 보존 → peak VRAM/처리 시간/OOM. 종료 코드 0 = 통과.
+한국어 보존은 입력 PDF 텍스트 레이어에 한글 음절이 있거나 --expect-korean이면
+결과에도 한글이 있어야 통과한다(없으면 실패 — 예전에는 안내 문구만 찍고 통과했다).
 """
 
 from __future__ import annotations
@@ -27,7 +30,24 @@ from _smoke_common import (  # noqa: E402
 ENGINE = "paddleocr_vl"
 
 
-def run(url: str, pdf: Path, model_wait_s: float, job_timeout_s: float) -> int:
+def hangul_count(text: str) -> int:
+    return sum(1 for ch in text if "가" <= ch <= "힣")
+
+
+def input_hangul(pdf: Path) -> int | None:
+    """입력 PDF 텍스트 레이어의 한글 음절 수. 텍스트 레이어가 없거나 PyMuPDF가 없으면 None
+    (스캔본은 --expect-korean으로 기대를 명시한다)."""
+    try:
+        import pymupdf
+    except ImportError:
+        return None
+    with pymupdf.open(pdf) as doc:
+        text = "".join(page.get_text() for page in doc)
+    return hangul_count(text) if text.strip() else None
+
+
+def run(url: str, pdf: Path, model_wait_s: float, job_timeout_s: float,
+        expect_korean: bool = False) -> int:
     failures: list[str] = []
 
     print(f"[1/5] health 확인: {url}")
@@ -78,12 +98,23 @@ def run(url: str, pdf: Path, model_wait_s: float, job_timeout_s: float) -> int:
     result = body.get("result") or {}
     if not result.get("has_layout"):
         failures.append("layout.json 없음 (full layout 엔진)")
-    # 한국어 보존: 한글 음절이 하나라도 있는 문서라면 결과에도 있어야 한다
-    # (기본 영문 샘플에서는 스킵 — --pdf로 한국어 문서를 지정해 검증하세요)
-    if any("가" <= ch <= "힣" for ch in md):
-        print("  ✓ 한글 음절 보존 확인")
+    # 한국어 보존: 입력에 한글 음절이 있는 문서라면 결과에도 있어야 한다.
+    # 입력 쪽은 텍스트 레이어로 판정하고, 텍스트 레이어가 없는 스캔본은 --expect-korean.
+    src_hangul = input_hangul(pdf)
+    out_hangul = hangul_count(md)
+    if expect_korean or (src_hangul or 0) > 0:
+        if out_hangul:
+            print(f"  ✓ 한글 음절 보존 확인 (입력 {src_hangul if src_hangul is not None else '?'}자 "
+                  f"→ 결과 {out_hangul}자)")
+        else:
+            src = f"텍스트 레이어 {src_hangul}자" if src_hangul is not None else "텍스트 레이어 없음"
+            failures.append(
+                f"입력에 한글이 있는데({src}{', --expect-korean' if expect_korean else ''}) "
+                "결과에 한글 음절이 없음"
+            )
     else:
-        print("  ⓘ 결과에 한글 없음 — 한국어 검증은 --pdf로 한국어 문서를 지정하세요")
+        print("  ⓘ 입력에 한글 없음 — 한국어 검증은 --pdf로 한국어 문서를 지정하세요 "
+              "(스캔본은 --expect-korean)")
 
     print("[5/5] 판정")
     if failures:
@@ -100,10 +131,13 @@ def main() -> int:
     ap.add_argument("--pdf", type=Path, default=Path("sample/sample.pdf"))
     ap.add_argument("--model-wait", type=float, default=1800.0)
     ap.add_argument("--timeout", type=float, default=900.0)
+    ap.add_argument("--expect-korean", action="store_true",
+                    help="결과에 한글이 반드시 있어야 한다(텍스트 레이어 없는 한국어 스캔본용)")
     args = ap.parse_args()
     try:
         pdf = ensure_sample_pdf(args.pdf)
-        return run(args.url.rstrip("/"), pdf, args.model_wait, args.timeout)
+        return run(args.url.rstrip("/"), pdf, args.model_wait, args.timeout,
+                   expect_korean=args.expect_korean)
     except SmokeError as e:
         print(f"✗ {e}")
         return 1

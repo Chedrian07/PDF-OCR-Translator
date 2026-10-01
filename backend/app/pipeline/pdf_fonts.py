@@ -23,12 +23,20 @@ PDF에 텍스트 레이어가 있으면 그 안의 span 크기를 그대로 읽�
 
 실패(텍스트 레이어 없음·손상 PDF·페이지 범위 초과)는 조용히 무시한다 —
 enrichment은 절대 잡·렌더를 깨뜨리면 안 된다.
+
+텍스트 추출(get_text)은 PDF 워커 프로세스에서 페이지마다 돈다(pdf_worker — 호출 맥락의
+풀: 병합은 ocr, API 백필은 export, 빌드 안에서는 그 워커 그대로). 시간 상한을 넘거나
+워커를 죽인 페이지가 나오면 그 호출의 나머지 페이지는 실측 없이 스탬프만 한다.
 """
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from pathlib import Path
 from statistics import median
+
+logger = logging.getLogger(__name__)
 
 _BOLD_FLAG = 16  # fitz span flags: bit 4 == bold
 
@@ -124,43 +132,83 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
 
     pages 엔트리: {"page": N(1-based), "width", "height", "blocks": [...]}.
     블록을 제자리(in-place)로 수정하고, 하나라도 주입했거나 fonts_v 스탬프를 새로
-    찍었으면 True를 돌려준다(스탬프만으로도 저장이 필요하다)."""
-    try:
-        # 조용한 임포트 — 손상 폰트 PDF에서 get_text가 MuPDF 에러를 stderr에
-        # 페이지마다 쏟아내던 것을 차단(요약은 아래 finally의 drain이 로깅)
-        from .pdf import drain_mupdf_warnings, quiet_fitz
+    찍었으면 True를 돌려준다(스탬프만으로도 저장이 필요하다). 원본 PDF를 열 수 없으면
+    아무것도 찍지 않고 False.
 
-        fitz = quiet_fitz()
-    except Exception:
-        return False
-    try:
-        doc = fitz.open(str(pdf_path))
-    except Exception:
-        drain_mupdf_warnings("폰트 추출")
-        return False
+    페이지마다 PDF 워커 작업 하나로 돈다(enrich_page_local) — 페이지 dict는 피클로 오가므로
+    결과를 원래 dict에 제자리로 되돌려 호출자가 쥔 참조(병합기의 layout_pages)를 지킨다.
+    시간 상한·워커 비정상 종료가 나면 그 페이지부터는 실측을 포기하고 스탬프만 찍는다 —
+    건너뛴 페이지를 스탬프하지 않으면 백필이 매 요청 같은 상한을 다시 기다린다."""
+    from . import pdf_worker
 
     changed = False
-    try:
-        for page in pages:
-            if not isinstance(page, dict):
-                continue
-            try:
-                if _enrich_page(fitz, doc, page):
-                    changed = True
-            except Exception:  # noqa: BLE001 — 한 페이지 실패가 나머지 백필을 막지 않는다
-                pass
-            finally:
-                # 건너뛴 페이지(번호 오류·범위 밖·크기 0·텍스트 추출 예외)도 이 버전으로
-                # "시도했고 얻을 것이 없었다"고 스탬프한다. 빼먹으면 백필 호출부가
-                # 미스탬프 페이지를 보고 매 요청 전 문서를 재스캔하고 layout을 다시 써서
-                # 내보내기 PDF 캐시까지 무효화하는 루프에 빠진다(손상 PDF로 재현).
-                if page.get("fonts_v") != ENRICH_VERSION:
-                    page["fonts_v"] = ENRICH_VERSION
-                    changed = True
-    finally:
-        doc.close()
-        drain_mupdf_warnings("폰트 추출")
+    gave_up = False
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        if gave_up:
+            if page.get("fonts_v") != ENRICH_VERSION:
+                page["fonts_v"] = ENRICH_VERSION
+                changed = True
+            continue
+        try:
+            page_index = int(page.get("page", 0)) - 1
+        except (TypeError, ValueError):
+            page_index = -1
+        try:
+            result = pdf_worker.run_page(
+                "app.pipeline.pdf_fonts:enrich_page_local", pdf_path, page_index, (page,),
+            )
+        except pdf_worker.PdfWorkerError as error:
+            logger.warning("폰트 실측 주입 중단 — %d페이지부터 스탬프만 남김 (%s)",
+                           page_index + 1, error)
+            gave_up = True
+            result = (False, page)
+        except Exception:  # noqa: BLE001 — 한 페이지 실패가 나머지 백필을 막지 않는다
+            result = (False, page)
+        if result is None:
+            return changed  # 원본 PDF를 열 수 없다 — 예전 계약대로 찍지 않는다
+        page_changed, updated = result
+        if updated is not page:  # 워커가 돌려준 사본 — 제자리로 되돌린다
+            page.clear()
+            page.update(updated)
+        if page_changed:
+            changed = True
+        # 건너뛴 페이지(번호 오류·범위 밖·크기 0·추출 예외·상한 초과)도 이 버전으로 "시도했고
+        # 얻을 것이 없었다"고 스탬프한다. 빼먹으면 백필 호출부가 미스탬프 페이지를 보고 매
+        # 요청 전 문서를 재스캔하고 layout을 다시 써서 내보내기 PDF 캐시까지 무효화하는 루프에
+        # 빠진다(손상 PDF로 재현).
+        if page.get("fonts_v") != ENRICH_VERSION:
+            page["fonts_v"] = ENRICH_VERSION
+            changed = True
     return changed
+
+
+def enrich_page_local(pdf_path: Path, page_index: int, page: dict) -> tuple[bool, dict] | None:
+    """(PDF 워커) 페이지 하나에 실측 메타를 심고 fonts_v를 찍는다 → (바뀌었나, 페이지).
+
+    원본 PDF를 열 수 없으면 None. 페이지 처리 예외는 삼키고 스탬프만 찍는다."""
+    from . import pdf_worker
+    from .pdf import drain_mupdf_warnings, quiet_fitz
+
+    try:
+        fitz = quiet_fitz()
+        with contextlib.ExitStack() as stack:
+            try:
+                doc = stack.enter_context(pdf_worker.open_document(pdf_path))
+            except Exception:  # noqa: BLE001 — 손상·없는 원본
+                return None
+            changed = False
+            try:
+                changed = _enrich_page(fitz, doc, page)
+            except Exception:  # noqa: BLE001 — 한 페이지 실패가 나머지 백필을 막지 않는다
+                changed = False
+            if page.get("fonts_v") != ENRICH_VERSION:
+                page["fonts_v"] = ENRICH_VERSION
+                changed = True
+            return changed, page
+    finally:
+        drain_mupdf_warnings("폰트 추출")
 
 
 def _enrich_page(fitz, doc, page: dict) -> bool:

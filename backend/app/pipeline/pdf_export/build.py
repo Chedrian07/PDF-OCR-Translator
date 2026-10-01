@@ -11,7 +11,7 @@ import logging
 import re
 import tempfile
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..layout import estimate_font_size_cqw
@@ -63,7 +63,12 @@ from .spans import (
     _source_text_rects,
 )
 from .subset import drawable_charset, subset_font_files
-from .tables import _table_cell_rects, _table_cell_source_style, _table_cells
+from .tables import (
+    _drawing_horizontal_segments,
+    _table_cell_rects,
+    _table_cell_source_style,
+    _table_cells,
+)
 from .text import (
     match_paragraph_shape,
     strip_markdown,
@@ -238,6 +243,10 @@ class _PageContext:
     # 그 위에 번역이 찍힌다(실측 겹침 30건). _process_page가 수렴할 때까지
     # 이 집합을 줄여 가며 두 모델을 일치시킨다.
     cleared_indices: frozenset = frozenset()
+    # 계획 패스 사이에 공유하는 페이지 분석 캐시(표 검색 TextPage, 가로 선분).
+    # 패스마다 `replace()`로 새 컨텍스트를 만들어도 같은 dict를 가리킨다 — 리댁션
+    # 전의 원본 페이지에서만 유효하므로 `_process_page`가 계획 직후 비운다.
+    analysis: dict = field(default_factory=dict)
 
     def obstacle_spans(self, exclude: "set[int] | frozenset[int]" = frozenset()):
         """이번 패스에서 **남을** 원문 span들 — 계획의 장애물 집합."""
@@ -281,8 +290,20 @@ def _rect_edge_bands(fitz, rect, stroke_width: float) -> list:
     ]
 
 
-def _page_visual_obstacles(fitz, page, block_rects, oblocks):
-    """(래스터 인스턴스, 그림 영역, 확장 장애물). 리댁션 전에 1회만 수집한다."""
+@dataclass(frozen=True)
+class _PageVisuals:
+    """리댁션 전에 1회만 수집한 페이지 시각 요소."""
+
+    raster_rects: list
+    image_regions: list
+    fixed_visuals: list
+    # 표 rule 보정이 쓰는 가로 선분 — 같은 get_drawings() 결과에서 뽑는다.
+    # None이면 수집 실패(표 쪽이 직접 다시 읽는다).
+    horizontal_segments: list | None
+
+
+def _page_visual_obstacles(fitz, page, block_rects, oblocks) -> _PageVisuals:
+    """래스터 인스턴스·그림 영역·확장 장애물·가로 선분. 리댁션 전에 1회만 수집한다."""
     # 래스터 인스턴스는 리댁션 '이전'에 1회만 수집한다 — apply_redactions
     # 이후의 get_image_info()는 스테일 캐시를 반환할 수 있다(실측).
     try:
@@ -298,8 +319,12 @@ def _page_visual_obstacles(fitz, page, block_rects, oblocks):
     # 안쪽이 비었거나(테두리만) 배경색으로 칠해진 것은 **테두리 띠만** 남긴다.
     page_area_all = page.rect.width * page.rect.height or 1.0
     drawing_rects = []
+    horizontal_segments: list | None = []
     try:
         for drawing in page.get_drawings():
+            # 표 rule 보정용 가로 선분도 같은 순회에서 뽑는다 — 표 블록 × 계획 패스마다
+            # 페이지 벡터 목록 전체를 다시 파싱하지 않게.
+            horizontal_segments.extend(_drawing_horizontal_segments(drawing))
             bbox = drawing.get("rect")
             if bbox is None:
                 continue
@@ -319,6 +344,7 @@ def _page_visual_obstacles(fitz, page, block_rects, oblocks):
             drawing_rects.append(drawing_rect)
     except Exception:  # noqa: BLE001 — 벡터 목록 실패가 텍스트 교체를 막지 않는다
         drawing_rects = []
+        horizontal_segments = None
     # 그림 위 텍스트 방어용 영역: layout image 블록 ∪ 래스터 인스턴스.
     # 페이지의 85% 이상을 덮는 영역은 전면 스캔 배경으로 간주해 제외한다
     # — 스캔 문서에서 모든 블록 교체가 생략되는 사고 방지.
@@ -337,7 +363,7 @@ def _page_visual_obstacles(fitz, page, block_rects, oblocks):
         r for r in raster_rects if 0 < r.width * r.height < page_area * 0.85
     ]
     fixed_visuals = image_regions + drawing_rects
-    return raster_rects, image_regions, fixed_visuals
+    return _PageVisuals(raster_rects, image_regions, fixed_visuals, horizontal_segments)
 
 
 def _plan_table_block(
@@ -371,7 +397,7 @@ def _plan_table_block(
     old_cells, row_count, col_count = old_parsed
     new_cells = new_parsed[0]
     cell_rects, grid_trusted = _table_cell_rects(
-        ctx.page, table_rect, old_cells, row_count, col_count,
+        ctx.page, table_rect, old_cells, row_count, col_count, cache=ctx.analysis,
     )
     if not grid_trusted:
         result.keep("table_grid_untrusted")
@@ -1213,15 +1239,18 @@ def _process_page(
     source_ownership, unowned_source, ambiguous_blocks = _assign_source_spans(
         page, block_rects, oblocks, source_records,
     )
-    raster_rects, image_regions, fixed_visuals = _page_visual_obstacles(
-        fitz, page, block_rects, oblocks,
-    )
+    visuals = _page_visual_obstacles(fitz, page, block_rects, oblocks)
     base_ctx = _PageContext(
         fitz, page, pno, aspect, oblocks, tblocks, block_rects,
         source_records, source_ownership, unowned_source, ambiguous_blocks,
-        image_regions, fixed_visuals, fonts,
+        visuals.image_regions, visuals.fixed_visuals, fonts,
+        analysis={"horizontal_segments": visuals.horizontal_segments},
     )
-    targets, repeated_scheme_link_rects = _plan_until_consistent(base_ctx, result)
+    try:
+        targets, repeated_scheme_link_rects = _plan_until_consistent(base_ctx, result)
+    finally:
+        # TextPage 등 원본 페이지 분석 결과는 리댁션 뒤에는 쓸모없고 메모리만 잡는다.
+        base_ctx.analysis.clear()
     if not targets:
         return
 
@@ -1231,7 +1260,7 @@ def _process_page(
     if repeated_scheme_link_rects:
         _normalize_repeated_scheme_links(page, repeated_scheme_link_rects)
 
-    _apply_page_redactions(fitz, page, targets, raster_rects)
+    _apply_page_redactions(fitz, page, targets, visuals.raster_rects)
     _insert_page_targets(page, targets, result)
 
 

@@ -373,7 +373,10 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
     broker = EventBroker()
     engine = build_engine(settings)  # 잘못된 OCR_DEVICE/OCR_ENGINE은 여기서 즉시 실패
     cancel_events: dict[str, threading.Event] = {}
-    worker = Worker(store, broker, engine, settings, cancel_events)
+    # 모델 로드 오류 — 프리로드 스레드와 워커(잡 시작 시 로드)가 함께 기록하고
+    # /api/health의 model_load_error가 읽는다.
+    load_state: dict = {"error": None}
+    worker = Worker(store, broker, engine, settings, cancel_events, load_state=load_state)
     # 재시작 전 대기열에 들어갔지만 시작하지 못한 잡을 생성 순서대로 다시 제출한다
     # (실행 중이던 잡은 load_existing이 오류로 마감 — 크래시 루프를 피해 자동 재실행하지
     # 않는다). 워커는 lifespan에서 시작되므로 그때부터 차례로 처리된다.
@@ -381,7 +384,6 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
         worker.submit(job)
     if restored:
         logger.info("재시작 전 대기 잡 %d개를 다시 대기열에 넣었습니다", len(restored))
-    load_state: dict = {"error": None}
 
     def _preload() -> None:
         try:

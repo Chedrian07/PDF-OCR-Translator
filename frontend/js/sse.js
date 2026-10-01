@@ -111,13 +111,17 @@ export function startStream(id) {
   es.addEventListener('error', (e) => {
     if (state.currentJobId !== id) return;
     const d = parseEventData(e);
-    if (d) onJobError(id, d);      // server-sent job error (has JSON data)
-    else handleSseConnError(id);   // transport-level error (no data)
+    if (d) onJobError(id, d);          // server-sent job error (has JSON data)
+    else handleSseConnError(id, es);   // transport-level error (no data)
   });
 }
 
-export function handleSseConnError(id) {
+// EventSource.CLOSED — 브라우저 밖(테스트)에서는 상수가 없을 수 있다.
+const SSE_CLOSED = 2;
+
+export function handleSseConnError(id, es) {
   if (state.currentJobId !== id) return;
+  if (es && es !== state.es) return; // 이미 교체·정리된 옛 연결의 늦은 오류
   if (state.fallbackActive) {
     // 폴링 중의 재승격 시도가 실패 — es를 닫고(브라우저 자동 재시도 차단)
     // 다음 백오프 단계로 재시도만 예약한다. 폴링은 그대로 유지된다.
@@ -126,7 +130,12 @@ export function handleSseConnError(id) {
     return;
   }
   state.sseErrorCount += 1;
-  if (state.sseErrorCount >= 2) {
+  // 첫 응답이 비-200(프록시 502·404, 잘못된 Content-Type)이면 EventSource는 CLOSED가 되어
+  // error를 딱 한 번 내고 다시 접속하지 않는다(WHATWG "fail the connection"). 2회를
+  // 기다리면 폴백도 재승격도 영영 켜지지 않는다(frontend-1) — 닫혔으면 바로 강등한다.
+  // 연결 도중 끊김(CONNECTING, 브라우저가 스스로 재접속)에만 2회 규칙을 쓴다.
+  const closed = !!es && es.readyState === SSE_CLOSED;
+  if (closed || state.sseErrorCount >= 2) {
     if (state.es) { try { state.es.close(); } catch (_) { /* ignore */ } state.es = null; }
     appendSystemLine('라이브 스트림을 사용할 수 없어 상태 폴링으로 전환했습니다 — 주기적으로 재연결을 시도합니다.', 'warn');
     startFallbackPolling(id);
@@ -161,29 +170,46 @@ export function stopFallbackPolling() {
 export function startFallbackPolling(id) {
   state.fallbackActive = true;
   if (state.fallbackTimer) clearInterval(state.fallbackTimer);
-  state.fallbackTimer = setInterval(async () => {
-    if (state.currentJobId !== id) { clearInterval(state.fallbackTimer); state.fallbackTimer = 0; return; }
+  // 폴링 요청은 한 번에 하나 — 느린 서버(응답 2–3초)에서 1초 틱이 겹치면 완료 응답이
+  // 여러 개 도착해 renderJob·refreshJobs·/html 요청이 중복되고, 순서가 뒤바뀐 진행
+  // 스냅샷이 진행바를 뒤로 돌렸다(frontend-12). 이 폴링이 해제·교체된 뒤 도착한 늦은
+  // 응답도 버린다(timer 동일성).
+  let inFlight = false;
+  const timer = setInterval(async () => {
+    const current = () => state.currentJobId === id && state.fallbackTimer === timer;
+    if (!current()) {
+      clearInterval(timer);
+      if (state.fallbackTimer === timer) state.fallbackTimer = 0;
+      return;
+    }
+    if (inFlight) return;
+    inFlight = true;
     let job;
     try {
       job = await apiGet(`/api/jobs/${id}`);
     } catch (e) {
-      if (e.status === 404) {
-        clearInterval(state.fallbackTimer);
+      if (e.status === 404 && current()) {
+        clearInterval(timer);
         state.fallbackTimer = 0;
+        state.fallbackActive = false;
         clearSsePromote();
         if (state.es) { try { state.es.close(); } catch (_) { /* ignore */ } state.es = null; } // 재승격 시도 중이던 es
         removeJobFromList(id);
-        if (state.currentJobId === id) { state.currentJobId = null; showEmptyState(); syncJobHash(null); }
+        state.currentJobId = null;
+        showEmptyState();
+        syncJobHash(null);
       }
       return;
+    } finally {
+      inFlight = false;
     }
-    if (state.currentJobId !== id) return;
-    // SSE가 이 fetch 사이에 재승격됐다면 이 스냅샷은 이미 낡았다. 그대로 적용하면
-    // groundAnnounce가 expectAnnounce를 다시 세워 다음 <PAGE> 마커를 재확인으로
-    // 삼켜 버리고, 그 뒤 페이지 번호가 한 칸씩 밀린다.
-    if (!state.fallbackActive && !isTerminal(job.status)) return;
+    // SSE가 이 fetch 사이에 재승격됐다면(stopFallbackPolling) 이 스냅샷은 이미 낡았다.
+    // 그대로 적용하면 groundAnnounce가 expectAnnounce를 다시 세워 다음 <PAGE> 마커를
+    // 재확인으로 삼켜 버리고, 그 뒤 페이지 번호가 한 칸씩 밀린다. 터미널 상태도 살아난
+    // 스트림의 done/error가 직접 전달하므로 여기서 다시 렌더하지 않는다.
+    if (!current() || !state.fallbackActive) return;
     if (isTerminal(job.status)) {
-      clearInterval(state.fallbackTimer);
+      clearInterval(timer);
       state.fallbackTimer = 0;
       state.fallbackActive = false;
       clearSsePromote(); // 터미널 — 재승격 재시도도 정리
@@ -199,6 +225,7 @@ export function startFallbackPolling(id) {
       }));
     }
   }, 1000);
+  state.fallbackTimer = timer;
 }
 
 export async function onJobDone(id, data) {

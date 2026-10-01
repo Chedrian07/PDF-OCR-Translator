@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # app.translate는 순수 파이썬(torch/OCR 비의존) — 계약 API만 사용한다.
-# load_dotenv_file도 표준 라이브러리만 쓰는 얇은 파서라 같은 제약을 지킨다.
+# load_dotenv_file도 순수 파이썬 python-dotenv만 쓰므로 같은 제약을 지킨다.
 from app.config import load_dotenv_file
 from app.translate.client import OpenAICompatClient
 from app.translate.glossary import Glossary

@@ -452,7 +452,7 @@ def execute_job(
     sink = BrokerSink(job, store, broker)
     merger: IncrementalMerger | None = None
     try:
-        job.status = "running"
+        job.mark_running()
         # 엔진/모델 메타 확정 — 업로드 시점에는 sidecar health(revision 등)를 모를 수
         # 있으므로, 엔진이 로드된 실행 시작 시점에 실제 사용값으로 갱신한다.
         start_caps = engine.capabilities()
@@ -1077,8 +1077,7 @@ def execute_job(
         merger.finalize()
         job.warnings = merger.warnings
         job.notices = merger.notices
-        job.status = "done"
-        job.error = None
+        job.mark_finished("done")
         store.save(job)
         broker.publish(
             job.id,
@@ -1092,8 +1091,7 @@ def execute_job(
 
     except JobCanceled:
         sink.flush()
-        job.status = "canceled"
-        job.error = "사용자에 의해 취소되었습니다"
+        job.mark_finished("canceled", "사용자에 의해 취소되었습니다")
         # 취소·오류로 끝나도 그때까지 쌓인 경고(플레이스홀더·재처리·텍스트 레이어
         # 복구 등)는 남긴다 — 부분 결과는 보존되는데 왜 그런지가 사라지면
         # 사용자는 정상 변환된 부분과 구분할 수 없다.
@@ -1106,8 +1104,7 @@ def execute_job(
     except Exception as e:  # noqa: BLE001 — 잡 단위 격리
         sink.flush()
         logger.exception("잡 실패: %s", job.id)
-        job.status = "error"
-        job.error = str(e)[:2000] or e.__class__.__name__
+        job.mark_finished("error", str(e)[:2000] or e.__class__.__name__)
         if merger is not None:
             job.warnings = merger.warnings
             job.notices = merger.notices

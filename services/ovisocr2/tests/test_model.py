@@ -96,3 +96,16 @@ def test_load_failure_does_not_set_load_error_itself(monkeypatch):
     with pytest.raises(ConnectionError):
         m.load()
     assert m.load_error is None and not m.loaded
+
+
+def test_failures_after_engine_death_do_not_raise_a_wedge_report():
+    """사망 판정 뒤 락을 기다리던 요청들의 실패가 웨지 신고(status=error)를 세우면 backend는
+    '기다려도 안 풀리는 로드 실패'로 보고 재시작을 기다리지 않고 잡을 실패시킨다."""
+    m = _model([EngineDeadError("EngineCore died")])
+    with pytest.raises(EngineDeadError):
+        m.infer(object())
+    for _ in range(5):  # 같은 시점에 줄 서 있던 요청들
+        with pytest.raises(RuntimeError, match="로드되지 않았습니다"):
+            m.infer(object())
+        m._note_infer_failure(RuntimeError("late failure"))
+    assert m.restart_required and m.load_error is None

@@ -7,8 +7,8 @@ import {
   restoreTokenReplay,
 } from './live.js';
 import {
-  applyProgress, hasLiveContent, refreshJobs, removeJobFromList, renderJob, setStopButton,
-  showEmptyState, syncJobHash, updateHeaderChip,
+  applyProgress, closeDeletedJob, hasLiveContent, refreshJobs, removeJobFromList, renderJob,
+  setStopButton, showEmptyState, syncJobHash, updateHeaderChip,
 } from './jobs.js';
 import { renderError, renderPartialResult, renderThumbGrid } from './results.js';
 import {
@@ -283,6 +283,12 @@ export async function onJobDone(id, data) {
 
 export function onJobError(id, d) {
   if (state.currentJobId !== id) return;
+  if (d && d.deleted) {
+    // DELETE(다른 탭·API 포함)의 종료 이벤트 — 잡과 산출물이 이미 없다. 취소 화면(부분 결과
+    // 탭)을 그리면 사라진 파일을 계속 요청하는 빈 화면이 남는다 — 화면과 구독을 닫는다.
+    closeDeletedJob(id, { remote: true });
+    return;
+  }
   flushStream(true);
   drainGroundToUI(true);
   teardownConnections();

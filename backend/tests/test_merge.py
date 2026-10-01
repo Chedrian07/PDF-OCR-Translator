@@ -420,6 +420,49 @@ def test_realigned_pages_name_crops_by_the_model_page_not_the_slot(tmp_path):
     assert page3["blocks"][0]["image"] == "p0002_0.jpg", page3["blocks"][0]
 
 
+def test_image_only_raw_pages_do_not_create_a_layout_json(tmp_path):
+    """image det뿐이거나 빈 원출력(`['']`)은 '좌표 데이터'가 아니다.
+
+    예전에는 비어 있지 않은 raw 리스트면 무조건 has_layout_data를 세워, figure_only
+    엔진(Ovis)·전면 스캔 잡도 image 블록뿐인 layout.json을 남겼다 → has_layout=True →
+    document.html이 OCR 텍스트 없는 원문 래스터, /pdf?lang=ko가 번역 안 된 원문."""
+    m = IncrementalMerger(tmp_path, SEP)
+    c0 = _mk_multi_chunk(tmp_path, "chunk_00", 2)
+    (c0 / "raw_pages.json").write_text(
+        json.dumps({"pages": ["<|det|>image [10, 10, 500, 500]<|/det|>", ""]}),
+        encoding="utf-8",
+    )
+    m.add_chunk(ChunkResult(c0, 1, 2, "<PAGE>\nA ![](images/page_0_0.jpg)\n<PAGE>\nB"))
+    assert not (tmp_path / "layout.json").exists()
+    assert m.has_layout_data is False
+
+    # 뒤 청크에서 텍스트 좌표가 처음 오면 그때 앞 페이지까지 포함해 기록한다
+    c1 = _mk_multi_chunk(tmp_path, "chunk_01", 1)
+    (c1 / "raw_pages.json").write_text(
+        json.dumps({"pages": ["<|det|>text [10, 10, 900, 200]<|/det|>본문"]}),
+        encoding="utf-8",
+    )
+    m.add_chunk(ChunkResult(c1, 3, 1, "<PAGE>\n본문"))
+    layout = json.loads((tmp_path / "layout.json").read_text(encoding="utf-8"))
+    assert [p["page"] for p in layout] == [1, 2, 3]
+    assert layout[0]["blocks"][0]["image"] == "p0001_0.jpg"
+
+
+def test_replacing_a_page_with_image_only_output_keeps_layout_absent(tmp_path):
+    """단독 재처리 교체(replace_page)도 같은 기준 — image뿐인 결과로 layout.json을
+    새로 만들지 않는다."""
+    m = IncrementalMerger(tmp_path, SEP)
+    c0 = _mk_multi_chunk(tmp_path, "chunk_00", 1)
+    m.add_chunk(ChunkResult(c0, 1, 1, "<PAGE>\nA"))
+    single = tmp_path / "work" / "fidelity" / "page_0001"
+    _touch(single / "images" / "0.jpg")
+    (single / "raw_pages.json").write_text(
+        json.dumps({"pages": ["<|det|>image [10, 10, 500, 500]<|/det|>"]}), encoding="utf-8"
+    )
+    assert m.replace_page(1, ChunkResult(single, 1, 1, "![](images/0.jpg)", single=True))
+    assert not (tmp_path / "layout.json").exists()
+
+
 def test_boxes_json_is_rewritten_when_the_last_figure_disappears(tmp_path):
     """마지막 그림이 사라져도 boxes.json을 갱신해야 한다 — 옛 항목이 남으면
     레이아웃 뷰가 없는 크롭을 그리려 한다."""

@@ -750,3 +750,97 @@ def test_repeated_wait_note_does_not_evict_loss_warnings(tmp_path, stub):
     for i in range(_MAX_JOB_WARNINGS + 10):
         eng._note(f"서로 다른 경고 {i}")
     assert len(eng.drain_warnings()) == _MAX_JOB_WARNINGS
+
+
+# ── 장애 복귀 대기·이상 신고 (잡 도중) ─────────────────────────────────────
+
+
+def _png(tmp_path, name="page_0001.png"):
+    from PIL import Image
+
+    pages = tmp_path / "job" / "pages"
+    pages.mkdir(parents=True, exist_ok=True)
+    path = pages / name
+    Image.new("RGB", (400, 560), "white").save(path)
+    return path
+
+
+def test_chunk_start_waits_for_a_restarting_sidecar(tmp_path, stub, monkeypatch):
+    """/api/health가 장애를 먼저 관측해 캐시가 '미로드'여도, 청크 시작은 즉시 실패하지
+    않고 복귀를 기다린다 — 예전 load()는 health를 한 번만 보고 실패해 재기동 중의 남은
+    페이지가 수 ms 만에 전부 플레이스홀더가 됐다."""
+    monkeypatch.setattr("app.engine.sidecar._HEALTH_CACHE_TTL_S", 0.0)
+    monkeypatch.setattr("app.engine.sidecar._MODEL_WAIT_POLL_S", 0.05)
+    eng = build_engine(_settings(tmp_path, stub))
+    eng.load()
+    stub.health_response = _health_body(model_loaded=False)  # 재기동 — 모델 재로드 중
+    assert eng.provider_health()["model_loaded"] is False     # 캐시가 장애를 먼저 본다
+    assert not eng.loaded
+
+    timer = threading.Timer(0.3, lambda: setattr(stub, "health_response", _health_body()))
+    timer.start()
+    try:
+        md = eng.run_single(_png(tmp_path), tmp_path / "out", NullSink(), threading.Event())
+    finally:
+        timer.cancel()
+    assert "본문" in md and eng.loaded
+
+
+def test_outage_wait_budget_is_shared_across_pages(tmp_path, stub, monkeypatch):
+    """긴 장애에서 페이지마다 OCR_SIDECAR_MODEL_WAIT_S씩 기다리지 않는다 — 첫 대기의
+    예산을 다 쓰면 이후 페이지는 한 번만 확인하고 곧바로 실패한다(복귀하면 다시 정상)."""
+    import time as _t
+
+    monkeypatch.setattr("app.engine.sidecar._HEALTH_CACHE_TTL_S", 0.0)
+    monkeypatch.setattr("app.engine.sidecar._MODEL_WAIT_POLL_S", 0.05)
+    eng = build_engine(_settings(tmp_path, stub, sidecar_model_wait_s=0.4))
+    eng.load()
+    stub.health_response = _health_body(model_loaded=False)
+    eng.provider_health()
+    page = _png(tmp_path)
+
+    t0 = _t.monotonic()
+    with pytest.raises(EngineError, match="제한시간"):
+        eng.run_single(page, tmp_path / "o1", NullSink(), threading.Event())
+    assert _t.monotonic() - t0 >= 0.35          # 첫 페이지는 예산만큼 기다렸다
+
+    t1 = _t.monotonic()
+    with pytest.raises(EngineError):
+        eng.run_single(page, tmp_path / "o2", NullSink(), threading.Event())
+    assert _t.monotonic() - t1 < 0.3            # 다음 페이지는 다시 기다리지 않는다
+
+    stub.health_response = _health_body()      # 복귀
+    md = eng.run_single(page, tmp_path / "o3", NullSink(), threading.Event())
+    assert "본문" in md
+
+
+def test_degraded_report_is_noted_once_per_job_not_per_page(sidecar_client_app, stub):
+    """status=error + model_loaded=True 신고가 청크(=페이지)마다 다시 쌓여 잡 경고
+    상한을 채우고 실제 손실 경고를 밀어내던 문제 — 잡당 한 번."""
+    stub.health_response = _health_body(status="error", model_loaded=True,
+                                        load_error="엔진 사망 시그니처")
+    c = sidecar_client_app
+    r = c.post("/api/jobs", files={"file": ("doc.pdf", BytesIO(make_pdf_bytes(pages=4)),
+                                            "application/pdf")},
+               data={"mode": "multi"})
+    body = wait_done(c, r.json()["job_id"])
+    assert body["status"] == "done", body
+    wedge = [w for w in body["warnings"] if "엔진 사망 시그니처" in w]
+    assert len(wedge) == 1, body["warnings"]
+
+
+def test_successful_parse_refreshes_a_stale_degraded_report(tmp_path, stub, monkeypatch):
+    """sidecar는 성공 1회로 이상 신고를 지우는데 backend 캐시는 그대로였다 — 성공한
+    parse 뒤 잡당 한 번 health를 다시 보고, 정상이면 이상 상태를 푼다."""
+    stub.health_response = _health_body(status="error", model_loaded=True,
+                                        load_error="엔진 사망 시그니처")
+    eng = build_engine(_settings(tmp_path, stub))
+    eng.load()
+
+    def _parse_then_recover():
+        stub.health_response = _health_body()  # sidecar는 첫 성공으로 신고를 지웠다
+        return (200, json.dumps(_parse_body()).encode())
+
+    stub.parse_behavior = _parse_then_recover
+    eng.run_single(_png(tmp_path), tmp_path / "out", NullSink(), threading.Event())
+    assert eng.provider_health()["status"] == "ok"

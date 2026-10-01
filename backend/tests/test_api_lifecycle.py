@@ -301,3 +301,149 @@ def test_closed_app_flags_shutdown_for_leftover_streams(settings):
     with TestClient(app):
         assert app.state.shutdown.requested is False
     assert app.state.shutdown.requested is True
+
+
+# ── 모델 로드 실패·로딩 대기 중 취소 (api-jobs-16 · tests-baseline-7) ────────────
+def test_worker_model_load_failure_fails_the_job_and_shows_in_health(
+    client, sample_pdf, monkeypatch,
+):
+    """PRELOAD_MODEL=0에서 첫 잡의 로드가 실패하면 잡은 '모델 로드 실패'로 끝나는데,
+    health는 model_load_error:null(=아직 로딩 전)로 보였다 — 워커의 실패도 드러낸다."""
+    engine = client.app.state.engine
+    assert client.app.state.settings.preload_model is False
+
+    def _unavailable():
+        raise RuntimeError("MPS backend not available (simulated)")
+
+    monkeypatch.setattr(engine, "load", _unavailable)
+    failed = _upload(client, sample_pdf)
+    body = wait_done(client, failed)
+    assert body["status"] == "error"
+    assert body["error"].startswith("모델 로드 실패: MPS backend not available")
+    health = client.get("/api/health").json()
+    assert health["model_loaded"] is False
+    assert "MPS backend not available" in health["model_load_error"]
+    assert health["worker_alive"] is True
+
+    monkeypatch.undo()                                  # 다음 잡에서 로드 재시도 → 성공
+    assert wait_done(client, _upload(client, sample_pdf))["status"] == "done"
+    health = client.get("/api/health").json()
+    assert health["model_loaded"] is True and health["model_load_error"] is None
+    assert client.app.state.load_state["error"] is None
+
+
+def test_cancel_while_waiting_for_the_model_finishes_as_canceled(client, sample_pdf, monkeypatch):
+    """워커가 맡은 뒤(모델 로딩 대기 중)의 취소는 canceling → 워커가 canceled로 마감한다."""
+    import threading
+
+    from app.engine.base import JobCanceled
+
+    engine = client.app.state.engine
+    entered = threading.Event()
+
+    def _wait_for_model(cancel, on_wait=None):
+        entered.set()
+        assert cancel.wait(10), "취소가 오지 않았다"
+        raise JobCanceled()
+
+    monkeypatch.setattr(engine, "wait_until_ready", _wait_for_model)
+    jid = _upload(client, sample_pdf)
+    assert entered.wait(5)
+    r = client.post(f"/api/jobs/{jid}/cancel")
+    assert r.status_code == 202 and r.json()["status"] == "canceling"   # 이미 워커가 맡았다
+    body = wait_done(client, jid)
+    assert body["status"] == "canceled" and body["error"] == "사용자에 의해 취소되었습니다"
+    monkeypatch.undo()
+    assert wait_done(client, _upload(client, sample_pdf))["status"] == "done"
+
+
+# ── 번역 라우트 수명주기 (tests-baseline-9 · tests-baseline-7) ───────────────────
+@pytest.fixture
+def translate_env(monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:1234/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    return monkeypatch
+
+
+def _wait_translate_idle(client, jid: str, lang: str = "ko", timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with client.app.state.translate_lock:
+            if (jid, lang) not in client.app.state.translate_tasks:
+                return
+        time.sleep(0.02)
+    raise AssertionError("번역 스레드가 끝나지 않았다")
+
+
+def test_translate_failure_before_the_engine_starts_records_the_real_reason(
+    client, sample_pdf, translate_env,
+):
+    """엔진 밖(클라이언트 생성)에서 실패하면 state.json이 접수 때의 running으로 남아,
+    다음 조회가 '서버가 재시작되어 번역이 중단되었습니다'로 오보했다(재현)."""
+    jid = _upload(client, sample_pdf)
+    assert wait_done(client, jid)["status"] == "done"
+
+    def _bad_client(*args, **kwargs):
+        raise ValueError("Invalid IPv6 URL")            # OPENAI_BASE_URL='http://[::1/v1'
+
+    def _never(*args, **kwargs):
+        raise AssertionError("엔진까지 가면 안 된다")
+
+    translate_env.setattr("app.api.OpenAICompatClient", _bad_client)
+    translate_env.setattr("app.api.run_translation", _never)
+    assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 202
+    _wait_translate_idle(client, jid)
+    state = client.get(f"/api/jobs/{jid}/translate/state?lang=ko").json()
+    assert state["status"] == "error"
+    assert "Invalid IPv6 URL" in state["error"]
+    assert "재시작" not in state["error"]
+    assert state["finished_at"]
+
+
+def test_duplicate_translate_post_while_running_is_200_running(client, sample_pdf, translate_env):
+    import json
+    import threading
+    from types import SimpleNamespace
+
+    jid = _upload(client, sample_pdf)
+    assert wait_done(client, jid)["status"] == "done"
+    gate = threading.Event()
+    calls: list[int] = []
+
+    def _slow_translation(job_dir, lang, cfg, **kwargs):
+        calls.append(1)
+        state = job_dir / "translations" / lang / "state.json"
+        state.write_text(json.dumps({"lang": lang, "status": "running", "current": 0, "total": 1}))
+        assert gate.wait(10)
+        state.write_text(json.dumps({"lang": lang, "status": "done", "current": 1, "total": 1}))
+        return SimpleNamespace(status="done", total=1, translated=1, cached=0, skipped=0,
+                               kept_original=[])
+
+    translate_env.setattr("app.api.run_translation", _slow_translation)
+    try:
+        assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 202
+        again = client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"})
+        assert again.status_code == 200
+        assert again.json() == {"job_id": jid, "lang": "ko", "status": "running"}
+    finally:
+        gate.set()
+        _wait_translate_idle(client, jid)
+    assert calls == [1]                                    # 중복 실행 없음
+
+
+# ── 좌표 레이아웃이 없는 잡(figure-only)의 폴백 (tests-baseline-7) ──────────────────
+def test_done_job_without_layout_falls_back_to_semantic_exports(client, sample_pdf):
+    jid = _upload(client, sample_pdf)
+    assert wait_done(client, jid)["status"] == "done"
+    job_dir = client.app.state.store.get(jid).dir
+    (job_dir / "layout.json").unlink()                     # figure_only 엔진의 결과 형태
+
+    doc = client.get(f"/api/jobs/{jid}/document.html")
+    assert doc.status_code == 200
+    assert "layout-page-image" not in doc.text             # facsimile이 아니라 읽기용 HTML
+    assert 'class="doc-page"' in doc.text
+    page = client.get(f"/api/jobs/{jid}/page/1")
+    assert page.status_code == 200 and page.headers["content-type"].startswith("image/png")
+    (job_dir / "result.ko.md").write_text("# 번역", encoding="utf-8")
+    pdf = client.get(f"/api/jobs/{jid}/pdf?lang=ko")
+    assert pdf.status_code == 409 and "document.html" in pdf.json()["detail"]

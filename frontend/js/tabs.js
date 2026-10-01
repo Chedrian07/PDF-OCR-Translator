@@ -1,7 +1,7 @@
 import { ICON } from './constants.js';
 import { busyWaitMessage, docLayoutIsFigureOnly, langFetchVerdict, withLangUrl } from './core.js';
 import { el, state } from './state.js';
-import { h, showToast, typesetMath } from './ui.js';
+import { h, setTrustedHtml, showToast, typesetMath } from './ui.js';
 import { fetchTextWithBusyRetry } from './api.js';
 import { revertToOriginal, setLang } from './translate.js';
 import { initQaTab, prefillQaPageFromReader } from './qa.js';
@@ -154,7 +154,9 @@ export async function loadDocLayout() {
     state.docLayoutLoaded = true;
     // Trusted server-rendered fragment (pipeline/layout.py — 텍스트 전부 이스케이프됨).
     // 번역본은 루트에 lang="ko"가 붙어 오지만, 컨테이너에도 setResultLangAttr로 반영해 둔다.
-    el.doclayoutBody.innerHTML = r.text;
+    // 붙이기 전에 외부 이미지를 막고, 전 페이지 PNG(쪽당 ~350KB)를 한꺼번에 받지 않도록
+    // loading=lazy를 단다 — 300쪽이면 수백 MB가 한 번에 큐에 올라 연결을 잡아먹었다.
+    setTrustedHtml(el.doclayoutBody, r.text, { lazyImages: true });
     typesetMath(el.doclayoutBody);
     if (window.uocrFitLayout) window.uocrFitLayout(el.doclayoutBody);
   });
@@ -186,8 +188,9 @@ export async function loadPreview() {
       return;
     }
     state.previewLoaded = true;
-    // Trusted server-rendered fragment (/html, same renderer as /render-preview).
-    el.previewBody.innerHTML = r.text;
+    // Trusted server-rendered fragment (/html, same renderer as /render-preview) —
+    // 외부 이미지 src는 붙이기 전에 막는다(frontend-3).
+    setTrustedHtml(el.previewBody, r.text);
     typesetMath(el.previewBody);
   });
 }

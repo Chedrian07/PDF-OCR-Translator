@@ -97,16 +97,28 @@ def drain_mupdf_warnings(context: str) -> None:
                 sum(counts.values()), context, " · ".join(top), extra)
 
 
+# PDF를 열지 못했을 때의 사용자 메시지. MuPDF 예외 문자열은 붙이지 않는다 — 그 안에
+# 서버의 절대 경로('Failed to open file \'/…/jobs/j_…/source.pdf\'')가 실려, 무인증
+# 업로드 한 번으로 DATA_DIR 위치(로컬이면 계정 이름까지)가 400 응답·잡 오류로 새어 나간다.
+# 원문은 서버 로그에만 남긴다.
+_OPEN_FAILED = "PDF를 열 수 없습니다 — 손상되었거나 지원하지 않는 형식입니다"
+
+
+def _open_pdf(fitz, pdf_path: Path, context: str):
+    try:
+        return fitz.open(str(pdf_path))
+    except Exception as e:
+        drain_mupdf_warnings(context)
+        logger.warning("%s: PDF 열기 실패 (%s: %s)", context, e.__class__.__name__, str(e)[:300])
+        raise ValueError(_OPEN_FAILED) from e
+
+
 def probe_pdf(pdf_path: Path, max_pages: int) -> int:
     """업로드 검증: 열 수 있는 PDF인지 확인하고 페이지 수를 돌려준다.
-    문제가 있으면 사용자 메시지를 담은 ValueError."""
+    문제가 있으면 사용자 메시지를 담은 ValueError(서버 경로 등 내부 정보 없음)."""
     fitz = quiet_fitz()
 
-    try:
-        doc = fitz.open(str(pdf_path))
-    except Exception as e:
-        drain_mupdf_warnings("업로드 검증")
-        raise ValueError(f"PDF를 열 수 없습니다: {e}") from e
+    doc = _open_pdf(fitz, pdf_path, "업로드 검증")
     try:
         if doc.needs_pass:
             raise ValueError("암호화된 PDF는 지원하지 않습니다")
@@ -226,7 +238,7 @@ def render_pdf_pages(
     fitz = quiet_fitz()
 
     pages_dir.mkdir(parents=True, exist_ok=True)
-    doc = fitz.open(str(pdf_path))
+    doc = _open_pdf(fitz, pdf_path, "페이지 렌더")  # 잡 오류 메시지로도 경로가 새지 않게
     try:
         if doc.needs_pass:
             raise ValueError("암호화된 PDF는 지원하지 않습니다")

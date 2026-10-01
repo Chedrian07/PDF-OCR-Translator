@@ -18,7 +18,14 @@ from pathlib import Path
 
 from ..config import Settings
 from ..native_ops import make_ngram_logits_processor
-from .base import EngineCapabilities, EngineError, OCREngine, RepetitiveOutputError, StreamSink
+from .base import (
+    EngineCapabilities,
+    EngineError,
+    OCREngine,
+    OutputLimitError,
+    RepetitiveOutputError,
+    StreamSink,
+)
 from .objc_pool import autorelease_pool
 from .repetition import SemanticRepetitionDetector
 
@@ -79,6 +86,22 @@ def _apple_chip_name() -> str:
         return out or "Apple Silicon"
     except Exception:
         return "Apple Silicon"
+
+
+class _GenerationOutcome:
+    """한 번의 infer/infer_multi 생성 결과 플래그 — generate_fn 래퍼가 채운다."""
+
+    __slots__ = ("length_capped",)
+
+    def __init__(self) -> None:
+        # EOS 없이 MAX_LENGTH(총 길이 상한)에 닿아 끝났는가 = 출력이 잘림
+        self.length_capped = False
+
+
+def _length_limit_message(max_length: int) -> str:
+    return (
+        f"생성 길이 상한(MAX_LENGTH={max_length:,}토큰)에 도달해 EOS 없이 출력이 잘렸습니다"
+    )
 
 
 def _resolve_dtype(device: str, dtype_name: str):
@@ -253,6 +276,7 @@ class UnlimitedEngine(OCREngine):
         cancel: threading.Event,
         ngram_window: int,
         repetition: SemanticRepetitionDetector,
+        outcome: _GenerationOutcome | None = None,
     ) -> dict:
         from transformers import StoppingCriteria, StoppingCriteriaList, TextStreamer
 
@@ -290,15 +314,31 @@ class UnlimitedEngine(OCREngine):
         extras["logits_processor"] = make_ngram_logits_processor(
             NGRAM_SIZE, ngram_window, self.torch_device
         )
+        # 디코드 경로는 항상 generate_fn(벤더 P15)으로 주입한다 — fast_decode든 HF generate
+        # 폴백(OCR_FAST_DECODE=0)이든 반환 텐서로 "EOS 없이 MAX_LENGTH 도달"을 판정해야
+        # 잘린 출력을 정상 결과로 채택하지 않는다(audit decode-correctness-1).
+        # 폴백 래퍼는 벤더의 기본 분기와 똑같이 model.generate(**gen_kwargs)를 부른다.
+        from .fast_decode import hit_length_limit
+
+        if outcome is None:
+            outcome = _GenerationOutcome()
         if self._settings.fast_decode:
             from .fast_decode import fast_greedy_decode
 
             block = self._settings.decode_block
 
-            def _generate_fn(model, gen_kwargs):
+            def _decode(model, gen_kwargs):
                 return fast_greedy_decode(model, gen_kwargs, block=block)
+        else:
+            def _decode(model, gen_kwargs):
+                return model.generate(**gen_kwargs)
 
-            extras["generate_fn"] = _generate_fn
+        def _generate_fn(model, gen_kwargs):
+            output_ids = _decode(model, gen_kwargs)
+            outcome.length_capped = hit_length_limit(output_ids, gen_kwargs)
+            return output_ids
+
+        extras["generate_fn"] = _generate_fn
         return extras
 
     # ── OCREngine 구현 ─────────────────────────────────────────
@@ -318,6 +358,7 @@ class UnlimitedEngine(OCREngine):
             max_page_tokens=s.max_page_output_tokens,
             expected_pages=len(image_paths),
         )
+        outcome = _GenerationOutcome()
         try:
             try:
                 # MPS: 이미지 H2D 복사·생성 루프·후처리 전체를 풀로 감싼다 — fast_decode는
@@ -335,7 +376,7 @@ class UnlimitedEngine(OCREngine):
                         ngram_window=MULTI_NGRAM_WINDOW,
                         save_results=True,
                         **self._gen_extras(
-                            sink, cancel, MULTI_NGRAM_WINDOW, repetition
+                            sink, cancel, MULTI_NGRAM_WINDOW, repetition, outcome
                         ),
                     )
             except Exception as exc:
@@ -344,6 +385,10 @@ class UnlimitedEngine(OCREngine):
                 raise
             if repetition.detected and not cancel.is_set():
                 raise RepetitiveOutputError(repetition.message)
+            if outcome.length_capped and not cancel.is_set():
+                # 스트리머는 디코드 끝에서 이미 flush됐다. 잘린 청크(꼬리 페이지 손실)를
+                # 정상 결과로 넘기지 않고 runner의 페이지별 복구 경로를 태운다.
+                raise OutputLimitError(_length_limit_message(s.max_length))
         finally:
             self._release_device_cache()
         # 취소 시에도 부분 출력을 반환한다 — 병합 후 취소 처리는 runner 몫
@@ -364,6 +409,7 @@ class UnlimitedEngine(OCREngine):
             max_page_tokens=s.max_page_output_tokens,
             expected_pages=1,
         )
+        outcome = _GenerationOutcome()
         try:
             try:
                 with autorelease_pool(self._uses_mps):  # run_multi와 같은 이유
@@ -380,7 +426,7 @@ class UnlimitedEngine(OCREngine):
                         ngram_window=SINGLE_NGRAM_WINDOW,
                         save_results=True,
                         **self._gen_extras(
-                            sink, cancel, SINGLE_NGRAM_WINDOW, repetition
+                            sink, cancel, SINGLE_NGRAM_WINDOW, repetition, outcome
                         ),
                     )
             except Exception as exc:
@@ -389,6 +435,8 @@ class UnlimitedEngine(OCREngine):
                 raise
             if repetition.detected and not cancel.is_set():
                 raise RepetitiveOutputError(repetition.message)
+            if outcome.length_capped and not cancel.is_set():
+                raise OutputLimitError(_length_limit_message(s.max_length))
         finally:
             self._release_device_cache()
         return outputs or ""

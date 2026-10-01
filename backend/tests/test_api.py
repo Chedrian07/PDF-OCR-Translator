@@ -79,6 +79,10 @@ def test_rate_limit_key_trusts_proxy_only_when_opted_in(monkeypatch):
     monkeypatch.delenv("TRUSTED_PROXY_HOPS", raising=False)
     assert api_mod._client_key(request) == "10.0.0.9"        # 기본: 헤더 무시
 
+    # 직접 연결 피어(10.0.0.9)가 신뢰 프록시로 선언돼야 헤더를 읽는다(기본은 루프백만) —
+    # 선언 없이 홉 수만 믿던 예전 동작은 백엔드 포트에 바로 붙은 클라이언트의 위조를
+    # 그대로 믿었다(api-jobs-10). 그 경우는 test_api_guards.py가 따로 고정한다.
+    monkeypatch.setenv("TRUSTED_PROXY_IPS", "10.0.0.0/8")
     monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
     assert api_mod._client_key(request) == "10.0.0.9"        # 신뢰 홉 1개 = 프록시A 주소
     monkeypatch.setenv("TRUSTED_PROXY_HOPS", "2")

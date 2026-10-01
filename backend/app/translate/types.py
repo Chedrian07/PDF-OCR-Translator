@@ -108,6 +108,15 @@ def resolve_reasoning_style(style: str, base_url: str) -> str:
     return "openrouter"
 
 
+def _env_max_response_mb(env) -> int:
+    value = _env_int(env, "TRANSLATE_MAX_RESPONSE_MB", DEFAULT_MAX_RESPONSE_MB)
+    if not 1 <= value <= _MAX_RESPONSE_MB_CEIL:
+        raise TranslateError(
+            f"TRANSLATE_MAX_RESPONSE_MB는 1–{_MAX_RESPONSE_MB_CEIL} 사이여야 합니다"
+        )
+    return value
+
+
 def _env_extra_body(env) -> str:
     """TRANSLATE_EXTRA_BODY — 모든 요청 본문에 병합할 JSON 객체(정규화 문자열로 보관).
 
@@ -227,6 +236,29 @@ def _env_temperature(env) -> str:
 
 
 _FALSE_WORDS = ("0", "false", "no", "off")
+_TRUE_WORDS = ("1", "true", "yes", "on")
+
+# 응답 본문 상한 기본값(MB) — xhigh 예산(81,920토큰)의 SSE 스트림도 청크 오버헤드
+# (토큰당 ~250B)까지 담는 크기. 악성·고장 게이트웨이가 끝없는 응답으로 메모리를
+# 고갈시키지 못하게 하는 애플리케이션 수준 상한이다(urllib3 버전과 무관하게 성립).
+DEFAULT_MAX_RESPONSE_MB = 32
+_MAX_RESPONSE_MB_CEIL = 1024
+
+
+def _env_stream(env) -> str:
+    """TRANSLATE_STREAM — auto | on | off (1/true/yes·0/false/no도 허용).
+
+    auto = chat 모드에서 SSE 스트리밍. read timeout이 '토큰 사이 정지 시간'이 되고,
+    취소·타임아웃 때 연결을 끊으면 서버(mlx_lm 등)가 생성을 즉시 멈춘다.
+    """
+    raw = _clean(env.get("TRANSLATE_STREAM")).lower()
+    if not raw or raw == "auto":
+        return "auto"
+    if raw in _TRUE_WORDS:
+        return "on"
+    if raw in _FALSE_WORDS:
+        return "off"
+    raise TranslateError("TRANSLATE_STREAM은 auto|1|0 중 하나여야 합니다")
 
 
 def _env_flag(env, name: str, default: bool) -> bool:
@@ -260,6 +292,8 @@ class TranslateConfig:
     reasoning_style: str = "auto"  # REASONING_STYLES — auto는 base URL로 확정
     # 모든 요청 본문에 병합할 JSON 객체(정규화 문자열, "" = 없음) — TRANSLATE_EXTRA_BODY
     extra_body: str = ""
+    stream: str = "auto"  # auto(chat 모드면 SSE) | on | off — TRANSLATE_STREAM
+    max_response_mb: int = DEFAULT_MAX_RESPONSE_MB  # 응답 본문 상한 — TRANSLATE_MAX_RESPONSE_MB
 
     @property
     def max_output_tokens(self) -> int:
@@ -341,6 +375,8 @@ class TranslateConfig:
             reasoning=reasoning,
             reasoning_style=style,
             extra_body=_env_extra_body(e),
+            stream=_env_stream(e),
+            max_response_mb=_env_max_response_mb(e),
         )
 
 

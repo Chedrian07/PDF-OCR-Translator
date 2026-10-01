@@ -26,8 +26,19 @@ export function activateTab(name) {
   if (name === 'reader') loadReader();
   else if (name === 'preview') loadPreview();
   else if (name === 'markdown') loadMarkdown();
-  else if (name === 'doclayout') loadDocLayout();
+  else if (name === 'doclayout') { loadDocLayout(); refitDocLayout(); }
   else if (name === 'qa') { prefillQaPageFromReader(); initQaTab(); }
+}
+
+// layout-fit은 보이는 블록만 잴 수 있다(숨은 패널은 clientHeight 0 → 건너뜀). 주입 직후 한
+// 번만 돌면, 다른 탭을 보던 동안 도착한 레이아웃이나 늦게 로드된 KaTeX 웹폰트 뒤에 넘친
+// 블록이 잘린 채 남는다(frontend-13) — 탭이 보일 때와 폰트 로드가 끝났을 때 다시 맞춘다.
+// uocrFitLayout은 원래 크기에서 다시 축소하므로(멱등) 여러 번 불러도 누적되지 않는다.
+export function refitDocLayout() {
+  if (!state.docLayoutLoaded || !window.uocrFitLayout || !el.doclayoutBody) return;
+  const panel = el.doclayoutBody.closest('.tab-panel');
+  if (panel && panel.hidden) return;
+  window.uocrFitLayout(el.doclayoutBody);
 }
 
 // figure_only 엔진(OvisOCR2·PaddleOCR-VL 등)은 본문 텍스트에 좌표가 없어 서버 레이아웃
@@ -159,6 +170,10 @@ export async function loadDocLayout() {
     setTrustedHtml(el.doclayoutBody, r.text, { lazyImages: true });
     typesetMath(el.doclayoutBody);
     if (window.uocrFitLayout) window.uocrFitLayout(el.doclayoutBody);
+    // 웹폰트(KaTeX 등)가 늦게 오면 글자 폭이 바뀐다 — 로드가 끝난 뒤 한 번 더 맞춘다.
+    if (typeof document !== 'undefined' && document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() => { if (isCurrentLoad(ctx)) refitDocLayout(); });
+    }
   });
 }
 

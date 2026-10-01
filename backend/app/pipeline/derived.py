@@ -589,10 +589,11 @@ def _mupdf_errors() -> tuple[type[BaseException], ...]:
 def _call_builder(builder, *args, message: str, **kwargs):
     """빌더 호출 — MuPDF 예외를 사용자용 PdfExportError로 정규화한다.
 
-    build_translated_pdf는 fitz.open만 감싸고 페이지 처리·저장은 감싸지 않는다
-    (build_dual_pdf는 전부 감싼다). 그래서 MuPDF 예외가 그대로 새어 /pdf·/page가
-    메시지 없는 500을, /layout이 문서화된 '좌표 텍스트 폴백' 대신 500을 내고 예열
-    스레드는 traceback을 남기고 죽었다.
+    지금은 두 빌더(build_translated_pdf·build_dual_pdf)가 스스로 모든 예외를
+    PdfExportError로 정규화한다. 예전 build_translated_pdf는 fitz.open만 감싸 MuPDF
+    예외가 그대로 새어 /pdf·/page가 메시지 없는 500을, /layout이 문서화된 '좌표 텍스트
+    폴백' 대신 500을 내고 예열 스레드가 traceback을 남기고 죽었다. 이 경계는 빌더를
+    바꿔 끼우는 이음매(테스트·api의 build= 인자)에도 같은 계약을 지키는 마지막 방어선이다.
     """
     try:
         return builder(*args, **kwargs)
@@ -611,10 +612,12 @@ def _require_job_dir(job) -> None:
 def _discard_if_deleted(job) -> None:
     """빌드·렌더 **도중** 잡이 삭제됐으면 빌더가 되살린 디렉터리를 치운다.
 
-    빌더·렌더러는 출력 디렉터리를 parents=True로 만든다 — 삭제 직후 끝난 대조 PDF
-    빌드가 meta.json 없는 잡 디렉터리를 되살려(export.ko.dual.pdf만 든 채) 목록·GC·
-    재시작 정리 어디에도 걸리지 않는 영구 고아가 됐다. 삭제 경로(DELETE·GC 모두
-    JobStore.delete_dir)가 세우는 delete_requested로 판정한다.
+    예전 빌더·렌더러는 출력 디렉터리를 parents=True로 만들었다 — 삭제 직후 끝난 대조
+    PDF 빌드가 meta.json 없는 잡 디렉터리를 되살려(export.ko.dual.pdf만 든 채) 목록·GC·
+    재시작 정리 어디에도 걸리지 않는 영구 고아가 됐다. 대조 PDF 빌더는 이제 잡
+    디렉터리를 만들지 않지만, 렌더러(render_pdf_pages)와 바꿔 끼운 빌더에 대한 방어로
+    남긴다. 삭제 경로(DELETE·GC 모두 JobStore.delete_dir)가 세우는 delete_requested로
+    판정한다.
     """
     if getattr(job, "delete_requested", False):
         shutil.rmtree(job.dir, ignore_errors=True)

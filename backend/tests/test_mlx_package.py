@@ -33,7 +33,13 @@ def test_mlx_status_reports_import_failure(monkeypatch):
     monkeypatch.setitem(sys.modules, "mlx", None)
     monkeypatch.setitem(sys.modules, "mlx.core", None)
     ok, why = pkg.mlx_status()
-    assert ok is False and "uv sync --extra mlx" in why
+    # mlx만 고르는 `uv sync --extra mlx`는 torch(MPS 폴백)를 지운다 — metal과 함께 안내한다
+    assert ok is False
+    assert "cd backend && uv sync --extra metal --extra mlx (= make setup-mlx)" in why
+    assert "`uv sync --extra mlx`" not in why
+    from app.engine.unlimited_mlx import MLX_INSTALL_HINT
+
+    assert MLX_INSTALL_HINT in why  # 엔진의 로드 오류 문구와 같은 안내
 
 
 def test_package_import_is_lazy_and_unknown_names_fail():

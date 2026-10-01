@@ -9,9 +9,11 @@
 (3.3B MoE VLM, DeepSeek-OCR 계열, MIT)로 파싱하여 **이미지(figure)까지 포함된 Markdown**으로
 변환해 주는 셀프호스팅 애플리케이션.
 
-- 디바이스 백엔드: **CPU**, **CUDA**, **Metal**(torch MPS, Apple Silicon) — 모두 구현 완료
+- 디바이스 백엔드: **CPU**, **CUDA**, Apple Silicon — **MLX**(in-process MLX 포팅, 기본)와
+  **Metal**(torch MPS, 폴백). `OCR_DEVICE=auto`(미설정 기본)가 쓸 수 있는 가장 빠른 것을 고른다(§6)
 - 배포: `docker compose up` 한 번으로 실행 (CPU 기본, GPU는 `docker compose up ocr-cuda`).
-  Metal은 컨테이너 GPU 패스스루가 없어 **로컬(uv) 실행 전용**
+  Apple Silicon GPU(MLX·Metal)는 컨테이너 GPU 패스스루가 없어 **로컬(uv) 실행 전용**
+- 신뢰할 수 없는 PDF를 다루는 PyMuPDF 작업은 서버 밖 워커 프로세스에서 시간 상한과 함께 돈다(§18)
 - 개발 스택: Python 3.12 (uv 관리) + C++17 (pybind11 네이티브 모듈)
 - **멀티 엔진 (RTX 5070 Ti 단일 GPU)**: `OCR_ENGINE=ovisocr2|paddleocr_vl`은
   GPU 전용 sidecar 컨테이너(`services/`)와 HTTP로 통신한다 — backend 프로세스는
@@ -32,7 +34,8 @@
 | 레이아웃 시각화 | 페이지별 `result_with_boxes_{i}.jpg` 저장 (GIF 데모의 박스 오버레이) |
 | 고정 의존성 | 모델 README 기준 — torch==2.10.0, torchvision==0.25.0, transformers==4.57.1 등. 벤더 모델 코드가 이 API에 묶여 고정하며, 남은 pip-audit 권고는 수용한 잔여 위험이다(근거는 `backend/pyproject.toml` 고정 옆 주석) |
 | 보안 고정 | 모델 수치와 무관한 I/O 라이브러리는 README 고정에서 이탈 — pymupdf==1.28.2(동봉 MuPDF의 CVE-2026-3308 수정), pillow==12.3.0. 전이 의존 urllib3≥2.8.0·anyio≥4.14.2와 함께 `backend/tests/test_dependency_floor.py`가 하한을 지킨다 |
-| MLX extra | `mlx==0.32.3`(darwin-arm64 마커) — 후속 in-process MLX OCR 엔진용 런타임. torch와 겹치지 않아 `uv sync --extra metal --extra mlx`로 함께 설치한다 |
+| MLX extra | `mlx==0.32.3`(darwin-arm64 마커, macOS 14+ 휠) — in-process MLX OCR 엔진(§6)의 런타임. torch와 겹치지 않아 `uv sync --extra metal --extra mlx`(= `make setup-mlx`)로 함께 설치한다. metal 단독·mlx 단독 sync는 서로를(그리고 `uv pip`로 넣은 C++ 모듈을) 지운다 |
+| MLX 포팅 | `backend/app/vendor/unlimited_ocr_mlx/` — mlx-vlm **0.7.4**의 Unlimited-OCR 모델 코드를 벤더링(MIT). mlx-vlm(transformers≥5.14 요구)·torch에 의존하지 않고 transformers 4.57.1은 토크나이저에만 쓴다. torch 경로와 **같은 스냅샷**을 변환 없이 strict 로드한다 |
 | CUDA 휠 | cu129 (README 테스트 환경 CUDA 12.9, Blackwell sm_120 포함) |
 | flash-attn | 선택 사항 (미설치 시 eager attention) — 본 프로젝트는 미사용 |
 
@@ -47,37 +50,73 @@
 6. 이미지 임베딩 주입을 `masked_scatter_` → bool 인덱싱 대입으로 교체 (torch 2.10 MPS의
    브로드캐스트 마스크 버그 회피 — CPU/CUDA 결과 동일, PROVENANCE P11)
 7. `_autocast_ctx`는 `mps`에서 항상 no-op — MPS autocast(bf16)의 로짓 오염 회피 (PROVENANCE P12)
+8. 디코드 가속 — P16(SDPA, CUDA 기본·MPS는 eager 유지 — M4 Max 재측정에서 붕괴는 없고
+   15–28% 빨랐지만 출력이 비트 동일하지 않아 `OCR_SDPA=1` 옵트인), P17(융합 MoE — **CUDA·MPS
+   기본**, 엔진이 `.to(device)` **전에** `prebuild_fused_moe`로 expert 가중치를 한 번 스택해
+   뷰로 재지정한다. `OCR_MOE_FUSED=0`이면 프리빌드까지 건너뛰어 legacy 완전 복원), P18(MPS 단일
+   토큰 패스트패스 — 이제 `OCR_MOE_FUSED=0`일 때의 MPS 폴백, 레이어당 동기화가 남아 실측 1.20배),
+   P20(디코드 링 슬롯 — eager는 호스트 int + 슬라이스 `copy_`, CUDA Graph 캡처 때만 텐서 슬롯.
+   MPS의 `index_copy_`가 KV 길이에 비례해 8쪽 청크 디코드를 34 tok/s로 떨어뜨리던 것을 되돌렸다)
+9. P22 — 모델 bbox를 픽셀로 바꾼 뒤 **페이지 안으로 clamp**하고 퇴화 상자는 건너뛰되 크롭 번호는
+   소비한다(마크다운 참조·boxes.json 정렬 유지). 거대·음수 좌표가 페이지보다 큰 크롭이나 Pillow
+   좌표 산술 오버플로에 닿지 않게 하는 보안 패치이며 MLX 포팅도 같은 규칙을 쓴다
+10. P23 — `infer_multi`의 페이지 분할은 첫 `<PAGE>` 앞이 **공백일 때만** 버린다(마커 0개면 전체가
+    1쪽) — 업스트림은 늘 버려 선행 마커를 생략한 출력의 1쪽이 사라졌다. `merge.split_pages`와 같은 규칙
+
+### MLX 포팅 패치 (backend/app/vendor/unlimited_ocr_mlx/)
+
+mlx-vlm 0.7.4 원본 대비 로컬 패치(전체 내역·sha256·측정은 그 디렉터리의 `PROVENANCE.md`,
+소스에서는 `grep -n "local patch M"`):
+
+| # | 내용 | 이유 |
+|---|---|---|
+| M1 | CLIP MLP를 `quick_gelu`, LayerNorm eps 1e-5로 | mlx-vlm 버그 — 원본(torch)과 달라 CLIP 출력 상대오차 0.309, 1쪽 det 블록 19 → 11 |
+| M2 | 원샷 프리필(`prefill_length = P`) | mlx-vlm chunked prefill은 P-1을 기록해 마지막 프롬프트 토큰이 링 캐시에서 밀려났다(8쪽 출력이 토큰 105에서 갈림) |
+| M3 | 생성 모듈 — GPU no-repeat-ngram, 토큰 콜백, 토큰마다 취소·반복 확인, `hit_max_length` | 엔진의 스트리밍·취소·반복 감지·`OutputLimitError` 계약 |
+| M4 | torch 없는 후처리(`ast.literal_eval`만 — P9) + P22 bbox clamp | 산출물(마크다운·크롭·boxes.json·raw_pages.json)이 torch 흐름과 바이트 동일 |
+| M5 | 인메모리 8비트 양자화 — 디코더만(group 64), 8 이외 비트 거부 | 처리량 약 1.44배·재현율 동일, 4비트는 숫자 오인식(2504 → 2304) |
+| M6 | **기각** — MoE 게이트 fp32 계산 | 측정상 스파이크·MPS 출력에서 오히려 멀어짐 |
+| M7 | gundam 크롭의 위치 임베딩 리샘플을 torch `F.interpolate`와 같은 가중치로 | mlx-vlm이 CLIP 채널 축을 리샘플하고 SAM rel_pos 좌표가 틀렸다 |
+
+M1·M7은 mlx-vlm 업스트림에 알릴 만한 버그다. bf16 MLX 출력은 torch MPS bf16과 토큰 단위로
+같지 않다(1쪽 첫 분기 122번째 토큰 — MPS의 fp16·bf16끼리도 같은 지점에서 갈린다). fp32에서는
+torch CPU와 로짓 상대오차 1e-5 수준으로 맞으므로, 엔진 간 회귀 판정은 토큰 일치가 아니라
+유사도·재현율로 한다.
 
 ## 3. 디렉터리 구조
 
 ```
 ├── docker-compose.yml          # ocr-cpu(기본)·ocr-cuda(cuda)·ocr-ovis+ovisocr2(ovis)·ocr-paddle+paddleocr-vl(paddle)
 ├── compose.ollama.yaml         # 선택 overlay — Ollama 컨테이너 추가 (§8)
-├── Makefile                    # setup/dev/test/coverage/e2e/e2e-mock/verify-e2e/docker-*
+├── Makefile                    # setup(-mlx/-metal)/dev(-metal/-textlayer)/test(-mps/-mlx-real)/audit/e2e*/verify-e2e/docker-*
 ├── .env.example                # 환경변수 템플릿 — 실제 키는 .env에 (커밋되지 않음)
-├── README.md · SECURITY.md     # 사용법 / 보안·노출 정책 (§14와 정합)
+├── README.md · SECURITY.md · CHANGELOG.md  # 사용법 / 보안·노출 정책 (§14와 정합) / 변경 이력
 ├── docs/
 │   ├── ARCHITECTURE.md         # 이 문서 (SSOT)
 │   ├── OCR_ENGINE_PROTOCOL.md  # sidecar 프로토콜 v1 계약
 │   └── CUDA_5070TI_MULTI_OCR_PLAN.md · OVISOCR2_CUDA_5070TI.md
 │       · PADDLEOCR_VL_BLACKWELL_5070TI.md · OCR_BENCHMARK.md · AUDIT/ROADMAP 문서
+├── .github/                    # workflows/(ci·release) · dependabot.yml · trivyignore.yaml (§11)
 ├── backend/
-│   ├── pyproject.toml          # uv 프로젝트, extras: cpu / cu129 / metal
+│   ├── pyproject.toml          # uv 프로젝트, extras: cpu / cu129 / metal / mlx
 │   ├── uv.lock                 # CI는 `uv sync --locked`로 lock 드리프트를 실패시킨다 (§11)
-│   ├── Dockerfile              # ARG TORCH_VARIANT=cpu|cu129, tesseract 포함, 비루트(uid 1000)
+│   ├── Dockerfile              # ARG TORCH_VARIANT=cpu|cu129, digest 고정 베이스, tesseract 포함, 비루트(uid 1000)
 │   ├── e2e_mock_app.py         # 브라우저 E2E 전용 진입점 (Q&A 라우터만 메모리 mock으로 교체)
 │   ├── app/
-│   │   ├── main.py             # FastAPI 앱 팩토리 + TrustedHost + 정적 프론트엔드 서빙
-│   │   ├── config.py           # 환경변수 설정(Settings) + .env 로더
+│   │   ├── main.py             # FastAPI 앱 팩토리 + TrustedHost + 보안 헤더(CSP) + 정적 프론트엔드 서빙
+│   │   ├── config.py           # 환경변수 설정(Settings) + .env 로더 + 알려진 env 키 레지스트리
 │   │   ├── api.py              # REST + SSE 라우트 + 남용 방어(레이트리밋·동시 상한, §5)
 │   │   ├── jobs.py             # Job/JobStore + 단일 워커 큐 + SSE 브로커 + TTL GC (§15)
+│   │   ├── owner_lock.py       # 잡 저장소 단일 소유자 flock (§4)
 │   │   ├── qa.py               # 페이지 텍스트 컨텍스트 추출 (result.md 페이지 인덱스, §17)
 │   │   ├── native_ops.py       # uocr_native 로더 + 순수 파이썬 폴백
 │   │   ├── engine/
-│   │   │   ├── base.py         # OCREngine 프로토콜 + EngineCapabilities
-│   │   │   ├── registry.py     # 디바이스·엔진 선택 (unlimited/fake/textlayer/ovisocr2/paddleocr_vl)
-│   │   │   ├── unlimited.py    # 실모델 엔진 (벤더링 코드 사용)
+│   │   │   ├── base.py         # OCREngine 프로토콜 + EngineCapabilities + 오류 계약(OutputLimitError 등)
+│   │   │   ├── registry.py     # 디바이스·엔진 선택 (auto 해석 · unlimited/fake/textlayer/ovisocr2/paddleocr_vl)
+│   │   │   ├── unlimited.py    # 실모델 엔진 — torch (cpu/cuda/metal, 벤더링 코드 사용)
+│   │   │   ├── unlimited_mlx.py  # 실모델 엔진 — MLX (Apple Silicon, vendor/unlimited_ocr_mlx 사용)
 │   │   │   ├── fast_decode.py  # 커스텀 그리디 디코드 루프 (OCR_FAST_DECODE)
+│   │   │   ├── objc_pool.py    # ObjC 오토릴리스 풀 (Metal 메모리 누적 방지, darwin 외 no-op)
 │   │   │   ├── repetition.py   # 의미 반복·페이지 출력 폭주 감지 (StoppingCriteria)
 │   │   │   ├── textlayer.py    # 텍스트 레이어 우선 + Tesseract 폴백 엔진 (§16)
 │   │   │   ├── sidecar.py      # sidecar 엔진 (HTTP client + materializer 연결)
@@ -87,14 +126,18 @@
 │   │   │   ├── client.py       # 동기 HTTP client (타임아웃/상한/취소/재시도)
 │   │   │   └── materializer.py # normalized 결과 → 기존 청크 산출물 규약
 │   │   ├── pipeline/
-│   │   │   ├── pdf.py          # PDF → 페이지 PNG (pymupdf)
+│   │   │   ├── pdf.py          # PDF → 페이지 PNG (pymupdf) · 업로드 검증(probe_pdf) · 텍스트 레이어 복구
+│   │   │   ├── pdf_worker.py   # PyMuPDF 격리 워커 프로세스 풀 (ocr·export·probe, §18)
+│   │   │   ├── pdf_complexity.py  # 업로드 복잡도 게이트 — 렌더 없이 페이지 작업량 측정 (§18)
 │   │   │   ├── runner.py       # 잡 실행 오케스트레이션(렌더→청크 OCR→병합) + 실패 격리
 │   │   │   ├── fidelity.py     # 페이지 OCR 충실도 게이트(원본 텍스트 레이어 = 정답)
-│   │   │   ├── merge.py        # <PAGE> 분리, figure 리넘버링, result.md 페이지 경계 계약 (§4)
-│   │   │   ├── layout.py       # raw_pages.json → layout.json 블록 파싱
+│   │   │   ├── merge.py        # <PAGE> 분리, 슬롯 정렬, figure 리넘버링, result.md 페이지 경계 계약 (§4)
+│   │   │   ├── reading_order.py  # 텍스트 레이어 블록의 읽기 순서(다단 감지)·조각 병합 (§16)
+│   │   │   ├── layout.py       # raw_pages.json → layout.json 블록 파싱 + 단독 HTML 내보내기
+│   │   │   ├── artifacts.py    # 잡 산출물 경로 · layout 사용 가능 판정(has_usable_layout)
 │   │   │   ├── pdf_fonts.py    # 원본 텍스트 레이어의 실측 폰트 크기·굵기 주입
 │   │   │   ├── render.py       # markdown → HTML (markdown-it-py) + document.html
-│   │   │   ├── derived.py      # 파생 산출물(페이지 raster·export) 락 + 전역 빌드 상한 (§5)
+│   │   │   ├── derived.py      # 파생 산출물(페이지 raster·export) 락 + 빌드 스탬프 + 전역 빌드 상한 (§5)
 │   │   │   └── pdf_export/     # 레이아웃 보존 번역 PDF (단일/대조) — §5 /pdf. **패키지**
 │   │   │       ├── __init__.py # 공개 API(build_translated_pdf 등) — 외부는 여기만 임포트
 │   │   │       ├── build.py    # 페이지 순회·리댁션·삽입 오케스트레이션
@@ -107,35 +150,42 @@
 │   │   │   ├── segment.py      # md/layout → 유닛 분해·재조립·reconcile
 │   │   │   ├── masking.py      # 플레이스홀더 마스킹/복원 + 출력 검증(looks_untranslated)
 │   │   │   ├── glossary.py     # 문서 용어집, prompts.py # 프롬프트 SSOT
-│   │   │   ├── types.py        # TranslateConfig · cache_key · PROMPT_V
+│   │   │   ├── flight.py       # SingleFlight — 같은 cache key 요청 합치기
+│   │   │   ├── types.py        # TranslateConfig · cache_key · PROMPT_V · reasoning 전달 방식
 │   │   │   └── data/seed_ko.json
 │   │   ├── llm/                # Q&A 공급자 계층 — providers.py + validate.py (§17)
-│   │   └── vendor/unlimited_ocr/   # 벤더링 모델 코드 (MIT) + PROVENANCE.md
+│   │   └── vendor/
+│   │       ├── unlimited_ocr/      # 벤더링 torch 모델 코드 (Baidu MIT) + PROVENANCE.md (P1–P23)
+│   │       └── unlimited_ocr_mlx/  # MLX 포팅 (mlx-vlm 0.7.4 기반, MIT) + PROVENANCE.md (M1–M7)
 │   ├── tools/translate_eval.py # 번역 품질 평가 CLI
 │   └── tests/
 ├── services/                   # GPU sidecar 컨테이너 (비루트 uid 1000)
-│   ├── ovisocr2/               # app/(main·model·parser·config) + Dockerfile + tests
-│   └── paddleocr_vl/           # app/(main·model·adapter·config) + Dockerfile + tests
+│   ├── ovisocr2/               # app/(main·model·parser·config·lifecycle) + Dockerfile
+│   │                           #  + requirements.in/.lock(해시 고정 웹 계층 덧씌움) + tests
+│   └── paddleocr_vl/           # app/(main·model·adapter·config·lifecycle) + Dockerfile
+│                               #  + requirements.in/.lock(전이 의존성 해시 잠금) + tests
 ├── native/                     # C++ pybind11 모듈 (uocr_native)
 │   ├── pyproject.toml          # scikit-build-core
 │   ├── CMakeLists.txt
 │   ├── src/uocr_native.cpp
 │   └── tests/test_parity.py
 ├── frontend/                   # 정적 SPA (빌드스텝/외부 의존성 0)
-│   ├── index.html · styles.css · layout-fit.js
-│   ├── app.js                  # **진입점만**(361줄) — 부트스트랩 + 모듈 배선. 로직 없음
-│   ├── js/                     # ES module 16개(약 6,060줄) — 실제 로직은 전부 여기 (§10)
+│   ├── index.html · styles.css · layout-fit.js · theme-init.js  # theme-init = CSP 아래 테마 부트스트랩
+│   ├── app.js                  # **진입점만**(372줄) — 부트스트랩 + 모듈 배선. 로직 없음
+│   ├── js/                     # ES module 17개(약 8,080줄) — 실제 로직은 전부 여기 (§10)
 │   │   ├── core.js · state.js · api.js · sse.js · ui.js · constants.js
 │   │   ├── upload.js · jobs.js · live.js · results.js · tabs.js · health.js
-│   │   └── translate.js · qa.js · viewer.js · reader.js
-│   ├── vendor/katex/           # 로컬 번들 (외부 CDN 금지 — §10)
-│   └── tests/                  # node --test 단위 + tests/e2e/(ui, mock-full-flow)
+│   │   └── translate.js · qa.js · viewer.js · reader.js · notes.js
+│   ├── vendor/katex/           # 로컬 번들 KaTeX 0.18.10 (외부 CDN 금지 — §10)
+│   └── tests/                  # node --test 단위(+helpers/fake-dom) + tests/e2e/(ui, mock-full-flow)
 └── scripts/
     ├── make_sample_pdf.py      # 텍스트+표+차트이미지 포함 샘플 PDF 생성
     ├── smoke_e2e.sh            # compose 기동 → 업로드 → 결과 검증
+    ├── smoke_image.sh          # 이미지 하드닝 스모크 (ci docker-image · release 공용)
     ├── verify_e2e.py           # 실 PDF 전 구간 검증 하네스 (= make verify-e2e, §11)
-    ├── mock_llm.py             # OpenAI 호환 목 서버 (결함 주입 모드 포함)
-    ├── benchmark_ocr_engines.py · check_cuda_environment.py
+    ├── mock_llm.py             # OpenAI 호환 목 서버 (SSE 스트리밍 · 결함 주입 모드 포함)
+    ├── dependency_audit.sh     # = make audit — CI dependency-audit 잡과 같은 pip-audit
+    ├── benchmark_ocr_engines.py · _smoke_common.py · check_cuda_environment.py
     └── smoke_ovisocr2_5070ti.py · smoke_paddleocr_vl_5070ti.py
 ```
 

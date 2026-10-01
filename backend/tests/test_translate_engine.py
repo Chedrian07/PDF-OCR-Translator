@@ -1004,8 +1004,10 @@ def test_reasoning_전달방식이_요청을_바꿀_때만_캐시를_무효화�
     assert _state(job)["request_variant"] == ""
 
     # 공개 게이트웨이의 auto는 openrouter로 확정 = 종전과 같은 요청 → 전량 적중
+    # (fixture의 단일 라벨 호스트 "host"는 auto가 로컬로 보므로 공개 호스트를 쓴다)
     same = EchoClient()
-    run_translation(job, "ko", replace(legacy, reasoning_style="auto"), client=same)
+    gateway = replace(legacy, reasoning_style="auto", base_url="https://gateway.example.com/v1")
+    run_translation(job, "ko", gateway, client=same)
     assert same.calls == 0
 
     # chat_template_kwargs로 실제 끄기 → 요청이 달라졌으니 다시 번역한다

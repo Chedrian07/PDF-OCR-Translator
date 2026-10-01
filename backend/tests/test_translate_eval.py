@@ -296,6 +296,7 @@ def test_judge는_dotenv를_읽어_프로바이더를_찾는다(job, tmp_path, m
     for key in ("OPENAI_BASE_URL", "TRANSLATE_MODEL", "OPENAI_MODEL"):
         monkeypatch.setenv(key, "")   # teardown에서 원상 복구되도록 등록한 뒤
         monkeypatch.delenv(key)       # 실행 시점엔 미설정 상태로 만든다
+    monkeypatch.delenv("DISABLE_DOTENV", raising=False)  # conftest의 격리 스위치 해제
     monkeypatch.chdir(env_dir)
 
     seen = {}

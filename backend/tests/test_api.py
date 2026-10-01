@@ -825,7 +825,11 @@ def _facsimile_job(tmp_path: Path, name: str, settings) -> SimpleNamespace:
     artifacts.export_report(job_dir, "ko").write_text(
         json.dumps({"format_version": PDF_EXPORT_FORMAT_VERSION}), encoding="utf-8",
     )
-    derived._write_pdf_export_font_id(job, "ko", derived._pdf_export_font_id(settings))
+    # 최신 캐시 = 지금 입력 지문·폰트 정체성으로 만든 빌드 표식이 있는 PDF
+    derived._write_build_stamp(
+        job, "ko", derived._pdf_export_font_id(settings),
+        derived._translated_pdf_inputs(job, "ko"),
+    )
     return job
 
 
@@ -1310,15 +1314,17 @@ def test_웜캐시_다운로드는_진행중인_빌드_뒤에_줄서지_않는�
 
     monkeypatch.setenv("PDF_EXPORT_QUEUE_TIMEOUT_S", "0.2")
     job, _translated = _dual_job(tmp_path, "warmlock")
-    # 최신 캐시 한 벌: export.ko.pdf + 리포트 + 폰트 표식.
+    # 최신 캐시 한 벌: export.ko.pdf + 리포트 + 빌드 표식(입력 지문·폰트 정체성).
     (job.dir / "layout.json").write_bytes(b"[]")
     (job.dir / "layout.ko.json").write_bytes(b"[]")
     (job.dir / "export.ko.pdf").write_bytes(b"%PDF-1.4 translated")
     (job.dir / "export.ko.report.json").write_text(
         json.dumps({"format_version": PDF_EXPORT_FORMAT_VERSION}), encoding="utf-8")
     settings = SimpleNamespace(pdf_export_font="", max_pages=100)
-    (job.dir / "export.ko.font.txt").write_text(
-        derived._pdf_export_font_id(settings), encoding="utf-8")
+    derived._write_build_stamp(
+        job, "ko", derived._pdf_export_font_id(settings),
+        derived._translated_pdf_inputs(job, "ko"),
+    )
 
     def _never(*args, **kwargs):
         raise AssertionError("캐시가 최신인데 다시 빌드했다")

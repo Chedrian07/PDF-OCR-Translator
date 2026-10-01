@@ -1,5 +1,6 @@
 import {
-  PHASE_LABELS, STATUS_LABELS, READER_FOCUS_RATIO, READER_KEEP_RADIUS,
+  PHASE_LABELS, STATUS_LABELS, READER_FOCUS_RATIO, READER_KEEP_RADIUS, READER_NOTE_MAX_CHARS,
+  READER_NOTES_MAX,
 } from './constants.js';
 
 /* ============================================================================
@@ -723,6 +724,87 @@ export function splitInlineMath(text) {
   if (pos < s.length) out.push({ type: 'text', value: s.slice(pos) });
   if (!out.length) out.push({ type: 'text', value: '' });
   return out;
+}
+
+/* ── 리더 인용·하이라이트 (순수 — tests/에서 검증) ────────────────────────────
+ * 잡별 localStorage 저장 형식: {v:1, updated, items:[{id, kind, page, lang, text, at}]}.
+ * kind는 'highlight' | 'citation', lang은 그 메모를 만든 레일 언어('orig' | 'ko').
+ * 저장소는 사용자가 손댈 수 있는 입력이다 — 읽을 때마다 검증·정리한다.
+ */
+export const READER_NOTE_KINDS = ['highlight', 'citation'];
+const NOTE_KIND_LABEL = { highlight: '하이라이트', citation: '인용' };
+const NOTE_LANG_LABEL = { orig: '원문', ko: '한국어' };
+
+export function normalizeReaderNotes(raw) {
+  const list = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.items) ? raw.items : []);
+  const out = [];
+  const ids = new Set();
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const kind = READER_NOTE_KINDS.includes(item.kind) ? item.kind : '';
+    const text = String(item.text == null ? '' : item.text).replace(/\s+/g, ' ').trim()
+      .slice(0, READER_NOTE_MAX_CHARS);
+    const page = Math.floor(Number(item.page));
+    const id = String(item.id == null ? '' : item.id).slice(0, 64);
+    if (!kind || !text || !(page >= 1) || !id || ids.has(id)) continue;
+    ids.add(id);
+    out.push({
+      id, kind, page, lang: item.lang === 'ko' ? 'ko' : 'orig', text,
+      at: Number.isFinite(Number(item.at)) ? Number(item.at) : 0,
+    });
+  }
+  return out.slice(-READER_NOTES_MAX);
+}
+
+// 같은 종류·페이지·언어·문장이면 새로 쌓지 않는다. 상한을 넘으면 가장 오래된 것부터 버린다.
+export function addReaderNote(items, note, max = READER_NOTES_MAX) {
+  const list = Array.isArray(items) ? items : [];
+  const [clean] = normalizeReaderNotes([note]);
+  if (!clean) return { items: list, note: null, added: false };
+  const dup = list.find((n) => n.kind === clean.kind && n.page === clean.page
+    && n.lang === clean.lang && n.text === clean.text);
+  if (dup) return { items: list, note: dup, added: false };
+  const next = [...list, clean];
+  return { items: next.slice(Math.max(0, next.length - Math.max(1, max))), note: clean, added: true };
+}
+
+export function removeReaderNote(items, id) {
+  return (Array.isArray(items) ? items : []).filter((n) => n.id !== id);
+}
+
+export function readerNoteLabel(note) {
+  return `${NOTE_KIND_LABEL[note.kind] || '메모'} · ${note.page}페이지 · ${NOTE_LANG_LABEL[note.lang] || '원문'}`;
+}
+
+// Markdown 줄머리에서 제목·목록·인용으로 해석될 문자를 무력화한다.
+function escapeMarkdownLineStart(text) {
+  return String(text).replace(/^(\s*)([#>+*-]|\d+[.)])/, '$1\\$2');
+}
+
+// 인용·하이라이트 Markdown 내보내기. 페이지 순(같은 페이지는 저장 순)으로 묶는다.
+export function readerNotesMarkdown(title, items) {
+  const notes = normalizeReaderNotes(items).sort((a, b) => a.page - b.page || a.at - b.at);
+  const lines = [`# ${String(title || '문서').trim() || '문서'} — 인용·하이라이트`, ''];
+  if (!notes.length) lines.push('저장한 인용·하이라이트가 없습니다.', '');
+  for (const kind of ['citation', 'highlight']) {
+    const group = notes.filter((n) => n.kind === kind);
+    if (!group.length) continue;
+    lines.push(`## ${NOTE_KIND_LABEL[kind]} (${group.length})`, '');
+    for (const n of group) {
+      lines.push(`> ${escapeMarkdownLineStart(n.text)}`, '', `— ${n.page}페이지 · ${NOTE_LANG_LABEL[n.lang]}`, '');
+    }
+  }
+  return `${lines.join('\n').trimEnd()}\n`;
+}
+
+// 보관 잡 수 상한 — entries [{key, updated}] 중 지울 키(가장 오래 손대지 않은 것부터).
+// 지금 쓰는 잡의 키(keepKey)는 지우지 않는다.
+export function readerNotesPruneKeys(entries, keepKey, maxJobs) {
+  const cap = Math.max(1, Math.floor(Number(maxJobs)) || 1);
+  const others = (Array.isArray(entries) ? entries : [])
+    .filter((e) => e && e.key !== keepKey)
+    .sort((a, b) => (Number(b.updated) || 0) - (Number(a.updated) || 0));
+  return others.slice(Math.max(0, cap - 1)).map((e) => e.key);
 }
 
 // 원문·한국어 대조 PDF 내보내기 버튼 노출 판정.

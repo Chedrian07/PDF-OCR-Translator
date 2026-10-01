@@ -326,6 +326,10 @@ test('리더 개요: 일시 실패는 캐시하지 않고, 404만 빈 개요로 
 /* ---------------- apiGet 시간 제한 (폴링 직렬화의 짝) ---------------- */
 
 test('apiGet: timeoutMs가 있으면 시간 제한 신호를 붙이고, 응답이 없으면 실패한다', async (t) => {
+  // Node의 AbortSignal.timeout 타이머는 unref라 이벤트 루프를 붙잡지 않는다 — 시간 제한이
+  // 터질 때까지 테스트 프로세스가 살아 있도록 잠깐 붙잡아 둔다.
+  const keepAlive = setInterval(() => {}, 10);
+  t.after(() => clearInterval(keepAlive));
   const seen = [];
   t.mock.method(globalThis, 'fetch', (url, init) => {
     seen.push(init && init.signal);

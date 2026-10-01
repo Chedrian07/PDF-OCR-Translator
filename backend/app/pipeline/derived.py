@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import importlib.util
 import json
@@ -568,6 +569,58 @@ def _write_build_stamp(job, lang: str, font_id: str, inputs: dict) -> None:
         tmp.unlink(missing_ok=True)
 
 
+# ── 빌더 호출 경계: 예외 정규화 · 삭제된 잡 보호 ─────────────────────────────
+@functools.lru_cache(maxsize=1)
+def _mupdf_errors() -> tuple[type[BaseException], ...]:
+    """MuPDF가 던지는 예외 타입 — PyMuPDF는 파이프라인처럼 지연 임포트한다.
+
+    pymupdf.mupdf.FzErrorBase(디스크 만원·사라진 디렉터리에 저장·리댁션 실패 등)는
+    Exception의 직계라 OSError·ValueError·RuntimeError 어디에도 걸리지 않는다.
+    """
+    try:
+        from .pdf import quiet_fitz
+
+        fitz = quiet_fitz()
+        return (fitz.mupdf.FzErrorBase, fitz.FileDataError)
+    except Exception:  # noqa: BLE001 — PyMuPDF가 없으면 정규화할 대상도 없다
+        return ()
+
+
+def _call_builder(builder, *args, message: str, **kwargs):
+    """빌더 호출 — MuPDF 예외를 사용자용 PdfExportError로 정규화한다.
+
+    build_translated_pdf는 fitz.open만 감싸고 페이지 처리·저장은 감싸지 않는다
+    (build_dual_pdf는 전부 감싼다). 그래서 MuPDF 예외가 그대로 새어 /pdf·/page가
+    메시지 없는 500을, /layout이 문서화된 '좌표 텍스트 폴백' 대신 500을 내고 예열
+    스레드는 traceback을 남기고 죽었다.
+    """
+    try:
+        return builder(*args, **kwargs)
+    except (PdfExportError, PdfExportBusyError):
+        raise
+    except _mupdf_errors() as error:
+        raise PdfExportError(message) from error
+
+
+def _require_job_dir(job) -> None:
+    """잡 디렉터리가 사라졌으면(DELETE·TTL GC) 빌드·렌더를 시작하지 않는다."""
+    if not Path(job.dir).is_dir():
+        raise PdfExportError("삭제된 작업입니다")
+
+
+def _discard_if_deleted(job) -> None:
+    """빌드·렌더 **도중** 잡이 삭제됐으면 빌더가 되살린 디렉터리를 치운다.
+
+    빌더·렌더러는 출력 디렉터리를 parents=True로 만든다 — 삭제 직후 끝난 대조 PDF
+    빌드가 meta.json 없는 잡 디렉터리를 되살려(export.ko.dual.pdf만 든 채) 목록·GC·
+    재시작 정리 어디에도 걸리지 않는 영구 고아가 됐다. 삭제 경로(DELETE·GC 모두
+    JobStore.delete_dir)가 세우는 delete_requested로 판정한다.
+    """
+    if getattr(job, "delete_requested", False):
+        shutil.rmtree(job.dir, ignore_errors=True)
+        raise PdfExportError("삭제된 작업입니다")
+
+
 # ── 파생 산출물 보장 ──────────────────────────────────────────────────────
 def _translated_pdf_cache(job, lang: str, font_id: str) -> tuple[bool, Path, dict]:
     """(캐시가 최신인가, 산출물 경로, 리포트).
@@ -618,11 +671,16 @@ def _ensure_translated_pdf(job, lang: str, settings, *, build=build_translated_p
         current, out, report = _translated_pdf_cache(job, lang, font_id)
         if current:
             return out, report
+        _require_job_dir(job)
         # 빌더가 입력을 읽기 **전에** 지문을 뜬다 — 이후의 변경은 전부 표식과
         # 어긋나 이 빌드를 캐시로 확정하지 못하게 만든다(안전한 방향).
         before = _translated_pdf_inputs(job, lang)
         with export_build_slot():
-            built = build(job.dir, lang, fontfile=settings.pdf_export_font)
+            built = _call_builder(
+                build, job.dir, lang, fontfile=settings.pdf_export_font,
+                message="번역 PDF를 만들 수 없습니다 — PDF 처리 중 오류가 났습니다",
+            )
+        _discard_if_deleted(job)
         if before is not None:
             _write_build_stamp(job, lang, font_id, before)
         changed = _translated_pdf_inputs(job, lang) != before
@@ -667,8 +725,14 @@ def _ensure_dual_pdf(job, lang: str, translated_pdf: Path, *, build=build_dual_p
     with _job_render_guard(job.id):
         if _dual_pdf_cache_current(source_pdf, translated_pdf, out):
             return out
+        _require_job_dir(job)
         with export_build_slot():
-            return build(source_pdf, translated_pdf, out)
+            built = _call_builder(
+                build, source_pdf, translated_pdf, out,
+                message="원문·번역 대조 PDF를 만들 수 없습니다",
+            )
+        _discard_if_deleted(job)
+        return built
 
 
 def _page_numbers(pages: list) -> list[int]:
@@ -740,24 +804,29 @@ def _ensure_facsimile_pages(
         signature = _facsimile_signature(job, pdf_path, page_numbers)
         if _facsimile_valid(memo_key, marker, target, signature, page_numbers):
             return target
-        target.mkdir(parents=True, exist_ok=True)
-        _sweep_stale_staging(artifacts.rendered_root(job.dir), lang)
+        _require_job_dir(job)
+        root = artifacts.rendered_root(job.dir)
         # 재생성은 파일 단위로 원자적이어야 한다. 예전에는 기존 PNG를 먼저 지우고
         # 같은 자리에 다시 렌더해, 그 사이 /files 요청이 404나 반쯤 쓰인 이미지를
         # 받았다. 임시 디렉터리에 렌더한 뒤 os.replace로 갈아끼운다.
         staging = artifacts.facsimile_staging(job.dir, lang)
-        staging.mkdir(parents=True, exist_ok=True)
+        try:
+            # parents=False — 그 사이 삭제된 잡 디렉터리를 되살리지 않는다.
+            root.mkdir(exist_ok=True)
+            target.mkdir(exist_ok=True)
+            _sweep_stale_staging(root, lang)
+            staging.mkdir()
+        except FileNotFoundError as error:
+            raise PdfExportError("삭제된 작업입니다") from error
         try:
             # 래스터도 빌드와 같은 전역 상한 아래에 둔다 — 리더 기본 경로는
             # 빌드 1회 + 전 페이지 래스터 1회인데 예전에는 앞의 절반만 상한을
             # 받아, 상한 1인데도 서로 다른 잡 4개의 래스터가 함께 돌았다(실측).
             with export_build_slot():
-                render(
-                    pdf_path,
-                    staging,
-                    dpi=int(job.dpi),
-                    max_pages=settings.max_pages,
+                _render_pages(
+                    render, pdf_path, staging, dpi=int(job.dpi), max_pages=settings.max_pages,
                 )
+            _discard_if_deleted(job)
             fresh = sorted(staging.glob("page_*.png"))
             for path in fresh:
                 os.replace(path, target / path.name)
@@ -775,6 +844,19 @@ def _ensure_facsimile_pages(
             shutil.rmtree(staging, ignore_errors=True)
         _facsimile_memo_set(memo_key, signature, _marker_id(marker))
     return target
+
+
+def _render_pages(render, pdf_path: Path, out_dir: Path, *, dpi: int, max_pages: int) -> None:
+    """번역 PDF 래스터 — 렌더러의 실패(전 페이지 실패·암호화·페이지 상한은
+    ValueError, 손상 PDF는 MuPDF 예외)를 사용자용 PdfExportError로 정규화한다.
+    예전에는 /page?lang=ko가 이 경우 409 안내 대신 500이었다."""
+    try:
+        _call_builder(
+            render, pdf_path, out_dir, dpi=dpi, max_pages=max_pages,
+            message="번역 페이지 이미지를 만들 수 없습니다 — PDF 처리 중 오류가 났습니다",
+        )
+    except ValueError as error:
+        raise PdfExportError(str(error) or "번역 페이지 이미지를 만들 수 없습니다") from error
 
 
 def _facsimile_signature(job, pdf_path: Path, page_numbers: list[int]) -> dict:
@@ -851,13 +933,17 @@ def _try_facsimile_pages(
     """레이아웃 HTML은 PDF export 결함 때문에 완전히 사라지지 않도록 폴백한다.
 
     과부하(PdfExportBusyError)는 여기서 삼키지 않는다 — 조용히 저품질 렌더로
-    떨어지는 대신 라우트가 503으로 알리고 재시도하게 한다.
+    떨어지는 대신 라우트가 503으로 알리고 재시도하게 한다. 그 밖의 실패는 종류를
+    가리지 않고 기록한 뒤 폴백한다 — 예외 하나가 새어 /layout·document.html이
+    문서화된 '좌표 텍스트 렌더' 대신 500이 되던 경로(MuPDF 예외)를 막는다.
     """
     try:
         return _ensure_facsimile_pages(
             job, _page_numbers(pages), lang, settings, render=render, build=build,
         )
-    except (PdfExportError, OSError, ValueError):
+    except PdfExportBusyError:
+        raise
+    except Exception:  # noqa: BLE001 — 폴백 렌더가 이 경로의 계약이다
         logger.exception(
             "facsimile 페이지 준비 실패 — 좌표 텍스트 렌더로 폴백: %s (%s)",
             job.id,
@@ -903,7 +989,7 @@ def warm_translated_pdf(job, lang: str, settings, *, build=build_translated_pdf)
         except PdfExportBusyError:
             logger.debug("PDF 예열 건너뜀(경합): %s/%s", job.id, lang)
             return False
-        except (PdfExportError, OSError, ValueError):
+        except Exception:  # noqa: BLE001 — 예열 스레드가 traceback을 남기고 죽지 않게
             # 예열 실패는 사용자에게 알리지 않는다 — 클릭 시 같은 경로가 다시
             # 시도하고, 그때는 진짜 오류로 보고된다.
             logger.warning("PDF 예열 실패: %s/%s", job.id, lang, exc_info=True)

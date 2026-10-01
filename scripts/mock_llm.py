@@ -4,8 +4,10 @@
   - 정상 모드(기본): 입력 텍스트를 결정적으로 "번역"한다. 마스킹 플레이스홀더
     (<m1 .../> 형태)는 **그대로 보존**하고 영문 단어만 한글로 치환하므로,
     복원 단계·layout 정렬·PDF 조판까지 실제 경로가 전부 돈다.
-  - 결함 주입 모드: ?fault=refusal|refusal_ko|echo|summary|drop_placeholder|http400|http429
+  - 결함 주입 모드: ?fault=refusal|refusal_ko|echo|summary|drop_placeholder|paired_tags|http400|http429
     쿼리 또는 FAULT 환경변수로 A-1(출력 검증) 회귀를 실증한다.
+    paired_tags는 XML 습관이 있는 소형 모델처럼 자기 닫힘 플레이스홀더를 쌍 태그로 바꾼다
+    (감사 translate-llm-10 — 유닛의 첫 태그는 빈 쌍, 나머지는 내용을 감싼 쌍).
     쿼리 경로는 `OPENAI_BASE_URL=http://host:port/v1?fault=echo` 로 쓴다 —
     translate/client.py `_endpoint_url()`이 base의 query를 보존한 채 경로만 이어
     붙이므로(`/v1/chat/completions?fault=echo`) 실제로 도달한다. verify_e2e.py는

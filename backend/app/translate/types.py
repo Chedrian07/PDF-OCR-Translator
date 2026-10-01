@@ -94,6 +94,48 @@ def _env_float(env, name: str, default: float) -> float:
     return value
 
 
+# 샘플링 온도 허용 범위 — OpenAI 호환 API 공통 상한(2)과 하한(0).
+_TEMPERATURE_MAX = 2.0
+
+
+def _env_temperature(env) -> str:
+    """TRANSLATE_TEMPERATURE — "none"(파라미터 생략) 또는 0–2의 유한한 숫자.
+
+    종전에는 소문자화만 하고 요청을 만들 때 float()을 불렀다. 'abc'·'0,2'는 잡마다
+    '번역 중 오류: could not convert…'로, 'nan'은 JSON NaN이 되어 '연결 실패'로,
+    음수는 mlx_lm이 응답 없이 연결을 끊어 재시도 뒤 '연결 실패'로 끝났다(실측).
+    그 사이 health는 translate_available:true를 광고했다. 설정 경계에서 거른다.
+    캐시 키 재료이므로 유효한 값의 표기는 바꾸지 않는다(기존 units.json 호환).
+    """
+    raw = (_clean(env.get("TRANSLATE_TEMPERATURE")) or "0").lower()
+    if raw == "none":
+        return raw
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not (math.isfinite(value) and 0.0 <= value <= _TEMPERATURE_MAX):
+        raise TranslateError(
+            "TRANSLATE_TEMPERATURE는 none 또는 0–2 사이의 숫자여야 합니다"
+        )
+    return raw
+
+
+_FALSE_WORDS = ("0", "false", "no", "off")
+
+
+def _env_flag(env, name: str, default: bool) -> bool:
+    """불리언 env — 0/false/no/off(대소문자 무관)만 거짓. 빈 값은 기본값.
+
+    TRANSLATE_CONTEXT=False·OFF처럼 대문자로 끈 설정이 종전 비교(소문자 튜플과
+    대소문자 구분 비교)에서 참으로 읽혀 문맥이 계속 실렸다.
+    """
+    raw = _clean(env.get(name)).lower()
+    if not raw:
+        return default
+    return raw not in _FALSE_WORDS
+
+
 @dataclass(frozen=True)
 class TranslateConfig:
     base_url: str
@@ -154,9 +196,9 @@ class TranslateConfig:
             ),
             timeout_s=max(5.0, _env_float(e, "TRANSLATE_TIMEOUT_S", 180.0)),
             max_retries=max(0, _env_int(e, "TRANSLATE_MAX_RETRIES", 3)),
-            temperature=(_clean(e.get("TRANSLATE_TEMPERATURE")) or "0").lower(),
+            temperature=_env_temperature(e),
             max_tokens_param=mt_param,
-            context=(_clean(e.get("TRANSLATE_CONTEXT")) or "1") not in ("0", "false", "no"),
+            context=_env_flag(e, "TRANSLATE_CONTEXT", True),
             reasoning=reasoning,
         )
 

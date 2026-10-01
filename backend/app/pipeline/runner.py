@@ -40,6 +40,15 @@ _MAX_JOB_WARNINGS = 200
 # 갈아끼우면 라이브 뷰만 흔들리고 얻는 것이 없다. 실측 회수 사례는 전부
 # 0.45→0.97처럼 큰 폭이라 0.05는 넉넉히 통과한다.
 _FIDELITY_ACCEPT_MARGIN = 0.05
+# 단독 재처리 점수가 이 이내로만 움직이면 전사가 아니라 지표의 한계다(같은 출력을
+# 다시 낸 것). 경고를 '측정 한계'로 써서 품질 문제로 오해되지 않게 한다.
+_FIDELITY_SAME_SCORE = 0.01
+# 후보 글자가 정답의 이 비율에도 못 미치면 '페이지 유실'(청크가 페이지를 통째로 놓침)
+# — 게이트의 존재 이유라 예산에서 먼저 쓰고, 회로 차단 뒤에도 재처리한다.
+_LOST_PAGE_SHARE = 0.10
+# 문서 단위 회로 차단 — 이만큼 재처리했는데 하나도 채택되지 않으면 이 문서에서는
+# 지표가 전사를 제대로 재지 못하는 것이다. 이후 부분 열화 페이지 재처리를 멈춘다.
+_GATE_BREAKER_ATTEMPTS = 3
 
 
 def _retry_fidelity(source_pdf: Path, page_dir: Path, page: int) -> "PageFidelity | None":
@@ -463,6 +472,8 @@ def execute_job(
         retry_budget = [
             max(2, int(total * max(0.0, settings.ocr_fidelity_max_retry_ratio)))
         ]
+        # 문서 단위 게이트 통계 — 회로 차단(_GATE_BREAKER_ATTEMPTS) 판단용
+        gate_state = {"tried": 0, "accepted": 0, "tripped": False}
         engine.drain_warnings()  # 이전 잡의 잔여 경고 폐기 (엔진은 잡 간 공유된다)
         if job.mode != "per_page" and not caps.supports_multi_page:
             # 페이지 단위 모델 안내 — 한 번만 기록 (multi를 선택해도 정상 처리되지만
@@ -617,9 +628,13 @@ def execute_job(
                 #    전 페이지가 0.00으로 나온다 — 전량 오탐이다.
                 #  · 이미 페이지 단위로 도는 엔진은 재처리가 **같은 호출**이라 개선 여지가
                 #    없다(중복 추론만 늘린다).
+                #  · 같은 페이지를 다시 돌려도 결과가 같은 결정적 엔진(textlayer —
+                #    텍스트 레이어·Tesseract)은 재처리가 같은 호출이다.
                 if caps.layout_capability != "full":
                     return
                 if not caps.supports_multi_page or (caps.preferred_chunk_size or 0) == 1:
+                    return
+                if getattr(engine, "deterministic_rerun", False):
                     return
                 source_pdf = job.dir / "source.pdf"
                 if not source_pdf.is_file():
@@ -637,10 +652,17 @@ def execute_job(
                         source_pdf, layout, should_cancel=cancel.is_set
                     )
                 }
+                def _lost(pno: int) -> bool:
+                    r = scored[pno]
+                    return r.ocr_chars < r.truth_chars * _LOST_PAGE_SHARE
+
                 degraded = sorted(
                     pno for pno, r in scored.items()
                     if r.measurable and r.score < threshold
                 )
+                if gate_state["tripped"]:
+                    # 회로 차단 뒤에도 통째로 유실된 페이지는 다시 처리한다
+                    degraded = [pno for pno in degraded if _lost(pno)]
                 if not degraded:
                     return
                 if retry_budget[0] <= 0:
@@ -651,15 +673,21 @@ def execute_job(
                     )
                     return
                 if len(degraded) > retry_budget[0]:
+                    # 예산은 통째로 유실된 페이지 → 점수가 낮은 페이지 순으로 쓴다(앞쪽
+                    # 페이지의 경미한 오탐이 뒤쪽의 진짜 유실을 밀어내지 않게).
                     # 상한에 걸려 버리는 페이지를 조용히 넘기지 않는다 — 그러면
                     # "전부 검사했다"로 읽히지만 실제로는 손대지 못한 페이지가 남는다.
-                    skipped = degraded[retry_budget[0] :]
+                    ranked = sorted(
+                        degraded, key=lambda pno: (not _lost(pno), scored[pno].score, pno)
+                    )
+                    chosen = set(ranked[: retry_budget[0]])
+                    skipped = [pno for pno in degraded if pno not in chosen]
                     merger.warnings.append(
                         f"충실도 미달이지만 재처리 예산이 모자라 건너뛴 페이지: "
                         f"{', '.join(str(pno) for pno in skipped)} "
                         "(OCR_FIDELITY_MAX_RETRY_RATIO로 상한 조정)"
                     )
-                    degraded = degraded[: retry_budget[0]]
+                    degraded = sorted(chosen)
                 first = degraded[0]
 
                 def _relive_text(page_number: int) -> str:
@@ -692,10 +720,11 @@ def execute_job(
                         # 되감아 놓고 그냥 끝내면 라이브 뷰에서 그 뒤 페이지가 사라진다.
                         _refill(pno)
                         raise JobCanceled()
-                    if pno not in degraded:
+                    if pno not in degraded or (gate_state["tripped"] and not _lost(pno)):
                         sink.emit_page(pno, _relive_text(pno))
                         continue
                     retry_budget[0] -= 1
+                    gate_state["tried"] += 1
                     before = scored[pno]
                     page_dir = work_dir / "fidelity" / f"page_{pno:04d}"
                     shutil.rmtree(page_dir, ignore_errors=True)
@@ -728,9 +757,23 @@ def execute_job(
                                 ChunkResult(page_dir, pno, 1, page_md, single=True),
                             )
                             accepted = True
+                            gate_state["accepted"] += 1
                             note = (
                                 f"충실도 {before.score:.2f} → {after.score:.2f}로 "
                                 "개선되어 단독 재처리 결과를 채택"
+                            )
+                        elif (
+                            after is not None
+                            and after.measurable
+                            and abs(after.score - before.score) <= _FIDELITY_SAME_SCORE
+                            and not _lost(pno)
+                        ):
+                            # 단독 추론이 같은 전사를 다시 냈다 — 페이지가 아니라 지표의
+                            # 한계다(수식·목차 표기 차이 등). 품질 문제로 읽히지 않게.
+                            # (통째로 유실된 페이지가 또 비면 그건 진짜 실패다)
+                            note = (
+                                f"충실도 {before.score:.2f} → {after.score:.2f} — 측정 "
+                                "한계로 판단해 원래 결과 유지"
                             )
                         else:
                             got = (
@@ -748,6 +791,17 @@ def execute_job(
                         sink.emit_page(pno, _relive_text(pno))
                     merger.warnings.append(f"{pno}페이지: {note}")
                     logger.info("%d페이지 충실도 게이트: %s", pno, note)
+                    if (
+                        not gate_state["tripped"]
+                        and gate_state["accepted"] == 0
+                        and gate_state["tried"] >= _GATE_BREAKER_ATTEMPTS
+                    ):
+                        gate_state["tripped"] = True
+                        merger.warnings.append(
+                            f"충실도 게이트: 단독 재처리 {gate_state['tried']}회가 모두 "
+                            "개선되지 않아 이 문서에서는 부분 열화 페이지 재처리를 멈춥니다 "
+                            "(측정 한계로 판단 — 통째로 유실된 페이지만 계속 재처리)"
+                        )
 
             def _gate(gate_start: int, gate_pages: list[Path]) -> None:
                 """충실도 게이트 — **선택적 개선**이다. 여기서 난 IO 오류가 이미 완주한

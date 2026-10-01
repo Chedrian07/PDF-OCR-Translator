@@ -532,3 +532,27 @@ def test_cpu_decode_keeps_pool_disabled(monkeypatch):
     monkeypatch.setattr(fd, "autorelease_pool", _spy_pool(events))
     _run(StubModel(eos_after=6), block=4, streamer=StubStreamer())
     assert events and all(enabled is False for _, enabled in events)
+
+
+# ── 길이 상한 판정(hit_length_limit) — 잘린 출력을 정상 결과로 채택하지 않기 위한 계약 ──
+
+def test_hit_length_limit_flags_only_eosless_max_length_outputs():
+    from app.engine.fast_decode import hit_length_limit
+
+    capped = _run(StubModel(eos_after=None), block=4, max_length=9)
+    assert capped.shape == (1, 9)
+    assert hit_length_limit(capped, {"max_length": 9, "eos_token_id": EOS}) is True
+
+    finished = _run(StubModel(eos_after=3), block=4, max_length=64)
+    assert int(finished[0, -1]) == EOS
+    assert hit_length_limit(finished, {"max_length": 64, "eos_token_id": EOS}) is False
+
+    # 상한 바로 그 자리에서 EOS로 끝났으면 잘린 것이 아니다
+    exact = torch.tensor([[0, 1, 2, EOS]])
+    assert hit_length_limit(exact, {"max_length": 4, "eos_token_id": EOS}) is False
+    # EOS id 목록·EOS 미지정
+    assert hit_length_limit(exact, {"max_length": 4, "eos_token_id": [3, EOS]}) is False
+    assert hit_length_limit(exact, {"max_length": 4, "eos_token_id": None}) is True
+    # 중단 기준(취소·반복)으로 상한 전에 멈춘 출력은 상한 도달이 아니다
+    stopped = torch.tensor([[0, 1, 2]])
+    assert hit_length_limit(stopped, {"max_length": 9, "eos_token_id": EOS}) is False

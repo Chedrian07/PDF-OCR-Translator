@@ -31,6 +31,7 @@ import {
 } from './js/live.js';
 import {
   armDelete, deleteJob, openJob, pollJobs, refreshJobs, requestCancel, showEmptyState,
+  toggleJobWarnings,
 } from './js/jobs.js';
 import { teardownConnections } from './js/sse.js';
 import { cancelTranslate, setLang, startTranslate } from './js/translate.js';
@@ -83,6 +84,7 @@ function init() {
   el.streamPane.addEventListener('scroll', onStreamScroll, { passive: true });
   el.livePreview.addEventListener('scroll', onPreviewScroll, { passive: true });
   el.jobStop.addEventListener('click', requestCancel);
+  el.jobWarningsChip.addEventListener('click', toggleJobWarnings); // 품질 경고 목록 펼침/접기
   el.jobDelete.addEventListener('click', () => {
     if (!state.currentJobId) return;
     // 키에 잡 id 포함 — 잡 전환 뒤 남은 무장이 다른 잡을 삭제하지 못하게 한다.

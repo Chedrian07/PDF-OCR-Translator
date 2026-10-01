@@ -143,6 +143,8 @@ class OpenAICompatClient:
         self.api_mode_used = "" if cfg.api_mode == "auto" else cfg.api_mode
         # auto 스트리밍 래치 — None=미확인, True=스트림 성공, False=서버가 거부해 비스트리밍
         self._stream_ok: bool | None = None
+        # Responses store:false 래치 — False면 서버가 store 파라미터를 거부해 빼고 보낸다
+        self._store_ok: bool | None = None
 
     def set_cancel_check(self, check: Callable[[], bool] | None) -> None:
         """엔진의 cancel+abort predicate를 주입한다 (사용자 제공 client와 호환용 선택 API)."""
@@ -440,6 +442,11 @@ class OpenAICompatClient:
         temp_ok = cfg.temperature != "none"
         if mode == "responses":
             p: dict = {"model": cfg.model, "instructions": system, "input": user}
+            if self._store_ok is not False:
+                # Responses는 store 생략 시 true — OpenAI는 응답 객체를 30일 보관하고 oMLX는
+                # 원문+번역을 SSD에 최근 1000건까지 평문 영속한다(mlx-integration-2).
+                # Q&A 클라이언트와 같은 store:false 약속을 번역 경로에도 지킨다.
+                p["store"] = False
             if temp_ok:
                 p["temperature"] = float(cfg.temperature)
             if cfg.max_tokens_param != "none":
@@ -477,6 +484,7 @@ class OpenAICompatClient:
         attempt = 0
         timeouts = 0
         stream_probe = False  # auto 스트리밍이 거부돼 같은 요청을 비스트리밍으로 재시도 중
+        store_probe = False   # store 파라미터가 거부돼 store 없이 재시도 중
         while True:
             self._raise_if_cancelled()
             try:
@@ -517,6 +525,14 @@ class OpenAICompatClient:
 
             if status == 200:
                 result = self._parse(mode, body)
+                if store_probe:
+                    self._store_ok = False
+                    logger.warning(
+                        "번역 API가 store 파라미터를 거부했습니다 — 이 잡은 store 없이 보냅니다"
+                        " (서버의 응답 보관 정책을 확인하세요)"
+                    )
+                elif "store" in payload:
+                    self._store_ok = True
                 if stream_probe:
                     self._stream_ok = False
                     logger.warning(
@@ -535,6 +551,14 @@ class OpenAICompatClient:
                 # 래치한다. 비스트리밍도 같은 오류면 원래 오류 처리로 간다(유닛 거부 등).
                 payload = self._build_payload(mode, system, user, max_tokens, stream=False)
                 stream_probe = True
+                continue
+            if (
+                "store" in payload and self._store_ok is None
+                and status in _STREAM_REJECTED and "store" in str(body).lower()
+            ):
+                # store를 모르는 엄격한 Responses 구현 — 빼고 1회 재시도, 성공하면 래치.
+                payload = {k: v for k, v in payload.items() if k != "store"}
+                store_probe = True
                 continue
             if allow_fallback and status in _FALLBACK:
                 raise _NeedsFallback()

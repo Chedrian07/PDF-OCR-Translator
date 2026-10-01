@@ -20,7 +20,10 @@ services:
       # OPENAI_MODEL: qwen3:8b
 
   ollama:
-    image: ollama/ollama:latest   # TODO: 버전 태그 고정 권장
+    # 버전 태그 + digest 고정 — :latest는 재생성 시점에 따라 검증되지 않은 버전으로
+    # 조용히 바뀌었다. 갱신: `docker buildx imagetools inspect ollama/ollama:<버전>`의
+    # Digest(멀티 아키텍처 인덱스)로 태그와 함께 바꾼다(Dependabot docker 생태계가 PR을 연다).
+    image: ollama/ollama:0.35.0@sha256:2a6e883b917fc543389599dae79918f5cac9e1438890506982f44aa4f5625d01
     # 포트는 Docker 내부 네트워크에만 노출 — 호스트에는 절대 공개하지 않는다
     expose:
       - "11434"

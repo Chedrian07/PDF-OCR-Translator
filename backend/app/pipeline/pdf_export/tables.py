@@ -8,7 +8,7 @@ from ..pdf import quiet_fitz
 from .constants import _MAX_TABLE_CELLS, _MIN_FONT_PT, _TABLE_RULE_TEXT_GAP_PT
 from .geometry import _rect_horizontal_overlap
 from .models import _RawTableCell, _SourceSpan, _TableCell
-from .spans import _source_span_records
+from .spans import _source_span_records, _span_redaction_band
 from .text import _plain_text
 
 
@@ -387,8 +387,17 @@ def _table_cell_source_style(
         align = 2
     else:
         align = 0
-    ink += (-0.4, -0.3, 0.4, 0.3)
-    ink &= cell_rect
+    # 지울 영역은 span bbox가 아니라 baseline 띠의 합이다 — 행 간격이 촘촘한 표에서
+    # span bbox(+0.3pt)는 다음 행 글리프 상자에 닿아, 번역하지 않는 아래 셀 값까지
+    # 지울 수 있다. 여러 줄 셀도 띠의 합집합이 첫 줄~끝 줄 사이를 모두 덮는다.
+    fitz = quiet_fitz()
+    redact = _span_redaction_band(fitz, spans[0])
+    for span in spans[1:]:
+        redact.include_rect(_span_redaction_band(fitz, span))
+    redact &= cell_rect
+    if redact.is_empty:
+        redact = ink + (-0.4, -0.3, 0.4, 0.3)
+        redact &= cell_rect
     return min(12.0, max(_MIN_FONT_PT, source_size * 1.03)), align, (
         bold_chars > total_chars * 0.5
-    ), ink
+    ), redact

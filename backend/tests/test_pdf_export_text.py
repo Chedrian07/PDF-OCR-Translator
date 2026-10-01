@@ -157,6 +157,12 @@ def test_emphasis_markers_present_in_the_source_are_kept_literally():
     assert strip_markdown("__x__ 는 변수", "the __x__ variable") == "__x__ 는 변수"
 
 
+def test_a_single_source_star_does_not_keep_llm_bold_markers():
+    """원문의 각주 '*' 하나 때문에 번역의 `**굵게**` 표기까지 지면에 남기지 않는다."""
+    assert strip_markdown("**중요한** 결과*", "important result*") == "중요한 결과*"
+    assert strip_markdown("**굵게**와 *기울임*", "bold and *italic*") == "굵게와 *기울임*"
+
+
 def test_list_bullets_survive_when_the_source_block_is_a_list():
     """원문 글머리표 글리프는 블록 소유로 리댁션된다 — 번역문 쪽 표기를 '• '로 남긴다."""
     assert strip_markdown(

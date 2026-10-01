@@ -30,7 +30,7 @@
 | 단일 이미지 | `model.infer(tokenizer, prompt='<image>document parsing.', ...)` — gundam(1024/640/crop) 또는 base(1024/1024) |
 | PDF/멀티페이지 | `model.infer_multi(tokenizer, prompt='<image>Multi page parsing.', image_files=[...], image_size=1024, max_length=32768, no_repeat_ngram_size=35, ngram_window=1024, save_results=True)` |
 | 페이지 구분 | 출력 텍스트에 `<PAGE>` 마커 |
-| 이미지(figure) 추출 | 모델이 `<|ref|>image<|/ref|><|det|>[[x1,y1,x2,y2]]<|/det|>` (0–999 정규화 좌표) 출력 → 원본 페이지에서 크롭하여 `{out}/images/page_{i}_{k}.jpg` 저장, 마크다운에는 `![](images/page_{i}_{k}.jpg)` 치환 |
+| 이미지(figure) 추출 | 모델이 `<\|ref\|>image<\|/ref\|><\|det\|>[[x1,y1,x2,y2]]<\|/det\|>` (0–999 정규화 좌표) 출력 → 원본 페이지에서 크롭하여 `{out}/images/page_{i}_{k}.jpg` 저장, 마크다운에는 `![](images/page_{i}_{k}.jpg)` 치환 |
 | 레이아웃 시각화 | 페이지별 `result_with_boxes_{i}.jpg` 저장 (GIF 데모의 박스 오버레이) |
 | 고정 의존성 | 모델 README 기준 — torch==2.10.0, torchvision==0.25.0, transformers==4.57.1 등. 벤더 모델 코드가 이 API에 묶여 고정하며, 남은 pip-audit 권고는 수용한 잔여 위험이다(근거는 `backend/pyproject.toml` 고정 옆 주석) |
 | 보안 고정 | 모델 수치와 무관한 I/O 라이브러리는 README 고정에서 이탈 — pymupdf==1.28.2(동봉 MuPDF의 CVE-2026-3308 수정), pillow==12.3.0. 전이 의존 urllib3≥2.8.0·anyio≥4.14.2와 함께 `backend/tests/test_dependency_floor.py`가 하한을 지킨다 |
@@ -1148,7 +1148,7 @@ auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은
 | `MAX_PAGES` | `200` | 페이지 상한 (1 이상) |
 | `MAX_UPLOAD_MB` | `100` | 업로드 상한 (1 이상) |
 | `MAX_LENGTH` | `32768` | 생성 총 길이 상한 (1 이상) |
-| `MAX_PAGE_OUTPUT_CHARS` | `16384` | `<PAGE>` 기준 페이지별 출력 **내용** 문자 hard limit — 레이아웃 태그(`<|ref|>`/`<|det|>` 블록)·HTML 표 태그는 세지 않는다(태그가 델타 사이에 걸치면 닫힐 때까지 최대 512자 보류). single에도 동일 적용, unlimited 엔진 전용, 0 이하=비활성 |
+| `MAX_PAGE_OUTPUT_CHARS` | `16384` | `<PAGE>` 기준 페이지별 출력 **내용** 문자 hard limit — 레이아웃 태그(`<\|ref\|>`/`<\|det\|>` 블록)·HTML 표 태그는 세지 않는다(태그가 델타 사이에 걸치면 닫힐 때까지 최대 512자 보류). single에도 동일 적용, unlimited 엔진 전용, 0 이하=비활성 |
 | `MAX_PAGE_OUTPUT_TOKENS` | `6144` | 페이지별 생성 토큰 hard limit (fast decode는 최대 한 block만큼 정지 지연, 0 이하=비활성). 마크업만 반복하는 폭주는 이 상한이 멈춘다 |
 | `PAGE_SEPARATOR` | `\n\n---\n\n` | 병합 시 페이지 구분자. 백슬래시 이스케이프(`\n`·`\t`·`\uXXXX`)를 해석하고 한글 등 비ASCII는 그대로 보존 |
 | `OCR_CPU_THREADS` | `0` | CPU 백엔드 torch 스레드 수 (0=torch 기본) |

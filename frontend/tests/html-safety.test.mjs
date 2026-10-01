@@ -135,5 +135,8 @@ test('CSP meta는 리소스보다 먼저, 테마 부트스트랩은 동기 스�
   assert.ok(theme, 'theme-init.js가 head에 있어야 한다');
   assert.doesNotMatch(theme[0], /\b(defer|async|type="module")\b/, '첫 페인트 전에 실행돼야 한다');
   assert.ok(fs.existsSync(path.join(FRONTEND, 'theme-init.js')));
-  assert.match(head, /<meta name="referrer" content="no-referrer">/);
+  // 서버 헤더 Referrer-Policy(same-origin)와 같은 값 — 다르면 meta가 헤더를 조용히 덮는다
+  // (backend/tests/test_security_headers.py가 두 층을 대조). 바깥 출처로는 어느 쪽이든
+  // Referer(인스턴스 주소)를 싣지 않는다.
+  assert.match(head, /<meta name="referrer" content="same-origin">/);
 });

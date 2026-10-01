@@ -166,27 +166,45 @@ class PageFidelity:
         return self.score is not None
 
 
-def _pdf_graphic_area(fitz, page, rect) -> float:
-    """PDF가 그 사각형 안에 실제로 그린 그림·벡터의 면적 합(중복 허용).
+def _pdf_graphic_areas(fitz, page, rects: list) -> list[float]:
+    """PDF가 각 사각형 안에 실제로 그린 그림·벡터의 면적 합(중복 허용) — 페이지당 1회 추출.
 
     모델의 그림 분류를 **원본으로 검증**하는 데 쓴다. 중복 계산은 의도적이다 —
     과대평가는 "모델 분류를 믿는다"는 기존 동작으로 떨어질 뿐이라 안전하다.
+
+    예전에는 그림 블록마다 `get_image_info()`·`get_drawings()`를 페이지 전체에 대해
+    새로 불러, 벡터 10^6개 페이지 + 그림 블록 3개면 한 페이지에 24초·1.67GB를 쓰며
+    GIL을 쥐었다. 목록은 페이지당 한 번만 뽑고 모든 블록의 교차 면적을 같은 패스에서
+    더한다. `get_cdrawings()`(목록 모드)는 `get_drawings()`와 같은 경로·사각형을 내되
+    경로마다 Point/Rect 객체를 만들지 않는다(실측: 두 샘플 논문 4,262개 경로에서 동일).
     """
-    total = 0.0
+    totals = [0.0] * len(rects)
+    if not rects:
+        return totals
+    boxes = [(r.x0, r.y0, r.x1, r.y1) for r in rects]
+
+    def _add(bbox) -> None:
+        x0, y0, x1, y1 = bbox
+        for i, (a0, b0, a1, b1) in enumerate(boxes):
+            w = min(x1, a1) - max(x0, a0)
+            if w > 0:
+                h = min(y1, b1) - max(y0, b0)
+                if h > 0:
+                    totals[i] += w * h
+
     try:
         for info in page.get_image_info():
-            total += abs((fitz.Rect(info["bbox"]) & rect).get_area())
+            _add(info["bbox"])
     except Exception:  # noqa: BLE001 — 그림 목록 실패는 '검증 불가'
         pass
     try:
-        for drawing in page.get_drawings():
+        for drawing in page.get_cdrawings():
             box = drawing.get("rect")
-            if box is None:
-                continue
-            total += abs((fitz.Rect(box) & rect).get_area())
+            if box is not None:
+                _add(box)
     except Exception:  # noqa: BLE001
         pass
-    return total
+    return totals
 
 
 def _image_rects(fitz, page, blocks: list[dict]) -> list:
@@ -198,7 +216,7 @@ def _image_rects(fitz, page, blocks: list[dict]) -> list:
     이유인 바로 그 실패에서 침묵한다.** 원본 PDF가 거기에 아무것도 그리지 않았다면
     그 분류는 틀린 것이므로 무시한다.
     """
-    out = []
+    candidates = []
     w, h = page.rect.width, page.rect.height
     for b in blocks:
         if not isinstance(b, dict):
@@ -217,8 +235,13 @@ def _image_rects(fitz, page, blocks: list[dict]) -> list:
         rect.normalize()
         if rect.is_empty:
             continue
+        candidates.append(rect)
+    areas = _pdf_graphic_areas(fitz, page, [r for r in candidates if r.get_area() > 0])
+    out = []
+    drawn = iter(areas)
+    for rect in candidates:
         area = abs(rect.get_area())
-        if area > 0 and _pdf_graphic_area(fitz, page, rect) < area * _GRAPHIC_MIN_COVER:
+        if area > 0 and next(drawn) < area * _GRAPHIC_MIN_COVER:
             continue        # 원본에 그림이 없다 — 모델의 그림 분류를 믿지 않는다
         out.append(rect)
     return out

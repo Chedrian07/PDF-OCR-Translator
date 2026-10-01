@@ -62,6 +62,20 @@ def test_charset_covers_pipeline_generated_characters():
         assert char not in charset
 
 
+def test_charset_includes_html_entity_decoded_characters():
+    """표 셀은 엔티티를 디코드한 글자로 그려진다 — 집합도 디코드 결과를 포함해야 한다.
+
+    원시 레이아웃만 직렬화해 훑으면 `&check;`의 '✓', `&deg;`의 '°'가 빠져 서브셋
+    폰트에서는 has_glyph가 원본과 달라지고 셀에 빈 네모가 찍힌다(동치 계약 위반).
+    """
+    charset = drawable_charset([{"blocks": [{
+        "content": "<table><tr><td>Acc &check;</td><td>36.5&deg;C</td>"
+        "<td>&#9830;</td><td>a &mdash; b</td></tr></table>",
+    }]}])
+    for char in ("✓", "°", "♦", "—"):
+        assert char in charset, char
+
+
 def test_charset_is_deterministic():
     payload = [{"blocks": [{"content": "나가다"}]}]
     assert drawable_charset(payload) == drawable_charset(payload)

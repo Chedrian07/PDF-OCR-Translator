@@ -17,6 +17,16 @@ import pytest
 from conftest import wait_done
 
 
+@pytest.fixture(autouse=True)
+def _skip_font_subsetting(monkeypatch):
+    """여기 테스트는 라우트·캐시 의미론만 본다 — 실제 빌드마다 시스템 CJK 폰트를
+    서브셋하는 비용(빌드당 ~1.3s, 이 파일 전체로 수십 초)은 건너뛴다. 서브셋 자체의
+    정확성은 tests/test_pdf_export_subset.py가 지킨다."""
+    monkeypatch.setattr(
+        "app.pipeline.pdf_export.build.subset_font_files", lambda *args, **kwargs: {},
+    )
+
+
 def _upload(client, pdf_bytes: bytes):
     return client.post(
         "/api/jobs", files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},

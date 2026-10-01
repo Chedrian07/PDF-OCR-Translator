@@ -149,8 +149,27 @@ def _pct(v: int) -> str:
     return f"{v / 999 * 100:.2f}"
 
 
+# ── 실제 HTML 태그만 지우는 화이트리스트 ──────────────────────────────────
+# 예전 `<[^>]+>`는 'p < 0.05 … n > 30'처럼 부등호 사이의 문장, `<think>`·`<eos>`·
+# `<|im_start|>` 같은 특수 토큰을 통째로 삼켰다(번역 PDF에서는 원문이 리댁션돼 독자가
+# 손실을 알 수 없다). OCR·번역이 실제로 내는 서식·표 태그 이름만 받고, 이름 뒤 경계
+# (공백·`/`·`>`)를 강제해 `<threshold>`의 `th` 같은 접두 오인을 막는다. 속성은
+# `이름=값` 꼴만 받아 `a <b and c> d` 같은 산문을 태그로 보지 않는다.
+# pdf_export.text도 같은 정규식을 쓴다(한곳에서만 고친다).
+_HTML_TAG_NAMES = (
+    "a|abbr|b|big|blockquote|br|caption|center|cite|code|col|colgroup|dd|del|div|"
+    "dl|dt|em|font|h[1-6]|hr|i|img|ins|kbd|li|mark|ol|p|pre|q|s|samp|small|span|"
+    "strike|strong|sub|sup|table|tbody|td|tfoot|th|thead|tr|tt|u|ul|var"
+)
+_HTML_ATTR = r"""\s+[A-Za-z_:][-\w:.]*\s*=\s*(?:"[^"<>]*"|'[^'<>]*'|[^\s"'<>=`]+)"""
+HTML_TAG_RE = re.compile(
+    rf"<(?:/(?:{_HTML_TAG_NAMES})\s*|(?:{_HTML_TAG_NAMES})(?:{_HTML_ATTR})*\s*/?)>",
+    re.IGNORECASE,
+)
+
+
 # ── 면적 기반 폰트 크기 추정 (cqw 단위, 해상도 독립) ──────────────────────
-_TAG_RE = re.compile(r"<[^>]+>")
+_TAG_RE = HTML_TAG_RE
 _WS_RE = re.compile(r"\s+")
 # CJK/전각: 한글 자모·음절, 한자(라디컬 포함), 가나, 전각 폼 — 폭 1.0em 취급
 _CJK_RE = re.compile(

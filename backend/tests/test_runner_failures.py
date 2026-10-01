@@ -150,11 +150,13 @@ def test_failed_multi_chunk_is_reprocessed_page_by_page(tmp_path):
     for page in range(1, 5):
         assert f"![](images/p{page:04d}_0.jpg)" in md
     assert len(md.split("\n\n---\n\n")) == 4  # 글로벌 페이지 수 정합 유지
-    assert len(job.warnings) == 1
-    assert "1–2페이지" in job.warnings[0] and "페이지별 재처리" in job.warnings[0]
+    # 페이지별 single로 전부 살렸다 — 품질 저하가 아니라 처리 경위라 참고(notices)다
+    assert job.warnings == []
+    assert len(job.notices) == 1
+    assert "1–2페이지" in job.notices[0] and "페이지별 재처리" in job.notices[0]
     meta = json.loads((job.dir / "meta.json").read_text(encoding="utf-8"))
     assert meta["status"] == "done"
-    assert meta["warnings"] == job.warnings
+    assert meta["warnings"] == [] and meta["notices"] == job.notices
 
 
 class PageFailingEngine(FakeEngine):
@@ -287,7 +289,8 @@ def test_repetitive_multi_chunk_falls_back_to_single_pages(tmp_path):
     for page in range(1, 5):
         assert f"![](images/p{page:04d}_0.jpg)" in md
     assert not (job.dir / "images" / "p0001_99.jpg").exists()
-    assert any("반복/출력 상한 감지로 페이지별 재처리" in warning for warning in job.warnings)
+    assert any("반복/출력 상한 감지로 페이지별 재처리" in note for note in job.notices)
+    assert job.warnings == []  # 페이지별 single로 모두 복구 — 남은 품질 저하 없음
 
 
 def test_single_fallback_failure_recovers_only_that_page_from_pdf_text(tmp_path):
@@ -402,10 +405,15 @@ def test_canceled_job_keeps_the_warnings_it_accumulated(tmp_path):
 
         def run_multi(self, image_paths, out_dir, sink, cancel):
             self.calls += 1
-            if self.calls <= 2:  # 청크1: 최초 + 재시도 실패 → 플레이스홀더 + 경고
+            if self.calls <= 2:  # 청크1: 최초 + 재시도 실패 → 페이지별 재처리(참고)
                 raise RuntimeError("모의 실패")
             cancel.set()  # 청크2 진입 시 취소
             raise JobCanceled()
+
+        def run_single(self, image_path, out_dir, sink, cancel):
+            if Path(image_path).stem.endswith("_0002"):  # 2쪽은 텍스트 레이어로 복구(경고)
+                raise RuntimeError("모의 페이지 실패")
+            return super().run_single(image_path, out_dir, sink, cancel)
 
     store = JobStore(tmp_path / "jobs")
     broker = EventBroker()
@@ -421,9 +429,10 @@ def test_canceled_job_keeps_the_warnings_it_accumulated(tmp_path):
 
     assert job.status == "canceled"
     assert job.warnings, "취소 전에 쌓인 경고가 사라졌다"
-    assert any("페이지별 재처리" in w for w in job.warnings)
+    assert any("2페이지" in w and "텍스트 레이어로 복구" in w for w in job.warnings)
+    assert any("페이지별 재처리" in n for n in job.notices), "취소 전에 쌓인 참고가 사라졌다"
     meta = json.loads((job.dir / "meta.json").read_text(encoding="utf-8"))
-    assert meta["warnings"] == job.warnings
+    assert meta["warnings"] == job.warnings and meta["notices"] == job.notices
 
 
 class _DeviceTensor:
@@ -579,7 +588,8 @@ def test_output_limit_keeps_completed_pages_and_reprocesses_the_rest(tmp_path):
     assert not list((job.dir / "images").glob("p0002_x*"))
     layout = json.loads((job.dir / "layout.json").read_text(encoding="utf-8"))
     assert [p["page"] for p in layout] == [1, 2, 3, 4]
-    assert any("MAX_LENGTH 도달" in w and "앞 2쪽은 유지" in w for w in job.warnings), job.warnings
+    assert any("MAX_LENGTH 도달" in n and "앞 2쪽은 유지" in n for n in job.notices), job.notices
+    assert job.warnings == []  # 잘린 쪽부터 단독 재처리로 모두 살렸다
     # 라이브 스트림도 페이지당 세그먼트 하나 — 잘린 페이지 출력은 물려졌다
     assert client_view(events).count("<PAGE>") == 4
 
@@ -592,7 +602,7 @@ def test_output_limit_without_partial_output_reprocesses_every_page(tmp_path):
     assert engine.single_calls == {1: 1, 2: 1, 3: 1, 4: 1}
     md = (job.dir / "result.md").read_text(encoding="utf-8")
     assert md.count("SINGLE-RUN") == 4
-    assert any("MAX_LENGTH 도달" in w for w in job.warnings), job.warnings
+    assert any("MAX_LENGTH 도달" in n for n in job.notices), job.notices
 
 
 def test_output_limit_in_per_page_mode_names_the_cause(tmp_path):
@@ -795,6 +805,7 @@ def test_canceled_chunk_skips_marker_correction_and_the_fidelity_gate(tmp_path):
     assert engine.single_calls == 0                  # 게이트 재처리 없음
     assert [e for e, _ in events if e == "reset"] == []
     assert job.warnings == ["1–8페이지: 취소로 중단된 청크 — 생성된 부분까지만 병합했습니다"]
+    assert job.notices == []
     assert job.progress["current_page"] <= 2         # 실제로 처리한 페이지까지만
     md = (job.dir / "result.md").read_text(encoding="utf-8")
     assert "페이지 1" in md and "페이지 2" in md     # 부분 결과는 보존된다

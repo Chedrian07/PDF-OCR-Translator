@@ -1,5 +1,5 @@
 import { ICON, THEME_KEY, katexOptions } from './constants.js';
-import { RETRY_AFTER_FALLBACK_S, RETRY_AFTER_MAX_S } from './core.js';
+import { RETRY_AFTER_FALLBACK_S, RETRY_AFTER_MAX_S, imageSrcAllowed } from './core.js';
 import { el, state } from './state.js';
 
 /* ============================ Utilities ============================ */
@@ -131,6 +131,70 @@ export function typesetMath(root) {
       elm.dataset.mathDone = '1';
     } catch (_) { /* 렌더 불가 tex는 원문 유지 */ }
   });
+}
+
+/* ── 서버 렌더 HTML 주입 (외부 이미지 차단 + 지연 로딩) ─────────────────── */
+// 서버 조각(/html·/render-preview·/layout)은 텍스트를 이스케이프해 오지만 마크다운 이미지의
+// src는 그대로다 — 문서에 숨은 ![](https://tracker…)가 여는 순간 제3자·LAN 요청이 된다
+// (frontend-3). <template>로 먼저 파싱하면(inert — 아무것도 요청하지 않는다) 붙이기 전에
+// 고칠 수 있다. index.html의 CSP(img-src 'self' data: blob:)가 최후 방어다.
+function blockedImageLabel(img, origin) {
+  let host = '';
+  try { host = new URL(img.getAttribute('src'), `${origin}/`).host; } catch (_) { /* 깨진 주소 */ }
+  const alt = (img.getAttribute('alt') || '').trim();
+  return h('span', {
+    class: 'blocked-image',
+    title: host ? `외부 이미지를 불러오지 않았습니다: ${host}` : '외부 이미지를 불러오지 않았습니다',
+    text: alt ? `[외부 이미지 차단됨: ${alt}]` : '[외부 이미지 차단됨]',
+  });
+}
+
+function srcsetAllowed(value, origin) {
+  return String(value || '').split(',')
+    .map((part) => part.trim().split(/\s+/)[0])
+    .every((url) => imageSrcAllowed(url, origin));
+}
+
+// options.lazyImages: 긴 문서의 페이지 PNG를 한꺼번에 받지 않게 loading=lazy를 붙인다.
+export function sanitizeImageSources(root, options = {}) {
+  const origin = typeof location !== 'undefined' ? location.origin : '';
+  for (const img of root.querySelectorAll('img')) {
+    if (!imageSrcAllowed(img.getAttribute('src'), origin)) {
+      img.replaceWith(blockedImageLabel(img, origin));
+      continue;
+    }
+    if (img.hasAttribute('srcset') && !srcsetAllowed(img.getAttribute('srcset'), origin)) {
+      img.removeAttribute('srcset');
+    }
+    if (options.lazyImages) {
+      img.setAttribute('loading', 'lazy');
+      img.setAttribute('decoding', 'async');
+    }
+  }
+  // 다른 미디어 요소의 주소 속성 — 마크다운 렌더러는 만들지 않지만 방어적으로 같은 규칙.
+  for (const node of root.querySelectorAll('source, video, audio, image, input')) {
+    for (const name of ['src', 'poster', 'href', 'xlink:href']) {
+      if (node.hasAttribute(name) && !imageSrcAllowed(node.getAttribute(name), origin)) {
+        node.removeAttribute(name);
+      }
+    }
+    if (node.hasAttribute('srcset') && !srcsetAllowed(node.getAttribute('srcset'), origin)) {
+      node.removeAttribute('srcset');
+    }
+  }
+}
+
+export function trustedHtmlFragment(html, options) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  sanitizeImageSources(tpl.content, options);
+  return tpl.content;
+}
+
+// Trusted server-rendered fragment를 컨테이너에 넣는다 — 외부 이미지는 붙이기 전에 막는다.
+export function setTrustedHtml(container, html, options) {
+  container.textContent = '';
+  container.appendChild(trustedHtmlFragment(html, options));
 }
 
 export function parseEventData(e) {

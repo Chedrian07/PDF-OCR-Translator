@@ -661,6 +661,17 @@ export function alignmentBatchPlan(total, current, radius, loaded, maxBatch = 16
   return plan;
 }
 
+// 리더 문서 재진입 때 레일에서 다시 그릴 페이지 (순수 — tests/에서 검증).
+// 레일을 새로 만들었으면(잡·언어·총 페이지 변경) 캐시된 페이지를 전부 그리고, 그 밖
+// (탭 재활성화·뷰어 열기)에는 아직 한 번도 그리지 않은 섹션만 채운다. 매번 전부 다시
+// 그리면 KaTeX 재조판과 활성 블록 스캔이 페이지 수에 비례해 쌓여 메인 스레드가 멈추고,
+// 칠해 둔 하이라이트와 레일 안 포커스가 사라진다(frontend-5).
+export function railPagesToRender(cachedPages, builtRail, isRendered) {
+  const pages = [...(cachedPages || [])];
+  if (builtRail) return pages;
+  return pages.filter((page) => !isRendered(page));
+}
+
 // 정렬 GET 실패가 "이 잡에서는 영영 안 되는" 실패인지 판정한다.
 // 서버는 레이아웃 대응이 깨진 잡에 409(블록/페이지/좌표 불일치), 없는 페이지에
 // 404, 잘못된 페이지 번호에 422를 준다 — 전부 재시도해도 결과가 같다. 이런 상태를

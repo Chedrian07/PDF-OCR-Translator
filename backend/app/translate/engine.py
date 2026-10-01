@@ -257,6 +257,9 @@ class _TranslationRun:
     # 응답을 받아도 '원문 2종'이라 통과해 result.{lang}.md로 샜다(실측 replay).
     output_sources: dict[str, set[str]] = field(default_factory=dict)
     degenerate_outputs: set[str] = field(default_factory=set)
+    # 분할로 복구된 유닛의 반쪽별 (원문, 번역) — 반쪽이 축퇴 출력이면 이어 붙인 결과도
+    # 축퇴다. 이어 붙인 문자열은 다른 유닛 출력과 같지 않아 스윕을 빠져나갔다.
+    fragments: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
 
     # ── 문서 상태 (execute 단계에서 채워진다) ────────────────────────────────
     md_text: str = ""
@@ -396,6 +399,7 @@ class _TranslationRun:
             return None
         stats["sanitized"] += sc
         if self._accepted(src, restored, missing, dup, mapping):
+            stats.setdefault("fragments", []).append((src, restored))
             return restored
         if self._halted() or not _repair_worthy(masked, clean, missing, dup):
             return None
@@ -404,10 +408,20 @@ class _TranslationRun:
             r_restored, r_missing, r_dup, r_sc, _ = self._run_pass(rprompt, max_toks, mapping, masked)
             stats["sanitized"] += r_sc
             if self._accepted(src, r_restored, r_missing, r_dup, mapping):
+                stats.setdefault("fragments", []).append((src, r_restored))
                 return r_restored
         except TranslateError:
             pass
         return None
+
+    def _joined_ok(self, u, joined: str, mapping: dict) -> bool:
+        """분할 반쪽들을 이어 붙인 결과도 유닛 전체 기준 게이트를 통과해야 채택한다.
+
+        반쪽마다 게이트를 통과해도, 고장 난 공급자의 캔드 응답 두 개를 이은 '요약입니다.
+        요약입니다.'는 유닛 원문 전체와 대조하면 길이비로 걸린다(verify_e2e 25쪽 실측
+        유출). 정상 반쪽 번역의 결합은 전체 원문 대비 비율도 정상 범위다.
+        """
+        return self._accepted(u.src, joined, [], [], mapping)
 
     def _unit_key(self, u):
         """유닛의 마스킹·용어집 파생값과 캐시 키 (유닛당 ~1.5ms — API 왕복의 0.04%)."""
@@ -582,7 +596,7 @@ class _TranslationRun:
             if ts is not None:
                 left = _table_part(ts[0], 1)
                 right = _table_part(ts[1], 1) if left is not None else None
-                if left is not None and right is not None:
+                if left is not None and right is not None and self._joined_ok(u, left + right, mapping):
                     stats["split"] = 1
                     return u, left + right, "translated", key, stats
 
@@ -600,7 +614,7 @@ class _TranslationRun:
                     right = self._translate_fragment(
                         right_src, pairs, first, right_ctx, stats, keep, u.kind,
                     )
-                    if right is not None:
+                    if right is not None and self._joined_ok(u, left + " " + right, mapping):
                         stats["split"] = 1
                         return u, left + " " + right, "translated", key, stats
 
@@ -714,6 +728,8 @@ class _TranslationRun:
                         self.cached_n += 1
                     elif status == "translated":
                         self.translated_n += 1
+                        if stats.get("fragments"):
+                            self.fragments[u.id] = list(stats["fragments"])
                         # non-force owner는 waiter 공개 전에 이미 캐시에 썼다.
                         # force 경로만 shared wrapper를 우회하므로 여기서 저장한다.
                         if self.force:
@@ -780,6 +796,11 @@ class _TranslationRun:
             src = src_by_id.get(uid)
             if norm and src is not None:
                 self.output_sources.setdefault(norm, set()).add(_source_signature(src))
+        for pieces in self.fragments.values():
+            for fsrc, fout in pieces:
+                norm = " ".join(fout.split())
+                if norm:
+                    self.output_sources.setdefault(norm, set()).add(_source_signature(fsrc))
         for norm, srcs in self.output_sources.items():
             # 서로 다른 원문 3개 이상이 같은 출력 → 축퇴. 원문이 실제로 같은 유닛
             # (반복되는 표 헤더 등)이 같은 번역을 받는 것은 정상이므로 원문 기준으로 센다.
@@ -791,6 +812,12 @@ class _TranslationRun:
                     "번역 축퇴 출력 감지: %s (lang=%s, 원문 %d종이 동일 출력 → 원문 유지)",
                     self.job_dir.name, self.lang, len(srcs),
                 )
+        # 반쪽 중 하나라도 축퇴 출력이면 그 유닛의 결합 출력도 축퇴로 본다
+        for uid, pieces in self.fragments.items():
+            if uid in results and any(
+                " ".join(fout.split()) in self.degenerate_outputs for _src, fout in pieces
+            ):
+                self.degenerate_outputs.add(" ".join(results[uid].split()))
         if not self.degenerate_outputs:
             self.flush_cache()
             return

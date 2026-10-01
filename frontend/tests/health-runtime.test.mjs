@@ -138,3 +138,23 @@ test('조회가 진행 중이면 겹쳐 보내지 않는다', async (t) => {
   await Promise.all([first, second]);
   assert.equal(calls.length, 1);
 });
+
+test('MLX 디바이스는 Apple GPU 배지(칩 이름·Metal 스타일)로 보인다', (t) => {
+  setup(t, [{}]);
+  const device = () => el.healthBadges.querySelectorAll('.badge-device')[0];
+  renderHealth({ model_loaded: true, device: 'mlx', gpu_name: 'Apple M4 Max', dtype: 'bfloat16+q8' });
+  assert.equal(device().textContent, 'MLX · M4 Max');
+  assert.ok(device().classList.contains('is-metal'));
+  assert.ok(!device().classList.contains('is-cpu'));
+  assert.match(device().getAttribute('title'), /dtype: bfloat16\+q8/);
+  // 칩 이름이 없어도 회색 CPU 배지가 아니다
+  renderHealth({ model_loaded: true, device: 'mlx' });
+  assert.equal(device().textContent, 'MLX');
+  assert.ok(device().classList.contains('is-metal'));
+  // 기존 디바이스 배지는 그대로
+  renderHealth({ model_loaded: true, device: 'metal', gpu_name: 'Apple M4 Max' });
+  assert.equal(device().textContent, 'Metal · M4 Max');
+  renderHealth({ model_loaded: true, device: 'cpu', gpu_name: 'ignored' });
+  assert.equal(device().textContent, 'CPU');
+  assert.ok(device().classList.contains('is-cpu'));
+});

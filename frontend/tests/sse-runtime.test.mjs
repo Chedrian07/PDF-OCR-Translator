@@ -10,16 +10,20 @@
 //  · 폴링은 한 번에 한 요청, 재승격 사이에 도착한 낡은 스냅샷은 적용하지 않는다(frontend-12).
 //  · 404 → 잡 제거와 빈 화면, 터미널 → 폴링·재승격 정리 후 결과 렌더.
 //  · teardownConnections가 es와 모든 타이머를 정리한다. 번역 SSE도 CLOSED면 바로 폴링한다.
+//  · DELETE의 종료 SSE {deleted:true}는 취소 화면이 아니라 잡을 닫는다(목록·이어 읽기·메모 정리).
+//  · POST /cancel 202 {status:'canceled'}(대기 잡 즉시 마감)는 종료 이벤트 없이도 바로 마감한다.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { readerNotesKey, readerPosKey } from '../js/constants.js';
 import { EL_IDS, el, state } from '../js/state.js';
 import {
   handleSseConnError, startFallbackPolling, startStream, teardownConnections,
 } from '../js/sse.js';
+import { deleteJob, requestCancel } from '../js/jobs.js';
 import { connectTranslateEvents, teardownTranslate } from '../js/translate.js';
-import { installFakeDom, mount } from './helpers/fake-dom.mjs';
+import { installFakeDom, installFakeStorage, mount } from './helpers/fake-dom.mjs';
 
 class MockEventSource {
   static instances = [];
@@ -258,4 +262,130 @@ test('번역 SSE도 첫 연결이 CLOSED면 즉시 상태 폴링으로 전환한
   assert.equal(state.translateEs, null);
   assert.ok(state.translatePollTimer, '번역 상태 폴링이 시작된다');
   teardownTranslate();
+});
+
+/* ---------------- 삭제·취소의 종료 처리 ---------------- */
+
+const DELETED = { message: '삭제된 작업입니다', canceled: true, deleted: true };
+
+test('DELETE의 종료 SSE {deleted:true}는 취소 화면 대신 잡을 닫고 로컬 흔적을 지운다', async (t) => {
+  const { calls } = setup(t);
+  const storage = installFakeStorage(t);
+  storage.setItem(readerPosKey('job-a'), '7');
+  storage.setItem(readerNotesKey('job-a'), '{"v":1,"items":[]}');
+  storage.setItem(readerPosKey('job-b'), '2');
+  Object.assign(state, {
+    displayedStatus: 'queued',
+    jobs: [{ job_id: 'job-a', status: 'queued' }, { job_id: 'job-b', status: 'done' }],
+  });
+  startStream('job-a');
+  const es = MockEventSource.instances[0];
+  es.open();
+  es.emit('error', DELETED); // 다른 탭(또는 API)이 이 대기 잡을 지웠다
+  await flush();
+  assert.equal(state.currentJobId, null);
+  assert.equal(el.emptyState.hidden, false, '빈 화면으로');
+  assert.equal(el.jobView.hidden, true);
+  assert.notEqual(el.errorTitle.textContent, '취소됨', '취소 화면을 그리지 않는다');
+  assert.deepEqual(state.jobs.map((j) => j.job_id), ['job-b']);
+  assert.equal(storage.getItem(readerPosKey('job-a')), null, '이어 읽기 위치 정리');
+  assert.equal(storage.getItem(readerNotesKey('job-a')), null, '인용·하이라이트 정리');
+  assert.equal(storage.getItem(readerPosKey('job-b')), '2', '다른 잡은 그대로');
+  assert.equal(es.closed, true);
+  assert.equal(state.es, null);
+  assert.match(el.toast.textContent, /삭제되었습니다/, '왜 닫혔는지 알린다');
+  assert.ok(!calls.some((u) => u.startsWith('/api/jobs/job-a')), `사라진 산출물을 묻지 않는다: ${calls}`);
+});
+
+test('이 탭이 지운 잡의 {deleted:true}가 DELETE 응답보다 먼저 와도 "삭제됨" 안내는 띄우지 않는다', async (t) => {
+  let releaseDelete;
+  setup(t, {
+    fetchImpl: (url, init) => {
+      if (init && init.method === 'DELETE') {
+        return new Promise((resolve) => { releaseDelete = () => resolve(response(204, null)); });
+      }
+      return response(200, { jobs: [] });
+    },
+  });
+  installFakeStorage(t);
+  state.displayedStatus = 'queued';
+  startStream('job-a');
+  MockEventSource.instances[0].open();
+  const deleting = deleteJob('job-a');
+  MockEventSource.instances[0].emit('error', DELETED); // 서버는 응답 전에 이벤트부터 보낸다
+  await flush();
+  assert.equal(state.currentJobId, null);
+  assert.equal(el.emptyState.hidden, false);
+  releaseDelete();
+  await deleting;
+  assert.doesNotMatch(el.toast.textContent || '', /삭제되었습니다/);
+});
+
+function cancelSetup(t, { cancelStatus, job }) {
+  return setup(t, {
+    fetchImpl: (url, init) => {
+      if (url === '/api/jobs/job-a/cancel' && init && init.method === 'POST') {
+        return response(202, { job_id: 'job-a', status: cancelStatus });
+      }
+      if (url === '/api/jobs/job-a') return response(200, job);
+      return response(200, { jobs: [job] });
+    },
+  });
+}
+
+test('POST /cancel 202 {status:canceled}(대기 잡 즉시 마감)는 종료 이벤트 없이 바로 취소 화면', async (t) => {
+  const job = {
+    job_id: 'job-a', filename: 'a.pdf', status: 'canceled',
+    error: '사용자에 의해 취소되었습니다', progress: {},
+  };
+  const { calls } = cancelSetup(t, { cancelStatus: 'canceled', job });
+  state.displayedStatus = 'queued';
+  startFallbackPolling('job-a'); // 폴링 강등 중 — 다음 틱(1초)도, 종료 SSE도 기다리지 않는다
+  await requestCancel();
+  assert.equal(state.displayedStatus, 'canceled');
+  assert.equal(el.errorSection.hidden, false);
+  assert.equal(el.errorTitle.textContent, '취소됨');
+  assert.equal(el.errorMessage.textContent, '사용자에 의해 취소되었습니다');
+  assert.equal(state.cancelRequestedFor, null);
+  assert.equal(el.jobStop.hidden, true, '정지 버튼이 남지 않는다');
+  assert.equal(state.fallbackTimer, 0, '폴링도 정리한다');
+  assert.ok(calls.includes('/api/jobs/job-a'), '최종 상태를 한 번 다시 받는다');
+});
+
+test('POST /cancel 202 {status:canceling}(실행 중)은 러너의 종료 이벤트를 기다린다', async (t) => {
+  const { calls } = cancelSetup(t, {
+    cancelStatus: 'canceling', job: { job_id: 'job-a', status: 'running', progress: {} },
+  });
+  state.displayedStatus = 'running';
+  await requestCancel();
+  assert.equal(state.displayedStatus, 'running');
+  assert.equal(state.cancelRequestedFor, 'job-a');
+  assert.equal(el.jobStop.disabled, true);
+  assert.equal(el.jobStopLabel.textContent, '취소 중…');
+  assert.ok(!calls.includes('/api/jobs/job-a'));
+});
+
+test('종료 SSE가 cancel 응답보다 먼저 마감했으면 다시 그리지 않는다', async (t) => {
+  let releaseCancel;
+  const { calls } = setup(t, {
+    fetchImpl: (url, init) => {
+      if (url === '/api/jobs/job-a/cancel') {
+        return new Promise((resolve) => {
+          releaseCancel = () => resolve(response(202, { job_id: 'job-a', status: 'canceled' }));
+        });
+      }
+      return response(200, { jobs: [] });
+    },
+  });
+  state.displayedStatus = 'queued';
+  startStream('job-a');
+  const es = MockEventSource.instances[0];
+  es.open();
+  const canceling = requestCancel();
+  es.emit('error', { message: '사용자에 의해 취소되었습니다', canceled: true });
+  assert.equal(state.displayedStatus, 'canceled');
+  releaseCancel();
+  await canceling;
+  assert.ok(!calls.includes('/api/jobs/job-a'), `중복 마감 조회 없음: ${calls}`);
+  assert.equal(el.errorTitle.textContent, '취소됨');
 });

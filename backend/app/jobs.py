@@ -57,6 +57,29 @@ def _default_progress() -> dict:
     return {"phase": "render", "current_page": 0, "total_pages": 0, "chunk": 0, "total_chunks": 0}
 
 
+# notices를 따로 기록하기 전(meta에 "notices" 키가 없는) 잡의 warnings 가운데 정보성 메모를
+# 가려내는 문구. runner가 지금 notices로 남기는 메시지의 고정 부분과 같아야 한다
+# (tests/test_job_notices.py가 실제 runner 출력으로 대조한다). 옛 잡도 페이지 단위 엔진
+# 안내·복구에 성공한 재처리 경위 때문에 'degraded'·'주의 N건'으로 보이지 않게 한다.
+LEGACY_NOTICE_MARKERS = (
+    "엔진은 페이지 단위 모델이라 문서를 페이지별로 처리했습니다",
+    "개선되어 단독 재처리 결과를 채택",
+    "측정 한계로 판단",
+    "페이지별 재처리",  # 청크 복구 경위(MAX_LENGTH 도달·반복 감지·청크 변환 실패)
+)
+
+
+def split_legacy_warnings(messages: list[str]) -> tuple[list[str], list[str]]:
+    """옛 meta의 단일 warnings 목록 → (경고, 참고). 순서는 각각 보존한다."""
+    warnings: list[str] = []
+    notices: list[str] = []
+    for message in messages:
+        text = str(message)
+        target = notices if any(marker in text for marker in LEGACY_NOTICE_MARKERS) else warnings
+        target.append(text)
+    return warnings, notices
+
+
 @dataclass
 class Job:
     id: str
@@ -68,7 +91,10 @@ class Job:
     created_at: str = field(default_factory=_now_iso)
     progress: dict = field(default_factory=_default_progress)
     error: str | None = None
+    # 실제 품질 저하(플레이스홀더·텍스트 레이어 복구·충실도 미달 잔존·페이지 경계 불일치 …)
+    # — quality.state는 이것만으로 정한다. 처리 경위·안내는 notices(정보성)로 따로 둔다.
     warnings: list[str] = field(default_factory=list)
+    notices: list[str] = field(default_factory=list)
     delete_requested: bool = False
     # 변환에 사용된 엔진/모델 메타 — 완료 후에도 어떤 모델로 변환했는지 확인 가능.
     # 구버전 meta.json에는 없으므로 복원 시 None 허용 (필드 부재 = 알 수 없음).
@@ -142,6 +168,8 @@ class Job:
             "progress": dict(self.progress),
             "error": self.error,
             "warnings": list(self.warnings),
+            # 정보성 메모(품질 저하 아님) — 프런트는 흐린 '참고 N건'으로 보여 준다
+            "notices": list(self.notices),
             "result": self._result_block(include_files=include_files),
             # 신규 필드(추가만 — 기존 필드 의미 불변). 구 잡은 null.
             "engine": self.engine,
@@ -165,6 +193,7 @@ class Job:
             "progress": self.progress,
             "error": self.error,
             "warnings": self.warnings,
+            "notices": self.notices,
             "engine": self.engine,
             "model_id": self.model_id,
             "model_revision": self.model_revision,
@@ -401,12 +430,20 @@ class JobStore:
                 continue
             try:
                 m = json.loads(meta_path.read_text(encoding="utf-8"))
+                warnings = [str(w) for w in m.get("warnings") or []]
+                notices = m.get("notices")
+                if isinstance(notices, list):
+                    notices = [str(n) for n in notices]
+                else:
+                    # notices 이전 meta — 한 목록에 섞여 있던 정보성 메모를 가려낸다(메모리만;
+                    # 터미널 잡의 meta.json mtime은 TTL GC 시계라 이 일로 다시 쓰지 않는다)
+                    warnings, notices = split_legacy_warnings(warnings)
                 job = Job(
                     id=m["id"], filename=m["filename"], mode=m.get("mode", "multi"),
                     dpi=int(m.get("dpi", 200)), dir=d, status=m.get("status", "error"),
                     created_at=m.get("created_at", _now_iso()),
                     progress=m.get("progress") or _default_progress(),
-                    error=m.get("error"), warnings=m.get("warnings") or [],
+                    error=m.get("error"), warnings=warnings, notices=notices,
                     # 구버전 meta.json에는 없는 필드 — 없으면 None으로 안전 복원
                     engine=m.get("engine"), model_id=m.get("model_id"),
                     model_revision=m.get("model_revision"), provider=m.get("provider"),

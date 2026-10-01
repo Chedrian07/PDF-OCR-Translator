@@ -18,6 +18,17 @@ translate/masking.py `looks_untranslated()`의 길이비 하한(0.3) 회귀가 �
 MOCK_TRANSLATE_RATIO=0 으로 두면 예전 길이 보존 동작으로 되돌아간다.
 
 Responses API(/v1/responses)와 Chat Completions(/v1/chat/completions)를 모두 지원한다.
+Chat 요청이 `"stream": true`면 실제 서버처럼 SSE(chat.completion.chunk → [DONE])로
+보낸다 — 번역 클라이언트의 기본(TRANSLATE_STREAM=auto)이 chat 스트리밍이라 하네스도
+그 경로를 돈다. 위 결함 모드는 스트리밍에서도 같은 출력을 낸다.
+
+시나리오 노브(결함 모드와 별개 — pytest가 쓴다. 쿼리 또는 환경변수):
+  delay=초 / MOCK_STREAM_DELAY_S   SSE 조각 사이 지연 — 취소 시 서버 생성 중단 검증용
+  chunk=N / MOCK_STREAM_CHUNK      SSE 조각당 글자 수(기본 16)
+  finish=length / MOCK_FINISH      finish_reason=length(responses는 incomplete) — 잘림 재현
+  reasoning=N / MOCK_REASONING_CHARS  본문 앞에 사고 N자를 reasoning_content로 싣는다
+계측: GET /__stats의 stream_chunks(보낸 SSE 조각 수)·stream_aborted(클라이언트가 끊어
+쓰기가 실패한 스트림 수).
 """
 from __future__ import annotations
 
@@ -26,10 +37,12 @@ import os
 import re
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
-# 호출 계측 — D-1(이중 번역) 검증에 쓴다.
-STATS = {"calls": 0, "by_text": {}}
+# 호출 계측 — D-1(이중 번역) 검증에 쓴다. stream_*은 SSE 경로 계측.
+STATS = {"calls": 0, "by_text": {}, "stream_chunks": 0, "stream_aborted": 0}
 _LOCK = threading.Lock()
 
 # ⚠ 접두 문자는 masking.py `_PLACEHOLDER_RE`와 **같은 집합**이어야 한다
@@ -211,6 +224,8 @@ class Handler(BaseHTTPRequestHandler):
             with _LOCK:
                 STATS["calls"] = 0
                 STATS["by_text"] = {}
+                STATS["stream_chunks"] = 0
+                STATS["stream_aborted"] = 0
             self._send(200, {"ok": True})
             return
         self._send(404, {"error": "not found"})
@@ -249,11 +264,15 @@ class Handler(BaseHTTPRequestHandler):
         out = _apply_fault(fault, src)
         if out is None:
             out = _translate(src)
+        knobs = _scenario(self.path)
+        finish = "length" if knobs["finish"] == "length" else "stop"
+        reasoning = "생각 중… " * (knobs["reasoning"] // 6 + 1) if knobs["reasoning"] else ""
+        reasoning = reasoning[:knobs["reasoning"]]
 
-        if self.path.startswith("/v1/responses") or "responses" in self.path:
+        if urlsplit(self.path).path.startswith("/v1/responses") or "responses" in self.path:
             self._send(200, {
                 "id": "resp_mock", "object": "response", "model": body.get("model", "mock"),
-                "status": "completed",
+                "status": "incomplete" if finish == "length" else "completed",
                 "output": [{
                     "type": "message", "role": "assistant", "status": "completed",
                     "content": [{"type": "output_text", "text": out}],
@@ -262,12 +281,79 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if body.get("stream"):
+            self._stream_chat(body, out, finish, reasoning, knobs)
+            return
+
+        message = {"role": "assistant", "content": out}
+        if reasoning:
+            message["reasoning_content"] = reasoning
         self._send(200, {
             "id": "chatcmpl_mock", "object": "chat.completion", "model": body.get("model", "mock"),
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": out},
-                         "finish_reason": "stop"}],
+            "choices": [{"index": 0, "message": message, "finish_reason": finish}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
         })
+
+    def _stream_chat(self, body: dict, out: str, finish: str, reasoning: str, knobs: dict):
+        """SSE 응답 — 실제 서버처럼 조각마다 flush하고, 클라이언트가 끊으면 즉시 멈춘다."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")  # 본문 길이 없음 — 종료로 끝을 알린다
+        self.end_headers()
+        self.close_connection = True
+        model = body.get("model", "mock")
+        step = max(1, knobs["chunk"])
+
+        def event(delta: dict, finish_reason=None, **extra) -> bytes:
+            obj = {"id": "chatcmpl_mock", "object": "chat.completion.chunk", "model": model,
+                   "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+            obj.update(extra)
+            return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode()
+
+        pieces = [event({"role": "assistant"})]
+        pieces += [event({"reasoning_content": reasoning[i:i + step]})
+                   for i in range(0, len(reasoning), step)]
+        pieces += [event({"content": out[i:i + step]}) for i in range(0, len(out), step)]
+        pieces.append(event({}, finish))
+        if (body.get("stream_options") or {}).get("include_usage"):
+            usage = {"prompt_tokens": 10, "completion_tokens": len(pieces), "total_tokens": 20}
+            pieces.append(f"data: {json.dumps({'choices': [], 'usage': usage})}\n\n".encode())
+        pieces.append(b"data: [DONE]\n\n")
+        try:
+            # prefill 중 keepalive 주석(mlx_lm 형태) — 클라이언트는 무시해야 한다
+            self.wfile.write(b": keepalive 1/1\n\n")
+            for piece in pieces:
+                if knobs["delay"]:
+                    time.sleep(knobs["delay"])
+                self.wfile.write(piece)
+                self.wfile.flush()
+                with _LOCK:
+                    STATS["stream_chunks"] += 1
+        except (BrokenPipeError, ConnectionResetError):
+            with _LOCK:
+                STATS["stream_aborted"] += 1
+
+
+def _scenario(path: str) -> dict:
+    """시나리오 노브 — 쿼리가 환경변수보다 우선한다(모듈 docstring 참조)."""
+    query = parse_qs(urlsplit(path).query)
+
+    def pick(name: str, env: str, default: str) -> str:
+        return (query.get(name) or [os.environ.get(env, default)])[0]
+
+    def num(raw: str, default: float) -> float:
+        try:
+            return float(raw)
+        except ValueError:
+            return default
+
+    return {
+        "delay": max(0.0, num(pick("delay", "MOCK_STREAM_DELAY_S", "0"), 0.0)),
+        "chunk": int(num(pick("chunk", "MOCK_STREAM_CHUNK", "16"), 16)),
+        "finish": pick("finish", "MOCK_FINISH", ""),
+        "reasoning": int(num(pick("reasoning", "MOCK_REASONING_CHARS", "0"), 0)),
+    }
 
 
 if __name__ == "__main__":

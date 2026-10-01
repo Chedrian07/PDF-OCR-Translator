@@ -66,7 +66,8 @@ class GlossaryEntry:
     src: str
     ko: str
     policy: str
-    first_unit: str = ""
+    first_unit: str = ""  # md 유닛 순서에서의 첫 등장 유닛 id (result.{lang}.md용)
+    first_lay: str = ""   # layout 유닛 순서에서의 첫 등장 유닛 id (PDF·리더용)
 
 
 def _strip_tokens(md_text: str) -> str:
@@ -116,7 +117,10 @@ class Glossary:
     def for_unit(self, text: str, unit_id: str = "") -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
         """이 유닛에 등장하는 (일반 용어쌍 B/C/D, 첫 등장 병기쌍 D)를 반환.
 
-        unit_id가 엔트리의 first_unit과 일치하는 D 항목만 병기 목록에 들어간다.
+        unit_id가 엔트리의 첫 등장 유닛(md 순서의 first_unit 또는 layout 순서의
+        first_lay)과 일치하는 D 항목만 병기 목록에 들어간다 — layout이 있는 잡에서
+        lay:* 유닛이 md 기준 first_unit과 영원히 일치하지 않아 병기가 PDF·md 어디에도
+        안 나오던 문제(translate-llm-12).
         수식·코드·인용 내부 매칭 방지 — 번역 대상 텍스트(마스킹 잔여)에서만 찾는다
         (실측: `\\mathrm{mse}` 안의 mse가 매칭돼 프롬프트·캐시 키를 오염시켰다).
         """
@@ -128,7 +132,7 @@ class Glossary:
                 continue
             if self._matcher(e.src).search(scan):
                 general.append((e.src, e.ko))
-                if e.policy == "D" and unit_id and e.first_unit == unit_id:
+                if e.policy == "D" and unit_id and unit_id in (e.first_unit, e.first_lay):
                     first.append((e.src, e.ko))
         return general, first
 
@@ -143,19 +147,32 @@ class Glossary:
                       if e.policy == "A" and self._matcher(e.src).search(scan)})
         return out[:12]
 
-    def compute_first_units(self, ordered_units) -> None:
-        """문서 순서의 유닛들을 스캔해 각 엔트리의 first_unit(첫 등장 유닛 id)을 채운다."""
+    def compute_first_units(self, ordered_units, lay_units=()) -> bool:
+        """문서 순서의 유닛들을 스캔해 각 엔트리의 첫 등장 유닛 id를 채운다.
+
+        md 순서(ordered_units)는 first_unit, layout 순서(lay_units)는 first_lay에 둔다.
+        병기가 실제 산출물에 나오려면 그 산출물을 만드는 유닛 순서로 첫 등장을 정해야
+        한다 — layout이 있는 잡은 PDF·리더가 lay:* 번역을, result.{lang}.md도 layout으로
+        덮이는 줄은 lay:* 번역을 쓴다. 매칭은 for_unit과 같은 규칙(마스킹 잔여 스캔)이라
+        수식·코드 안의 등장은 첫 등장으로 치지 않는다. 바뀐 값이 있으면 True.
+        """
+        before = [(e.first_unit, e.first_lay) for e in self.entries]
         for e in self.entries:
             e.first_unit = ""
+            e.first_lay = ""
         pats = [(e, self._matcher(e.src)) for e in self.entries]
-        for unit in ordered_units:
-            for e, pat in pats:
-                if not e.first_unit and pat.search(unit.src):
-                    e.first_unit = unit.id
+        for attr, units in (("first_unit", ordered_units), ("first_lay", lay_units)):
+            for unit in units:
+                scan = _strip_tokens(unit.src)
+                for e, pat in pats:
+                    if not getattr(e, attr) and pat.search(scan):
+                        setattr(e, attr, unit.id)
+        return before != [(e.first_unit, e.first_lay) for e in self.entries]
 
     def save(self, path) -> None:
         data = [
-            {"src": e.src, "ko": e.ko, "policy": e.policy, "first_unit": e.first_unit}
+            {"src": e.src, "ko": e.ko, "policy": e.policy, "first_unit": e.first_unit,
+             "first_unit_lay": e.first_lay}
             for e in self.entries
         ]
         Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -164,7 +181,10 @@ class Glossary:
     def load(cls, path) -> "Glossary":
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         return cls([
-            GlossaryEntry(d["src"], d["ko"], d["policy"], d.get("first_unit", ""))
+            GlossaryEntry(
+                d["src"], d["ko"], d["policy"], d.get("first_unit", ""),
+                d.get("first_unit_lay", ""),
+            )
             for d in data
         ])
 

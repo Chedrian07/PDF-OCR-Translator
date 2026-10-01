@@ -10,6 +10,11 @@
 ⚠ 단일 GPU에서는 한 시점에 한 스택만 기동할 수 있으므로, 보통 스택을 하나씩
 띄워 같은 --out 디렉터리에 이어서 실행한다 (결과는 endpoint별로 병합·누적).
 
+시간: 측정 전에 health의 model_loaded를 기다리고, --warmup N개 잡(기록 안 함)으로
+콜드 스타트(모델 다운로드·vLLM 컴파일, 첫 요청 수십 초)를 결과에서 뺀다. s/page는
+서버 처리 시간(running 관측 → 완료 관측, 오차 ≤ 0.25초)을 페이지 수로 나눈 값이고,
+업로드·큐 대기를 포함한 벽시계는 total_s로 따로 남긴다.
+
 출력: {out}/results.json · results.csv · summary.md, 엔진·문서별 markdown 사본.
 
 정확도: --ground-truth DIR에 {문서stem}.md가 있을 때만 normalized edit distance /
@@ -29,8 +34,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _smoke_common import (  # noqa: E402
-    SmokeError, VramSampler, count_markers, http_json, http_text,
-    upload_pdf, wait_job,
+    POLL_INTERVAL_S, SmokeError, VramSampler, count_markers, http_json, http_text,
+    upload_pdf, wait_job, wait_model_loaded,
 )
 
 _EDIT_DISTANCE_CAP = 20_000  # DP O(nm) 상한 — 초과분은 앞부분만 비교하고 표기
@@ -112,8 +117,14 @@ def bench_one(name: str, url: str, pdf: Path, timeout_s: float, out_dir: Path,
     t0 = time.monotonic()
     with VramSampler() as vram:
         job_id = upload_pdf(url, pdf)
+        uploaded = time.monotonic()
         body = wait_job(url, job_id, timeout_s)
-    elapsed = time.monotonic() - t0
+    timing = body["_timing"]
+    elapsed = timing["finished_seen"] - t0
+    # 서버 처리 시간 = running 관측 → 완료 관측. 업로드·큐 대기를 빼야 엔진끼리 비교된다
+    # (예전에는 업로드 직전부터 2초 폴링 반환까지의 벽시계를 그대로 s/page로 썼다).
+    process_s = max(timing["finished_seen"] - timing["running_seen"], 0.0)
+    pages = body["progress"].get("total_pages", 0)
     row: dict = {
         "engine": name,
         "backend_engine": health.get("engine"),
@@ -121,10 +132,14 @@ def bench_one(name: str, url: str, pdf: Path, timeout_s: float, out_dir: Path,
         "model_revision": body.get("model_revision"),
         "document": pdf.name,
         "status": body["status"],
-        "pages": body["progress"].get("total_pages", 0),
-        "total_s": round(elapsed, 1),
-        "pages_per_s": round(body["progress"].get("total_pages", 0) / elapsed, 3) if elapsed else 0,
-        "avg_page_s": round(elapsed / max(body["progress"].get("total_pages", 1), 1), 1),
+        "pages": pages,
+        "total_s": round(elapsed, 2),
+        "upload_s": round(uploaded - t0, 2),
+        "queue_s": round(max(timing["running_seen"] - uploaded, 0.0), 2),
+        "process_s": round(process_s, 2),
+        "pages_per_s": round(pages / process_s, 3) if process_s else 0,
+        "avg_page_s": round(process_s / max(pages, 1), 2),
+        "timing_resolution_s": timing["poll_s"],
         "warnings": len(body.get("warnings", [])),
         "peak_vram_mb": vram.peak_mb if vram.available else None,
         "error": body.get("error"),
@@ -186,21 +201,24 @@ def write_outputs(rows: list[dict], out_dir: Path) -> None:
     results_json.write_text(json.dumps(merged, ensure_ascii=False, indent=1), encoding="utf-8")
 
     cols = ["engine", "model", "model_revision", "document", "status", "pages",
-            "total_s", "pages_per_s", "avg_page_s", "md_chars", "tables",
-            "formulas", "figures", "warnings", "failed_pages", "peak_vram_mb",
-            "output_path"]
+            "total_s", "upload_s", "queue_s", "process_s", "pages_per_s", "avg_page_s",
+            "timing_resolution_s", "md_chars", "tables", "formulas", "figures",
+            "warnings", "failed_pages", "peak_vram_mb", "output_path"]
     with (out_dir / "results.csv").open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
         w.writerows(merged)
 
     lines = ["# OCR 엔진 벤치마크 요약", "",
-             "| engine | model | doc | pages | total(s) | s/page | md chars | tables | formulas | figures | warn | peak VRAM(MB) |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             f"> s/page = 서버 처리 시간(running→완료 관측, 오차 ≤ {POLL_INTERVAL_S}초) ÷ 페이지."
+             " total(s)는 업로드·큐 대기를 포함한 벽시계다.", "",
+             "| engine | model | doc | pages | total(s) | process(s) | s/page | md chars | tables | formulas | figures | warn | peak VRAM(MB) |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in sorted(merged, key=lambda r: (r.get("document") or "", r.get("engine") or "")):
         lines.append(
             f"| {r.get('engine')} | {r.get('model')} | {r.get('document')} | {r.get('pages')} "
-            f"| {r.get('total_s')} | {r.get('avg_page_s')} | {r.get('md_chars', '-')} "
+            f"| {r.get('total_s')} | {r.get('process_s', '-')} | {r.get('avg_page_s')} "
+            f"| {r.get('md_chars', '-')} "
             f"| {r.get('tables', '-')} | {r.get('formulas', '-')} | {r.get('figures', '-')} "
             f"| {r.get('warnings')} | {r.get('peak_vram_mb') or '-'} |")
     gts = [r for r in merged if "gt" in r]
@@ -230,6 +248,11 @@ def main() -> int:
     ap.add_argument("--ground-truth", type=Path, default=None,
                     help="{stem}.md / {stem}.boxes.json이 있는 디렉터리 (선택)")
     ap.add_argument("--timeout", type=float, default=1800.0, help="문서당 대기 상한(초)")
+    ap.add_argument("--warmup", type=int, default=1, metavar="N",
+                    help="endpoint마다 첫 PDF로 N번 돌리고 기록하지 않는다 — 콜드 스타트(첫 요청의 "
+                         "모델 준비·컴파일)를 결과에서 뺀다 (기본 1, 0=끔)")
+    ap.add_argument("--model-wait", type=float, default=1800.0,
+                    help="측정 전 health의 model_loaded를 기다리는 상한(초)")
     args = ap.parse_args()
 
     endpoints: list[tuple[str, str]] = []
@@ -254,6 +277,16 @@ def main() -> int:
             print("  (단일 GPU에서는 스택을 하나씩 띄워 같은 --out으로 재실행해 병합하세요)")
             continue
         print(f"● {name}: engine={health.get('engine')} model={health.get('model_id')}")
+        try:
+            wait_model_loaded(url, args.model_wait)
+            for i in range(args.warmup):
+                print(f"  - 워밍업 {i + 1}/{args.warmup} ({pdfs[0].name}, 기록 안 함) …", flush=True)
+                warm = wait_job(url, upload_pdf(url, pdfs[0]), args.timeout)
+                if warm["status"] != "done":
+                    print(f"    ⚠ 워밍업 잡 status={warm['status']} error={warm.get('error')}")
+        except SmokeError as e:
+            print(f"✗ {name} 준비 실패 — 건너뜀: {e}")
+            continue
         for pdf in pdfs:
             print(f"  - {pdf.name} …", flush=True)
             try:

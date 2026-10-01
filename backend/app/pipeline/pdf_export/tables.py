@@ -135,32 +135,82 @@ def _grid_boundaries(centers: list[list[float]], lo: float, hi: float) -> list[f
     return [lo] + [(values[i] + values[i + 1]) / 2 for i in range(n - 1)] + [hi]
 
 
-def _horizontal_table_rules(page, table_rect) -> list[tuple[float, float, float, float]]:
-    """표 영역의 가로 rule을 `(x0, x1, y, width)`로 반환한다."""
-    rules: list[tuple[float, float, float, float]] = []
+def _drawing_horizontal_segments(drawing: dict) -> list[tuple[float, float, float, float]]:
+    """벡터 도형 하나에서 가로 선분 `(x0, x1, y, width)`만 뽑는다."""
+    segments: list[tuple[float, float, float, float]] = []
+    width = max(0.1, float(drawing.get("width") or 0.1))
+    for item in drawing.get("items", []):
+        if not item or item[0] != "l" or len(item) < 3:
+            continue
+        start, end = item[1], item[2]
+        if abs(float(start.y) - float(end.y)) > max(0.5, width):
+            continue
+        x0, x1 = sorted((float(start.x), float(end.x)))
+        y = (float(start.y) + float(end.y)) / 2
+        segments.append((x0, x1, y, width))
+    return segments
+
+
+def _horizontal_table_rules(
+    page, table_rect, segments: list[tuple[float, float, float, float]] | None = None,
+) -> list[tuple[float, float, float, float]]:
+    """표 영역의 가로 rule을 `(x0, x1, y, width)`로 반환한다.
+
+    `segments`는 페이지에서 이미 한 번 뽑아 둔 가로 선분이다(`build`가 장애물을
+    모을 때 같은 `get_drawings()` 결과에서 만든다). 넘기지 않으면 직접 읽지만,
+    표 블록 수 × 계획 패스 수만큼 페이지 벡터 목록 전체를 다시 파싱하게 된다 —
+    path가 10^5~10^6개인 차트 페이지에서 그만큼 빌드가 늘어난다.
+    """
+    if segments is None:
+        try:
+            drawings = page.get_drawings()
+        except Exception:  # noqa: BLE001 — rule 보정은 품질 향상용
+            return []
+        segments = [
+            segment
+            for drawing in drawings
+            for segment in _drawing_horizontal_segments(drawing)
+        ]
+    return [
+        (x0, x1, y, width)
+        for x0, x1, y, width in segments
+        if not (
+            x1 < table_rect.x0 - 2
+            or x0 > table_rect.x1 + 2
+            or y < table_rect.y0 - 3
+            or y > table_rect.y1 + 3
+        )
+    ]
+
+
+def _search_textpage(page, clip, cache: dict | None):
+    """표 검색 영역의 TextPage 하나 — 셀 검색과 원문 유무 판정이 같이 쓴다.
+
+    `page.search_for(text, clip=...)`는 textpage를 넘기지 않으면 **호출마다** 새
+    TextPage를 만들고 clip과 무관하게 페이지 콘텐츠 스트림 전체를 다시 해석한다.
+    셀이 200개면 200번이다(벡터 과다 페이지에서 표 하나에 수 초~수십 초). 플래그는
+    textpage 없이 부를 때 search_for가 쓰는 기본값과 같아야 검색 결과가 같다.
+    실패하면 None — 호출부는 예전처럼 호출마다 만드는 경로로 돌아간다.
+    """
+    fitz = quiet_fitz()
+    key = ("textpage", round(clip.x0, 3), round(clip.y0, 3), round(clip.x1, 3), round(clip.y1, 3))
+    if cache is not None and key in cache:
+        return cache[key]
     try:
-        drawings = page.get_drawings()
-    except Exception:  # noqa: BLE001 — rule 보정은 품질 향상용
-        return rules
-    for drawing in drawings:
-        width = max(0.1, float(drawing.get("width") or 0.1))
-        for item in drawing.get("items", []):
-            if not item or item[0] != "l" or len(item) < 3:
-                continue
-            start, end = item[1], item[2]
-            if abs(float(start.y) - float(end.y)) > max(0.5, width):
-                continue
-            x0, x1 = sorted((float(start.x), float(end.x)))
-            y = (float(start.y) + float(end.y)) / 2
-            if (
-                x1 < table_rect.x0 - 2
-                or x0 > table_rect.x1 + 2
-                or y < table_rect.y0 - 3
-                or y > table_rect.y1 + 3
-            ):
-                continue
-            rules.append((x0, x1, y, width))
-    return rules
+        textpage = page.get_textpage(
+            clip=clip,
+            flags=(
+                fitz.TEXT_DEHYPHENATE
+                | fitz.TEXT_PRESERVE_WHITESPACE
+                | fitz.TEXT_PRESERVE_LIGATURES
+                | fitz.TEXT_MEDIABOX_CLIP
+            ),
+        )
+    except Exception:  # noqa: BLE001 — 검색은 호출별 TextPage로 폴백
+        textpage = None
+    if cache is not None:
+        cache[key] = textpage
+    return textpage
 
 
 def _table_cell_rects(
@@ -169,11 +219,16 @@ def _table_cell_rects(
     original: list[_TableCell],
     rows: int,
     cols: int,
+    *,
+    cache: dict | None = None,
 ) -> tuple[list[object], bool]:
     """원문 셀 검색 중심으로 표 격자를 추정해 `(셀 사각형, 격자 신뢰 여부)`를 낸다.
 
     `grid_trusted=False`는 원문 셀을 거의 찾지 못해 균등 분할로 강행했다는 뜻이다
     — 호출부는 그런 표를 교체하지 말고 원문 그대로 보존해야 한다.
+
+    `cache`는 한 페이지의 계획 동안 살아 있는 분석 캐시다. 같은 표를 계획 패스마다
+    다시 볼 때 TextPage와 가로 선분 목록을 재사용한다.
     """
     x_centers: list[list[float]] = [[] for _ in range(cols)]
     y_centers: list[list[float]] = [[] for _ in range(rows)]
@@ -181,6 +236,7 @@ def _table_cell_rects(
     search_clip = +table_rect
     search_clip += (-2.0, -12.0, 2.0, 12.0)
     search_clip &= page.mediabox
+    textpage = _search_textpage(page, search_clip, cache)
     observed: list[object] = []
     for cell in original:
         if not cell.text:
@@ -191,7 +247,11 @@ def _table_cell_rects(
         expected_y = table_rect.y0 + (
             cell.row + cell.rowspan / 2
         ) * table_rect.height / rows
-        hits = page.search_for(cell.text, clip=search_clip)
+        hits = (
+            page.search_for(cell.text, textpage=textpage)
+            if textpage is not None
+            else page.search_for(cell.text, clip=search_clip)
+        )
         if not hits:
             continue
         hit = min(hits, key=lambda r: abs((r.x0 + r.x1) / 2 - expected_x)
@@ -210,7 +270,12 @@ def _table_cell_rects(
     # 리댁션된다. 스캔 표(텍스트 레이어 없음)는 지울 원문이 없어 균등 격자가
     # 무해하므로 그대로 신뢰한다.
     try:
-        has_source_text = bool(page.get_text("text", clip=search_clip).strip())
+        source_text = (
+            textpage.extractText()
+            if textpage is not None
+            else page.get_text("text", clip=search_clip)
+        )
+        has_source_text = bool(source_text.strip())
     except Exception:  # noqa: BLE001 — 추출 실패는 스캔 표와 같게 취급
         has_source_text = False
     grid_trusted = not has_source_text or (
@@ -218,7 +283,9 @@ def _table_cell_rects(
     )
     xs = _grid_boundaries(x_centers, grid_x0, grid_x1)
     ys = _grid_boundaries(y_centers, grid_y0, grid_y1)
-    horizontal_rules = _horizontal_table_rules(page, table_rect)
+    horizontal_rules = _horizontal_table_rules(
+        page, table_rect, cache.get("horizontal_segments") if cache is not None else None,
+    )
     rects: list[object] = []
     for cell in original:
         rect = fitz.Rect(

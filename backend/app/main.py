@@ -194,6 +194,9 @@ class UploadBodyLimitMiddleware:
 #   막힌다. 해시는 index.html에서 계산하고 파일이 바뀌면 다시 계산한다.
 # - API가 내보내는 HTML(document.html 내려받기 등)은 KaTeX를 인라인으로 품으므로
 #   스크립트는 'unsafe-inline'을 두되 리소스 출처는 같은 규칙으로 묶는다.
+# - frame-ancestors 'none': 다른 사이트가 이 인증 없는 UI(삭제·번역·Q&A 버튼)를 보이지
+#   않는 iframe에 싣고 클릭을 유도하는 클릭재킹을 막는다. 앱은 자기 화면을 프레임에 넣지
+#   않는다. 이 지시어는 <meta> CSP에서는 무시되므로 헤더에만 둔다(index.html 메타와 별개).
 _CSP_COMMON = (
     "default-src 'self'",
     "style-src 'self' 'unsafe-inline'",
@@ -202,6 +205,7 @@ _CSP_COMMON = (
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
+    "frame-ancestors 'none'",
 )
 _API_HTML_CSP = "; ".join(
     (_CSP_COMMON[0], "script-src 'self' 'unsafe-inline'", *_CSP_COMMON[1:])

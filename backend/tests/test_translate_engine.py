@@ -1864,3 +1864,19 @@ def test_여러_줄_layout_블록과_같은_md유닛은_한_번만_번역한다(
     res = run_translation(tmp_path, "ko", cfg, client=client)
     assert client.unit_calls == len(blocks) and res.total == len(blocks)
     assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(md)
+
+
+def test_거부된_출력도_축퇴_증거로_센다(tmp_path, cfg):
+    """같은 캔드 응답이 긴 문단들에서는 게이트에 거부되고 짧은 조각 둘만 통과하면, 통과분만
+    세는 스윕('원문 3종')은 그 둘을 놓쳤다(verify_e2e 4쪽 fault=summary 실측)."""
+    canned = "요약입니다."
+    md = "\n\n".join([
+        "(inner-prod error)\nDprod := E",
+        "(unbiased inner-prod)\nE\nQ",
+        "The first long paragraph explains the training procedure and the data split in detail.",
+        "The second long paragraph summarizes the evaluation protocol and the reported metrics.",
+    ]) + "\n"
+    res, report, out = _run_md(tmp_path, cfg, md, _CannedEverywhere(canned))
+    assert canned not in out
+    assert report["kept_reasons"].get("degenerate-output") == 2
+    assert not json.loads((tmp_path / "translations/ko/units.json").read_text(encoding="utf-8"))

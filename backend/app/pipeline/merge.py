@@ -148,6 +148,37 @@ def split_pages(markdown: str) -> list[str]:
     return [p.strip() for p in parts]
 
 
+def keep_leading_pages(chunk_dir: Path, keep: int) -> None:
+    """multi 청크 산출물에서 앞 keep쪽(모델 페이지 0..keep-1)의 것만 남긴다.
+
+    MAX_LENGTH에서 잘린 청크는 이미 끝난 앞 페이지를 살리고 나머지만 페이지별로
+    다시 처리한다. 잘린 페이지·시작도 못 한 페이지의 크롭·오버레이·원출력이 남아
+    있으면 add_chunk가 그것들을 마지막 보존 페이지로 접어 넣어 엉뚱한 그림이 붙는다.
+    """
+    images = chunk_dir / "images"
+    if images.is_dir():
+        for f in list(images.iterdir()):
+            m = _FILE_MULTI.match(f.name)
+            if m and int(m.group(1)) >= keep:
+                f.unlink(missing_ok=True)
+    if chunk_dir.is_dir():
+        for f in list(chunk_dir.iterdir()):
+            m = _BOXES_FILE.match(f.name)
+            if m and int(m.group(1)) >= keep:
+                f.unlink(missing_ok=True)
+    raw_path = chunk_dir / "raw_pages.json"
+    if raw_path.is_file():
+        try:
+            raw = json.loads(raw_path.read_text(encoding="utf-8"))["pages"]
+        except Exception:  # noqa: BLE001 — 깨진 원출력은 레이아웃 없이 병합된다
+            raw = None
+        if isinstance(raw, list):
+            kept = [str(p) for p in raw[:keep]] + [""] * max(0, keep - len(raw))
+            _atomic_write_json(raw_path, {"pages": kept})
+        else:
+            raw_path.unlink(missing_ok=True)
+
+
 def _global_image_name(global_page: int, k: int | str) -> str:
     return f"p{global_page:04d}_{k}.jpg"
 
@@ -592,7 +623,14 @@ class IncrementalMerger:
 
     # ── 공개 API ───────────────────────────────────────────────
 
-    def add_chunk(self, chunk: ChunkResult) -> None:
+    def add_chunk(self, chunk: ChunkResult, *, warn: bool = True) -> None:
+        """청크 하나를 병합한다.
+
+        warn=False면 마커 과부족 보정 경고를 남기지 않는다(배치·보정 자체는 같다).
+        취소로 끊긴 청크의 부분 출력은 마커가 모자란 게 당연한데, 그 경고가 잡에
+        영구 기록되면 '모델이 페이지를 놓쳤다'는 엉뚱한 품질 문제로 읽힌다.
+        """
+        notes: list[str] = []
         pages = [chunk.markdown] if chunk.single else split_pages(chunk.markdown)
         raw_pages = self._load_raw_pages(chunk)
 
@@ -620,7 +658,7 @@ class IncrementalMerger:
                     raw_pages = place_by_alignment(
                         padded, mapping, chunk.num_pages, "\n"
                     )
-                self.warnings.append(
+                notes.append(
                     f"{chunk.start_page}페이지 청크: 페이지 마커 {len(mapping)}개 "
                     f"(기대 {chunk.num_pages}) — 원본 본문과 대조해 "
                     f"{placed}개 페이지를 제자리에 배치"
@@ -628,7 +666,7 @@ class IncrementalMerger:
 
         if len(pages) > chunk.num_pages:
             # 마커가 초과 생성됨 — 초과분을 마지막 페이지에 합침
-            self.warnings.append(
+            notes.append(
                 f"{chunk.start_page}페이지 청크: 페이지 마커 {len(pages)}개 "
                 f"(기대 {chunk.num_pages}) — 초과분을 마지막 페이지에 병합 "
                 "(초과분의 레이아웃 좌표는 제외됩니다)"
@@ -637,7 +675,7 @@ class IncrementalMerger:
             tail = "\n\n".join(pages[chunk.num_pages - 1 :])
             pages = head + [tail]
         elif len(pages) < chunk.num_pages:
-            self.warnings.append(
+            notes.append(
                 f"{chunk.start_page}페이지 청크: 페이지 마커 {len(pages)}개 (기대 {chunk.num_pages}) — 빈 페이지로 보정"
             )
             pages = pages + [""] * (chunk.num_pages - len(pages))
@@ -647,6 +685,8 @@ class IncrementalMerger:
         self._ingest_layout(chunk, raw_pages, slot_source)
         self.pages_md.extend(_clean(p, self.page_separator) for p in pages)
         self._write_partial()
+        if warn:
+            self.warnings.extend(notes)
 
     @property
     def markdown(self) -> str:

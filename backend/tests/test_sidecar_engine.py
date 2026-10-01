@@ -234,10 +234,37 @@ def test_run_multi_produces_chunk_contract(tmp_path, stub):
     assert (out / "images" / "page_0_0.jpg").is_file()
     assert (out / "result_with_boxes_0.jpg").is_file()
     assert (out / "boxes.json").is_file()
-    assert (out / "raw_pages.json").is_file()
+    # figure_only 엔진(Ovis)은 좌표 layout의 원천인 raw_pages.json을 쓰지 않는다 —
+    # 쓰면 image 블록뿐인 layout.json이 생겨 HTML·PDF 내보내기가 텍스트를 잃는다.
+    assert not (out / "raw_pages.json").exists()
     # 페이지 단위 발행: <PAGE> 마커 후 페이지 전체 텍스트 (기존 SSE 계약)
     assert texts[0] == "<PAGE>\n"
     assert "본문" in "".join(texts)
+
+
+def test_full_layout_engine_still_writes_raw_pages(tmp_path, stub):
+    """텍스트 bbox를 주는 엔진(PaddleOCR-VL, layout=full)은 raw_pages.json을 그대로
+    남긴다 — figure_only 차단이 full 엔진의 레이아웃 뷰까지 끄면 안 된다."""
+    stub.health_response = _health_body(
+        engine="paddleocr_vl", model_id="PaddlePaddle/PaddleOCR-VL-1.6"
+    )
+    body = _parse_body(engine="paddleocr_vl", model_id="PaddlePaddle/PaddleOCR-VL-1.6")
+    body["page"]["blocks"].append(
+        {"type": "text", "bbox": [100, 720, 900, 900], "content": "본문", "order": 1}
+    )
+    stub.parse_behavior = lambda: (200, json.dumps(body).encode())
+    eng = build_engine(_settings(tmp_path, stub, engine="paddleocr_vl"))
+    assert eng.capabilities().layout_capability == "full"
+    eng.load()
+    from PIL import Image
+
+    page_png = tmp_path / "p1.png"
+    Image.new("RGB", (400, 560), "white").save(page_png)
+    out = tmp_path / "chunk_00"
+    eng.run_multi([page_png], out, NullSink(), threading.Event())
+
+    raw = json.loads((out / "raw_pages.json").read_text(encoding="utf-8"))["pages"]
+    assert len(raw) == 1 and "<|det|>text" in raw[0] and "본문" in raw[0]
 
 
 def test_run_single_contract(tmp_path, stub):
@@ -429,11 +456,15 @@ def test_e2e_upload_to_done_with_sidecar(sidecar_client_app, stub):
     result = body["result"]
     assert any("p0001_0.jpg" in u for u in result["images"])
     assert any("page_0001.jpg" in u for u in result["layouts"])
-    assert result["has_layout"] is True
-
-    # layout.json — figure_only 엔진은 image 블록만
-    layout = c.get(f"/api/jobs/{job_id}/layout")
-    assert layout.status_code == 200
+    # figure_only 엔진은 텍스트 좌표가 없어 layout.json을 만들지 않는다. 예전에는
+    # image 블록뿐인 layout.json이 생겨 has_layout=True가 됐고, 그 결과 document.html이
+    # OCR 텍스트 없는 원문 래스터(facsimile)로, /pdf?lang=ko가 번역 안 된 원문으로 나갔다.
+    assert result["has_layout"] is False
+    assert c.get(f"/api/jobs/{job_id}/layout").status_code == 404
+    # 그래서 HTML 내보내기는 원문 래스터가 아니라 OCR 텍스트(+인라인 그림)를 담는다
+    doc = c.get(f"/api/jobs/{job_id}/document.html")
+    assert doc.status_code == 200
+    assert "<p>본문</p>" in doc.text and "data:image/" in doc.text
 
     # archive에 meta.json 동봉
     archive = c.get(f"/api/jobs/{job_id}/archive")

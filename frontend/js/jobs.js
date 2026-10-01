@@ -5,7 +5,7 @@ import {
 } from './core.js';
 import { armTimers, el, state } from './state.js';
 import { h, isTerminal, localGet, localRemove, showToast } from './ui.js';
-import { apiDelete, apiGet } from './api.js';
+import { POLL_TIMEOUT_MS, apiDelete, apiGet } from './api.js';
 import {
   drainGroundToUI, flushStream, renderOverlay, resetLiveState, retryPageImageIfNeeded,
   updateLeftPane,
@@ -54,7 +54,7 @@ export function pollJobs() {
 async function refreshJobsOnce() {
   let data;
   try {
-    data = await apiGet('/api/jobs');
+    data = await apiGet('/api/jobs', { timeoutMs: POLL_TIMEOUT_MS });
   } catch (_) {
     return; // keep last known list on transient failure
   }

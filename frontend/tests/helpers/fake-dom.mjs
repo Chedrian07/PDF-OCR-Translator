@@ -231,6 +231,16 @@ class FakeElement extends FakeNode {
     if (this.tagName === 'TEMPLATE') this.content = new FakeFragment(doc);
   }
   get children() { return this.childNodes.filter((n) => n.nodeType === 1); }
+  get nextElementSibling() {
+    let node = this.nextSibling;
+    while (node && node.nodeType !== 1) node = node.nextSibling;
+    return node;
+  }
+  get previousElementSibling() {
+    let node = this.previousSibling;
+    while (node && node.nodeType !== 1) node = node.previousSibling;
+    return node;
+  }
   get firstElementChild() { return this.children[0] || null; }
   get lastElementChild() { const k = this.children; return k[k.length - 1] || null; }
   get childElementCount() { return this.children.length; }

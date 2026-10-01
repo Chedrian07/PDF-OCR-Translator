@@ -146,10 +146,14 @@ jobs:
           set -euo pipefail
           docker save "$IMAGE" | gzip > "$RUNNER_TEMP/$ARCHIVE"
           gzip -t "$RUNNER_TEMP/$ARCHIVE"
+          # 스모크·스캔을 통과한 바로 이 아카이브의 해시 — release-assets가 대조한다
+          (cd "$RUNNER_TEMP" && sha256sum "$ARCHIVE" > "$ARCHIVE.sha256")
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-image-${{ matrix.arch }}
-          path: ${{ runner.temp }}/pdf-ocr-translator-*.tar.gz
+          path: |
+            ${{ runner.temp }}/pdf-ocr-translator-*.tar.gz
+            ${{ runner.temp }}/pdf-ocr-translator-*.tar.gz.sha256
           compression-level: 0
           retention-days: 7
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -188,3 +192,40 @@ jobs:
             "$release_image:$release_version-cpu-amd64" \
             "$release_image:$release_version-cpu-arm64"
           docker buildx imagetools inspect "$release_image:$release_version-cpu"
+
+  # 오프라인 설치 이미지(tar.gz)와 SHA256SUMS를 릴리스 자산으로 첨부한다 — 예전에는 워크플로
+  # 아티팩트(7일 뒤 소멸)에만 올라가고, 담당자가 손으로 첨부하며 SHA256SUMS도 CI 밖에서
+  # 만들었다. 여기서는 스모크·스캔을 통과한 아카이브의 해시를 대조한 뒤 계산한다.
+  release-assets:
+    needs: publish-manifest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-image-*
+          merge-multiple: true
+          path: assets
+      - name: Verify per-arch checksums and write SHA256SUMS
+        working-directory: assets
+        run: |
+          set -euo pipefail
+          sha256sum -c ./*.tar.gz.sha256
+          sha256sum pdf-ocr-translator-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: Attach offline images and SHA256SUMS to the GitHub release
+        working-directory: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # 릴리스가 아직 없으면 초안으로 만든다 — 노트는 담당자가 채워 공개한다.
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+              --title "$RELEASE_TAG" \
+              --notes "오프라인 설치 이미지(tar.gz)와 SHA256SUMS는 릴리스 워크플로가 첨부했다."
+          fi
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            pdf-ocr-translator-*.tar.gz SHA256SUMS

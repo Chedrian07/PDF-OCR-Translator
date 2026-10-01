@@ -56,11 +56,19 @@ metal = [
     "torch==2.10.0; sys_platform == 'darwin'",
     "torchvision==0.25.0; sys_platform == 'darwin'",
 ]
+# mlx: Apple Silicon용 in-process MLX OCR 엔진(후속 단계) 런타임. 마커 때문에 darwin-arm64
+#   (macOS 14 이상 휠)에만 설치되고 Linux·Docker 이미지에는 들어가지 않는다. torch와 겹치지
+#   않아 metal·cpu extra와 함께 쓴다 — `uv sync --extra metal --extra mlx`.
+#   0.32.3은 감사 스파이크가 같은 가중치로 패리티를 검증한 버전이다. mlx-vlm은
+#   transformers>=5.14를 요구해 4.57.1 고정과 충돌하므로 의존하지 않고 모델 코드를 벤더링한다.
+mlx = ["mlx==0.32.3; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 
 [dependency-groups]
 dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.15.21"]
 
 [tool.uv]
+# torch 변형(cpu·cu129·metal)끼리만 상호 배타다. mlx extra는 torch를 끌어오지 않으므로
+# 어느 쪽과도 충돌하지 않아 여기에 넣지 않는다.
 conflicts = [
     [{ extra = "cpu" }, { extra = "cu129" }],
     [{ extra = "cpu" }, { extra = "metal" }],

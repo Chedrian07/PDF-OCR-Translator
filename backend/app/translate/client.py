@@ -8,9 +8,11 @@ requests만 쓰며(런타임 기존 의존성), 실제 전송은 _post 한 메�
 잘림(truncation) 처리: chat `finish_reason=="length"` / responses
 `status=="incomplete"`를 감지하면 같은 요청을 **max_tokens 2배로 1회 재시도**한다
 (2026-07-08 합의 정책 ②). thinking 모델은 reasoning 토큰이 같은 예산에서 차감되어
-effort 테이블(types.REASONING_MAX_TOKENS)로도 드물게 잘릴 수 있다 — 잘린 출력을
-조용히 반환하면 unmask 실패→래더→원문 유지로 강등되고, 용어집 Pass-0 JSON은
-시드로 조용히 강등되던 취약 지점이다.
+effort 테이블(types.REASONING_MAX_TOKENS)로도 드물게 잘릴 수 있다.
+재시도 뒤에도 잘렸으면 **잘린 출력을 반환하지 않고** TranslateOutputTruncated(유닛
+단위 거부)를 던진다 — 종전처럼 잘린 출력을 돌려주면 플레이스홀더 없는 산문은 래더에
+들어가지도 않고 문단 끝이 빠진 채 채택·캐시됐다(probe:MLX-02). 반복 루프·과도한
+길이처럼 재시도해도 같은 결과가 뻔하면 2배 재시도 자체를 생략한다(probe:MLX-05).
 """
 
 from __future__ import annotations
@@ -24,7 +26,14 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
-from .types import TranslateAPIError, TranslateConfig, TranslateUnitRejected
+from .masking import is_degenerate_repetition
+from .types import (
+    TranslateAPIError,
+    TranslateConfig,
+    TranslateEmptyOutput,
+    TranslateOutputTruncated,
+    TranslateUnitRejected,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +54,9 @@ _CONNECT_TIMEOUT_S = 10.0
 
 # 재시도 대기 상한 — 지수 백오프와 Retry-After 헤더 양쪽에 같은 상한을 건다.
 _MAX_BACKOFF_S = 30.0
+
+# 잘린 출력이 '쓸 수 없을 만큼 길다'고 보는 최소 길이(문자) — _hopeless_truncation 참조.
+_OVERLONG_MIN_CHARS = 2000
 
 # thinking 출력 표기 — 여는 태그는 선두에서만 의미가 있다(템플릿이 프롬프트 끝에
 # `<think>`를 미리 넣는 Qwen3 계열은 content가 여는 태그 없이 '…</think>답'으로 온다).
@@ -175,26 +187,47 @@ class OpenAICompatClient:
 
     # ── 공개 API ───────────────────────────────────────────────────
     def complete(self, system: str, user: str, *, max_tokens: int) -> str:
+        """번역문을 반환한다. 잘림이 남으면 TranslateOutputTruncated(유닛 단위 거부).
+
+        잘린 출력은 어떤 경로로도 반환하지 않는다 — 호출자가 캐시·게시하지 않게.
+        """
         text, truncated = self._complete_once(system, user, max_tokens)
         if not truncated:
-            return text  # 빈 응답은 _parse가 이미 raise
+            return text  # 빈 응답은 _parse가 TranslateEmptyOutput으로 이미 raise
         # 잘림(finish_reason=length / responses incomplete) — 예산 2배로 1회 재시도.
-        # max_tokens 파라미터를 아예 안 보내는 설정(none)이면 같은 요청의 반복이라 생략.
-        if self.cfg.max_tokens_param != "none":
-            logger.warning("번역 API 출력 잘림 — max_tokens %d→%d로 1회 재시도", max_tokens, max_tokens * 2)
-            try:
-                retry_text, _ = self._complete_once(system, user, max_tokens * 2)
-            except TranslateAPIError as e:
-                # 2배 재시도가 실패해도 잘린 첫 출력이 있으면 버리지 않는다 — 래더가 흡수.
-                if not text:
-                    raise
-                logger.warning("번역 API 잘림 2배 재시도 실패(%s) — 잘린 첫 출력을 사용", type(e).__name__)
-                return text
-            if retry_text:
-                return retry_text  # 여전히 잘렸어도 더 긴 출력 — 래더가 흡수
-        if text:
-            return text
-        raise TranslateAPIError(_exhausted_message(self.cfg))
+        if self.cfg.max_tokens_param == "none":
+            # max_tokens를 안 보내는 설정이면 재시도는 같은 요청의 반복이다. mlx_lm은
+            # 이때 서버 기본 --max-tokens 512에서 자른다(probe:MLX-02).
+            logger.warning(
+                "번역 API 출력 잘림 — TRANSLATE_MAX_TOKENS_PARAM=none이라 서버 기본 상한에서"
+                " 잘렸고 재시도할 수 없습니다"
+            )
+            raise self._truncated(text, None, "max_tokens 미전송 — 서버 기본 상한")
+        hopeless = _hopeless_truncation(text, user)
+        if hopeless:
+            # 온도 0 greedy 루프는 2배 예산도 끝까지 태운다(실측 8192→16384 연속 루프).
+            logger.warning("번역 API 출력 잘림 — %s, 2배 재시도 생략", hopeless)
+            raise self._truncated(text, max_tokens, hopeless)
+        logger.warning("번역 API 출력 잘림 — max_tokens %d→%d로 1회 재시도", max_tokens, max_tokens * 2)
+        try:
+            retry_text, retry_truncated = self._complete_once(system, user, max_tokens * 2)
+        except TranslateUnitRejected as e:
+            # 2배 예산이 서버 상한을 넘어 400 등 — 그 유닛의 원인은 여전히 잘림이다.
+            # 연결 실패·5xx 같은 전역 오류는 그대로 전파한다(엔드포인트 문제).
+            raise self._truncated(text, max_tokens, f"2배 재시도 거부: {e}") from e
+        if not retry_truncated:
+            return retry_text
+        why = _hopeless_truncation(retry_text, user) or "2배 예산에서도 잘림"
+        raise self._truncated(retry_text or text, max_tokens * 2, why)
+
+    def _truncated(self, text: str, budget: int | None, why: str) -> TranslateOutputTruncated:
+        if not text:
+            # 본문이 한 글자도 없다 = thinking이 예산을 다 썼다 → 서버측 안내
+            return TranslateOutputTruncated(_exhausted_message(self.cfg))
+        where = f"max_tokens({budget})" if budget else "서버 상한"
+        return TranslateOutputTruncated(
+            f"번역 API 출력이 {where}에서 잘렸습니다({why}) — 잘린 번역은 쓰지 않습니다"
+        )
 
     def _complete_once(self, system: str, user: str, max_tokens: int) -> tuple[str, bool]:
         """1회 완성 시도 — (텍스트, 잘림 여부) 반환. auto 모드 폴백/래치 담당."""
@@ -383,8 +416,26 @@ class OpenAICompatClient:
             raise TranslateAPIError(f"번역 API 응답 파싱 실패: {_body_preview(body)}") from e
         text = _postprocess(text)
         if not text and not truncated:
-            raise TranslateAPIError("번역 API가 빈 응답을 반환했습니다")
+            # 사고만 내고 끝났거나 빈 문자열 — 같은 프롬프트(온도 0)면 같은 결과라 유닛 단위.
+            raise TranslateEmptyOutput("번역 API가 빈 응답을 반환했습니다")
         return text, truncated
+
+
+def _hopeless_truncation(text: str, user: str) -> str:
+    """잘린 출력을 2배 예산으로 다시 받아도 쓸 수 없을 게 뻔한 이유 — 없으면 "".
+
+    본문이 비었으면(thinking이 예산을 다 씀) 2배 예산이면 본문까지 갈 수 있어 재시도한다.
+    프롬프트 전체 길이를 쓰는 이유: 클라이언트는 원문 구간을 모른다. 원문 ⊂ 프롬프트라
+    '프롬프트의 4배 초과'면 원문 대비 게이트 상한(3–4배)도 반드시 넘는다(보수적).
+    짧은 프롬프트는 thinking 뒤 남은 본문 몇 줄만으로도 4배를 넘으므로 하한을 둔다.
+    """
+    if not text:
+        return ""
+    if is_degenerate_repetition(text):
+        return "반복 루프 감지"
+    if len(text) > max(4 * len(user), _OVERLONG_MIN_CHARS):
+        return "출력이 입력의 4배를 넘음"
+    return ""
 
 
 def _exhausted_message(cfg: TranslateConfig) -> str:

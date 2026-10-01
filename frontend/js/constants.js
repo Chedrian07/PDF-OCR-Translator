@@ -81,3 +81,11 @@ export const READER_SYNC_QUIET_MS = 260;   // 프로그램적 스크롤 뒤 반�
 export const READER_DEFAULT_RATIO = 1700 / 2200; // 페이지 크기 미상일 때 자리표시자 종횡비
 export const READER_ALIGNMENT_COOLDOWN_MS = 30_000; // 제한 재시도 소진 뒤 사용자 재진입 전 휴지기
 export const readerPosKey = (jobId) => `uocr-reader-pos-${jobId}`;
+// 리더의 인용·하이라이트 — 잡별 localStorage에 남긴다(잡 삭제 시 함께 정리).
+// 한 잡 READER_NOTES_MAX개, 보관 잡 READER_NOTES_MAX_JOBS개(가장 오래 손대지 않은 잡부터
+// 정리)로 묶어 저장 공간이 끝없이 자라지 않게 한다.
+export const READER_NOTES_PREFIX = 'uocr-reader-notes-';
+export const readerNotesKey = (jobId) => `${READER_NOTES_PREFIX}${jobId}`;
+export const READER_NOTES_MAX = 200;
+export const READER_NOTES_MAX_JOBS = 50;
+export const READER_NOTE_MAX_CHARS = 2000;

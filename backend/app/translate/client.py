@@ -46,7 +46,10 @@ _CONNECT_TIMEOUT_S = 10.0
 # 재시도 대기 상한 — 지수 백오프와 Retry-After 헤더 양쪽에 같은 상한을 건다.
 _MAX_BACKOFF_S = 30.0
 
-_THINK_RE = re.compile(r"^\s*<think>.*?</think>", re.DOTALL)
+# thinking 출력 표기 — 여는 태그는 선두에서만 의미가 있다(템플릿이 프롬프트 끝에
+# `<think>`를 미리 넣는 Qwen3 계열은 content가 여는 태그 없이 '…</think>답'으로 온다).
+_THINK_OPEN_RE = re.compile(r"^\s*<think>")
+_THINK_CLOSE = "</think>"
 _FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)```\s*$", re.DOTALL)
 
 
@@ -466,11 +469,40 @@ def _parse_responses_output(output) -> str:
     return "".join(parts)
 
 
-def _postprocess(text) -> str:
-    """선두 <think> 블록 제거, 전체 감싼 코드펜스 벗기기, strip."""
-    if not isinstance(text, str):
+def _strip_think(text: str) -> str:
+    """thinking 흔적을 걷어낸 본문.
+
+    세 형태를 처리한다(감사 mlx-integration-6·translate-llm-16, probe:MLX-06):
+      * `<think>…</think>답` — 선두 완결 블록(종전 유일 처리 형태)
+      * `…</think>답` — 여는 태그가 프롬프트 쪽에 있어 content에는 닫는 태그만 온다.
+        reasoning을 분리하지 않는 서버(llama.cpp --reasoning-format none, LM Studio
+        분리 끔 등)에서 짧은 영어 독백이 번역문 앞에 붙은 채 게이트를 통과했다.
+      * 닫히지 않은 선두 `<think>…` — 사고 도중 잘렸거나 사고만 냈다 → 본문 없음.
+    원문의 `<think>` 리터럴은 마스킹이 플레이스홀더로 바꾸므로 출력의 태그는 언제나
+    모델의 사고 표기다. 따라서 마지막 닫는 태그 뒤만 본문으로 쓴다.
+    """
+    if _THINK_CLOSE in text:
+        return text.rsplit(_THINK_CLOSE, 1)[1]
+    if _THINK_OPEN_RE.match(text):
         return ""
-    text = _THINK_RE.sub("", text).strip()
+    return text
+
+
+def _content_text(content) -> str:
+    """message.content — 문자열 또는 [{"type":"text","text":…}] 파트 배열."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text") or "") for part in content
+            if isinstance(part, dict) and part.get("type") in (None, "text", "output_text")
+        )
+    return ""
+
+
+def _postprocess(text) -> str:
+    """thinking 흔적 제거, 전체 감싼 코드펜스 벗기기, strip."""
+    text = _strip_think(_content_text(text)).strip()
     m = _FENCE_RE.match(text)
     if m:
         text = m.group(1).strip()

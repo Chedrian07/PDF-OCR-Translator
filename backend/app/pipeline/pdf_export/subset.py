@@ -30,6 +30,7 @@ fontTools가 없거나 서브셋이 실패하면 조용히 원본 경로를 돌�
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import unicodedata
@@ -114,6 +115,10 @@ def drawable_charset(*payloads: object) -> str:
         else:
             blob = json.dumps(payload, ensure_ascii=False, default=str)
         chars.update(blob)
+        # 표 셀은 HTMLParser(convert_charrefs=True)를 거쳐 `&uarr;`·`&check;`·`&#10003;`
+        # 같은 엔티티가 실제 글자로 바뀐 채 그려진다. 원시 문자열만 훑으면 그 글자가
+        # 집합에서 빠져, 서브셋 폰트에서 has_glyph가 원본과 달라지고 tofu가 된다.
+        chars.update(html.unescape(blob))
     # NFKD ASCII 분해는 `_portable_text_for_font`의 마지막 폴백 경로다.
     for char in list(chars):
         for part in unicodedata.normalize("NFKD", char):

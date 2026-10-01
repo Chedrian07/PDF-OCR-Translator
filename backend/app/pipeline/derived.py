@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -376,17 +378,77 @@ def _load_pdf_export_report(job, lang: str) -> dict:
         return {}
 
 
-def _pdf_export_font_id(settings) -> str:
-    """PDF_EXPORT_FONT 설정의 정체성. 경로뿐 아니라 크기·mtime까지 넣어, 같은 경로에
-    다른 폰트를 덮어써도 export.{lang}.pdf 캐시가 무효화되게 한다."""
-    raw = (settings.pdf_export_font or "").strip()
-    if not raw:
-        return "auto"
+def _font_file_identity(path: str) -> str:
+    """폰트 파일의 정체성 — 경로뿐 아니라 크기·mtime까지 넣어, 같은 경로에 다른
+    폰트를 덮어써도 바뀐다."""
     try:
-        stat = Path(raw).stat()
+        stat = Path(path).stat()
     except OSError:
-        return f"{raw}:missing"
-    return f"{raw}:{stat.st_size}:{stat.st_mtime_ns}"
+        return f"{path}:missing"
+    return f"{path}:{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def _fonttools_available() -> bool:
+    try:
+        return importlib.util.find_spec("fontTools") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _system_font_digest() -> str:
+    """자동 폰트 해석(PDF_EXPORT_FONT 미지정·무효)이 고를 수 있는 시스템 한글 폰트의 지문.
+
+    빌더(pdf_export.fonts._resolve_font)와 같은 순서로 본다: 정적 후보가 하나라도
+    있으면 그것들, 전멸이면 fc-list 탐색 결과. 폰트를 열어 검증하지는 않는다(빌드당
+    몇 번이면 되는 그 비용을 요청마다 낼 수 없다) — 설치·삭제·교체만 잡으면 된다.
+    """
+    from .pdf_export.fonts import (
+        _SYSTEM_FONT_CANDIDATES,
+        _SYSTEM_SANS_FONT_CANDIDATES,
+        _fontconfig_candidates,
+    )
+
+    static = dict.fromkeys(_SYSTEM_FONT_CANDIDATES + _SYSTEM_SANS_FONT_CANDIDATES)
+    present = [path for path in static if Path(path).is_file()]
+    candidates = present or list(_fontconfig_candidates())
+    joined = "|".join(_font_file_identity(path) for path in candidates)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+# 폰트 환경(시스템 폰트 지문·fontTools 가용) 메모. 캐시 판정은 /page?lang 요청마다
+# 돌므로 매번 후보 전부를 stat(경우에 따라 fc-list 실행)할 수 없다. 짧은 TTL이라
+# 프로세스를 재시작하지 않아도 폰트·fontTools 설치가 곧 반영된다.
+_FONT_ENV_TTL_S = 30.0
+_FONT_ENV: tuple[float, str, bool] | None = None
+_FONT_ENV_GUARD = threading.Lock()
+
+
+def _font_environment() -> tuple[str, bool]:
+    global _FONT_ENV
+    now = time.monotonic()
+    with _FONT_ENV_GUARD:
+        cached = _FONT_ENV
+    if cached is not None and now - cached[0] < _FONT_ENV_TTL_S:
+        return cached[1], cached[2]
+    digest, fonttools = _system_font_digest(), _fonttools_available()
+    with _FONT_ENV_GUARD:
+        _FONT_ENV = (now, digest, fonttools)
+    return digest, fonttools
+
+
+def _pdf_export_font_id(settings) -> str:
+    """내보내기 폰트 구성의 정체성 — 빌드 표식에 들어가 캐시 판정에 쓰인다.
+
+    예전에는 PDF_EXPORT_FONT가 비면 'auto' 고정이라, 폰트 없는 환경에서 내장 CJK
+    (1em 전각 자간)로 만든 PDF가 경고 안내대로 fonts-noto-cjk를 설치한 뒤에도,
+    fontTools를 설치해 서브셋이 가능해진 뒤에도 캐시로 계속 나갔다. 그래서 자동
+    해석이 볼 시스템 폰트 지문과 서브셋 가능 여부를 함께 넣는다. 명시 폰트가 없거나
+    깨졌으면 빌더가 시스템 폰트로 폴백하므로 지문은 두 경우 모두에 넣는다.
+    """
+    raw = (settings.pdf_export_font or "").strip()
+    system, fonttools = _font_environment()
+    explicit = _font_file_identity(raw) if raw else "auto"
+    return f"{explicit}|system:{system}|{'subset' if fonttools else 'full'}"
 
 
 def _font_marker_path(job, lang: str) -> Path:

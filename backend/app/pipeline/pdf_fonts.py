@@ -33,7 +33,10 @@ from statistics import median
 _BOLD_FLAG = 16  # fitz span flags: bit 4 == bold
 
 # enrichment 스키마 버전 — 필드 추가 시 올리면 기존 잡이 /layout 요청 때 재백필된다
-ENRICH_VERSION = 5
+# 6: /Rotate 페이지에서 span을 표시(회전 반영) 공간으로 옮겨 bbox와 비교한다. 그 전에는
+#    표시 공간 bbox와 비회전 공간 span을 섞어 fs·정렬이 전멸하고 가로 글을 세로쓰기로
+#    오판했다 — 기존 잡의 회전 페이지 메타를 다시 계산하려고 올린다.
+ENRICH_VERSION = 6
 
 
 def _weighted_median(pairs: list[tuple[float, int]]) -> float:
@@ -142,7 +145,7 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
             if not isinstance(page, dict):
                 continue
             try:
-                if _enrich_page(doc, page):
+                if _enrich_page(fitz, doc, page):
                     changed = True
             except Exception:  # noqa: BLE001 — 한 페이지 실패가 나머지 백필을 막지 않는다
                 pass
@@ -160,7 +163,7 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
     return changed
 
 
-def _enrich_page(doc, page: dict) -> bool:
+def _enrich_page(fitz, doc, page: dict) -> bool:
     """한 페이지의 블록에 실측 메타를 심는다. 블록을 바꿨으면 True.
 
     스탬프는 호출부가 결과와 무관하게 찍는다 — 여기서 일찍 빠져나가도 된다.
@@ -180,14 +183,29 @@ def _enrich_page(doc, page: dict) -> bool:
         text_dict = fpage.get_text("dict")
     except Exception:  # noqa: BLE001 — 손상 페이지는 폴백 휴리스틱에 맡긴다
         return False
-    # 페이지의 모든 span을 평면화 (bbox·size·text·flags·font)
-    spans: list[tuple[dict, tuple, int]] = []
+    # det bbox는 렌더 이미지와 같은 **표시(회전 반영) 공간**의 0–999 좌표이고(pw·ph도
+    # fpage.rect), get_text("dict")의 bbox·dir은 /Rotate 이전의 비회전 공간이다.
+    # span을 rotation_matrix로 표시 공간에 옮겨야 비교·정렬 추론·세로쓰기 판정이 같은
+    # 좌표계에서 이뤄진다(회전 0이면 항등행렬이라 기존과 같다). 방향 벡터는 평행이동
+    # 없이 선형 부분만 돌린다 — 화면에서 가로로 읽히는 줄을 세로쓰기로 오판하지 않게.
+    to_display = fpage.rotation_matrix
+    # 페이지의 모든 span을 평면화 (표시 공간 bbox·dir과 원본 span dict)
+    spans: list[tuple[dict, tuple, tuple, int]] = []
     line_no = 0
     for tb in text_dict.get("blocks", ()):
         for line in tb.get("lines", ()):
-            ldir = tuple(line.get("dir") or (1, 0))
+            dx, dy = tuple(line.get("dir") or (1, 0))[:2]
+            ldir = (
+                dx * to_display.a + dy * to_display.c,
+                dx * to_display.b + dy * to_display.d,
+            )
             for sp in line.get("spans", ()):
-                spans.append((sp, ldir, line_no))
+                raw_bbox = sp.get("bbox")
+                if not raw_bbox or len(raw_bbox) != 4:
+                    continue
+                shown = fitz.Rect(raw_bbox) * to_display
+                shown.normalize()
+                spans.append((sp, (shown.x0, shown.y0, shown.x1, shown.y1), ldir, line_no))
             line_no += 1
     if not spans:
         return False
@@ -213,10 +231,7 @@ def _enrich_page(doc, page: dict) -> bool:
         sans_chars = 0
         vert_up = vert_down = 0
         matched_lines: dict[int, list[float]] = {}
-        for sp, ldir, source_line_no in spans:
-            sb = sp.get("bbox")
-            if not sb or len(sb) != 4:
-                continue
+        for sp, sb, ldir, source_line_no in spans:
             cx = (sb[0] + sb[2]) / 2
             cy = (sb[1] + sb[3]) / 2
             if not (rx1 <= cx <= rx2 and ry1 <= cy <= ry2):

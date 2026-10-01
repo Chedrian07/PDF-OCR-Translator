@@ -129,6 +129,25 @@ def _env_choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
     return v
 
 
+def _env_unescaped(name: str, default: str) -> str:
+    """백슬래시 이스케이프(`\\n`·`\\t`·`\\uXXXX` 등)를 해석하는 문자열 env.
+
+    예전 `encode().decode("unicode_escape")`는 UTF-8 바이트를 Latin-1로 읽어 한글·
+    전각 대시가 'í\\x8e\\x98…'처럼 깨졌다. Latin-1 밖 문자를 먼저 `\\uXXXX`로 바꿔
+    두면 unicode_escape가 원래 문자로 되돌리고, 기존 ASCII 이스케이프 해석은 그대로다.
+    큰따옴표 .env 값처럼 이미 풀린 실제 개행도 그대로 남는다.
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return raw.encode("latin-1", "backslashreplace").decode("unicode_escape")
+    except UnicodeDecodeError as e:
+        raise ValueError(
+            f"{name}={raw!r}: 백슬래시 이스케이프를 해석할 수 없습니다 ({e.reason})"
+        ) from None
+
+
 def _translate_global_concurrency() -> int:
     """서버 전체 번역 HTTP 상한(1..8).
 
@@ -225,7 +244,6 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         load_dotenv_file()  # 로컬 실행(Metal 등)에서도 .env의 번역/OCR 설정이 잡히게
-        sep = os.environ.get("PAGE_SEPARATOR")
         frontend = os.environ.get("FRONTEND_DIR")
         device = os.environ.get("OCR_DEVICE", "cpu").strip().lower()
         return cls(
@@ -250,7 +268,7 @@ class Settings:
             max_length=_env_int("MAX_LENGTH", 32768),
             max_page_output_chars=_env_limit("MAX_PAGE_OUTPUT_CHARS", 16_384),
             max_page_output_tokens=_env_limit("MAX_PAGE_OUTPUT_TOKENS", 6_144),
-            page_separator=sep.encode().decode("unicode_escape") if sep else "\n\n---\n\n",
+            page_separator=_env_unescaped("PAGE_SEPARATOR", "\n\n---\n\n"),
             cpu_threads=_env_int("OCR_CPU_THREADS", 0),
             fast_decode=_env_bool("OCR_FAST_DECODE", True),
             decode_block=_env_int("OCR_DECODE_BLOCK", 8),

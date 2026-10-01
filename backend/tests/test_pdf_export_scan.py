@@ -299,3 +299,40 @@ def test_table_image_cells_are_covered_before_translation(tmp_path):
         method_cell = fitz.Rect(62, 83, 210, 101)
         left, before = _ink_beyond_translation(source[0], result.path, method_cell)
     assert before > 20 and left <= before * 0.05, (left, before)
+
+
+def test_tall_narrow_scan_stamp_is_kept_as_vertical_text(tmp_path):
+    """스캔 여백의 세로 스탬프(arXiv 식별자)는 덮고 가로로 다시 쓰지 않는다.
+
+    텍스트 레이어가 없어 줄 방향을 모르는 스캔에서는 레이아웃 뷰와 같은 기하
+    폴백(폭 대비 높이 6배 이상 + 12자 이상)으로 세로쓰기를 판정해 원문을 보존한다.
+    예전에는 그 영역을 덮은 뒤 한국어를 한 글자씩 세로로 쌓아 찍었다.
+    """
+    job_dir = tmp_path / "scan-stamp"
+    job_dir.mkdir()
+    scale = SCAN_DPI / 72
+    page_image = Image.open(io.BytesIO(_scan_png()))
+    stamp = Image.new("RGB", (int(260 * scale), int(14 * scale)), PAPER)
+    ImageDraw.Draw(stamp).text((0, 0), "arXiv:2504.19874v1 [cs.LG] 28 Apr 2025",
+                               fill=INK, font=_font(11 * scale))
+    page_image.paste(stamp.rotate(90, expand=True), (int(20 * scale), int(300 * scale)))
+    buffer = io.BytesIO()
+    page_image.save(buffer, "PNG")
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    page.insert_image(page.rect, stream=buffer.getvalue())
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+    stamp_rect = fitz.Rect(19, 299, 36, 562)
+    _write_layout(job_dir, [
+        {"type": "text", "bbox": _bbox(stamp_rect),
+         "content": "arXiv:2504.19874v1 [cs.LG] 28 Apr 2025"},
+        {"type": "text", "bbox": _bbox(BLOCK), "content": "\n".join(LINES)},
+    ], {0: "아카이브 식별자 번역문 스물여덟 사월", 1: KO})
+
+    result = build_translated_pdf(job_dir, "ko")
+    assert result.kept_reasons.get("vertical") == 1, result.report()
+    assert result.raster_blocks_erased == 1, result.report()   # 본문 블록만 덮었다
+    with fitz.open(job_dir / "source.pdf") as source:
+        left, before = _ink_beyond_translation(source[0], result.path, stamp_rect)
+    assert before > 100 and left >= before * 0.9, (left, before)   # 스탬프 픽셀은 그대로

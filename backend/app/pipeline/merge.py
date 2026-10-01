@@ -618,18 +618,21 @@ class IncrementalMerger:
         """이 청크가 덮는 물리 페이지들의 원본 텍스트 (정합 대조용, 정규화됨).
 
         텍스트 레이어가 없는 스캔 PDF면 빈 목록 — 호출자는 기존 위치 기반
-        동작으로 안전하게 되돌아간다."""
-        try:
-            import pymupdf as fitz  # 레거시 fitz 임포트는 1.28+에서 stdout 폐지 경고
+        동작으로 안전하게 되돌아간다. 원문은 PDF 워커에서 페이지마다 읽는다(pdf.page_plain_texts
+        — 적대적 페이지가 OCR 워커 스레드·서버 GIL을 붙잡지 않게). 한 페이지라도 시간 상한을
+        넘거나 실패하면 정합하지 않는다."""
+        from .pdf import page_plain_texts
 
-            with fitz.open(self.job_dir / "source.pdf") as doc:
-                texts = []
-                for local in range(chunk.num_pages):
-                    idx = chunk.start_page - 1 + local
-                    raw = doc[idx].get_text() if 0 <= idx < doc.page_count else ""
-                    texts.append(_align_norm(raw))
-        except Exception:
+        try:
+            raws = page_plain_texts(
+                self.job_dir / "source.pdf",
+                [chunk.start_page - 1 + local for local in range(chunk.num_pages)],
+            )
+        except Exception:  # noqa: BLE001 — 정합은 선택적 개선이다
             return []
+        if raws is None:
+            return []
+        texts = [_align_norm(raw) for raw in raws]
         return texts if any(len(t) >= _ALIGN_MIN_PAGE_CHARS for t in texts) else []
 
     def _align_chunk_pages(

@@ -975,6 +975,38 @@ def test_translated_layout_font_backfill_follows_enrich_version(client, sample_p
     assert (job_dir / "layout.json").read_bytes() == original_before
 
 
+def test_concurrent_identical_backfills_do_not_rewrite_or_rewarm(client, sample_pdf, monkeypatch):
+    """리더는 /viewer/pages·/alignment·/outline을 한꺼번에 부른다 — ENRICH_VERSION 상향 뒤
+    같은 낡은 layout을 읽은 요청들이 같은 백필 결과를 차례로 다시 써서, 쓸 때마다 inode·
+    mtime이 바뀌어 내보내기 PDF 캐시를 무효화하고 예열을 또 띄웠다."""
+    import app.api as api_mod
+
+    jid, job_dir = _ko_layout_job(client, sample_pdf)
+    st = client.app.state
+    job = st.store.get(jid)
+    target = job_dir / "layout.ko.json"
+    stale = json.loads(target.read_text(encoding="utf-8"))
+    for page in stale:
+        page["fonts_v"] = 1
+    target.write_text(json.dumps(stale), encoding="utf-8")
+
+    warmed = []
+    monkeypatch.setattr(api_mod, "_warm_export_pdf", lambda st_, job_, lang: warmed.append(lang))
+    first = json.loads(target.read_text(encoding="utf-8"))   # 두 요청이 같은 낡은 내용을 읽었다
+    second = json.loads(target.read_text(encoding="utf-8"))
+
+    api_mod._backfill_layout_fonts(job, first, "ko", st)
+    assert warmed == ["ko"]
+    written = target.stat()
+
+    api_mod._backfill_layout_fonts(job, second, "ko", st)
+    assert second == first                                   # 같은 백필 결과
+    after = target.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (written.st_ino, written.st_mtime_ns)
+    assert warmed == ["ko"]                                  # 두 번째는 교체·예열 없음
+    assert list(job_dir.glob(".layout.*.tmp")) == []
+
+
 def test_page_image_does_not_reparse_layout_each_request(client, sample_pdf, monkeypatch):
     """페이지 이미지 요청마다 layout.json 전체를 재파싱하지 않는다(크기·mtime 캐시)."""
     import app.api as api_mod

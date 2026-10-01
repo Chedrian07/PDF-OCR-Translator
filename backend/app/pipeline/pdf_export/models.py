@@ -114,3 +114,6 @@ class _SourceSpan:
     size: float
     flags: int
     origin: tuple[float, float]
+    # 줄 진행 방향(get_text의 line dir, 비회전 공간). 리댁션 띠를 baseline 기준으로
+    # 만들 때 회전된 줄(세로로 놓인 줄)도 같은 식으로 다루려면 필요하다.
+    dir: tuple[float, float] = (1.0, 0.0)

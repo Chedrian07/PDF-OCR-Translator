@@ -366,6 +366,16 @@ def d1_plan_for_job(jd: Path, lang: str) -> tuple[dict[str, int], set[str], int]
     )
 
 
+def unit_placeholder_counts(jd: Path) -> dict[str, int]:
+    """번역 유닛 id → 마스킹 플레이스홀더 수 (엔진과 같은 유닛 분리·마스킹)."""
+    from app.translate.masking import mask
+    from app.translate.segment import layout_units, split_markdown
+
+    md_text, layout, separator = _job_sources(jd)
+    units = [*split_markdown(md_text, separator), *(layout_units(layout) if layout else [])]
+    return {u.id: len(mask(u.src)[1]) for u in units}
+
+
 def kept_reason_summary(report: dict) -> dict[str, int]:
     """export.{lang}.report.json의 보존 사유별 집계.
 
@@ -973,6 +983,9 @@ _FAULT_EXPECT: dict[str, tuple[str, tuple[str, ...]]] = {
     # 수**로 잡는다 — unmask가 missing을 보고하지 않고 통과시키면 수식·코드가
     # 산출물에서 조용히 증발한다(문서가 주장하던 커버리지의 실제 대상).
     "drop_placeholder": ("플레이스홀더 유실", ()),
+    # 목이 플레이스홀더를 쌍 태그로 바꾼다(감사 translate-llm-10) — 유닛의 첫 태그는 빈 쌍,
+    # 나머지는 내용을 감싼 쌍. 문구가 아니라 **닫는 태그 잔여물**과 채택 여부로 잡는다.
+    "paired_tags": ("쌍 태그", ()),
 }
 
 # 이 fault들은 FAULT 환경변수 대신 **OPENAI_BASE_URL의 `?fault=` 쿼리**로 주입한다.
@@ -994,13 +1007,13 @@ def protected_token_count(text: str) -> int:
 
 
 def verify_translation_faults(pdf: Path, data_dir: Path) -> None:
-    """A-1 실증 — 거부문/echo/요약/플레이스홀더 유실/HTTP 오류를 주입하고 무성 손실을 본다.
+    """A-1 실증 — 거부문/echo/요약/플레이스홀더 유실/쌍 태그/HTTP 오류를 주입하고 무성 손실을 본다.
 
     mock_llm.py가 제공하는 결함 모드는 **전부** 여기서 돈다(tests/test_ci_ops_contracts.py
     가 목록 일치를 강제한다). 코드만 있고 한 번도 실행되지 않는 결함 모드는
     문서상의 커버리지만 부풀리고 아무것도 지키지 않는다.
     """
-    print("\n[8] A-1 번역 결함 주입 (거부문 · echo · 플레이스홀더 유실 · HTTP 오류)")
+    print("\n[8] A-1 번역 결함 주입 (거부문 · echo · 플레이스홀더 유실 · 쌍 태그 · HTTP 오류)")
     info(f"스캐폴딩 마커 {len(scaffolding_markers())}종: "
          + ", ".join(scaffolding_markers())[:200])
     for fault, (label, _) in _FAULT_EXPECT.items():
@@ -1065,6 +1078,22 @@ def verify_translation_faults(pdf: Path, data_dir: Path) -> None:
                 residual = re.findall(r"<[mkgucft]\d+", body)
                 check(f"A-1[{label}]: 플레이스홀더 잔여물이 result.ko.md에 남지 않음",
                       not residual, f"잔여 {len(residual)}개 (예: {residual[:3]})")
+
+            # (e) paired_tags 전용 — 내용을 감싼 쌍은 '</f2>'·'Figure 2그림 2'를 산출물에 박지
+            #     말아야 하고(거부 → 래더), 빈 쌍은 자기 닫힘과 같으니 채택돼야 한다. 빈 쌍까지
+            #     거부하면 플레이스홀더가 하나뿐인 유닛(인용 하나 달린 문장)이 전부 영어로 남는다.
+            if fault == "paired_tags" and src:
+                closing = re.findall(r"</\s*[mkgucft]\d+\s*>", body)
+                check(f"A-1[{label}]: 닫는 플레이스홀더 태그가 result.ko.md에 남지 않음",
+                      not closing, f"잔여 {len(closing)}개 (예: {closing[:3]})")
+                residual = re.findall(r"<[mkgucft]\d+", body)
+                check(f"A-1[{label}]: 플레이스홀더 잔여물이 result.ko.md에 남지 않음",
+                      not residual, f"잔여 {len(residual)}개 (예: {residual[:3]})")
+                counts = unit_placeholder_counts(jd)
+                single = [uid for uid in kept if counts.get(uid) == 1]
+                check(f"A-1[{label}]: 빈 쌍 태그(플레이스홀더 1개 유닛)는 자기 닫힘으로 접혀 채택됨",
+                      len(single) <= max(2, 0.02 * n_units),
+                      f"플레이스홀더 1개인데 원문 유지 {len(single)}개 (예: {single[:3]})")
 
             check(f"A-1[{label}]: kept_original에 기록되어 관측 가능", len(kept) > 0,
                   f"kept={len(kept)} units_cached={n_units}")

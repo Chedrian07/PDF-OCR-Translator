@@ -1,6 +1,8 @@
 # CI — backend pytest(+커버리지)·backend×native 통합·native 패리티·frontend
 # node --test·sidecar 파서 테스트 + ruff 린트(backend·services) + 실 PDF 전 구간
-# 하네스(verify-e2e). nightly/수동에서는 hermetic 브라우저 E2E까지.
+# 하네스(verify-e2e). PR을 뺀 모든 실행(main push·nightly·수동)에서는 hermetic 브라우저
+# E2E(e2e-mock)까지 — release.yml은 태그 커밋의 push CI 성공을 요구하므로 e2e-mock도
+# 사실상 릴리스 게이트다.
 # 실모델은 실행하지 않음: backend 테스트는 FakeEngine 기반, torch는 CPU 휠(uv 캐시 활용).
 name: CI
 
@@ -8,7 +10,7 @@ on:
   push:
     branches: [main]
   pull_request:
-  # 러너 시간이 큰 잡(e2e-mock)은 PR을 막지 않고 nightly·수동으로만 돈다.
+  # 러너 시간이 큰 잡(e2e-mock)은 PR을 막지 않는다 — main push·nightly·수동에서만 돈다.
   schedule:
     - cron: "0 18 * * *"
   workflow_dispatch:
@@ -190,8 +192,10 @@ jobs:
           if-no-files-found: ignore
 
   # mock OpenAI(로컬 http) + FakeEngine 백엔드를 직접 띄우는 hermetic 브라우저 E2E.
-  # GPU·외부 API 불필요하지만 러너 시간이 커서 PR을 막지 않는다 — nightly(schedule)와
-  # 수동 실행(workflow_dispatch)에서만 돈다. de-flake가 확인되면 if:를 지워 PR에 붙인다.
+  # GPU·외부 API 불필요하지만 러너 시간이 커서 PR만 막지 않는다 — main push·nightly
+  # (schedule)·수동 실행(workflow_dispatch)에서는 돈다. release.yml이 태그 커밋의 push CI
+  # 성공을 요구하므로 이 잡이 흔들리면 그 커밋의 릴리스도 막힌다(재실행으로 해소).
+  # de-flake가 확인되면 if:를 지워 PR에도 붙인다.
   e2e-mock:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest

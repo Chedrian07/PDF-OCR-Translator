@@ -1,5 +1,6 @@
 import json
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 
 from app.pipeline.layout import (
@@ -469,3 +470,159 @@ def test_absurd_image_box_keeps_vendor_crop_numbering():
         ([10, 20, 30, 40], 2),
         ([50, 50, 60, 60], 3),
     ]
+
+
+# ── standalone 내려받기 파일의 CSP·KaTeX 옵션 ─────────────────────────────────
+class _HeadScan(HTMLParser):
+    """standalone HTML의 meta·자원 참조를 순서대로 모은다 — CSP 대조용."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.order: list[str] = []          # 'csp' · 'referrer' · 'style' · 'script' (등장 순)
+        self.csp: list[str] = []
+        self.referrer: list[str] = []
+        self.img_src: list[str] = []
+        self.loaders: list[str] = []        # link·iframe·object·embed·source 등 외부 로더
+        self.styles: list[str] = []
+        self._in_style = False
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "meta" and (a.get("http-equiv") or "").lower() == "content-security-policy":
+            self.order.append("csp")
+            self.csp.append(a.get("content") or "")
+        elif tag == "meta" and (a.get("name") or "").lower() == "referrer":
+            self.order.append("referrer")
+            self.referrer.append(a.get("content") or "")
+        elif tag in ("style", "script"):
+            self.order.append(tag)
+            self._in_style = tag == "style"
+        elif tag == "img":
+            self.img_src.append(a.get("src") or "")
+        elif tag in ("link", "iframe", "object", "embed", "source", "video", "audio"):
+            self.loaders.append(tag)
+
+    def handle_data(self, data):
+        if self._in_style:
+            self.styles.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "style":
+            self._in_style = False
+
+
+def _scan(html: str) -> _HeadScan:
+    scan = _HeadScan()
+    scan.feed(html)
+    return scan
+
+
+def _csp_directives(policy: str) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for part in policy.split(";"):
+        tokens = part.split()
+        if tokens:
+            out[tokens[0]] = tokens[1:]
+    return out
+
+
+def _standalone_samples(tmp_path):
+    """두 standalone 렌더러의 대표 출력 — 크롭·페이지 이미지·수식·KaTeX 인라인 포함."""
+    from app.pipeline.layout import render_document_standalone
+
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "p0001_0.jpg").write_bytes(b"\xff\xd8fakejpg")
+    pages_dir = tmp_path / "pages"
+    pages_dir.mkdir()
+    (pages_dir / "page_0001.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    pages = [{"page": 1, "width": 1000, "height": 1400, "blocks": [
+        {"type": "title", "bbox": [0, 0, 900, 80], "content": "제목 \\( x \\)"},
+        {"type": "image", "bbox": [100, 100, 800, 600], "content": "", "image": "p0001_0.jpg"},
+    ]}]
+    inner = (
+        '<section class="doc-page" data-page="1"><p>본문</p>'
+        '<p><img src="/api/jobs/j_x/files/images/p0001_0.jpg" alt=""></p>'
+        '<p><span class="math-inline">\\tau^{2}</span></p></section>'
+    )
+    return {
+        "layout": render_layout_standalone(pages, tmp_path, "문서", FRONTEND_DIR, lang="ko"),
+        "facsimile": render_layout_standalone(
+            pages, tmp_path, "문서", FRONTEND_DIR, pages_dir=pages_dir, facsimile=True,
+        ),
+        "layout-no-assets": render_layout_standalone(pages, tmp_path, "문서", None),
+        "document": render_document_standalone(inner, tmp_path, "문서", FRONTEND_DIR, lang="ko"),
+        "document-no-assets": render_document_standalone(inner, tmp_path, "문서", None),
+    }
+
+
+def test_standalone_exports_lock_out_external_origins_with_meta_csp(tmp_path):
+    """디스크에서 여는 내려받기 파일은 서버 CSP 헤더를 받지 못한다 — 업로드 PDF 본문이
+    파일을 연 사람의 IP·열람 사실을 바깥 주소로 흘리지 못하게 meta CSP로 모든 바깥 출처를
+    막는다. 필요한 자원은 전부 data:·인라인이므로 렌더는 그대로다(Chromium 실측: 수식·
+    크롭·페이지 이미지 정상, 주입한 바깥 이미지는 img-src 위반으로 차단)."""
+    from app.pipeline.layout import STANDALONE_CSP
+
+    assert _csp_directives(STANDALONE_CSP) == {
+        "default-src": ["'none'"],
+        "img-src": ["data:", "blob:"],
+        "font-src": ["data:"],
+        "style-src": ["'unsafe-inline'"],
+        "script-src": ["'unsafe-inline'"],
+    }
+    katex_vendored = (FRONTEND_DIR / "vendor" / "katex" / "katex.min.js").is_file()
+    for name, html in _standalone_samples(tmp_path).items():
+        scan = _scan(html)
+        assert scan.csp == [STANDALONE_CSP], name
+        assert scan.referrer == ["no-referrer"], name            # 링크 클릭에 출처 주소를 싣지 않는다
+        # meta CSP는 그 뒤에 오는 <style>·<script>에만 적용된다 — 맨 앞이어야 한다
+        assert scan.order[:2] == ["csp", "referrer"], (name, scan.order)
+        # 정책이 허용하는 자원만 쓴다: 이미지는 data:, 폰트(CSS url())는 data:, 외부 로더 없음
+        assert scan.img_src and all(src.startswith("data:") for src in scan.img_src), name
+        urls = re.findall(r"url\(\s*['\"]?([^'\")]+)", "".join(scan.styles))
+        assert all(url.startswith("data:") for url in urls), (name, urls[:3])
+        assert scan.loaders == [], name
+        if katex_vendored and not name.endswith("no-assets"):
+            # KaTeX 스크립트·woff2 폰트도 정책 안(인라인·data:)에서 실린다
+            assert "script" in scan.order and "data:font/woff2;base64," in html, name
+
+
+def _js_katex_options() -> dict[str, str]:
+    """frontend/js/constants.js katexOptions의 반환 객체 → {키: JS 리터럴} (displayMode 제외)."""
+    src = (FRONTEND_DIR / "js" / "constants.js").read_text(encoding="utf-8")
+    consts = dict(re.findall(r"export const (KATEX_[A-Z_]+) = (\d+);", src))
+    body = re.search(r"export function katexOptions\([^)]*\) \{\s*return \{(.*?)\};", src, re.S)
+    assert body, "frontend/js/constants.js에서 katexOptions를 찾지 못했다"
+    out = {}
+    for key, value in re.findall(r"(\w+):\s*([^,\n]+),", body.group(1)):
+        if key != "displayMode":
+            out[key] = consts.get(value.strip(), value.strip())
+    return out
+
+
+def _typeset_katex_options(script: str) -> dict[str, str]:
+    m = re.search(r"katex\.render\(e\.textContent,e,\{(.*?)\}\);", script)
+    assert m, script
+    pairs = dict(part.split(":", 1) for part in m.group(1).split(","))
+    assert pairs.pop("displayMode") == "e.classList.contains('math-display')"
+    return pairs
+
+
+def test_standalone_katex_options_match_the_app(tmp_path):
+    """내려받기 파일의 KaTeX도 앱(frontend/js/constants.js katexOptions)과 같은 상한·trust·
+    strict로 조판한다 — 예전에는 throwOnError만 줘서 OCR 수식의 \\rule{2000em}{2000em}이
+    수만 px 박스가 되고, 기본값에 기대는 trust가 GHSA-238p-pmpm-9mq7 경로에 열려 있었다.
+    값을 한쪽만 바꾸면 이 대조가 깨진다(Chromium 실측: 옵션 없는 사본만 2000em 박스)."""
+    from app.pipeline.layout import _TYPESET_JS
+
+    app_options = _js_katex_options()
+    assert app_options == {
+        "throwOnError": "false", "maxSize": "10", "maxExpand": "1000",
+        "strict": "'ignore'", "trust": "false",
+    }
+    assert _typeset_katex_options(_TYPESET_JS) == app_options
+    if (FRONTEND_DIR / "vendor" / "katex" / "katex.min.js").is_file():
+        pages = [{"page": 1, "width": 1000, "height": 1400, "blocks": [
+            {"type": "text", "bbox": [0, 0, 900, 80], "content": "\\( x \\)"},
+        ]}]
+        html = render_layout_standalone(pages, tmp_path, "t", FRONTEND_DIR)
+        assert _TYPESET_JS in html

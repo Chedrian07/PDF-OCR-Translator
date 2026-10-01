@@ -1050,3 +1050,96 @@ def test_trustworthy_text_layer_is_still_judged():
     assert result.measurable and result.score > 0.95
     lost = page_fidelity_blocks(pymupdf, _TextLayerPage(_PARAGRAPH), [], 1)
     assert lost.measurable and lost.score == pytest.approx(0.0)
+
+
+# ── 예산 우선순위·회로 차단·측정 한계 ─────────────────────────────────────
+
+
+class PartialDroppingEngine(PageDroppingEngine):
+    """multi에서 일부 페이지를 **부분** 유실(앞 keep 비율만 남김)하는 엔진.
+
+    single_keeps_partial이면 단독 재처리도 같은 부분 전사를 낸다(지표 한계 상황)."""
+
+    def __init__(self, partial=None, *, single_keeps_partial=False, **kw):
+        super().__init__(**kw)
+        self.partial = dict(partial or {})
+        self.single_keeps_partial = single_keeps_partial
+        self._in_single = False
+
+    def _raw(self, page, *, degraded):
+        md, raw = super()._raw(page, degraded=degraded)
+        ratio = self.partial.get(page)
+        if ratio is None or degraded or (self._in_single and not self.single_keeps_partial):
+            return md, raw
+        body = page_truth(page)[: int(len(page_truth(page)) * ratio)]
+        return f"# page {page}\n\n{body}\n", f"<|det|>text [60, 60, 930, 900]<|/det|>{body}"
+
+    def run_single(self, image_path, out_dir, sink, cancel):
+        self._in_single = True
+        try:
+            return super().run_single(image_path, out_dir, sink, cancel)
+        finally:
+            self._in_single = False
+
+
+def test_retry_budget_goes_to_lost_pages_then_lowest_scores(tmp_path):
+    """예산이 모자랄 때 앞쪽 페이지의 경미한 열화가 뒤쪽의 통째 유실을 밀어내면 안 된다
+    — 유실 페이지 먼저, 그다음 점수가 낮은 순."""
+    engine = PartialDroppingEngine(partial={2: 0.6, 3: 0.4}, drop_pages={5})
+    job, _events = run_job(tmp_path, engine, pages=6, pages_per_chunk=6)  # 예산 max(2, 1)=2
+
+    assert engine.single_calls == [3, 5], engine.single_calls
+    assert any("건너뛴 페이지: 2 " in w for w in job.warnings), job.warnings
+    result = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert page_truth(5) in result and page_truth(3) in result
+
+
+def test_gate_breaker_stops_partial_retries_but_keeps_recovering_lost_pages(tmp_path):
+    """단독 재처리가 연달아 같은 결과를 내면(지표가 이 문서의 전사를 못 잰다) 그 문서의
+    부분 열화 재처리를 멈춘다 — 통째로 유실된 페이지는 계속 복구한다."""
+    engine = PartialDroppingEngine(
+        partial={1: 0.5, 2: 0.5, 3: 0.5, 4: 0.5, 5: 0.5},
+        single_keeps_partial=True,
+        drop_pages={7},
+    )
+    job, _events = run_job(
+        tmp_path, engine, pages=8, pages_per_chunk=2, ocr_fidelity_max_retry_ratio=1.0
+    )
+
+    assert engine.single_calls == [1, 2, 3, 7], engine.single_calls
+    assert sum("측정 한계로 판단해 원래 결과 유지" in w for w in job.warnings) == 3, job.warnings
+    assert any("재처리를 멈춥니다" in w for w in job.warnings), job.warnings
+    assert page_truth(7) in (job.dir / "result.md").read_text(encoding="utf-8")
+
+
+def test_deterministic_engines_skip_the_gate(tmp_path, monkeypatch):
+    """textlayer는 같은 페이지를 다시 돌려도 결과가 같다 — 게이트가 Tesseract(페이지당
+    최대 180초)를 반복하고 거짓 '충실도 미달' 경고를 남기던 문제."""
+    from app.engine import textlayer as textlayer_mod
+    from app.engine.textlayer import TextLayerEngine
+
+    calls = []
+    monkeypatch.setattr(textlayer_mod, "find_tesseract", lambda: "/fake/tesseract")
+
+    def _fake_tesseract(executable, languages, png_bytes):
+        calls.append(1)
+        return "OCR text that does not match the page's dot-leader text layer"
+
+    monkeypatch.setattr(textlayer_mod, "run_tesseract", _fake_tesseract)
+
+    store = JobStore(tmp_path / "jobs")
+    broker = EventBroker()
+    job = store.create("doc.pdf", "multi", dpi=72)
+    (job.dir / "source.pdf").write_bytes(make_texty_pdf(3))
+    settings = Settings(
+        engine="textlayer", device="cpu", data_dir=tmp_path / "data",
+        preload_model=False, pages_per_chunk=3,
+        # NATIVE_TEXT_THRESHOLD를 올린 배포 — 판정 가능한 텍스트 레이어가 있어도 Tesseract
+        # 경로를 타고 raw가 비어 0점이 된다(게이트가 '열화'로 본다)
+        native_text_threshold=100_000,
+    )
+    execute_job(job, store, broker, TextLayerEngine(settings), settings, threading.Event())
+
+    assert job.status == "done", job.error
+    assert len(calls) == 3                     # 페이지당 한 번 — 게이트 재실행 없음
+    assert not any("충실도" in w for w in job.warnings), job.warnings

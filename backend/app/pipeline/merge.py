@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -24,6 +25,8 @@ from pathlib import Path
 
 from .artifacts import layout_has_text_blocks
 from .fidelity import normalize as _comparable_text
+
+logger = logging.getLogger(__name__)
 
 _IMG_MULTI = re.compile(r"!\[\]\(images/page_(\d+)_(\d+)\.jpg\)")
 _IMG_SINGLE = re.compile(r"!\[\]\(images/(\d+)\.jpg\)")
@@ -479,9 +482,12 @@ class IncrementalMerger:
             raster = self.job_dir / "pages" / f"page_{slot_page:04d}.png"
             if not raster.is_file():
                 continue
-            figures = [
-                b for b in parse_page_blocks(str(raw_pages[k])) if "crop_index" in b
-            ]
+            try:
+                figures = [
+                    b for b in parse_page_blocks(str(raw_pages[k])) if "crop_index" in b
+                ]
+            except Exception:  # noqa: BLE001 — 기형 원출력: 벤더 크롭 유지(경고는 _page_blocks)
+                continue
             if not figures:
                 continue
             try:
@@ -666,14 +672,12 @@ class IncrementalMerger:
         페이지마다 따로 파싱한다 — 크롭 번호는 모델 페이지마다 0부터라 이어 붙인 뒤
         파싱하면 두 번째 페이지의 그림이 없는 파일을 가리킨다.
         """
-        from .layout import parse_page_blocks
-
         new_pages: list[dict] = []
         for local in range(chunk.num_pages):
             g = chunk.start_page + (0 if chunk.single else local)
             blocks: list[dict] = []
             for k, raw in slot_raws[local] if local < len(slot_raws) else []:
-                for b in parse_page_blocks(str(raw)) if raw else []:
+                for b in self._page_blocks(raw, g):
                     if "crop_index" in b:
                         # 벤더 크롭 순서 == boxes/이미지 저장 순서 → 글로벌 이미지명 매핑
                         b["image"] = self._crop_name(chunk, placement, k, b.pop("crop_index"))
@@ -698,6 +702,27 @@ class IncrementalMerger:
             # 원자적 교체 — 크래시/재시작 타이밍에 layout.json이 파손된 채 남아
             # /layout이 500을 내는 일이 없게 (result.md의 _write_partial과 동일 패턴)
             _atomic_write_json(self.job_dir / "layout.json", self.layout_pages)
+
+    def _page_blocks(self, raw, page_number: int) -> list[dict]:
+        """한 페이지 원출력 → layout 블록. 파싱 실패는 그 페이지 좌표만 비운다.
+
+        모델 원출력은 신뢰할 수 없는 입력이다 — 한 페이지의 기형 grounding이 예외를 내면
+        예전에는 add_chunk 전체가 실패해 청크(=잡)가 오류로 끝났다. 마크다운 본문은 그대로
+        병합하고, 좌표를 잃은 사실은 경고(품질 저하 — 그 페이지는 좌표 보기·번역 PDF에서
+        빠진다)로 남긴다."""
+        from .layout import parse_page_blocks
+
+        if not raw:
+            return []
+        try:
+            return parse_page_blocks(str(raw))
+        except Exception as error:  # noqa: BLE001 — 페이지 단위 격리
+            logger.warning("%d페이지 레이아웃 좌표 파싱 실패", page_number, exc_info=True)
+            self.warnings.append(
+                f"{page_number}페이지: 레이아웃 좌표를 해석하지 못해 이 페이지의 좌표 블록을 "
+                f"비웠습니다 (본문은 유지; {type(error).__name__})"
+            )
+            return []
 
     # ── 페이지 단위 교체 (충실도 게이트의 복구 경로) ─────────────
 
@@ -750,9 +775,7 @@ class IncrementalMerger:
 
     def _replace_layout_page(self, page_number: int, raw: str) -> None:
         """layout_pages에서 해당 물리 페이지의 블록만 새 원출력으로 갈아끼운다."""
-        from .layout import parse_page_blocks
-
-        blocks = parse_page_blocks(raw) if raw else []
+        blocks = self._page_blocks(raw, page_number)
         for b in blocks:
             if "crop_index" in b:
                 b["image"] = _global_image_name(page_number, b.pop("crop_index"))

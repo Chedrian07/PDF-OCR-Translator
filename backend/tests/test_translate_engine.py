@@ -1661,3 +1661,30 @@ def test_같은_라벨의_표기_변형이_같은_번역으로_수렴하는_것�
     again = Labeler()
     run_translation(tmp_path, "ko", cfg, client=again)
     assert again.calls == 0                                  # 캐시가 지워지지 않았다
+
+
+def test_layout_잡에서도_D정책_첫_등장_병기가_프롬프트에_실린다(tmp_path, cfg):
+    """종전에는 first_unit이 md 유닛 id라 lay:* 유닛과 일치하지 않고, md 유닛은 layout으로
+    덮여 지연되므로 [첫 등장 병기]가 든 프롬프트가 0건이었다(translate-llm-12)."""
+    lines = [
+        "We adopt sparse attention for long documents in this work.",
+        "The sparse attention pattern reduces the memory footprint.",
+    ]
+    prompts_seen = []
+
+    class Recorder(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            prompts_seen.append(user)
+            return super().complete(system, user, max_tokens=max_tokens)
+
+    md = "\n\n".join(lines) + "\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    (tmp_path / "layout.json").write_text(
+        json.dumps(_layout_of(lines), ensure_ascii=False), encoding="utf-8")
+    run_translation(tmp_path, "ko", cfg, client=Recorder())
+
+    first = [p for p in prompts_seen if "[첫 등장 병기" in p]
+    assert len(first) == 1 and lines[0] in first[0]
+    saved = json.loads((tmp_path / "translations/ko/glossary.json").read_text(encoding="utf-8"))
+    entry = next(e for e in saved if e["src"] == "sparse attention")
+    assert entry["first_unit_lay"] == "lay:1:0"

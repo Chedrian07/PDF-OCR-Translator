@@ -87,4 +87,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30m --retries=5 \
     CMD curl -sf http://localhost:8000/api/health || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --timeout-graceful-shutdown: 열린 SSE(잡·번역 진행 스트림)는 스스로 끝나지 않아, 상한이
+# 없으면 `docker compose stop/restart`가 'Waiting for connections to close'에서 멈췄다가
+# 10초 유예 뒤 SIGKILL로 죽고 lifespan 종료(워커 정지·잡 저장소 락 해제)가 돌지 않았다.
+# 5초 뒤 남은 연결을 끊고 lifespan 종료를 마친다(Docker 기본 유예 10초 안).
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "5"]

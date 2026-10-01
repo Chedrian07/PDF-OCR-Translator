@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .pipeline import artifacts
+
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Callable
 
@@ -152,8 +154,10 @@ class Job:
             "pages": _urls("pages"),
             # 레이아웃 뷰/다운로드 가능 여부 — 레이아웃 기능(P14) 이전에 변환된
             # 잡에는 layout.json이 없어 /layout*이 404가 난다. 프런트가 이 플래그로
-            # 버튼을 비활성화한다 (없으면 재변환 필요).
-            "has_layout": (self.dir / "layout.json").is_file(),
+            # 버튼을 비활성화한다 (없으면 재변환 필요). 파일 존재가 아니라 텍스트 블록이
+            # 있는가로 판정한다 — figure_only 엔진의 옛 잡(image 블록뿐인 layout.json)은
+            # /layout·/pdf가 404·409인데 이 플래그만 True여서 버튼이 헛돌았다.
+            "has_layout": artifacts.has_usable_layout(self.dir),
         }
 
     def to_dict(

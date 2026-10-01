@@ -408,6 +408,33 @@ _RASTER_TABLE_OVERLAP = 0.8
 _FIGURE_OVERLAP = 0.30
 
 
+# 스캔에는 줄 방향(dir)을 알려 줄 텍스트 레이어가 없다. 레이아웃 뷰(layout.py)와
+# 같은 기하 폴백 — 극단적으로 좁고 긴 블록은 세로쓰기(여백의 arXiv 식별자 등)다.
+_VERTICAL_ASPECT = 6.0
+_VERTICAL_MIN_CHARS = 12
+
+
+def _raster_block_looks_vertical(ctx: "_PageContext", block_index: int, block) -> bool:
+    """래스터 원문 블록이 화면에서 세로로 놓인 글인가(덮고 가로로 다시 쓰면 안 된다).
+
+    텍스트 레이어가 있으면 폰트 백필이 줄 방향으로 `vertical`을 심지만, 스캔은
+    그럴 수 없어 세로 스탬프를 덮은 뒤 한국어를 한 글자씩 세로로 쌓아 찍었다.
+    """
+    if block_index not in ctx.raster_blocks or not isinstance(block, dict):
+        return False
+    rect = ctx.block_rects[block_index]
+    if rect is None:
+        return False
+    shown = rect * ctx.page.rotation_matrix
+    shown.normalize()
+    if shown.width <= 0:
+        return False
+    return (
+        shown.height / shown.width >= _VERTICAL_ASPECT
+        and len(str(block.get("content") or "").strip()) >= _VERTICAL_MIN_CHARS
+    )
+
+
 def _raster_backed_blocks(block_rects, oblocks, source_records, visuals) -> frozenset:
     """원문이 텍스트가 아니라 래스터 픽셀인 블록 인덱스.
 
@@ -862,7 +889,10 @@ def _plan_page_targets(ctx: _PageContext, result: PdfExportResult):
                     result.specialist_kept.get(block_type, 0) + 1
                 )
             continue
-        if (tb.get("vertical") or ob.get("vertical")) in _VERTICAL_SKIP:
+        if (
+            (tb.get("vertical") or ob.get("vertical")) in _VERTICAL_SKIP
+            or _raster_block_looks_vertical(ctx, block_index, ob)
+        ):
             result.keep("vertical")
             result.specialist_kept["vertical"] = result.specialist_kept.get("vertical", 0) + 1
             continue
@@ -1471,7 +1501,11 @@ def _plan_until_consistent(base_ctx: _PageContext, result: PdfExportResult):
     집합이 매 패스 줄어들어 수렴하며, 수렴 시점에는 "장애물로 본 것 = 실제로
     남는 것"이 되어 번역문이 남은 원문 위에 찍히는 일이 구조적으로 없다.
     """
-    cleared = _optimistically_cleared(base_ctx.oblocks, base_ctx.tblocks)
+    cleared = frozenset(
+        index
+        for index in _optimistically_cleared(base_ctx.oblocks, base_ctx.tblocks)
+        if not _raster_block_looks_vertical(base_ctx, index, base_ctx.oblocks[index])
+    )
     targets: list[_Replacement] = []
     links: list[object] = []
     trial = result

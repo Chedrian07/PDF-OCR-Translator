@@ -182,3 +182,67 @@ def test_fault_expectations_are_substring_checks_not_equality():
 def test_layout_pages_accepts_both_shapes():
     assert verify_e2e.layout_pages([{"blocks": []}]) == [{"blocks": []}]
     assert verify_e2e.layout_pages(json.loads('{"pages": [1]}')) == [1]
+
+
+# ───────────────────── 목 SSE 스트리밍 (번역 클라이언트 기본 경로) ─────────────────────
+
+def _serve_mock():
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), mock_llm.Handler)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05},
+                     daemon=True).start()
+    return srv
+
+
+@pytest.mark.parametrize("fault", ["", "refusal", "refusal_ko", "echo", "summary",
+                                   "drop_placeholder"])
+def test_mock_stream_and_plain_responses_carry_the_same_output(fault):
+    """클라이언트 기본이 chat 스트리밍이 됐다 — 결함 모드가 SSE에서도 같은 출력을 내야
+    하네스의 결함 주입이 스트리밍 경로에서도 유효하다."""
+    from app.translate.client import OpenAICompatClient
+    from app.translate.types import TranslateConfig
+
+    srv = _serve_mock()
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+        if fault:
+            base += f"?fault={fault}"
+        prompt = '[번역할 원문]\nThe model <m1 v="E=mc^2"/> is fast and the results are good.'
+        outs = []
+        for stream in ("on", "off"):
+            cfg = TranslateConfig(base_url=base, api_key="k", model="m", api_mode="chat",
+                                  stream=stream, max_retries=0)
+            outs.append(OpenAICompatClient(cfg).complete("s", prompt, max_tokens=100))
+        assert outs[0] == outs[1]
+        assert mock_llm.STATS["stream_chunks"] > 0
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_mock_stream_ends_with_done_and_usage():
+    import json as _json
+    import urllib.request
+
+    srv = _serve_mock()
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions?chunk=4"
+        body = {"model": "m", "stream": True, "stream_options": {"include_usage": True},
+                "messages": [{"role": "user", "content": "[번역할 원문]\nThe model is fast."}]}
+        req = urllib.request.Request(url, data=_json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.headers["Content-Type"] == "text/event-stream"
+            raw = resp.read().decode()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    events = [e for e in raw.split("\n\n") if e.startswith("data: ")]
+    assert events[-1] == "data: [DONE]"
+    usage = _json.loads(events[-2][6:])
+    assert usage["choices"] == [] and usage["usage"]["total_tokens"] > 0
+    finish = _json.loads(events[-3][6:])["choices"][0]["finish_reason"]
+    assert finish == "stop"

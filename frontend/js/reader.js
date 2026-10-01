@@ -7,7 +7,8 @@ import {
   PDF_RETRY_MAX, alignmentBatchPlan, alignmentFailureIsPermanent, blockAtFraction,
   busyWaitMessage, clampReaderPage, extractDocPages, langFetchVerdict, livePageImageUrl,
   normalizeAlignmentPayload, overlayInKeepWindow, pdfExportState, pdfProgressLabel,
-  pdfReportMessage, pdfRetryDelay, railAnchorFrom, railAnchorTarget, readerFocusAt,
+  pdfReportMessage, pdfRetryDelay, railAnchorFrom, railAnchorTarget, railPagesToRender,
+  readerFocusAt,
   readerHydrationWindow, readerImageUrl, readerRailBandAt, splitInlineMath,
   translatedHtmlExportState, withLangUrl,
 } from './core.js';
@@ -806,10 +807,12 @@ export function readerBlockCard(block, displayIndex, page) {
   });
   const target = h('p', { class: 'reader-map-target' });
   target.append(...mathTextNodes(mainText));
+  const active = block.id === state.readerActiveBlock;
   const card = h('article', {
-    class: `reader-map-card type-${block.type.replace(/[^a-z0-9_-]/gi, '')}`,
+    class: `reader-map-card type-${block.type.replace(/[^a-z0-9_-]/gi, '')}${active ? ' is-active' : ''}`,
     'data-block-id': block.id,
     'data-page': String(page),
+    'aria-current': active ? 'true' : null,
   },
   h('div', { class: 'reader-map-card-head' },
     h('span', { class: 'reader-map-number', text: number }),
@@ -917,7 +920,8 @@ export function renderRailPage(page) {
     renderRailFlowContent(page, section, body, pages);
   }
   state.readerRailIndexDirty = true;
-  if (state.readerActiveBlock) setReaderActiveBlock(state.readerActiveBlock);
+  // 활성 블록 표시는 새로 만든 카드(readerBlockCard)와 이 페이지 박스(renderPageOverlay)가
+  // 스스로 붙인다 — 페이지 하나를 그릴 때마다 레일 전체 카드를 훑지 않는다(O(K²) 방지).
   syncReaderInteractiveTabStops();
   updateReaderRailStatus();
 }
@@ -1095,9 +1099,15 @@ export function renderReaderDocument() {
     ? '원문 위치와 연결된 한국어'
     : '원문 위치와 연결된 텍스트';
 
-  // 이미 캐시된 페이지는 즉시 그린다 (언어 전환 후 재진입 등).
+  // 레일을 새로 만들었으면 캐시된 페이지를 즉시 전부 그린다(언어 전환 등). 탭 재활성화·
+  // 뷰어 열기처럼 레일이 그대로면 아직 빈 섹션만 채운다 — 전 페이지 재렌더는 KaTeX
+  // 재조판·하이라이트 소실·포커스 소실을 부른다(frontend-5).
   const cache = state.readerAlignments[readerLangKey()];
-  for (const page of cache.keys()) renderRailPage(page);
+  const rendered = (page) => {
+    const section = state.readerRailEls.get(page);
+    return !!(section && section.dataset.mode);
+  };
+  for (const page of railPagesToRender(cache.keys(), builtRail, rendered)) renderRailPage(page);
 
   hydrateReaderPages();
   observeReaderResize();

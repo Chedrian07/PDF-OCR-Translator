@@ -152,8 +152,12 @@ class OvisModel:
             },
         }
         with self._infer_lock:
+            # 락을 기다리는 사이 앞 요청이 엔진 사망을 판정해 _llm을 버렸을 수 있다
+            llm = self._llm
+            if llm is None:
+                raise RuntimeError("모델이 로드되지 않았습니다")
             try:
-                outputs = self._llm.generate([request], params, use_tqdm=False)
+                outputs = llm.generate([request], params, use_tqdm=False)
             except Exception as e:
                 self._note_infer_failure(e)
                 raise
@@ -175,6 +179,8 @@ class OvisModel:
           안 풀리는 로드 실패'로 보고 잡을 즉시 실패시킨다.
         - 연속 실패 임계: 오탐일 수 있어 _llm은 유지하고 load_error(웨지 신고)만
           세운다. 다음 성공이 자동으로 복구한다."""
+        if self.restart_required:
+            return  # 이미 재시작 대기 — 뒤따른 실패로 웨지 신고(status=error)를 세우면 backend가 잡을 실패시킨다
         self._infer_failures += 1
         if is_engine_dead(e, _ENGINE_DEAD_MARKERS):
             self._llm = None

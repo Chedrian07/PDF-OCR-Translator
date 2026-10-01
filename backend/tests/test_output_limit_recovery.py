@@ -50,7 +50,9 @@ def test_length_capped_multi_chunk_is_reprocessed_page_by_page(tmp_path):
     md = (job.dir / "result.md").read_text(encoding="utf-8")
     assert "잘린 출력" not in md
     assert len(md.split("\n\n---\n\n")) == 4
-    assert any("MAX_LENGTH" in warning and "페이지별 재처리" in warning for warning in job.warnings)
+    # 잘린 청크의 재처리 경위는 참고다 — 페이지별 single로 모두 살려 품질 저하가 없다
+    assert any("MAX_LENGTH" in note and "페이지별 재처리" in note for note in job.notices)
+    assert job.warnings == []
 
 
 def test_length_capped_single_page_falls_back_to_text_layer(tmp_path):

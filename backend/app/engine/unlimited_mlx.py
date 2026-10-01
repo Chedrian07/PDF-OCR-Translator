@@ -72,7 +72,7 @@ def mlx_unavailable_reason() -> str | None:
     if sys.platform != "darwin" or machine != "arm64":
         return (
             f"MLX는 Apple Silicon(macOS arm64) 로컬 실행 전용입니다 (현재 {sys.platform}/{machine}"
-            " — Docker 컨테이너에는 Metal이 없다)"
+            " — Docker 컨테이너에는 Metal이 없습니다)"
         )
     try:
         import mlx.core as mx
@@ -293,6 +293,7 @@ class UnlimitedMLXEngine(OCREngine):
         label: str,
     ):
         """vendor infer 호출 1회 + 스트리밍·취소·반복 감지·잘림 판정 (run_multi/run_single 공통)."""
+        self.last_generation = None  # 생성 전에 실패해도 이전 실행의 통계가 남지 않게
         streamer = make_sink_streamer(self._tokenizer, sink, repetition, self._eos_text)
 
         def on_token(token_id: int) -> None:

@@ -101,6 +101,12 @@ _LATEX_LETTERS = {
 # 판정에 필요한 최소 정답 분량. 이보다 짧은 페이지(표지·백지·전면 그림)는
 # 정답 자체가 빈약해 지표가 요동친다 — 게이트를 걸지 않는다.
 MIN_TRUTH_CHARS = 200
+# 텍스트 레이어 자체를 믿을 수 없는 페이지 — Type3 글꼴·깨진 ToUnicode는 사용자 영역
+# 문자(PUA)·U+FFFD·제어 문자를 낸다. 그런 '정답'과 대조하면 정상 전사도 0점이 되어
+# 페이지 단독 추론을 헛되이 쓰고 거짓 '충실도 미달' 경고를 남긴다 → 판정 불가.
+_BROKEN_GLYPH_SHARE = 0.20
+# 정규화 뒤 글자·숫자가 원문(공백 제외)의 이 비율에 못 미치면 정답이 대부분 기호다.
+_MIN_WORD_SHARE = 0.30
 # 과생성 허용 배수. 1.0이면 정답보다 조금만 길어도 깎여 LaTeX 전개가 많은 문서가
 # 억울해진다. 실측 최적은 1.2(마진 0.357)지만 그 여유를 사서 1.3을 쓴다(마진 0.319).
 # 이 값이 발동하는 페이지는 46쪽 중 중복 전사된 p37 하나뿐이다.
@@ -369,6 +375,26 @@ def truth_text(fitz, page, blocks: list[dict], should_cancel: CancelCheck = None
     return _truth_outside(fitz, page, rects)
 
 
+def _broken_glyph(char: str) -> bool:
+    code = ord(char)
+    if 0xE000 <= code <= 0xF8FF or code >= 0xF0000 or code == 0xFFFD:
+        return True  # 사용자 영역(PUA)·대체 문자 — 글자 매핑이 없는 글꼴
+    return unicodedata.category(char) == "Cc"
+
+
+def _untrusted_truth(raw_truth: str, normalized: str) -> str:
+    """정답으로 쓸 수 없는 텍스트 레이어면 사유, 아니면 빈 문자열."""
+    visible = [c for c in raw_truth if not c.isspace()]
+    if not visible:
+        return ""
+    broken = sum(1 for c in visible if _broken_glyph(c))
+    if broken / len(visible) >= _BROKEN_GLYPH_SHARE:
+        return f"텍스트 레이어 신뢰 불가(깨진 글리프 {broken * 100 // len(visible)}%)"
+    if len(normalized) / len(visible) < _MIN_WORD_SHARE:
+        return "텍스트 레이어 신뢰 불가(대부분 기호)"
+    return ""
+
+
 def page_fidelity_blocks(
     fitz, page, blocks: list, page_number: int, should_cancel: CancelCheck = None
 ) -> PageFidelity:
@@ -383,7 +409,11 @@ def page_fidelity_blocks(
     regions += _trusted_equations(fitz, page, blocks)
     # 정답에서 뺀 영역의 블록만 후보에서도 뺀다 — 양쪽이 같은 블록을 본다
     ocr = normalize(ocr_text(blocks, excluded={i for i, _ in regions}))
-    truth = normalize(_truth_outside(fitz, page, [r for _, r in regions]))
+    raw_truth = _truth_outside(fitz, page, [r for _, r in regions])
+    truth = normalize(raw_truth)
+    untrusted = _untrusted_truth(raw_truth, truth)
+    if untrusted:
+        return PageFidelity(page_number, None, len(truth), len(ocr), untrusted)
     if len(truth) < MIN_TRUTH_CHARS:
         return PageFidelity(page_number, None, len(truth), len(ocr), "정답 텍스트 부족")
     return PageFidelity(page_number, score(truth, ocr), len(truth), len(ocr))

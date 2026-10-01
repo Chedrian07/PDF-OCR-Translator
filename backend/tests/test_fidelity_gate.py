@@ -887,3 +887,51 @@ def test_graphic_analysis_runs_once_per_page_not_per_figure_block(tmp_path):
         assert "get_drawings" not in counting.calls, counting.calls
     finally:
         opened.close()
+
+
+def test_fidelity_analysis_stops_at_cancel_checkpoints(tmp_path):
+    """청크 평가는 한 번의 호출이라 그 안에 취소 확인 지점이 없으면, 벡터가 많은
+    문서에서 취소 클릭이 평가가 끝날 때까지(수 분) 무시된다."""
+    import fitz
+
+    from app.engine.base import JobCanceled
+
+    doc = fitz.open()
+    for _ in range(2):
+        page = doc.new_page(width=595, height=842)
+        page.insert_textbox(fitz.Rect(50, 60, 545, 300), _PARAGRAPH, fontsize=11)
+        shape = page.new_shape()
+        for i in range(9000):  # 벡터 과다 페이지(축소판) — 경로 9,000개
+            x, y = 60 + (i % 90) * 5, 320 + (i // 90) * 4
+            shape.draw_rect(fitz.Rect(x, y, x + 3, y + 2))
+            shape.finish(color=(0, 0, 0), fill=(0.5, 0.5, 0.5))
+        shape.commit()
+    path = tmp_path / "vectors.pdf"
+    doc.save(path)
+    doc.close()
+    figure = {"type": "image", "bbox": [90, 380, 910, 900]}
+
+    with pytest.raises(JobCanceled):
+        evaluate_layout_pages(
+            path, [{"page": n, "blocks": [figure]} for n in (1, 2)],
+            should_cancel=lambda: True,
+        )
+
+    # 한 페이지 안에서도 경로 순회 도중 멈춘다 — 페이지 경계 확인만 있었다면 이 페이지는
+    # 확인 2번(페이지 시작·벡터 추출 전)으로 끝까지 돌았을 것이다.
+    polls = []
+
+    def cancel_on_fourth_poll() -> bool:
+        polls.append(1)
+        return len(polls) >= 4
+
+    with pytest.raises(JobCanceled):
+        evaluate_layout_pages(path, [{"page": 1, "blocks": [figure]}],
+                              should_cancel=cancel_on_fourth_poll)
+    assert len(polls) == 4
+
+    # 취소하지 않으면 평가는 그대로 끝난다
+    results = evaluate_layout_pages(
+        path, [{"page": n, "blocks": [figure]} for n in (1, 2)], should_cancel=lambda: False
+    )
+    assert [r.page for r in results] == [1, 2]

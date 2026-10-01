@@ -8,6 +8,7 @@ export const state = {
   displayedStatus: null,
   displayedPhase: null,   // 마지막 진행 phase — loading→render 전이에서 라이브 뷰 오픈 판정
   queuePos: null, // 열린 잡의 마지막 대기열 위치 — queued가 아니게 되면 해제
+  jobWarningsOpen: false, // 잡 품질 경고 목록 펼침 여부 — 잡을 바꾸면 접는다
   selectedFiles: [], // 다중 선택 지원 — 검증을 통과한 파일들만 담긴다
   uploading: false, // 업로드 루프 재진입 가드 — 진행 중 새 선택이 버튼을 되살리지 않게
   // /api/health 스냅샷 — 필드 부재·미수신 시 undefined (검증·비활성은 fail-open)
@@ -184,6 +185,11 @@ export const EL_IDS = {
   jobFilename: 'job-filename',
   jobTime: 'job-time',
   jobModel: 'job-model',
+  jobWarningsChip: 'job-warnings-chip',
+  jobWarnings: 'job-warnings',
+  jobWarningsList: 'job-warnings-list',
+  jobNotices: 'job-notices',
+  jobNoticesList: 'job-notices-list',
   streamModeChip: 'stream-mode-chip',
   jobStop: 'job-stop',
   jobStopLabel: 'job-stop-label',

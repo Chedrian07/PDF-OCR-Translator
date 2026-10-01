@@ -189,7 +189,8 @@ def test_html_whitelist_keeps_angle_brackets_in_code():
     """
     code = "#include <AK/Debug.h> Vector<Component> read_value<BigEndian<u16>>(x)"
     kept = normalize(code)
-    assert "AK/Debug.h" in kept and "Component" in kept and "BigEndian" in kept
+    # 비교는 글자·숫자만(소문자)으로 한다 — 꺾쇠 안의 이름이 살아남으면 된다
+    assert "akdebugh" in kept and "component" in kept and "bigendian" in kept
     # 모델이 내는 표 마크업은 그대로 제거된다
     assert normalize("<table><tr><td>a</td></tr></table>") == "a"
     # 여러 줄을 가로지르는 삼킴이 없다
@@ -935,3 +936,67 @@ def test_fidelity_analysis_stops_at_cancel_checkpoints(tmp_path):
         path, [{"page": n, "blocks": [figure]} for n in (1, 2)], should_cancel=lambda: False
     )
     assert [r.page for r in results] == [1, 2]
+
+
+# ── 정규화: 표기만 다른 정상 전사를 열화로 오판하지 않는다 ─────────────────
+
+
+def test_dot_leaders_in_a_table_of_contents_are_not_a_loss():
+    """목차의 점선 리더는 모델이 줄이거나 생략한다 — 실측 unlimited-ocr-paper.pdf
+    2쪽은 빠진 bigram 596개 중 562개가 `..`이라 정상 전사가 0.465로 오탐됐다."""
+    entries = [f"{i}. Section title number {i}" for i in range(1, 25)]
+    truth = normalize(" ".join(f"{e} {'.' * 40} {i * 3}" for i, e in enumerate(entries, 1)))
+    ocr = normalize(" ".join(f"{e} {i * 3}" for i, e in enumerate(entries, 1)))
+    assert score(truth, ocr) > 0.95
+
+
+def test_latex_transcription_of_glyph_math_scores_as_faithful():
+    """PDF 글리프 수식과 모델 LaTeX는 같은 내용이다 — 실측 2504.19874v1.pdf 13쪽이
+    0.656으로 오탐됐다(빠진 것은 `˜x`·`⟨y` 같은 글리프, LaTeX 명령이 후보를 부풀림)."""
+    truth = normalize(
+        "For any x ∈ Rd with ∥x∥2 = 1 the estimator satisfies E[⟨y, ˜x⟩] = ⟨y, x⟩ "
+        "and Dprod ≤ √3π2 · ∥y∥2/d · 1/4b where Q−1 is the dequantizer and π, α are fixed."
+    )
+    ocr = normalize(
+        r"For any \(x \in \mathbb{R}^{d}\) with \(\|x\|_{2} = 1\) the estimator satisfies "
+        r"\(\mathbb{E}[\langle y, \tilde{x} \rangle] = \langle y, x \rangle\) and "
+        r"\(D_{prod} \leq \sqrt{3}\pi^{2} \cdot \|y\|_{2}/d \cdot 1/4^{b}\) where "
+        r"\(Q^{-1}\) is the dequantizer and \(\pi, \alpha\) are fixed."
+    )
+    assert score(truth, ocr) > 0.90, score(truth, ocr)
+
+
+def test_ligatures_and_width_variants_match_after_nfkc():
+    assert normalize("eﬃciently ﬁrst ＡＢＣ x²") == normalize("efficiently first ABC x2")
+
+
+def test_real_losses_and_duplication_are_still_caught_after_normalization():
+    truth = normalize(_PARAGRAPH * 3)
+    assert score(truth, normalize(_PARAGRAPH)) < 0.70           # 3분의 2 유실
+    assert score(truth, normalize(_PARAGRAPH * 6)) < 0.70       # 같은 내용 두 번 전사
+    assert score(truth, "") == pytest.approx(0.0)
+
+
+def test_distrusted_equation_blocks_count_on_both_sides(tmp_path):
+    """수식 분류를 믿지 않으면(페이지 절반 초과) 정답에 그 줄이 남는다 — 후보에서만
+    수식 내용을 빼면 같은 내용이 정답에만 있어 정상 페이지가 열화로 보인다."""
+    import fitz
+    import pymupdf
+
+    from app.pipeline.fidelity import page_fidelity_blocks
+
+    body = "The quantity alpha plus beta equals gamma for every index k " * 6
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_textbox(fitz.Rect(50, 60, 545, 760), body, fontsize=11)
+    path = tmp_path / "eqpage.pdf"
+    doc.save(path)
+    doc.close()
+
+    blocks = [{"type": "equation", "bbox": [0, 0, 999, 999], "content": body}]
+    opened = pymupdf.open(path)
+    try:
+        result = page_fidelity_blocks(pymupdf, opened[0], blocks, 1)
+    finally:
+        opened.close()
+    assert result.measurable and result.score > 0.95, result

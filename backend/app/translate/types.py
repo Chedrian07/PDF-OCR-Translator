@@ -2,7 +2,9 @@
 
 디렉터리 계약 (job_dir 기준, lang은 BCP-47 소문자 예: "ko"):
   translations/{lang}/state.json    진행 상태 — 아래 write_state() 스키마
-  translations/{lang}/glossary.json 문서 용어집 [{"src","ko","policy","first_unit"}]
+  translations/{lang}/glossary.json 문서 용어집 [{"src","ko","policy","first_unit","first_unit_lay"}]
+                                    first_unit=md 순서, first_unit_lay=layout 순서의 첫 등장
+  translations/{lang}/glossary.incomplete  용어집 LLM 판정 실패 표식 — 있으면 다음 실행이 재판정
   translations/{lang}/units.json    유닛 캐시 {cache_key: 번역문}
   translations/{lang}/report.json   품질 리포트 {"kept_original":[...],"retried":n,"skipped":n,...}
   result.{lang}.md                  번역된 마크다운 — page_separator 구조·페이지 수 보존

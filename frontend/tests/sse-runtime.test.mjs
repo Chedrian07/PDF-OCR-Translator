@@ -12,6 +12,7 @@
 //  · teardownConnections가 es와 모든 타이머를 정리한다. 번역 SSE도 CLOSED면 바로 폴링한다.
 //  · DELETE의 종료 SSE {deleted:true}는 취소 화면이 아니라 잡을 닫는다(목록·이어 읽기·메모 정리).
 //  · POST /cancel 202 {status:'canceled'}(대기 잡 즉시 마감)는 종료 이벤트 없이도 바로 마감한다.
+//  · SSE가 없는 완료 잡은 전체 목록에서 사라졌을 때 상세 404를 확인하고 화면을 닫는다.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,7 +22,7 @@ import { EL_IDS, el, state } from '../js/state.js';
 import {
   handleSseConnError, startFallbackPolling, startStream, teardownConnections,
 } from '../js/sse.js';
-import { deleteJob, requestCancel } from '../js/jobs.js';
+import { deleteJob, refreshJobs, requestCancel } from '../js/jobs.js';
 import { connectTranslateEvents, teardownTranslate } from '../js/translate.js';
 import { installFakeDom, installFakeStorage, mount } from './helpers/fake-dom.mjs';
 
@@ -388,4 +389,38 @@ test('종료 SSE가 cancel 응답보다 먼저 마감했으면 다시 그리지 
   await canceling;
   assert.ok(!calls.includes('/api/jobs/job-a'), `중복 마감 조회 없음: ${calls}`);
   assert.equal(el.errorTitle.textContent, '취소됨');
+});
+
+test('SSE가 없는 완료 잡이 전체 목록에서 사라지면 상세 404를 확인하고 화면을 닫는다', async (t) => {
+  const { calls } = setup(t, {
+    fetchImpl: (url) => (url === '/api/jobs/job-a'
+      ? response(404, { detail: '잡을 찾을 수 없습니다' })
+      : response(200, { jobs: [{ job_id: 'job-b', status: 'done' }], has_more: false, total: 1 })),
+  });
+  installFakeStorage(t);
+  Object.assign(state, { displayedStatus: 'done', jobs: [{ job_id: 'job-a', status: 'done' }] });
+  await refreshJobs(); // 다른 탭이 job-a를 지운 뒤의 5초 목록 폴링
+  for (let i = 0; i < 5; i += 1) await flush();
+  assert.ok(calls.includes('/api/jobs/job-a'), '사라진 열린 잡만 한 번 확인한다');
+  assert.equal(state.currentJobId, null);
+  assert.equal(el.emptyState.hidden, false);
+  assert.match(el.toast.textContent, /삭제되었습니다/);
+});
+
+test('목록 창 밖(has_more)이거나 상세가 살아 있으면 열린 잡을 닫지 않는다', async (t) => {
+  let page = { jobs: [{ job_id: 'job-b', status: 'done' }], has_more: true, total: 80 };
+  const { calls } = setup(t, {
+    fetchImpl: (url) => (url === '/api/jobs/job-a'
+      ? response(200, { job_id: 'job-a', status: 'done' })
+      : response(200, page)),
+  });
+  Object.assign(state, { displayedStatus: 'done' });
+  await refreshJobs(); // 오래된 잡을 해시로 연 경우 — 최신 창에 없을 뿐이다
+  await flush();
+  assert.ok(!calls.includes('/api/jobs/job-a'), '불완전한 창으로는 판단하지 않는다');
+  page = { jobs: [{ job_id: 'job-b', status: 'done' }], has_more: false, total: 1 };
+  await refreshJobs();
+  for (let i = 0; i < 5; i += 1) await flush();
+  assert.ok(calls.includes('/api/jobs/job-a'));
+  assert.equal(state.currentJobId, 'job-a', '상세가 있으면(목록 경합) 그대로 둔다');
 });

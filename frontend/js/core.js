@@ -1051,7 +1051,29 @@ export function translateKeptSummary(data) {
   }
   if (!kept && !skipped) lines.push('모든 문단이 한국어로 교체되었습니다.');
   if (total) lines.push(`총 ${total}개 문단`);
+  const notes = translateWarnings(d).length;
+  if (notes) lines.push(`번역 참고 사항 ${notes}건`); // 목록은 결과 화면의 '번역 참고 사항'
   return { kept, skipped, total, text, detail: lines.join('\n'), tone: kept ? 'warn' : '' };
+}
+
+// translate/state(report.json 병합)의 warnings → 표시용 목록. 캐시 전량 무효화(재번역 비용)·
+// 용어집 판정 실패·참고문헌 규칙 불일치·API 성공 0건처럼 결과는 나왔지만 알아야 할 사항이다.
+// 필드가 없거나(구버전 서버) 비정상이면 빈 목록. 문자열(또는 {message|text})만 받고, 같은
+// 문장은 한 번만, 길이·개수는 묶는다.
+export const TRANSLATE_WARNING_MAX_ITEMS = 50;
+
+export function translateWarnings(data) {
+  const raw = data && typeof data === 'object' && Array.isArray(data.warnings) ? data.warnings : [];
+  const out = [];
+  const seen = new Set();
+  for (const entry of raw) {
+    const text = noteText(entry);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+    if (out.length >= TRANSLATE_WARNING_MAX_ITEMS) break;
+  }
+  return out;
 }
 
 // 진행 페이로드 → 진행바 좌측 문구 (순수 — frontend/tests/에서 검증).

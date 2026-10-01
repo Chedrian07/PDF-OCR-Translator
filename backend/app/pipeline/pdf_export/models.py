@@ -117,3 +117,6 @@ class _SourceSpan:
     # 줄 진행 방향(get_text의 line dir, 비회전 공간). 리댁션 띠를 baseline 기준으로
     # 만들 때 회전된 줄(세로로 놓인 줄)도 같은 식으로 다루려면 필요하다.
     dir: tuple[float, float] = (1.0, 0.0)
+    # 화면에 실제로 칠해지는 글자인가. 스캔에 얹힌 OCR 텍스트 레이어(렌더 모드 3,
+    # 투명)는 False — 그런 span만 가진 블록의 원문은 텍스트가 아니라 래스터 픽셀이다.
+    visible: bool = True

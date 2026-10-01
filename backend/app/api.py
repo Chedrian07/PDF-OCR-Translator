@@ -376,12 +376,37 @@ def _stale_adjusted_state(request: Request, job, lang: str) -> dict | None:
     return state
 
 
+def _record_translate_failure(st, job, lang: str, message: str) -> None:
+    """엔진이 상태를 마감하지 못한 채 끝난 번역을 실제 사유로 마감한다.
+
+    run_translation은 run.execute() 안에서 난 실패만 state.json에 기록한다. 그 밖
+    (OpenAICompatClient 생성 — 예: OPENAI_BASE_URL='http://[::1/v1' 형식 오류)에서 난
+    실패는 접수 때 쓴 'running'이 그대로 남아, 다음 조회가 '서버가 재시작되어 번역이
+    중단되었습니다'로 오보했다(실제 원인은 서버 로그에만). 엔진이 이미 마감한 상태
+    (error·canceled)는 덮지 않는다. 레지스트리 정리(finally)보다 먼저 불려
+    _stale_adjusted_state의 '최종 state 기록 → 레지스트리 이탈' 순서를 지킨다."""
+    with st.translate_lock:
+        state = _read_translate_state(job, lang)
+        if state is None or state.get("status") != "running":
+            return
+        try:
+            _write_translate_state(job, lang, {
+                **state, "status": "error", "error": message[:500],
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except FileNotFoundError:
+            pass  # 삭제 경합 — 마감할 잡이 없다
+        except OSError:
+            logger.warning("번역 실패 상태 기록 실패: %s (lang=%s)", job.id, lang, exc_info=True)
+
+
 def _run_translate_thread(
     st, job, lang: str, cfg: TranslateConfig,
     cancel: threading.Event, force: bool, page_separator: str,
 ) -> None:
     """번역 워커 스레드 본문. 진행/완료/오류를 브로커 채널로 중계하고 레지스트리를 정리한다.
-    state.json은 run_translation(엔진)이 직접 기록하므로 여기서는 이벤트만 발행한다."""
+    state.json은 run_translation(엔진)이 직접 기록한다 — 엔진 밖에서 난 실패로 'running'이
+    남은 경우에만 여기서 실제 사유로 마감한다(_record_translate_failure)."""
     broker = st.broker
     channel = _translate_channel(job.id, lang)
 
@@ -406,6 +431,21 @@ def _run_translate_thread(
                 "message": "번역이 취소되었습니다", "canceled": True,
             })
         else:
+            # 'done'을 알리기 **전에** 캐시를 무효화한다 — 예전에는 발행 뒤에 지워서,
+            # done을 받은 직후의 다운로드나 번역 완료 직전에 시작된 빌드가 옛 번역(또는
+            # 번역 없는) archive.zip·PDF를 가져갈 창이 있었다.
+            # ko 번역본을 포함해 다시 만들도록 archive.zip 캐시를 무효화한다(내용 지문
+            # 판정 — job_archive — 이 그 사이 시작된 빌드의 결과도 거른다).
+            artifacts.archive(job.dir).unlink(missing_ok=True)
+            # 번역이 갱신됐으므로 내보내기 PDF·대조 PDF·리포트와, 그 PDF에서 만든
+            # HTML 기준면 캐시까지 한 곳(artifacts)에서 무효화한다.
+            artifacts.invalidate_language_artifacts(job.dir, lang)
+            # 방금 지운 그 캐시를 곧바로 다시 만들어 둔다. 사용자가 다운로드
+            # 버튼을 누르는 시점이 정확히 'done' 직후라, 예열하지 않으면 첫 클릭이
+            # 빌드 전체를 요청 안에서 기다린다. done 발행 전에 띄워 두면 그 클릭은
+            # 예열 대기 상한으로 이 예열을 기다린다. 경합하면 조용히 포기하므로
+            # 진짜 클릭을 밀어내지 않는다(derived.warm_translated_pdf 참조).
+            _warm_export_pdf(st, job, lang)
             broker.publish(channel, "done", {
                 "phase": "translate", "lang": lang,
                 "markdown_url": f"/api/jobs/{job.id}/markdown?lang={lang}",
@@ -419,22 +459,14 @@ def _run_translate_thread(
                     "kept_original": len(getattr(result, "kept_original", []) or []),
                 },
             })
-            # ko 번역본을 포함해 다시 만들도록 archive.zip 캐시를 무효화한다.
-            artifacts.archive(job.dir).unlink(missing_ok=True)
-            # 번역이 갱신됐으므로 내보내기 PDF·대조 PDF·리포트와, 그 PDF에서 만든
-            # HTML 기준면 캐시까지 한 곳(artifacts)에서 무효화한다.
-            artifacts.invalidate_language_artifacts(job.dir, lang)
-            # 방금 지운 그 캐시를 곧바로 다시 만들어 둔다. 사용자가 다운로드
-            # 버튼을 누르는 시점이 정확히 여기 직후라, 예열하지 않으면 첫 클릭이
-            # 빌드 전체를 요청 안에서 기다린다. 경합하면 조용히 포기하므로
-            # 진짜 클릭을 밀어내지 않는다(derived.warm_translated_pdf 참조).
-            _warm_export_pdf(st, job, lang)
     except TranslateError as e:
         # SSE는 구독자가 없으면 이벤트를 버린다 — 서버 로그에도 반드시 남긴다
         logger.exception("번역 실패: %s (lang=%s)", job.id, lang)
+        _record_translate_failure(st, job, lang, str(e))
         broker.publish(channel, "error", {"message": str(e), "canceled": False})
     except Exception as e:  # noqa: BLE001 — 스레드가 조용히 죽지 않도록 SSE로 중계
         logger.exception("번역 실패: %s (lang=%s)", job.id, lang)
+        _record_translate_failure(st, job, lang, str(e) or e.__class__.__name__)
         broker.publish(channel, "error", {"message": str(e), "canceled": False})
     finally:
         with st.translate_lock:

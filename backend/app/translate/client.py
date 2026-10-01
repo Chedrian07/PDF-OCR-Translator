@@ -191,9 +191,7 @@ class OpenAICompatClient:
                 return retry_text  # 여전히 잘렸어도 더 긴 출력 — 래더가 흡수
         if text:
             return text
-        raise TranslateAPIError(
-            "번역 API 출력이 max_tokens에서 전부 잘렸습니다 — TRANSLATE_REASONING 예산을 확인하세요"
-        )
+        raise TranslateAPIError(_exhausted_message(self.cfg))
 
     def _complete_once(self, system: str, user: str, max_tokens: int) -> tuple[str, bool]:
         """1회 완성 시도 — (텍스트, 잘림 여부) 반환. auto 모드 폴백/래치 담당."""
@@ -267,36 +265,28 @@ class OpenAICompatClient:
     def _build_payload(self, mode: str, system: str, user: str, max_tokens: int) -> dict:
         cfg = self.cfg
         temp_ok = cfg.temperature != "none"
-        # reasoning 제어 (opt-in — 미설정 시 파라미터 자체를 안 보내 구형 서버 호환 유지)
-        reasoning = None
-        if cfg.reasoning == "off":
-            reasoning = {"enabled": False}
-        elif cfg.reasoning in ("low", "medium", "high", "xhigh"):
-            reasoning = {"effort": cfg.reasoning}
         if mode == "responses":
             p: dict = {"model": cfg.model, "instructions": system, "input": user}
             if temp_ok:
                 p["temperature"] = float(cfg.temperature)
             if cfg.max_tokens_param != "none":
                 p["max_output_tokens"] = max_tokens
-            if reasoning is not None:
-                p["reasoning"] = reasoning
-            return p
-        p = {
-            "model": cfg.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        }
-        if temp_ok:
-            p["temperature"] = float(cfg.temperature)
-        if cfg.max_tokens_param == "max_tokens":
-            p["max_tokens"] = max_tokens
-        elif cfg.max_tokens_param == "max_completion_tokens":
-            p["max_completion_tokens"] = max_tokens
-        if reasoning is not None:
-            p["reasoning"] = reasoning
+        else:
+            p = {
+                "model": cfg.model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            }
+            if temp_ok:
+                p["temperature"] = float(cfg.temperature)
+            if cfg.max_tokens_param == "max_tokens":
+                p["max_tokens"] = max_tokens
+            elif cfg.max_tokens_param == "max_completion_tokens":
+                p["max_completion_tokens"] = max_tokens
+        _apply_reasoning(p, mode, cfg.reasoning, cfg.effective_reasoning_style)
+        _merge_extra_body(p, cfg.extra_body_dict)
         return p
 
     def _send(
@@ -392,6 +382,71 @@ class OpenAICompatClient:
         if not text and not truncated:
             raise TranslateAPIError("번역 API가 빈 응답을 반환했습니다")
         return text, truncated
+
+
+def _exhausted_message(cfg: TranslateConfig) -> str:
+    """출력이 전부 잘렸을 때의 안내 — 원인은 대개 thinking이 예산을 다 쓴 것이다.
+
+    종전 문구('TRANSLATE_REASONING 예산을 확인하세요')는 off가 이미 설정돼 있어도 같은
+    말을 해 원인을 가렸다. mlx_lm·oMLX는 reasoning 필드를 무시하고 thinking을 켜므로
+    서버측에서 끄는 방법까지 안내한다.
+    """
+    style = cfg.effective_reasoning_style
+    if not cfg.reasoning:
+        how = "TRANSLATE_REASONING=off로 thinking을 끄세요"
+    elif cfg.reasoning == "off" and style in ("openrouter", "none"):
+        how = (
+            f"TRANSLATE_REASONING=off가 이 서버에 전달되지 않았을 수 있습니다(방식: {style}) — "
+            "로컬 MLX·vLLM 서버는 TRANSLATE_REASONING_STYLE=chat_template_kwargs를 쓰세요"
+        )
+    elif cfg.reasoning == "off":
+        how = "서버가 thinking 끄기 요청을 따르지 않았습니다"
+    else:
+        how = f"reasoning effort({cfg.reasoning})를 낮추거나 off로 두세요"
+    return (
+        "번역 API 출력이 max_tokens에서 전부 잘렸습니다 — 모델의 thinking(reasoning)이 "
+        f"출력 예산을 모두 쓴 것으로 보입니다. {how}. 서버에서 끄려면 mlx_lm.server는 "
+        "--chat-template-args '{\"enable_thinking\":false}', oMLX·LM Studio는 모델별 "
+        "thinking 설정을 끄거나 비-thinking(Instruct) 모델을 쓰세요"
+    )
+
+
+def _apply_reasoning(p: dict, mode: str, reasoning: str, style: str) -> None:
+    """TRANSLATE_REASONING 값을 서버 계열별 필드로 싣는다 (types.REASONING_STYLES 참조).
+
+    reasoning이 빈 값이면 아무것도 보내지 않는다 — 구형 서버 호환 기본값(opt-in).
+    """
+    if not reasoning or style == "none":
+        return
+    off = reasoning == "off"
+    if style == "openrouter":
+        p["reasoning"] = {"enabled": False} if off else {"effort": reasoning}
+    elif style == "chat_template_kwargs":
+        # mlx_lm·oMLX·vLLM·llama.cpp가 채팅 템플릿 인자로 넘긴다. mlx_lm은 Qwen 계열에
+        # enable_thinking=True를 기본 주입하므로 off를 반드시 명시해야 꺼진다.
+        p["chat_template_kwargs"] = {"enable_thinking": not off}
+        if not off:
+            # effort 개념이 있는 모델(gpt-oss 등)용 — 모르는 서버·모델은 무시한다.
+            if mode == "responses":
+                p["reasoning"] = {"effort": reasoning}
+            else:
+                p["reasoning_effort"] = reasoning
+    elif style == "reasoning_effort":
+        effort = "none" if off else reasoning
+        if mode == "responses":
+            p["reasoning"] = {"effort": effort}
+        else:
+            p["reasoning_effort"] = effort
+
+
+def _merge_extra_body(p: dict, extra: dict) -> None:
+    """TRANSLATE_EXTRA_BODY 병합 — 객체 값은 한 단계 합치고(chat_template_kwargs 등)
+    나머지는 덮어쓴다. 클라이언트가 책임지는 키는 설정 단계에서 이미 거부됐다."""
+    for key, value in extra.items():
+        if isinstance(value, dict) and isinstance(p.get(key), dict):
+            p[key] = {**p[key], **value}
+        else:
+            p[key] = value
 
 
 def _parse_responses_output(output) -> str:

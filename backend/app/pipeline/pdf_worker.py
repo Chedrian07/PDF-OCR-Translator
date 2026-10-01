@@ -146,8 +146,12 @@ class PdfWorkerTimeout(PdfWorkerError):
 
     def __init__(self, seconds: float | None, what: str = "PDF 처리") -> None:
         self.seconds = seconds
+        self.what = what
         limit = f"{seconds:g}초" if seconds else "상한"
         super().__init__(f"{what}가 시간 상한({limit})을 넘어 중단했습니다")
+
+    def __reduce__(self):
+        return (type(self), (self.seconds, self.what))
 
 
 class PdfPageQuarantined(PdfWorkerTimeout):
@@ -155,10 +159,14 @@ class PdfPageQuarantined(PdfWorkerTimeout):
 
     def __init__(self, page_index: int) -> None:
         self.page_index = page_index
+        self.seconds = None
+        self.what = "PDF 처리"
         PdfWorkerError.__init__(
             self, f"{page_index + 1}페이지는 앞서 처리 상한을 넘은 페이지라 건너뜁니다",
         )
-        self.seconds = None
+
+    def __reduce__(self):
+        return (type(self), (self.page_index,))
 
 
 class PdfWorkerCrashed(PdfWorkerError):
@@ -171,12 +179,18 @@ class PdfWorkerCrashed(PdfWorkerError):
             "손상됐거나 처리할 수 없는 PDF일 수 있습니다"
         )
 
+    def __reduce__(self):
+        return (type(self), (self.exitcode,))
+
 
 class PdfWorkerCanceled(PdfWorkerError):
     """취소 콜백이 참이 되어 진행 중이던 작업의 워커를 종료했다."""
 
     def __init__(self) -> None:
         super().__init__("취소되어 PDF 처리를 중단했습니다")
+
+    def __reduce__(self):
+        return (type(self), ())
 
 
 class PdfWorkerBusy(PdfWorkerError):
@@ -187,13 +201,20 @@ class PdfWorkerBusy(PdfWorkerError):
         self.waited = waited
         super().__init__("PDF 처리 대기열이 가득 찼습니다 — 잠시 후 다시 시도하세요")
 
+    def __reduce__(self):
+        return (type(self), (self.pool, self.waited))
+
 
 class PdfWorkerRemoteError(PdfWorkerError):
     """작업이 낸 예외를 그대로 옮길 수 없을 때(피클 불가)의 대체 — 원래 타입 이름과 문구."""
 
     def __init__(self, type_name: str, message: str) -> None:
         self.type_name = type_name
+        self.message = message
         super().__init__(f"{type_name}: {message}" if message else type_name)
+
+    def __reduce__(self):
+        return (type(self), (self.type_name, self.message))
 
 
 class _RemoteTraceback(Exception):
@@ -493,8 +514,13 @@ def _child_main(conn, pool_name: str, mem_limit_mb: int, log_level: int) -> None
             except (BrokenPipeError, EOFError, ConnectionResetError):
                 return
             except Exception as exc:  # noqa: BLE001 — 결과를 피클할 수 없다
+                failure = (
+                    "remote", f"{type(exc).__module__}.{type(exc).__qualname__}",
+                    f"작업 결과를 부모 프로세스로 보낼 수 없습니다: {str(exc)[:500]}",
+                    "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-8000:],
+                )
                 try:
-                    conn.send((task_id, False, _portable_exception(exc), _peak_rss_bytes()))
+                    conn.send((task_id, False, failure, _peak_rss_bytes()))
                 except (OSError, EOFError):
                     return
     finally:
@@ -676,7 +702,8 @@ class WorkerPool:
         self._closed = False
         self._index = itertools.count(1)
         self.counters: dict[str, int] = dict.fromkeys(
-            ("tasks", "timeouts", "crashes", "canceled", "spawned", "recycled", "busy"), 0,
+            ("tasks", "timeouts", "crashes", "canceled", "spawned", "recycled", "rejected_busy"),
+            0,
         )
 
     def size(self) -> int:
@@ -741,7 +768,7 @@ class WorkerPool:
                     raise PdfWorkerCanceled()
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
-                    self.counters["busy"] += 1
+                    self.counters["rejected_busy"] += 1
                     raise PdfWorkerBusy(self.name, time.monotonic() - started)
                 self._cond.wait(_POLL_S if remaining is None else min(_POLL_S, remaining))
         try:
@@ -811,7 +838,7 @@ class WorkerPool:
             return {
                 "size": self.size(),
                 "workers": len(self._all),
-                "busy": self._checked_out,
+                "in_use": self._checked_out,
                 **self.counters,
             }
 

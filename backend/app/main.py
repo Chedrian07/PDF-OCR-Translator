@@ -188,8 +188,9 @@ class UploadBodyLimitMiddleware:
 # 폰트·연결)를 같은 출처와 data:/blob:으로 묶는다. 리더는 /html·/layout 조각을 SPA에
 # innerHTML로 넣으므로 실제 효력은 SPA 문서(index.html)의 정책에서 난다.
 # - 인라인 style 속성(레이아웃 좌표·KaTeX)은 쓰므로 style-src에 'unsafe-inline'.
-# - SPA의 인라인 스크립트(테마 부트스트랩)는 해시로 허용한다 — 주입된 인라인 스크립트·
-#   on* 속성은 막힌다. 해시는 index.html에서 계산하고 파일이 바뀌면 다시 계산한다.
+# - SPA 스크립트는 같은 출처 파일('self' — 테마 부트스트랩도 theme-init.js)이고, index.html에
+#   인라인 스크립트가 생기면 그 해시로만 허용한다 — 주입된 인라인 스크립트·on* 속성은
+#   막힌다. 해시는 index.html에서 계산하고 파일이 바뀌면 다시 계산한다.
 # - API가 내보내는 HTML(document.html 내려받기 등)은 KaTeX를 인라인으로 품으므로
 #   스크립트는 'unsafe-inline'을 두되 리소스 출처는 같은 규칙으로 묶는다.
 _CSP_COMMON = (

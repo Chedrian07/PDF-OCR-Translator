@@ -694,3 +694,86 @@ def test_canceled_chunk_skips_marker_correction_and_the_fidelity_gate(tmp_path):
     assert job.progress["current_page"] <= 2         # 실제로 처리한 페이지까지만
     md = (job.dir / "result.md").read_text(encoding="utf-8")
     assert "페이지 1" in md and "페이지 2" in md     # 부분 결과는 보존된다
+
+
+# ── 페이지 단위 엔진·타임아웃 재시도 정책 ──────────────────────────────────
+
+
+class _NoSamePageRetry(RuntimeError):
+    """sidecar 읽기 타임아웃 대역 — 같은 페이지 즉시 재요청은 무의미하다."""
+
+    retry_same_page = False
+
+
+class PageUnitEngine(FakeEngine):
+    """sidecar처럼 페이지 단위로 도는 엔진(동시성 2 → 청크 2쪽). bad_pages는 늘 실패."""
+
+    def __init__(self, bad_pages=(), exc=RuntimeError, chunk=2):
+        super().__init__(delay=0.0)
+        self.bad_pages = set(bad_pages)
+        self.exc = exc
+        self.chunk = chunk
+        self.multi_calls = 0
+        self.single_calls: dict[int, int] = {}
+
+    def capabilities(self):
+        from app.engine.base import EngineCapabilities
+
+        return EngineCapabilities(
+            model_id="page-unit", supports_multi_page=False,
+            preferred_chunk_size=self.chunk, stream_granularity="page",
+        )
+
+    @staticmethod
+    def _page(image_path) -> int:
+        return int(Path(image_path).stem.rsplit("_", 1)[-1])
+
+    def run_multi(self, image_paths, out_dir, sink, cancel):
+        self.multi_calls += 1
+        bad = [self._page(p) for p in image_paths if self._page(p) in self.bad_pages]
+        if bad:
+            raise self.exc(f"{bad[0]}페이지 sidecar 추론 실패 (HTTP 502)")
+        return super().run_multi(image_paths, out_dir, sink, cancel)
+
+    def run_single(self, image_path, out_dir, sink, cancel):
+        page = self._page(image_path)
+        self.single_calls[page] = self.single_calls.get(page, 0) + 1
+        if page in self.bad_pages:
+            raise self.exc(f"{page}페이지 sidecar 추론 실패 (HTTP 502)")
+        return super().run_single(image_path, out_dir, sink, cancel)
+
+
+def test_page_unit_engine_isolates_a_bad_page_without_rerunning_the_chunk(tmp_path):
+    """동시성>1에서 한 페이지의 실패가 같은 청크의 정상 페이지를 GPU에서 다시 추론시키고
+    전부 플레이스홀더로 만들던 문제 — 청크 재시도 없이 페이지별로 내린다."""
+    engine = PageUnitEngine(bad_pages={1})
+    job = _run_job(tmp_path, engine, pages=2, pages_per_chunk=8)
+
+    assert job.status == "done"
+    assert engine.multi_calls == 1                 # 청크 통째 재시도 없음
+    assert engine.single_calls == {1: 2, 2: 1}     # 정상 페이지는 한 번, 실패 페이지만 재시도
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert FAILED_MARK not in md
+    assert "Sample page 1" in md and "PDF 내장 텍스트 레이어" in md
+    assert "![](images/p0002_0.jpg)" in md
+
+
+def test_no_same_page_retry_errors_go_straight_to_page_isolation(tmp_path):
+    """읽기 타임아웃처럼 같은 페이지 즉시 재요청이 무의미한 실패는 재시도하지 않는다 —
+    재요청은 버려진 추론 뒤에 줄을 서 다시 타임아웃이 나고 시간만 2배가 된다."""
+    engine = PageUnitEngine(bad_pages={1}, exc=_NoSamePageRetry, chunk=1)
+    job = _run_job(tmp_path, engine, pages=2, pages_per_chunk=8)
+
+    assert job.status == "done"
+    assert engine.multi_calls == 2                 # 1쪽(실패, 재시도 없음) + 2쪽
+    assert engine.single_calls == {}               # 1쪽 청크는 텍스트 레이어로 바로 간다
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert "Sample page 1" in md and "PDF 내장 텍스트 레이어" in md
+
+
+def test_no_same_page_retry_also_applies_to_per_page_fallbacks(tmp_path):
+    engine = PageUnitEngine(bad_pages={1}, exc=_NoSamePageRetry, chunk=2)
+    job = _run_job(tmp_path, engine, pages=2, pages_per_chunk=8)
+
+    assert job.status == "done"
+    assert engine.single_calls == {1: 1, 2: 1}     # 실패 페이지도 한 번만

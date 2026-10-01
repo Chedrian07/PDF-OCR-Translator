@@ -7,12 +7,17 @@ Q&A 전용 키 분리·ALLOWED_HOSTS 와일드카드 경고 등 기동 설정 �
 
 import logging
 import os
+import re
 from pathlib import Path
 
 import pytest
+from dotenv import dotenv_values
 
 import app.config as config_module
 from app.config import Settings, load_dotenv_file
+from app.translate.types import TranslateConfig
+
+REPO = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture(autouse=True)
@@ -272,6 +277,35 @@ def test_남용_방어_상한의_오타는_기본값으로_강등된다(monkeypa
 
     assert s.qa_rate_limit_per_min == 30
     assert any("QA_RATE_LIMIT_PER_MIN" in r.getMessage() for r in caplog.records)
+
+
+# ── .env.example 주석 해제 계약 (감사 infra-docs-1, mlx-integration-7, api-jobs-2) ──
+
+def test_env_example은_어느_줄을_주석_해제해도_유효한_값이다(tmp_path, monkeypatch):
+    """README는 '.env.example에서 #을 지우고 값을 넣으라'고 안내한다. 설명이 같은 줄에
+    있으면 설명까지 값이 돼 OCR_FAST_DECODE=1이 False로 뒤집히고 OCR_DEVICE=metal이
+    기동에 실패했다 — 설명은 별도 줄에 두고, 전부 주석 해제해도 기동돼야 한다."""
+    lines = []
+    for line in (REPO / ".env.example").read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^# ?([A-Z][A-Z0-9_]*=.*)$", line)
+        lines.append(m.group(1) if m else line)
+    env = tmp_path / ".env"
+    env.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    values = dotenv_values(env)
+    assert len(values) > 50  # 주석 해제가 조용히 0줄이면 아래 단언이 무력화된다
+    assert {k: v for k, v in values.items() if v and "#" in v} == {}
+
+    for key in values:
+        monkeypatch.delenv(key, raising=False)
+    load_dotenv_file(env)
+    s = Settings.from_env()  # 설명이 값에 섞였다면 여기서 ValueError나 설정 반전
+    assert s.fast_decode is True and s.preload_model is True
+    assert s.device == "cpu"
+    assert s.allowed_hosts == ["localhost", "127.0.0.1"]
+    TranslateConfig.from_env({
+        **os.environ, "OPENAI_BASE_URL": "http://127.0.0.1:9/v1", "OPENAI_MODEL": "m",
+    })
 
 
 def test_QA키는_번역키를_폴백하지_않는다(monkeypatch):

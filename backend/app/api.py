@@ -622,6 +622,7 @@ def _sse_poll(q: queue.Queue):
 async def job_events(request: Request, job_id: str) -> StreamingResponse:
     job = _get_job(request, job_id)
     broker = _state(request).broker
+    store = _state(request).store
 
     async def gen():
         # 구독 등록과 이전 토큰 스냅샷을 원자적으로 수행 — 업로드 응답과
@@ -675,6 +676,10 @@ async def job_events(request: Request, job_id: str) -> StreamingResponse:
                     if item is not None and item[0] == "token":
                         continue
                 if item is None:
+                    # 방어: 종료 이벤트 없이 잡이 사라졌으면(삭제 경합) 스트림을 닫는다 —
+                    # ping만 계속 받는 고아 구독이 폴 스레드를 점유하지 않게.
+                    if store.get(job_id) is None:
+                        return
                     idle += 1
                     if idle >= 15:
                         idle = 0
@@ -1489,12 +1494,19 @@ def job_pdf(
 
 @router.post("/jobs/{job_id}/cancel", status_code=202)
 def cancel_job(request: Request, job_id: str) -> dict:
-    """삭제 없이 중단 — 부분 결과(result.md, 완료된 청크의 이미지)는 보존된다."""
+    """삭제 없이 중단 — 부분 결과(result.md, 완료된 청크의 이미지)는 보존된다.
+
+    아직 워커가 맡지 않은 대기 잡은 즉시 canceled로 마감하고 종료 SSE를 발행한다
+    ({"status":"canceled"}). 실행 중(또는 모델 로딩 대기 중) 잡은 취소 이벤트만 세우고
+    {"status":"canceling"} — 워커가 다음 확인 지점에서 마감한다."""
     st = _state(request)
     job = _get_job(request, job_id)
     if job.status in ("done", "error", "canceled"):
         return {"job_id": job_id, "status": job.status}
     st.cancel_events.setdefault(job_id, threading.Event()).set()
+    if st.store.try_cancel_queued(job, "사용자에 의해 취소되었습니다"):
+        st.broker.publish(job_id, "error", {"message": job.error, "canceled": True})
+        return {"job_id": job_id, "status": "canceled"}
     return {"job_id": job_id, "status": "canceling"}
 
 
@@ -1875,6 +1887,12 @@ def delete_job(request: Request, job_id: str) -> Response:
             if jid == job_id:
                 task["cancel"].set()
     if job.status != "running":
+        # 이 잡의 SSE 구독자(다른 탭 등)에게 종료 이벤트를 보내 스트림을 닫는다 —
+        # 예전에는 대기 잡을 지우면 구독자가 ping만 받으며 '대기 중'에 영원히 머물렀다.
+        # 실행 중 잡은 러너가 취소를 마감하며 같은 이벤트를 발행한다.
+        st.broker.publish(job_id, "error", {
+            "message": "삭제된 작업입니다", "canceled": True, "deleted": True,
+        })
         # queued 잡은 워커가 dequeue 시 delete_requested를 보고 정리하지만,
         # 디렉터리와 목록은 지금 바로 제거해 UI에서 사라지게 한다.
         st.store.delete_dir(job)

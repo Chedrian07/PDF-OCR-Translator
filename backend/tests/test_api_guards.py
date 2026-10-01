@@ -110,3 +110,45 @@ def test_render_preview_concurrency_is_capped(client, sample_pdf, monkeypatch):
         thread.join(10)
     assert first["status"] == 200
     assert client.post(url, content=b"# c").status_code == 200   # 슬롯이 반납됐다
+
+
+# ── api-jobs-10: X-Forwarded-For는 신뢰 프록시가 붙인 것만 믿는다 ─────────────────
+def _req(host: str, xff: str | None = None):
+    from types import SimpleNamespace
+
+    headers = {"x-forwarded-for": xff} if xff is not None else {}
+    return SimpleNamespace(client=SimpleNamespace(host=host), headers=headers)
+
+
+def test_forged_forwarded_for_from_a_direct_client_is_ignored(monkeypatch, caplog):
+    """nginx를 두고 TRUSTED_PROXY_HOPS=1을 켰는데 백엔드 포트(compose 기본 0.0.0.0)도 열려
+    있으면, 직접 붙은 LAN 클라이언트가 요청마다 XFF를 바꿔 IP 레이트리밋을 무력화했다
+    (rl_probe: 192.168.1.66이 위조한 10.9.9.0..4가 키 5개로)."""
+    import logging
+
+    import app.api as api_mod
+
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+    monkeypatch.delenv("TRUSTED_PROXY_IPS", raising=False)       # 기본 = 루프백만
+    with caplog.at_level(logging.WARNING, logger="app.api"):
+        keys = {api_mod._client_key(_req("192.168.1.66", f"10.9.9.{i}")) for i in range(5)}
+    assert keys == {"192.168.1.66"}                              # 위조 무시 → 피어 IP 한 버킷
+    assert any("TRUSTED_PROXY_IPS" in r.getMessage() for r in caplog.records)
+
+    # 같은 호스트의 프록시(루프백)가 붙인 헤더는 믿는다 — 가장 흔한 배치는 설정 없이 동작
+    assert api_mod._client_key(_req("127.0.0.1", "203.0.113.7")) == "203.0.113.7"
+    assert api_mod._client_key(_req("::1", "203.0.113.8")) == "203.0.113.8"
+    assert api_mod._client_key(_req("::ffff:127.0.0.1", "203.0.113.9")) == "203.0.113.9"
+
+
+def test_trusted_proxy_ips_accepts_addresses_and_cidrs(monkeypatch):
+    import app.api as api_mod
+
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+    monkeypatch.setenv("TRUSTED_PROXY_IPS", "172.17.0.0/16, 10.1.2.3, not-an-ip")
+    assert api_mod._client_key(_req("172.17.0.1", "203.0.113.7")) == "203.0.113.7"   # 도커 브리지
+    assert api_mod._client_key(_req("10.1.2.3", "203.0.113.8")) == "203.0.113.8"
+    assert api_mod._client_key(_req("127.0.0.1", "203.0.113.9")) == "127.0.0.1"      # 명시하면 기본 대체
+    assert api_mod._client_key(_req("unknown", "203.0.113.9")) == "unknown"
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "0")                 # 홉 0이면 목록과 무관하게 무시
+    assert api_mod._client_key(_req("172.17.0.1", "203.0.113.7")) == "172.17.0.1"

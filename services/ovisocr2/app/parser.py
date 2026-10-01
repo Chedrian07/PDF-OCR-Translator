@@ -11,6 +11,8 @@
 - 유효 figure 태그는 `[[FIGURE:n]]` placeholder로 치환 (파일명 결정은 메인 backend 몫)
 - 그 외 모든 `<img …>` 태그는 제거 (외부 URL·경로 탈출·비정상 속성 무력화)
 - figure 수·태그 길이·좌표 범위·중복·퇴화 bbox 검증
+- 문서 본문에 리터럴로 실린 `[[FIGURE:`는 `&#91;&#91;FIGURE:`(숫자 문자 참조)로 바꾼다 —
+  placeholder는 이 파서만 만든다
 """
 
 from __future__ import annotations
@@ -32,6 +34,21 @@ FIGURE_TAG_RE = re.compile(
 _ANY_IMG_TAG_RE = re.compile(r"<img\b[^>]{0,500}?/?>", re.IGNORECASE)
 # 닫히지 않은 <img … (태그 종결 없이 줄이 끝나는 잔여물)도 정리
 _UNCLOSED_IMG_RE = re.compile(r"<img\b[^>\n]{0,500}", re.IGNORECASE)
+
+# 앱이 소유한 figure 참조 문법의 여는 부분과 그 리터럴 표기. 문서 본문에 `[[FIGURE:0]]`이
+# 글자로 실려 있으면 모델이 그대로 옮겨 적고, 같은 index의 진짜 placeholder와 겹쳐
+# figure가 문장 한가운데로 옮겨 붙었다(감사 sidecar-9). `\[`로 이스케이프하면 렌더러가
+# 디스플레이 수식(`\[ … \]`)으로 읽으므로 숫자 문자 참조를 쓴다 — 렌더하면 `[[`로 보인다
+# (backend protocol의 리터럴 표기와 같다).
+_FIGURE_OPEN = "[[FIGURE:"
+_FIGURE_OPEN_LITERAL = "&#91;&#91;FIGURE:"
+
+
+def escape_literal_placeholders(text: str) -> str:
+    """본문의 리터럴 `[[FIGURE:`를 문자 참조로 바꾼다 — placeholder 정규식에 걸리지 않게.
+
+    치환문에는 `[`가 없어 결과에 `[[FIGURE:`가 새로 생길 수 없다(1회 치환으로 충분)."""
+    return text.replace(_FIGURE_OPEN, _FIGURE_OPEN_LITERAL)
 
 
 def clean_truncated_repeats(
@@ -92,6 +109,11 @@ def parse_page(raw: str) -> dict:
     markdown의 유효 figure 태그는 순서대로 `[[FIGURE:n]]`으로 치환되고,
     같은 순서로 image 블록(figure_index=n, bbox [0,999])이 생성된다.
     heading/본문/HTML 표/LaTeX/코드/목록은 그대로 보존된다.
+
+    유효 태그 **사이의 본문 조각마다** 비정상 img 태그를 지운 뒤 리터럴 `[[FIGURE:`를
+    이스케이프한다. 치환을 마친 전체 문자열에서 img 태그를 지우면 `[<img …>[FIGURE:0]]`
+    처럼 지운 자리 양쪽이 이어져 placeholder가 새로 생기고, 바깥 잔여물(`<img alt="`)이
+    뒤따르는 진짜 placeholder까지 삼켰다 — 조각 단위로 처리하면 둘 다 일어나지 않는다.
     """
     warnings: list[str] = []
     if len(raw) > MAX_RAW_CHARS:
@@ -131,17 +153,29 @@ def parse_page(raw: str) -> dict:
         })
         return f"[[FIGURE:{n}]]"
 
-    markdown = FIGURE_TAG_RE.sub(_replace, raw)
+    removed = {"tags": 0, "unclosed": 0}
 
-    # 유효 figure 외의 img 태그는 전부 제거 — 어떤 경로/URL도 통과시키지 않는다
-    stripped = _ANY_IMG_TAG_RE.subn("", markdown)
-    markdown = stripped[0]
-    if stripped[1]:
-        warnings.append(f"비정상 img 태그 {stripped[1]}개 제거")
-    unclosed = _UNCLOSED_IMG_RE.subn("", markdown)
-    markdown = unclosed[0]
-    if unclosed[1]:
-        warnings.append(f"닫히지 않은 img 태그 잔여물 {unclosed[1]}개 제거")
+    def _text(segment: str) -> str:
+        # 유효 figure 외의 img 태그는 전부 제거 — 어떤 경로/URL도 통과시키지 않는다
+        segment, n_tags = _ANY_IMG_TAG_RE.subn("", segment)
+        segment, n_unclosed = _UNCLOSED_IMG_RE.subn("", segment)
+        removed["tags"] += n_tags
+        removed["unclosed"] += n_unclosed
+        # 제거로 이어 붙은 자리까지 본 뒤에 이스케이프한다
+        return escape_literal_placeholders(segment)
+
+    parts: list[str] = []
+    pos = 0
+    for m in FIGURE_TAG_RE.finditer(raw):
+        parts.append(_text(raw[pos:m.start()]))
+        parts.append(_replace(m))
+        pos = m.end()
+    parts.append(_text(raw[pos:]))
+    markdown = "".join(parts)
+    if removed["tags"]:
+        warnings.append(f"비정상 img 태그 {removed['tags']}개 제거")
+    if removed["unclosed"]:
+        warnings.append(f"닫히지 않은 img 태그 잔여물 {removed['unclosed']}개 제거")
 
     # 반복 suffix 정리는 placeholder 치환 후 적용 (공식 순서: 태그 필터 → 정리).
     cleaned = clean_truncated_repeats(markdown)

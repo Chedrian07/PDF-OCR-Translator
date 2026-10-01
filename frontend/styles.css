@@ -1893,6 +1893,71 @@ button.chip { appearance: none; font-family: inherit; cursor: pointer; }
   font-weight: 650;
   cursor: pointer;
 }
+/* 저장한 인용·하이라이트 — 선택 문장 도구 안 목록 (페이지 이동·삭제·Markdown 내보내기) */
+.reader-notes-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-weak);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 650;
+}
+.reader-notes { display: grid; gap: 6px; margin: 0 14px 12px; }
+.reader-notes-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  font-size: 11px;
+}
+.reader-notes-actions { display: inline-flex; gap: 6px; }
+.reader-notes-list {
+  display: grid;
+  gap: 6px;
+  max-height: 220px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.reader-note {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  font-size: 11px;
+}
+.reader-note-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--text-muted); }
+.reader-note-kind { font-weight: 650; }
+.reader-note.kind-highlight .reader-note-kind { color: var(--warn); }
+.reader-note.kind-citation .reader-note-kind { color: var(--accent); }
+.reader-note-page {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.reader-note-text {
+  grid-column: 1 / -1;
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text);
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.reader-note-del { grid-column: 2; grid-row: 1; }
+.reader-notes-empty { margin: 0; font-size: 10.5px; line-height: 1.45; }
 .reader-content .doc-page { max-width: 68ch; margin-inline: auto; }
 .reader-content mark.reader-highlight {
   color: inherit;

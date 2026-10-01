@@ -41,11 +41,24 @@ _MAX_JOB_WARNINGS = 40
 _MODEL_WAIT_POLL_S = 3.0   # wait_until_ready 폴링 간격
 _CANCEL_POLL_S = 0.1       # _AnyCancel.wait의 폴링 슬라이스
 
+# 대기 중 진행 문구(잡 진행 note·잡 경고) — 같은 상태에서는 문구가 바뀌지 않아야 경고가
+# 시도마다 쌓이지 않는다. 시도 횟수·남은 시간 같은 세부는 예외 메시지와 health에 싣는다.
+_WAIT_NOTE_LOADING = "모델 로딩 대기 중… (최초 기동은 다운로드·컴파일로 수 분 소요)"
+_WAIT_NOTE_RETRY = "모델 로드 재시도 대기 중… (일시적 로드 실패 — sidecar가 자동으로 다시 시도)"
+_WAIT_NOTE_RESTART = "sidecar 재시작 대기 중… (추론 엔진 복구 — 모델 재로드 뒤 이어서 진행)"
+
 
 class SidecarNotReadyError(EngineError):
-    """sidecar는 응답하지만 모델이 아직 로드 중 — 일시적(대기하면 준비됨)."""
+    """sidecar는 응답하지만 모델이 아직 로드 중 — 일시적(대기하면 준비됨).
+
+    note는 대기 중 진행 문구다(첫 로드·로드 재시도·재시작 대기를 구분한다)."""
 
     transient = True
+
+    def __init__(self, message: str, note: str = _WAIT_NOTE_LOADING) -> None:
+        super().__init__(message)
+        self.note = note
+
 
 
 class _AnyCancel:
@@ -99,6 +112,21 @@ def _live_stream_text(page: PageResult) -> str:
 
     return FIGURE_PLACEHOLDER_RE.sub(_repl, page.markdown)
 
+
+def _retry_summary(retry: dict) -> str:
+    """health.load_retry → '2/5번째 시도 실패, 30초 뒤 재시도 — 마지막 오류: …' (있는 값만)."""
+    parts: list[str] = []
+    attempt, total = retry.get("attempt"), retry.get("max_attempts")
+    if attempt is not None:
+        parts.append(f"{attempt}/{total}번째 시도 실패" if total else f"{attempt}번째 시도 실패")
+    delay = retry.get("next_retry_s")
+    if delay is not None:
+        parts.append(f"{delay:.0f}초 뒤 재시도")
+    text = ", ".join(parts) or "재시도 대기"
+    error = retry.get("last_error")
+    if error:
+        text += f" — 마지막 오류: {error}"
+    return text
 
 @dataclass(frozen=True)
 class SidecarSpec:
@@ -258,10 +286,24 @@ class SidecarEngine(OCREngine):
             raise EngineError(f"sidecar 통신 오류(대기해도 해소되지 않음): {e}") from e
         self._commit_health(h)
         if not h.model_loaded:
+            if h.restarting:
+                # 추론 엔진이 죽어 sidecar가 스스로 종료·재기동하는 중 — 컨테이너가 돌아오면
+                # 모델을 다시 올린다. status와 무관하게 기다리면 풀리는 상태다.
+                raise SidecarNotReadyError(
+                    "sidecar가 추론 엔진 복구를 위해 재시작하는 중입니다 — 컨테이너 재기동과 "
+                    "모델 재로드 뒤 이어서 진행합니다 (진행: docker compose logs -f)",
+                    note=_WAIT_NOTE_RESTART,
+                )
             if h.status != "ok":
                 # 모델이 없는데 status까지 error — 진짜 로드 실패다 (하드 실패)
                 detail = h.load_error or f"sidecar 상태 이상({h.status})"
                 raise EngineError(f"sidecar 모델 로드 실패: {detail}")
+            if h.load_retry:
+                raise SidecarNotReadyError(
+                    f"sidecar 모델 로드가 일시적으로 실패해 다시 시도하는 중입니다 "
+                    f"({_retry_summary(h.load_retry)})",
+                    note=_WAIT_NOTE_RETRY,
+                )
             raise SidecarNotReadyError(
                 "sidecar가 아직 모델을 로드하지 못했습니다 — 최초 기동은 모델 다운로드·"
                 "컴파일로 수 분 걸릴 수 있습니다 (진행: docker compose logs -f)"
@@ -313,6 +355,7 @@ class SidecarEngine(OCREngine):
 
     def _wait_ready(self, cancel, deadline: float, on_wait=None) -> None:
         last = ""
+        note = _WAIT_NOTE_LOADING
         while True:
             if cancel.is_set():
                 raise JobCanceled()
@@ -321,6 +364,7 @@ class SidecarEngine(OCREngine):
                 return  # 준비됨
             except SidecarNotReadyError as e:
                 last = str(e)
+                note = e.note  # 첫 로드·로드 재시도·재시작 대기를 구분해 보인다
             # EngineError(하드 실패)는 여기서 잡지 않고 그대로 전파 — 대기 무의미
             if time.monotonic() >= deadline:
                 raise EngineError(
@@ -329,7 +373,7 @@ class SidecarEngine(OCREngine):
                     "docker compose logs로 sidecar 상태를 확인하세요."
                 )
             if on_wait is not None:
-                on_wait("모델 로딩 대기 중… (최초 기동은 다운로드·컴파일로 수 분 소요)")
+                on_wait(note)
             cancel.wait(_MODEL_WAIT_POLL_S)  # 취소 가능한 슬립
 
     def capabilities(self) -> EngineCapabilities:
@@ -394,6 +438,10 @@ class SidecarEngine(OCREngine):
             "model_loaded": h.model_loaded,
             "gpu_total_mb": h.gpu_total_mb,
             "gpu_free_mb": h.gpu_free_mb,
+            # 미로드의 이유 — 일시적 로드 실패 뒤 재시도 대기(attempt·max_attempts·
+            # next_retry_s·last_error) / 추론 엔진 사망 뒤 컨테이너 재시작 대기
+            "load_retry": h.load_retry,
+            "restarting": h.restarting,
         }
 
     def gpu_name(self) -> str | None:

@@ -1920,7 +1920,10 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
   **기본 신뢰 경계는 "로컬 머신"이 아니라 "서버가 붙어 있는 네트워크"** 이며,
   VPN/Tailscale이나 방화벽 뒤 홈랩 같은 신뢰 네트워크를 전제로 한다. 공개
   인터넷에 노출한다면 **반드시 인증을 제공하는 리버스 프록시**(nginx basic auth 등)
-  뒤에 두어야 한다. README §보안 · SECURITY.md와 같은 정책이다.
+  뒤에 두어야 한다. README §보안 · SECURITY.md와 같은 정책이다. Docker 게시 포트는
+  `ufw`·`firewalld` 규칙을 거치지 않으므로 '방화벽 뒤'는 네트워크 방화벽·`DOCKER-USER` 체인·
+  밖에서 닿지 않는 `BIND_HOST`를 뜻한다(§8). CSRF 방어도 두지 않는다 — 이 기본값들은 의도된
+  결정이고 0.0.0.0·`*` 기본은 `test_ci_ops_contracts`가 고정한다.
 - **로컬 전용으로 되돌리기(opt-in 하드닝)** — `.env`에:
   1. `BIND_HOST=127.0.0.1` — 포트를 루프백에만 바인딩
   2. `ALLOWED_HOSTS=localhost,127.0.0.1` — Host 헤더 화이트리스트 복원
@@ -1935,6 +1938,56 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
   테스트는 conftest가 테스트 프로세스의 기본 화이트리스트에만 `testserver`를 추가한다.
 - **비용 남용 방어**: 인증이 없는 대신 유료 경로(`/qa`·`/translate`)에 잡·IP 단위
   레이트리밋과 동시 실행 상한을 두고 초과분을 429 + `Retry-After`로 거절한다 (§5).
+  `/render-preview`도 크기 가중 레이트리밋·동시 4건·본문 256 KiB로 묶고, SSE 구독은 잡당 8·전체
+  64로 묶는다. 리버스 프록시 뒤에서는 `TRUSTED_PROXY_IPS`에 있는 피어의 `X-Forwarded-For`만
+  믿는다(§5).
+- **HTTP 보안 헤더** (`main.SecurityHeadersMiddleware`, 순수 ASGI): 모든 `text/html` 응답에 CSP와
+  `Referrer-Policy: same-origin`. 공통 지시어 `default-src 'self'`, `style-src 'self'
+  'unsafe-inline'`(레이아웃 좌표·KaTeX의 인라인 style 속성), `img-src 'self' data: blob:`,
+  `font-src 'self' data:`, `object-src 'none'`, `base-uri 'self'`, `form-action 'self'`,
+  **`frame-ancestors 'none'`**(다른 사이트가 이 인증 없는 UI를 보이지 않는 iframe에 싣고 삭제·번역
+  버튼 클릭을 유도하는 클릭재킹 차단 — meta CSP에서는 무시되므로 헤더에만 있다). SPA 문서는
+  `script-src 'self'` + `index.html` 인라인 스크립트의 sha256 해시(지금은 없다 — 테마 부트스트랩은
+  `theme-init.js`, 파일이 바뀌면 해시를 다시 계산), API가 내보내는 HTML(`document.html` — 인라인
+  KaTeX)은 `script-src 'self' 'unsafe-inline'`. 정적 프론트엔드(`/api` 밖)는
+  `Cache-Control: no-cache` — 업그레이드 뒤 브라우저가 옛 ES 모듈과 새 모듈을 섞어 쓰지 않게
+  ETag로 재검증한다(라우트가 정한 헤더는 덮지 않는다).
+- **SPA meta CSP**: `index.html`의 `<meta http-equiv="Content-Security-Policy">`와
+  `<meta name="referrer" content="same-origin">`는 meta가 표현할 수 있는 모든 지시어에서 헤더와
+  **같다**(`connect-src 'self'`는 `default-src`와 같은 값) — 실효 정책은 헤더 정책 그대로이고
+  `frame-ancestors`만 헤더 전용이다. 두 층은 함께 고친다(`tests/test_security_headers.py`가
+  어긋나면 실패한다). 예전 meta의 `font-src 'self'`·`no-referrer`는 헤더와 달라 실효 정책이
+  교집합이었다 — 지금 실효 리퍼러는 same-origin이며 다른 출처로는 여전히 Referer가 가지 않는다.
+- **단독 내보내기 CSP**: 내려받는 `document.html`(facsimile·의미 기반 둘 다)은 `<meta charset>`
+  바로 뒤에 `default-src 'none'; img-src data: blob:; font-src data:; style-src 'unsafe-inline';
+  script-src 'unsafe-inline'` meta CSP와 `no-referrer`를 둔다 — 모든 자원이 인라인이라
+  디스크에서 열어도 정상 렌더되고 어떤 외부 요청도 나가지 않는다(§5).
+- **외부 이미지 차단**: 렌더러(`pipeline/render.py`)는 `images/<파일>`(하위 경로·`..` 없음)과
+  `data:image/(png|jpeg|gif|webp)`만 `<img>`로 만들고, 그 밖(http(s)·`//호스트`·LAN 주소·같은
+  출처 절대 경로·경로 탈출)은 클릭해야 열리는 링크 `<a class="blocked-image" rel="noopener
+  noreferrer nofollow">`로 바꾼다 — OCR·텍스트 레이어 마크다운의 `![](https://…)`가 문서를 여는
+  순간 열람 사실·IP·인스턴스 주소를 흘리고 내부망 GET을 유도하던 경로(텍스트 레이어의 보이지 않는
+  `render_mode=3` 비콘 포함). SPA도 넣기 전에 외부 이미지 출처를 자리표시로 바꾼다(§10).
+- **렌더러 선형 시간**: 수식·코드 펜스 스캔이 선형이다(다음 이스케이프 안 된 여는 기호나 빈 줄에서
+  멈추고, `\\[2pt]` 같은 이스케이프는 구분자가 아니다) — 예전 2차 정규식은 20 KiB에 0.56초였고
+  `/render-preview` 한 번이 GIL을 쥔 채 서버 전체를 멈출 수 있었다. 마스크 복원은 한 번에 하고
+  NUL은 U+FFFD로 바꿔 재귀·팽창이 없다.
+- **수식(KaTeX 0.18.10)**: GHSA-238p-pmpm-9mq7(0.18.2에서 수정)을 포함한 판으로 올렸고, 앱과
+  단독 내보내기 모두 `maxSize 10`·`maxExpand 1000`·`strict 'ignore'`·`trust false`로 부른다(§10).
+- **신뢰할 수 없는 PDF**: MuPDF 작업은 서버 밖 워커 프로세스에서 시간 상한과 함께 돌고, 업로드는
+  렌더 없이 작업량을 재는 복잡도 게이트를 지난다(§18). 손상 PDF는 서버 경로 없는 고정 문구로
+  거부하고(원래 오류는 서버 로그에만), Pillow 압축 폭탄 상한은 앱의 최대 렌더 픽셀 + 5%
+  (5,250만 픽셀)로 낮춘다(프로세스 전역 — 낮추기만 하고 올리지 않는다).
+- **모델 출력은 비신뢰**: 벤더 P8/P9가 `eval()`을 없앴고(좌표는 `ast.literal_eval`), P22가 bbox를
+  페이지 안으로 자른다(MLX 포팅 M4도 같다). sidecar 응답은 스키마 검증·정화를 거친다
+  (OCR_ENGINE_PROTOCOL.md).
+- **공급망**: pip-audit(`dependency-audit` 잡·`make audit`)·trivy(릴리스 push 전)·Dependabot,
+  digest 고정 베이스 + `apt-get upgrade`, 해시 고정 sidecar lock, SHA 고정 액션(§11.2).
+  `tests/test_dependency_floor.py`가 MuPDF/PyMuPDF·Pillow·urllib3·anyio 보안 하한을 지킨다.
+  수용한 잔여 권고(torch 2.10.0·transformers 4.57.1 — 모델 카드 고정)는 이유와 2027-04-01 기한을
+  달고 있다(SECURITY.md).
+- **설정 노출**: `/api/health`의 `config_warnings`는 이 앱이 읽지 않는 `.env` 키의 **이름**만
+  싣는다(값은 로그에도 남기지 않는다).
 - **자격증명 분리**: Q&A는 `LLM_OPENAI_API_KEY`만 읽고 번역용 `OPENAI_API_KEY`로
   폴백하지 않는다 (§17.3·§17.4) — 제3자 게이트웨이 키가 `api.openai.com`으로
   전송되던 유출 경로를 막는다.
@@ -1964,15 +2017,16 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
 
 ### 15.1 업그레이드 노트 — 버전 상수 상향 = 캐시 전량 무효화
 
-이 리포에는 산출물 캐시를 무효화하는 **버전 상수가 셋** 있고, 최근 사이클에 **셋이 동시에**
-올랐다. 기존 배포를 이 커밋으로 올리면 잡마다 1회씩 아래가 실제로 일어난다.
-**코드 변경 없이 조용히 일어나므로**, 모르면 "왜 갑자기 느리고 청구서가 늘었나"가 된다.
+이 리포에는 산출물 캐시를 무효화하는 **버전 상수가 셋** 있다. 오르면 기존 배포를 올린 뒤
+잡마다 1회씩 아래가 실제로 일어난다. **코드 변경 없이 조용히 일어나므로**, 모르면 "왜 갑자기
+느리고 청구서가 늘었나"가 된다. 0.1.0 이후 사이클에서는 `PDF_EXPORT_FORMAT_VERSION`(→ 10)과
+`ENRICH_VERSION`(→ 6)이 올랐고 `PROMPT_V`는 그대로다(아래 '이번 업그레이드').
 
 | 상수 | 위치 | 현재 값 | 상향 시 무효화되는 것 | 비용 |
 |---|---|---|---|---|
 | `PROMPT_V` | `translate/types.py` | `"6"` | `translations/{lang}/units.json` **전체**(캐시 키 첫 재료) | **유료 API 전량 재호출** |
-| `PDF_EXPORT_FORMAT_VERSION` | `pipeline/pdf_export/report.py` | `6` | `export.{lang}.pdf`·`.dual.pdf`·`.report.json` | CPU (실측 9.4s/16p) |
-| `ENRICH_VERSION` | `pipeline/pdf_fonts.py` | `5` | `layout.json`의 폰트 메타(`fonts_v`) → 뒤이어 export 캐시 | CPU (재조판) |
+| `PDF_EXPORT_FORMAT_VERSION` | `pipeline/pdf_export/report.py` | `10` | `export.{lang}.pdf`·`.dual.pdf`·`.report.json` | CPU (실측 9.4s/16p — 지금은 export 워커 프로세스) |
+| `ENRICH_VERSION` | `pipeline/pdf_fonts.py` | `6` | `layout.json`의 폰트 메타(`fonts_v`) → 뒤이어 export 캐시 | CPU (재조판) |
 
 - **가장 비싼 것은 번역이다**: 모델·샘플링(`TRANSLATE_TEMPERATURE`·`TRANSLATE_REASONING`)을
   바꿔도 같은 일이 일어난다(§13.4). 재번역은 **번역을 다시 실행할 때만** 일어나므로,
@@ -1986,7 +2040,9 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
   export 빌드가 한꺼번에 몰린다. 그래서 전역 상한(`PDF_EXPORT_MAX_CONCURRENT`, 기본 2)이
   있고, 대기가 `PDF_EXPORT_QUEUE_TIMEOUT_S`(기본 30초)를 넘으면 503 + `Retry-After`가 나간다
   (§5 `/pdf`). 업그레이드 직후 잠깐 503이 보이는 것은 **설계된 동작**이며, 코어가 넉넉하면
-  상한을 올려 흡수한다.
+  상한을 올려 흡수한다. 이 값은 이제 export **워커 프로세스 수**라 빌드가 코어를 실제로 나눠
+  쓴다(예전 스레드 빌드는 GIL 때문에 몇 개를 띄워도 코어 하나였다) — 작은 서버에서는 OCR과
+  코어를 다투므로 1–2로 둔다(1이면 예열하지 않는다).
 - **권장 절차**: ① 이미지 갱신 전 `data/jobs`(=`ocr-data` 볼륨) 백업 → ② 올린 뒤 잡 하나로
   번역을 재실행해 `report.json`의 `cache_reused`로 비용 규모를 실측 → ③ 여럿이 쓰는 서버라면
   `TRANSLATE_RATE_LIMIT_PER_MIN`·`TRANSLATE_MAX_ACTIVE`를 임시로 낮춰 동시 재번역을 묶는다.
@@ -1994,6 +2050,37 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
   구버전으로 되돌리면 옛 키가 다시 맞아 재번역이 일어나지 않는다(신·구 항목이 함께 쌓인다).
   반면 `export.{lang}.pdf`·`layout.json`은 **덮어쓰는 단일 산출물**이라 버전을 오갈 때마다
   매번 재생성된다(CPU만).
+
+#### 이번 업그레이드(0.1.0 → 현재)에서 운영자가 보게 되는 것
+
+- **내보내기 캐시 1회 재생성**: `PDF_EXPORT_FORMAT_VERSION` 10과 새 빌드 스탬프(§5 `/pdf` —
+  옛 `export.{lang}.font.txt`는 스탬프가 아니라 무효), `archive.zip`의 내용 서명 때문에 잡마다
+  번역 PDF·대조 PDF·ZIP을 한 번씩 다시 만든다. `ENRICH_VERSION` 6이라 layout 폰트 메타도 잡마다
+  한 번 다시 주입된다(회전 페이지 수정).
+- **옛 meta**: `page_separator`가 없는 잡에는 기동 때 현재 값을 한 번 고정한다(meta mtime 보존 —
+  TTL 시계 불변). `notices`가 없는 옛 잡의 처리 경위 메모는 메모리에서 참고로 갈라 읽는다(§4).
+  옛 잡에는 `started_at`·`finished_at`이 없다.
+- **옛 OvisOCR2 잡**(image 블록뿐인 layout.json): 이제 '레이아웃 없음'이다 — 좌표 라우트 404,
+  `/pdf` 409, `has_layout=false`, `document.html`은 의미 기반. 다시 번역해도 `layout.ko.json`을
+  쓰지 않고, 남아 있는 옛 파일은 사용 가능 판정에서 무시된다.
+- **번역 캐시**: `PROMPT_V`는 그대로라 전량 재번역은 없다. 캐시 키에 `request_variant`가 들어가는
+  것은 reasoning 전달 방식이나 `TRANSLATE_EXTRA_BODY`가 종전과 다를 때뿐이다(로컬 서버에
+  reasoning을 설정한 잡은 의도대로 다시 번역된다). 마스킹 규칙·용어집 첫 등장 계산이 바뀐 일부
+  유닛과, 예전 코드가 캐시했지만 지금 게이트를 통과하지 못하는 출력(`cache_rejected`)은 다시
+  번역된다. `result.ko.md`는 부분만 덮이던 유닛이 이제 자기 번역을 써서 내용이 달라질 수 있다.
+- **디바이스 기본값**: 로컬(uv) 실행의 `OCR_DEVICE` 기본이 `auto`다 — Apple Silicon은 MLX(없으면
+  MPS), cu129 extra를 깐 Linux는 CUDA. compose는 서비스마다 고정이라 그대로다.
+- **번역은 기본 스트리밍**(chat 모드) — 스트리밍을 못 다루는 게이트웨이면 `TRANSLATE_STREAM=0`.
+- **`.env` 확인**: 이 앱이 읽지 않는 키가 기동 로그·`/api/health`의 `config_warnings`에 나온다.
+  `REASONING_EFFORT`는 번역 `TRANSLATE_REASONING` 또는 Q&A `LLM_REASONING_EFFORT`로 바꾼다.
+- **프록시 배포**: `TRUSTED_PROXY_HOPS>0`인데 프록시가 루프백이 아니면 `TRUSTED_PROXY_IPS`가
+  필요하다(없으면 레이트리밋이 프록시 IP 하나로 붕괴하고 한 번 경고).
+- **`PDF_EXPORT_MAX_CONCURRENT=1`이면 예열하지 않는다.** 업로드 복잡도 게이트가 아주 조밀한
+  도면·지도 페이지를 400으로 거부하면 사유에 적힌 설정을 올리거나 0으로 끈다(§18).
+- **시작 직후 첫 잡 목록 폴**은 잡마다 layout.json을 한 번 파싱한다(그 뒤로는 파일 버전별
+  캐시). 메타데이터가 없는 `j_<12hex>` 디렉터리는 기동 때 지워진다.
+- **더 엄격한 기동 검증**: 범위 밖 숫자 노브(예: `PAGES_PER_CHUNK=0`·`OCR_DECODE_BLOCK=0`·
+  음수 `JOB_TTL_DAYS`)는 예전처럼 조용히 보정되지 않고 기동 시 실패한다(§7).
 
 ## 16. textlayer 엔진 (Localight 통합)
 
@@ -2006,7 +2093,21 @@ Localight의 "텍스트 레이어 우선 + OCR 폴백" 추출기를 기존 엔�
 - **텍스트 레이어 우선**: 페이지별로 pymupdf 내장 텍스트 레이어를 먼저 추출한다.
   추출 영숫자 수가 `NATIVE_TEXT_THRESHOLD`(기본 `120`) 미만인 페이지만
   **Tesseract OCR**(`OCR_LANGUAGES`, 기본 `eng+kor`)로 폴백한다 — 텍스트 PDF는
-  OCR 오류 없이 원문 그대로, 스캔 페이지만 OCR을 거친다.
+  OCR 오류 없이 원문 그대로, 스캔 페이지만 OCR을 거친다. Tesseract 출력에는 bbox가 없어
+  OCR한 페이지는 레이아웃 블록이 없다 — 전면 스캔 문서는 `layout.json`이 생기지 않는다(§4).
+- **읽기 순서** (`pipeline/reading_order.py`, 텍스트 레이어 복구 경로와 공용): `sort=True`의 좌표
+  정렬 대신 **내용 스트림 순서**에서 시작해 다단을 감지한다 — 가로지르는 블록 높이가 가장 작은
+  x를 단 사이 홈으로 보고(양쪽 각 20% 이상, 가로지름 25% 이하, O(n log n)) 가로지르는 블록을 띠
+  경계로 삼아 띠마다 왼쪽 단 → 오른쪽 단으로 읽는다(3단 이상은 재귀). 세로 여백 도장은 맨 뒤로
+  보낸다. 같은 줄 조각과 같은 문단의 다음 줄 이어짐을 합친다(글자 크기·마침 구두점·목록·알고리즘
+  항목·표 행·가운데 제목 규칙으로 막는다). 2504.19874v1: 블록 969 → 673, 글자 손실 0(페이지별
+  글자 다중집합 대조). PyMuPDF 1.28의 문단 감지가 제목·수식을 더 잘게 쪼개는 것도 여기서
+  다시 붙는다.
+- **결정적 재실행**: `deterministic_rerun = True` — 같은 페이지를 다시 돌려도 결과가 같으므로
+  충실도 게이트가 재처리하지 않는다(§4).
+- 텍스트 레이어 추출은 ocr 워커 프로세스에서 페이지 단위로 돈다(§18). 시간 상한을 넘거나
+  워커가 죽은 페이지는 `… 텍스트 레이어 추출을 건너뛰었습니다 (…) — 이 페이지는 OCR 경로로
+  처리합니다` 경고와 함께 Tesseract 경로로 간다.
 - **raw_pages.json 합성**: 블록 좌표(0–999 정규화)를 담은 raw_pages.json을 벤더
   P14와 같은 스키마로 합성한다 → 기존 pipeline/layout.py 경로로 **레이아웃 뷰
   (`GET /layout`)가 그대로 동작**한다.
@@ -2031,6 +2132,17 @@ httpx만 사용하는 자립 모듈(app.* 임포트 없음, lazy import 원칙�
 | `openai-responses` | `{LLM_OPENAI_BASE_URL}/responses` | thinking이고 effort≠`default`일 때만 중첩 `reasoning {effort, summary}` |
 | `openai-chat` | `{LLM_OPENAI_BASE_URL}/chat/completions` | 최상위 `reasoning_effort` + system 프롬프트는 role `developer` (중첩 reasoning 객체 금지) |
 | `ollama` | `{OLLAMA_BASE_URL}/api/chat` | `think` 매핑: thinking=False→`false`, effort∈{low,medium,high}→effort, 그 외 `true` |
+| `local-openai` | `{LLM_LOCAL_OPENAI_BASE_URL}/chat/completions` | `chat_template_kwargs.enable_thinking`(+ thinking이면 `reasoning_effort`), role `system`, `max_tokens` 8192. think 태그·reasoning 필드는 버린다 |
+
+`local-openai`(`LocalOpenAIClient`)는 oMLX·LM Studio·mlx_lm.server 같은 **로컬** OpenAI 호환
+서버용이다. `LLM_LOCAL_OPENAI_BASE_URL`을 설정해야 구성되고(그때 `LLM_LOCAL_OPENAI_MODEL` 필수),
+`/api/providers`에는 구성됐을 때만 나오며 `available`은 실시간 `GET /models` 확인이다.
+`LLM_LOCAL_OPENAI_MODELS`는 추가 허용 모델(그 밖은 400), 키는 `LLM_LOCAL_OPENAI_API_KEY`만 쓴다.
+`LLM_PROVIDER=local-openai`는 base URL 없이 기동하면 실패한다. `qa_available`은
+`LlmRouter.configured(provider)`를 따르고, `GenerationResult.remote`는 공급자 집합으로 정한다.
+프런트는 공급자를 늘 명시해 보내므로 `POST /qa`가 `local-openai`를 받는다. 서버가 꺼져 있으면
+UI가 서버(oMLX·LM Studio·mlx_lm.server)를 켜고 `LLM_LOCAL_OPENAI_BASE_URL`·
+`LLM_LOCAL_OPENAI_MODEL`을 확인하라고 안내한다.
 
 ### 17.2 REST 계약 (Q&A)
 
@@ -2058,6 +2170,12 @@ httpx만 사용하는 자립 모듈(app.* 임포트 없음, lazy import 원칙�
   - `local_url`: `OLLAMA_BASE_URL`은 루프백(`127.0.0.1`/`localhost`/`::1`)·
     `host.docker.internal`·`ollama`(compose overlay의 컨테이너)만 허용.
     자격증명(userinfo) 포함 URL은 거부.
+  - `local_openai_url`: `LLM_LOCAL_OPENAI_BASE_URL`은 정확히 `127.0.0.1`·`localhost`·`::1`·
+    `host.docker.internal`의 http(s)만 허용 — userinfo, 쿼리·프래그먼트, 잘못된 포트, IPv4 매핑·
+    그 밖의 IPv6, 10진·8진·16진·축약 IP 표기, 끝 점, DNS 이름은 거부한다. 리다이렉트는 따라가지
+    않는다.
+- **local-openai 전용 키**: `LLM_LOCAL_OPENAI_API_KEY`만 보낸다. 번역 `OPENAI_API_KEY`나 Q&A
+  `LLM_OPENAI_API_KEY`로 폴백하면 그 키가 로컬 서버 로그 등으로 샌다.
 - **Q&A 전용 키 (`LLM_OPENAI_API_KEY`) — 번역 키와 분리, 폴백 없음**:
   `LLM_OPENAI_BASE_URL`이 공식 `api.openai.com`으로 고정돼 있으므로, OpenRouter·로컬
   게이트웨이용 `OPENAI_API_KEY`를 폴백으로 재사용하면 **그 키가 제3자에게 전송된다**
@@ -2087,3 +2205,123 @@ httpx만 사용하는 자립 모듈(app.* 임포트 없음, lazy import 원칙�
   OpenAI 호환 `/v1` 경로를 지정한다 — 로컬: `OPENAI_BASE_URL=http://localhost:11434/v1`
   + `OPENAI_MODEL=qwen3:8b`, 컨테이너: `http://ollama:11434/v1`
   (compose.ollama.yaml overlay의 주석 예시 참조).
+
+## 18. PyMuPDF 프로세스 격리 + 업로드 복잡도 게이트
+
+### 18.1 왜 별도 프로세스인가
+
+MuPDF C 호출은 GIL을 쥔 채 돌고 중간에 멈출 지점이 없다. 서버 프로세스 안에서 돌리면:
+
+- 수 KB짜리 중첩 Form XObject PDF 하나가 단일 OCR 워커를 영구히 점거하고, GIL 때문에
+  `/api/health`·취소까지 멈췄다 — 재시작만이 복구 수단이었다.
+- 평면 path 10^7개 문서의 분석(`get_drawings`)이 컨테이너 메모리 상한을 넘겨 서버째 OOM-kill되고,
+  대기 중이던 다른 사용자의 잡까지 error가 됐다.
+- 번역 PDF 빌드 동안 같은 프로세스의 OCR 디코드가 굶었다 — MLX·torch 디코드 루프도 토큰마다
+  GIL이 필요하다. 실측(M4 Max, MLX bf16, 16쪽): 서버 안 빌드와 겹치면 디코드 70 tok/s·OCR
+  275.6초, 워커 프로세스로 옮긴 뒤 빌드가 OCR 내내 돌아도 291 tok/s·64.7초(빌드 없음 289 tok/s·
+  65.8초). 서버 프로세스의 순수 파이썬 루프는 빌드 스레드가 있으면 0.53–0.57배로 느려졌다(워커
+  빌드면 0.99배).
+- 빌드 스레드 N개는 코어 하나를 나눠 쓸 뿐이었고(가속비 1.00), 한 프로세스에서 MuPDF를 여러
+  스레드로 쓰는 것은 업스트림 비지원이다(손상 PDF 2스레드에서 SIGSEGV 재현).
+
+### 18.2 워커 풀 (`pipeline/pdf_worker.py`)
+
+spawn 방식 상주 워커 프로세스가 이름 붙은 작업(`'모듈:함수'`)을 실행한다. 인자·결과는 피클로
+오간다. 풀 셋, 모두 처음 쓸 때 띄운다:
+
+| 풀 | 워커 수 | 작업 |
+|---|---|---|
+| `ocr` | 1 | OCR 입력 페이지 렌더, 충실도 분석·재처리 채점, 텍스트 레이어 복구, 페이지 정렬 텍스트, 병합 때 폰트 실측 주입, textlayer 엔진 추출 |
+| `export` | `PDF_EXPORT_MAX_CONCURRENT`(0 이하면 min(8, CPU)) | 번역·대조 PDF 빌드, facsimile 래스터, API 레이아웃 폰트 백필(`pool_scope('export')`) |
+| `probe` | 2 | 업로드 검증(`probe_pdf` + 복잡도 게이트) |
+
+- 풀을 셋으로 나눈 이유: 업로드가 15분짜리 빌드나 적대적 OCR 페이지 뒤에 줄서지 않게 한다.
+  빈 워커를 기다리다 넘치면 `PdfWorkerBusy` — 업로드는 503 + `Retry-After: 5`(§5).
+- 앱 lifespan 종료와 atexit에서 풀을 멈춘다(쉬는 워커는 정상 종료, 작업 중이면 종료). 워커는
+  작업 200건을 넘기거나 최대 RSS가 1.5 GB를 넘으면 반납 때 교체한다. 쉬는 워커를 회수하지는 않아
+  서버 외에 최대 5개 정도(+ 자원 추적 프로세스)가 남는다(각 약 60–320 MB).
+- **시간 상한·장애**: 상한 초과·워커 비정상 종료(SIGSEGV·OOM-kill 포함)·취소면 **그 워커만**
+  끝낸다(SIGTERM, 1초 뒤 SIGKILL). 다음 호출이 새 워커를 띄우므로 서버 프로세스와 다른 잡은
+  영향이 없다. 오류 타입: `PdfWorkerTimeout`, `PdfPageQuarantined`(`PdfWorkerTimeout` 하위),
+  `PdfWorkerCrashed`, `PdfWorkerCanceled`, `PdfWorkerBusy`, `PdfWorkerRemoteError`.
+- **페이지 단위 작업**: 페이지마다 따로 작업이라 페이지마다 자기 시간 상한(`PDF_PAGE_TIMEOUT_S`,
+  기본 60초)을 갖는다(25쪽 잡이면 작업 약 81개 — 작업당 수 ms의 프로세스 통신이 더해질 뿐
+  verify_e2e 시간은 그대로다). 워커는 마지막으로 연 문서를 (경로, inode, 크기, mtime) 키로 캐시하고
+  30초 쉬거나 작업 오류가 나면 닫는다.
+- **격리(quarantine)**: 상한을 넘기거나 워커를 죽인 (파일, 페이지)는 서버 프로세스가 기억해 같은
+  잡의 다음 단계가 상한을 또 기다리지 않고 곧바로 건너뛴다 — 충실도는 그 페이지를 `timed_out`
+  으로 표시하고 참고를 남기며, 정렬은 빈 텍스트로, 폰트 주입은 그 페이지만 스탬프하고, 텍스트
+  복구는 None이다. 이 기억은 서버를 재시작하면 사라진다.
+- **렌더 규칙**: 페이지 렌더가 상한을 넘으면 흰 페이지 + 경고
+  `{k}/{n}페이지가 렌더 시간 상한({t}초)을 넘어 흰 페이지로 대체했습니다 (…) (PDF_PAGE_TIMEOUT_S)`.
+  한 문서에서 세 번이면 잡을 끝낸다(`페이지 N개의 렌더가 시간 상한(…)을 넘어 처리를 중단했습니다`).
+  facsimile에서는 `PdfExportError`가 돼 좌표 텍스트 재조판으로 폴백한다. 렌더 중 취소·삭제는
+  그 페이지를 그리던 워커를 바로 끝낸다(`render_pdf_pages(…, should_cancel=)`).
+- **빌드**: 번역·대조 PDF 빌드는 export 워커에서 `PDF_EXPORT_BUILD_TIMEOUT_S`(기본 900초) 안에 돈다
+  (실측 약 0.5초/쪽). 시간 초과·비정상 종료는 `PdfExportError`(409)다. 잡 락과 캐시 판정은 서버
+  프로세스에 남는다(§5 `/pdf`). 실서버 확인: OCR·백필·빌드·대조 빌드·facsimile·document.html
+  내내 서버 프로세스는 `_mupdf`를 한 번도 로드하지 않았다(lsof).
+- **워커 안에서는 inline**: 워커 안에서 다시 이 모듈을 거치는 호출(빌드 안의 폰트 주입 등)은 새
+  프로세스를 띄우지 않고 그 자리에서 돈다.
+- **실행 모드** `PDF_WORKER_MODE`: `process`(기본) | `inline`(호출 스레드에서 바로 실행 — 상한·
+  격리 없음, 기동 WARNING). 운영 노브가 아니다 — 테스트 세션이 inline으로 켜고(많은 테스트가
+  pymupdf 내부를 monkeypatch한다) verify_e2e 하네스는 지운다. 기동 INFO 한 줄이 모드·풀 크기·
+  상한·게이트 값을 남긴다.
+
+### 18.3 워커 프로세스
+
+- 이 모듈과 작업 모듈만 임포트한다(pdf·fidelity·pdf_fonts·pdf_export·engine.textlayer — torch·
+  mlx·app.main·설정/LLM 계층·httpx는 끌어오지 않는다. `app.engine`은 `build_engine`을 PEP 562로
+  지연 로드한다). 부모의 `__main__`도 다시 실행하지 않는다 — spawn 준비 데이터에서 그 항목을
+  뺀다(CPython 내부 `multiprocessing.spawn.get_preparation_data`를 감싼다. 사라지면 기본 동작으로
+  돌아가 런처 모듈(uvicorn 등)을 함께 올릴 뿐 동작은 한다).
+- SIGINT는 무시하고(개발 서버 Ctrl+C는 부모가 정리) 로그는 프로세스 이름(`pdf-ocr-1` 등)을 붙여
+  stderr로 낸다.
+- **자격 증명 제거**: 이름에 `KEY`·`TOKEN`·`SECRET`·`PASSWORD`·`CREDENTIAL`이 든 환경 변수(번역·
+  Q&A API 키, HF 토큰)를 기동 즉시 지운다 — MuPDF 메모리 결함으로 워커가 장악돼도 키를 읽지
+  못하게 하는 심층 방어다.
+- **임시 파일**: 워커 전용 `$TMPDIR/pdfocr-worker-<풀>-<pid>`에 만든다. 종료당한 워커의 디렉터리는
+  부모가 지우고, 이전 서버가 SIGKILL로 남긴 것은 첫 풀 생성 때 쓸어 낸다.
+- **자폭 알람**: 작업마다 `SIGALRM`을 상한 + 10초로 건다 — 기본 동작이 커널의 프로세스 종료라
+  GIL이 필요 없어, 서버가 SIGKILL로 사라져도 적대적 작업이 CPU를 영원히 태우지 않는다
+  (`SIGALRM`이 있는 플랫폼에서만).
+- **Linux 전용**: `/proc/self/oom_score_adj`를 1000으로 올려 메모리 압박 시 커널이 서버 대신
+  워커를 고르게 하고, `PDF_WORKER_MEM_LIMIT_MB`>0이면 `RLIMIT_AS`도 건다(macOS 커널은
+  `RLIMIT_AS`를 강제하지 않아 건너뛴다).
+- 워커는 **자원·장애 격리 경계이지 권한 샌드박스가 아니다** — 같은 사용자·같은 파일 시스템이고,
+  서버는 워커가 돌려준 피클 결과를 신뢰한다.
+- 두 스레드가 같은 워커를 동시에 멈춰도 안전하다(종료·`close` 경합 수정).
+
+### 18.4 업로드 복잡도 게이트 (`pipeline/pdf_complexity.py`)
+
+`probe_pdf`(probe 워커, `PDF_PAGE_TIMEOUT_S` 안)가 큐에 넣기 **전에** 페이지마다 렌더 없이 잰다:
+
+- **콘텐츠 바이트**: 페이지 콘텐츠 스트림과 거기서 도달하는 Form XObject·주석 외형(AP)·타일링
+  패턴·Type3 글리프 스트림의 **압축 해제** 길이 합(서로 다른 스트림은 한 번씩). 스트리밍으로 풀다가
+  상한에서 멈춰 압축 폭탄을 끝까지 풀지 않는다. 상한 `PDF_MAX_PAGE_CONTENT_MB`(기본 64).
+- **펼친 XObject 호출 수**: 콘텐츠의 `/이름 Do`를 리소스로 해석해 Form이면 그 안의 호출을 곱해
+  더한다(DAG 메모·포화 덧셈 — 10^12도 즉시 계산). 이미지 Do도 한 번의 그리기로 센다. 상한
+  `PDF_MAX_PAGE_XOBJECT_CALLS`(기본 2,000,000). Form 중첩이 64단계를 넘으면 거부한다.
+- 넘으면 설정 이름을 담은 한국어 사유로 400이다. 각 상한은 0이면 그 검사를 끈다(호출 수만 세려면
+  스트림을 풀어야 하므로 콘텐츠 검사를 꺼도 256 MB까지만 푼다).
+- **세지 않는 비용**: Type3 글리프 반복, 타일링 반복, 거대 이미지·셰이딩 디코드 — 페이지 시간
+  상한이 받친다. 문자열·주석 안의 `Do`까지 세는 쪽(과대 추정 = 안전한 쪽)으로 틀린다.
+
+보정(M4 Max 실측):
+
+| 입력 | 페이지당 크기 | 페이지당 호출 | 결과 |
+|---|---|---|---|
+| 리포 표본 PDF | 최대 0.31 MB | 최대 129 | 통과 |
+| 중첩 폭탄 bomb_3 / bomb_4 / bomb_5 | — | 10^3 / 10^4 / 10^5 | 통과, 렌더 0.006–0.39초 |
+| 중첩 폭탄 bomb_12 (3,023바이트, 10단계 × 10) | — | 1.1×10^12 | 1 ms 안에 거부 |
+| 평면 path 10^6개 | 33 MB | — | 통과, 렌더 1.5초 · 벡터 추출 3.4초/1.66 GB |
+| 마커 산점도 10^6개 | — | 10^6 | 통과, 렌더 3.6초 |
+| 1 GB flate 폭탄 | — | — | 35 ms에 거부, 추가 메모리 없음 |
+| 감사의 손상 PDF들 | — | — | 통과하고 정상 완료 |
+
+실서버(fake 엔진)에서 bomb_12는 10 ms, 1 GB flate 폭탄은 50 ms에 400이었다. 게이트를 끄고 페이지
+상한을 10초로 둔 실험에서 정상-폭탄-정상 문서는 10.3초에 done(2쪽은 흰 페이지 + 경고), 폭탄
+한 쪽 문서는 10.0초에 error였고 health는 내내 1–2 ms로 답했다.
+
+**오탐 가능성**: 페이지당 압축 해제 콘텐츠 64 MB나 펼친 호출 200만 회를 넘는 정상 페이지(아주
+조밀한 CAD 도면·지도)는 400으로 거부된다 — 사유에 적힌 설정을 올리거나 0으로 끈다.

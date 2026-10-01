@@ -492,3 +492,104 @@ def test_font_environment_is_memoized_between_requests(monkeypatch):
     for _ in range(5):
         derived._pdf_export_font_id(settings)
     assert calls == [1]
+
+
+# ── gap3-…-7: 예열은 사용자 클릭 몫의 빌드 슬롯을 남긴다 ─────────────────────
+def _bare_job(tmp_path: Path, name: str):
+    """빌드 입력만 갖춘 가짜 잡 (빌더는 주입한다)."""
+    from types import SimpleNamespace
+
+    job_dir = tmp_path / name
+    job_dir.mkdir()
+    for file_name in ("source.pdf", "layout.json", "layout.ko.json"):
+        (job_dir / file_name).write_text("[]", encoding="utf-8")
+    return SimpleNamespace(id=name, dir=job_dir)
+
+
+def _fake_build_factory(gate: threading.Event | None = None, entered: list | None = None):
+    from types import SimpleNamespace
+
+    from app.pipeline.pdf_export import PDF_EXPORT_FORMAT_VERSION
+
+    def _build(job_dir, lang, *, fontfile=""):
+        if entered is not None:
+            entered.append(job_dir.name)
+        if gate is not None:
+            assert gate.wait(10), "게이트가 열리지 않았다"
+        out = job_dir / f"export.{lang}.pdf"
+        out.write_bytes(b"%PDF-1.4 built")
+        report = {"format_version": PDF_EXPORT_FORMAT_VERSION}
+        (job_dir / f"export.{lang}.report.json").write_text(json.dumps(report), encoding="utf-8")
+        return SimpleNamespace(path=out, report=lambda: dict(report))
+
+    return _build
+
+
+def test_prewarms_leave_one_build_slot_for_user_clicks(tmp_path, monkeypatch):
+    """번역이 끝난 두 잡의 예열이 빌드 슬롯(기본 2)을 다 채우면, 아무도 누르지 않은
+    백그라운드 작업 때문에 세 번째 잡의 진짜 클릭이 대기열 상한 뒤 503을 받았다
+    (주석의 불변식 '예열은 사용자 요청을 밀어내지 않는다' 위반, 재현됨)."""
+    from types import SimpleNamespace
+
+    from app.pipeline import derived
+
+    _export_env(monkeypatch, queue="0.3", slots="2")
+    derived._WARM_SLOTS = None
+    gate = threading.Event()
+    entered: list[str] = []
+    gated = _fake_build_factory(gate, entered)
+    settings = SimpleNamespace(pdf_export_font="")
+    warm_a, warm_b, clicked = (_bare_job(tmp_path, n) for n in ("warm-a", "warm-b", "click-c"))
+    outcomes: dict[str, object] = {}
+
+    def _warm(job):
+        outcomes[job.id] = derived.warm_translated_pdf(job, "ko", settings, build=gated)
+
+    first = threading.Thread(target=_warm, args=(warm_a,), daemon=True)
+    second = threading.Thread(target=_warm, args=(warm_b,), daemon=True)
+    try:
+        first.start()
+        deadline = time.monotonic() + 5
+        while "warm-a" not in entered and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert entered == ["warm-a"]
+        second.start()
+        second.join(5)
+        # 두 번째 예열은 예열 몫이 없어 기다리지 않고 포기한다(빌드에 들어가지 않는다)
+        assert not second.is_alive() and outcomes["warm-b"] is False
+        assert entered == ["warm-a"]
+
+        started = time.monotonic()
+        path, _report = derived._ensure_translated_pdf(
+            clicked, "ko", settings, build=_fake_build_factory(),
+        )
+        assert path.name == "export.ko.pdf"
+        assert time.monotonic() - started < 2.0          # 남겨 둔 클릭 몫 슬롯으로 즉시 빌드
+    finally:
+        gate.set()
+        first.join(10)
+        for job in (warm_a, warm_b, clicked):
+            derived._forget_job_caches(job.id)
+    assert outcomes["warm-a"] is True
+
+
+def test_single_slot_deployment_does_not_prewarm(tmp_path, monkeypatch):
+    """상한 1이면 클릭 몫을 남길 여유가 없다 — 예열은 빌드하지 않고 클릭이 직접 만든다."""
+    from types import SimpleNamespace
+
+    from app.pipeline import derived
+
+    _export_env(monkeypatch, queue="0.3", slots="1")
+    derived._WARM_SLOTS = None
+    entered: list[str] = []
+    settings = SimpleNamespace(pdf_export_font="")
+    job = _bare_job(tmp_path, "single-slot")
+    try:
+        assert derived.warm_translated_pdf(
+            job, "ko", settings, build=_fake_build_factory(entered=entered),
+        ) is False
+        assert entered == []
+        derived._ensure_translated_pdf(job, "ko", settings, build=_fake_build_factory(entered=entered))
+        assert entered == ["single-slot"]
+    finally:
+        derived._forget_job_caches(job.id)

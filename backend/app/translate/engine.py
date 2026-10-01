@@ -880,8 +880,18 @@ class _TranslationRun:
         gpath = self.tdir / "glossary.json"
         if gpath.is_file() and not self.force:
             glossary = Glossary.load(gpath)
+            built = False
         else:
             glossary = build_glossary(self.md_text, self.md_units, self.client, cfg)
+            built = True
+        # 첫 등장 병기(policy D)는 번역 대상 유닛 순서로 정한다 — md와 layout 각각.
+        # layout 잡에서 md 기준 first_unit만 두면 lay:* 유닛과 일치하지 않아 병기가
+        # PDF·result.{lang}.md 어디에도 나오지 않았다(translate-llm-12). 건너뛴 유닛
+        # (코드·참고문헌)의 등장은 번역되지 않으므로 첫 등장으로 치지 않는다.
+        md_seq = [u for u in self.md_units if u.id not in self.md_skipped and not u.skip_reason]
+        lay_seq = [u for u in self.lay_units if u.id not in self.preserved_layout]
+        changed = glossary.compute_first_units(md_seq, lay_seq)
+        if built or changed:
             glossary.save(gpath)
         self.glossary = glossary
 

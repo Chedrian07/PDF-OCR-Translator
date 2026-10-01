@@ -322,10 +322,14 @@ def test_length_cap_raises_output_limit_error_after_flush(tmp_path, monkeypatch,
         engine.run_multi([Path("p.png")], tmp_path / "m", sink, threading.Event())
     assert isinstance(info.value, RepetitiveOutputError)
     assert sink.text.count("t") == 12 - 2  # 상한까지 생성된 10토큰이 전부 스트림됨
+    # 잘린 multi 출력(run_multi 형식)을 실어 runner가 끝까지 생성된 앞 페이지를 살린다
+    assert info.value.partial_output == "<PAGE>\nchunk"
+    assert "chunk" not in str(info.value)  # 문서 내용은 메시지(로그·잡 경고)에 넣지 않는다
 
     engine2, _ = _decode_engine(monkeypatch, _ChainDecoder(eos_after=None), fast_decode=fast_decode)
-    with pytest.raises(OutputLimitError):
+    with pytest.raises(OutputLimitError) as single_info:
         engine2.run_single(Path("p.png"), tmp_path / "s", _Sink(), threading.Event())
+    assert single_info.value.partial_output is None  # 한 쪽짜리라 살릴 앞 페이지가 없다
 
 
 @pytest.mark.parametrize("fast_decode", [True, False])

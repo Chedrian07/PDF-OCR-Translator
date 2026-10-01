@@ -393,16 +393,70 @@ def _font_marker_path(job, lang: str) -> Path:
     return artifacts.export_font_marker(job.dir, lang)
 
 
-def _write_pdf_export_font_id(job, lang: str, font_id: str) -> None:
-    """어떤 폰트 설정으로 만든 PDF인지 원자적으로 남긴다(리포트는 파이프라인 소유라
-    여기서 건드리지 않는다). 기록 실패는 다음 요청의 재빌드로만 이어진다."""
+# ── 빌드 표식(build stamp): 이 PDF를 무엇으로 만들었는가 ─────────────────────
+# 예전 캐시 판정은 '출력 mtime ≥ 입력 mtime'이었다. 빌더는 입력을 먼저 읽고 출력을
+# 마지막에 쓰므로, 빌드 **도중** 바뀐 번역(재번역·ENRICH 백필)은 출력보다 오래된
+# mtime을 갖게 되고 옛 번역으로 만든 PDF가 '최신'으로 영구히 굳었다(결정적 재현).
+# 그래서 빌드 직전에 입력 지문(inode·크기·mtime_ns)을 떠 두고, 그 지문과 폰트
+# 정체성을 표식으로 남긴 뒤 **현재 지문과의 일치**로만 최신을 판정한다. 표식에는
+# 빌드 전 지문을 적으므로, 빌드 중 입력이 바뀌었으면 표식이 현재와 어긋나 그 결과는
+# 캐시로 확정되지 않는다(다음 요청·재예열이 다시 만든다).
+# 번역 진행 상태(state.json)는 넣지 않는다 — 빌드 입력이 아니고 진행 중 매 틱
+# 바뀌어, 재번역이 도는 내내 멀쩡한 이전 PDF 캐시를 무효로 만든다. 완료된 번역은
+# layout.{lang}.json 교체(새 inode)로 지문에 그대로 드러난다.
+# 표식 파일은 예전 폰트 표식(export.{lang}.font.txt — derived 소유)을 그대로 쓴다.
+# 리포트(export.{lang}.report.json)는 파이프라인이 쓰는 파일이라 건드리지 않는다.
+_BUILD_STAMP_VERSION = 2
+
+
+def _file_signature(path: Path) -> list[int]:
+    """원자적 교체(os.replace)마다 바뀌는 지문 — 새 inode라 mtime 해상도가 거칠어도
+    (같은 틱 안의 교체) 놓치지 않는다."""
+    stat = path.stat()
+    return [stat.st_ino, stat.st_size, stat.st_mtime_ns]
+
+
+def _translated_pdf_inputs(job, lang: str) -> dict | None:
+    """번역 PDF 빌드 입력의 지문. 하나라도 없으면 None(빌더가 사용자용 오류로 바꾼다)."""
+    inputs: dict[str, list[int]] = {}
+    for path in (
+        artifacts.source_pdf(job.dir),
+        artifacts.layout(job.dir),
+        artifacts.layout(job.dir, lang),
+    ):
+        try:
+            inputs[path.name] = _file_signature(path)
+        except OSError:
+            return None
+    return inputs
+
+
+def _build_stamp(font_id: str, inputs: dict) -> dict:
+    return {"v": _BUILD_STAMP_VERSION, "font": font_id, "inputs": inputs}
+
+
+def _read_build_stamp(job, lang: str) -> dict | None:
+    raw = _read_text_or_none(_font_marker_path(job, lang))
+    if raw is None:
+        return None
+    try:
+        stamp = json.loads(raw)
+    except ValueError:
+        return None  # 예전 형식(폰트 정체성 문자열) — 한 번 재빌드로 새 형식이 된다
+    return stamp if isinstance(stamp, dict) else None
+
+
+def _write_build_stamp(job, lang: str, font_id: str, inputs: dict) -> None:
+    """빌드 표식을 원자적으로 남긴다. 기록 실패는 다음 요청의 재빌드로만 이어진다."""
     marker = _font_marker_path(job, lang)
     tmp = artifacts.export_font_marker_tmp(job.dir, lang)
     try:
-        tmp.write_text(font_id, encoding="utf-8")
+        tmp.write_text(
+            json.dumps(_build_stamp(font_id, inputs), sort_keys=True), encoding="utf-8",
+        )
         os.replace(tmp, marker)
     except OSError:
-        logger.warning("PDF 폰트 표식 저장 실패: %s", marker.name)
+        logger.warning("PDF 빌드 표식 저장 실패: %s", marker.name)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -411,30 +465,23 @@ def _write_pdf_export_font_id(job, lang: str, font_id: str) -> None:
 def _translated_pdf_cache(job, lang: str, font_id: str) -> tuple[bool, Path, dict]:
     """(캐시가 최신인가, 산출물 경로, 리포트).
 
-    모든 입력은 원자적 교체(os.replace)로만 갱신되므로 락 없이 읽어도 반쪽짜리
-    파일을 보지 않는다. 최악의 경우 빌드 직후 리포트·폰트 표식이 아직 안 써진
-    찰나를 봐서 '낡음'으로 판정하는데, 그러면 락을 잡고 다시 확인하게 되므로
-    안전한 방향의 오판이다.
+    최신 = 산출물이 있고, 리포트 포맷이 현행이며, 빌드 표식의 입력 지문·폰트
+    정체성이 **지금**의 값과 같다. 모든 입력은 원자적 교체(os.replace)로만 갱신되므로
+    락 없이 읽어도 반쪽짜리 파일을 보지 않는다. 최악의 경우 빌드 직후 리포트·표식이
+    아직 안 써진 찰나를 봐서 '낡음'으로 판정하는데, 그러면 락을 잡고 다시 확인하게
+    되므로 안전한 방향의 오판이다.
     """
     out = artifacts.export_pdf(job.dir, lang)
     report = _load_pdf_export_report(job, lang)
-    try:
-        latest_input = max(
-            artifacts.source_pdf(job.dir).stat().st_mtime_ns,
-            artifacts.layout(job.dir).stat().st_mtime_ns,
-            artifacts.layout(job.dir, lang).stat().st_mtime_ns,
-        )
-        current = (
-            out.is_file()
-            and out.stat().st_mtime_ns >= latest_input
-            and report.get("format_version") == PDF_EXPORT_FORMAT_VERSION
-            # 폰트는 입력 파일이 아니라 설정이라 mtime 비교로는 잡히지 않는다 —
-            # PDF_EXPORT_FONT를 바꾸면 예전 폰트로 조판된 캐시가 계속 나갔다.
-            and _read_text_or_none(_font_marker_path(job, lang)) == font_id
-        )
-    except OSError:
-        # build_translated_pdf가 누락 입력을 사용자용 PdfExportError로 변환한다.
-        current = False
+    inputs = _translated_pdf_inputs(job, lang)
+    current = (
+        inputs is not None
+        and out.is_file()
+        and report.get("format_version") == PDF_EXPORT_FORMAT_VERSION
+        # 폰트는 입력 파일이 아니라 설정이다 — 정체성을 표식에 함께 넣어
+        # PDF_EXPORT_FONT를 바꾸면 예전 폰트로 조판된 캐시가 나가지 않게 한다.
+        and _read_build_stamp(job, lang) == _build_stamp(font_id, inputs)
+    )
     return current, out, report
 
 
@@ -464,10 +511,26 @@ def _ensure_translated_pdf(job, lang: str, settings, *, build=build_translated_p
         current, out, report = _translated_pdf_cache(job, lang, font_id)
         if current:
             return out, report
+        # 빌더가 입력을 읽기 **전에** 지문을 뜬다 — 이후의 변경은 전부 표식과
+        # 어긋나 이 빌드를 캐시로 확정하지 못하게 만든다(안전한 방향).
+        before = _translated_pdf_inputs(job, lang)
         with export_build_slot():
             built = build(job.dir, lang, fontfile=settings.pdf_export_font)
-        _write_pdf_export_font_id(job, lang, font_id)
-        return built.path, built.report()
+        if before is not None:
+            _write_build_stamp(job, lang, font_id, before)
+        changed = _translated_pdf_inputs(job, lang) != before
+        result = (built.path, built.report())
+    if changed:
+        # 빌드 도중 번역·레이아웃이 바뀌었다 — 이 요청에는 방금 만든(요청 시점
+        # 입력의) PDF를 주되, 캐시는 '낡음'으로 남기고 새 입력으로 다시 예열한다.
+        # 잡 락을 놓은 뒤에 부른다: 예열은 대기 0이라 락을 쥔 채 부르면 즉시 포기한다.
+        logger.info("PDF 빌드 도중 입력이 바뀌어 캐시로 확정하지 않음 — 재예열: %s/%s",
+                    job.id, lang)
+        try:
+            warm_translated_pdf_async(job, lang, settings, build=build)
+        except Exception:  # noqa: BLE001 — 재예열 실패가 이미 만든 결과를 깨지 않는다
+            logger.warning("PDF 재예열 시작 실패: %s/%s", job.id, lang, exc_info=True)
+    return result
 
 
 def _dual_pdf_cache_current(source_pdf: Path, translated_pdf: Path, out: Path) -> bool:
@@ -708,8 +771,16 @@ def _try_facsimile_pages(
 #    만들면 되고, 예열이 큐를 잡고 있다가 진짜 클릭을 503으로 만들지 않는다.
 #  - (job, lang)마다 하나만 돈다. 번역 완료와 폰트 백필이 연달아 예열을
 #    부탁해도 빌드는 한 번이다.
+#  - 다만 예열이 **도는 중에** 들어온 부탁은 버리지 않는다(dirty). 그 부탁은 진행
+#    중 빌드가 이미 읽은 입력보다 새 입력(방금 끝난 재번역 등) 때문에 왔을 수 있다 —
+#    예전에는 조용히 버려져 옛 번역 PDF가 다음 무효화 전까지 캐시로 남았다. 진행 중
+#    예열이 끝나면 한 번 더 돈다(캐시가 이미 최신이면 그 회차는 즉시 끝난다).
 _WARM_INFLIGHT: set[tuple[str, str]] = set()
+_WARM_DIRTY: set[tuple[str, str]] = set()
 _WARM_GUARD = threading.Lock()
+# 같은 예열 스레드가 dirty로 다시 도는 최대 회차 — 입력이 계속 바뀌는 병적인
+# 경우에도 스레드가 끝나게 한다(남은 부탁은 다음 요청이 직접 만든다).
+_WARM_MAX_ROUNDS = 4
 
 
 def warm_translated_pdf(job, lang: str, settings, *, build=build_translated_pdf) -> bool:
@@ -734,24 +805,52 @@ def warm_translated_pdf(job, lang: str, settings, *, build=build_translated_pdf)
 
 
 def warm_translated_pdf_async(job, lang: str, settings, *, build=build_translated_pdf) -> bool:
-    """`warm_translated_pdf`를 데몬 스레드에서 돌린다. 시작했으면 True.
+    """`warm_translated_pdf`를 데몬 스레드에서 돌린다. 새로 시작했으면 True.
 
-    같은 (job, lang) 예열이 이미 돌고 있으면 새로 띄우지 않는다.
+    같은 (job, lang) 예열이 이미 돌고 있으면 새로 띄우지 않고 dirty로 표시한다 —
+    진행 중 예열이 끝나면 같은 스레드가 한 번 더 돈다.
     """
     key = (job.id, lang)
     with _WARM_GUARD:
         if key in _WARM_INFLIGHT:
+            _WARM_DIRTY.add(key)
             return False
         _WARM_INFLIGHT.add(key)
 
-    def _run() -> None:
-        try:
-            warm_translated_pdf(job, lang, settings, build=build)
-        finally:
-            with _WARM_GUARD:
-                _WARM_INFLIGHT.discard(key)
+    def _finish() -> None:
+        with _WARM_GUARD:
+            _WARM_DIRTY.discard(key)
+            _WARM_INFLIGHT.discard(key)
 
-    threading.Thread(
-        target=_run, name=f"pdf-warm-{job.id}-{lang}", daemon=True,
-    ).start()
+    def _run() -> None:
+        rounds = 0
+        try:
+            while True:
+                rounds += 1
+                warm_translated_pdf(job, lang, settings, build=build)
+                # dirty 확인과 inflight 해제를 같은 락에서 한다 — 그 사이에 온 부탁은
+                # dirty로 남아 다음 회차가 되거나, 해제 뒤라면 새 스레드를 띄운다.
+                with _WARM_GUARD:
+                    if key not in _WARM_DIRTY:
+                        _WARM_INFLIGHT.discard(key)
+                        return
+                    _WARM_DIRTY.discard(key)
+                    if rounds >= _WARM_MAX_ROUNDS:
+                        _WARM_INFLIGHT.discard(key)
+                        logger.warning("PDF 예열 재요청이 계속돼 %d회에서 멈춤: %s/%s",
+                                       rounds, job.id, lang)
+                        return
+        except BaseException:
+            _finish()
+            raise
+
+    try:
+        threading.Thread(
+            target=_run, name=f"pdf-warm-{job.id}-{lang}", daemon=True,
+        ).start()
+    except BaseException:
+        # 스레드를 못 띄우면 inflight 표식이 영구히 남아 이후 예열이 전부 '진행 중'으로
+        # 건너뛰어지고 클릭이 헛되이 예열 대기 상한을 받는다 — 표식을 거둔다.
+        _finish()
+        raise
     return True

@@ -1583,13 +1583,33 @@ export function updateReaderResearchTools() {
     : '오른쪽 텍스트에서 문장을 선택하세요.';
 }
 
+// 마지막으로 잡은 레일 선택 범위. [선택 문장 도구]를 펼치려고 summary를 누르면 브라우저가
+// 문서 선택을 지운다 — 그 뒤 [하이라이트]를 눌러도 칠할 범위가 남아 있도록 복제해 둔다.
+let readerRange = null;
+
+function liveReaderRange() {
+  const selection = window.getSelection && window.getSelection();
+  if (selection && !selection.isCollapsed && selection.rangeCount) {
+    const range = selection.getRangeAt(0);
+    if (el.readerContent.contains(range.commonAncestorContainer)) return { range, selection };
+  }
+  const saved = readerRange;
+  if (saved && saved.startContainer.isConnected && saved.endContainer.isConnected
+      && el.readerContent.contains(saved.commonAncestorContainer)) {
+    return { range: saved, selection };
+  }
+  return null;
+}
+
 export function captureReaderSelection() {
   const selection = window.getSelection && window.getSelection();
   let text = '';
   let page = state.readerPage;
+  readerRange = null;
   if (selection && !selection.isCollapsed && selection.rangeCount) {
     const range = selection.getRangeAt(0);
     if (el.readerContent.contains(range.commonAncestorContainer)) {
+      readerRange = typeof range.cloneRange === 'function' ? range.cloneRange() : range;
       // selection.toString()은 카드 머리말('02 본문 원문 보기')과 KaTeX 내부 글자(MathML+HTML
       // 두 벌)까지 섞는다 — 설명·인용에 쓸 문장은 본문만, 수식은 원래 TeX로 만든다.
       text = (rangeReadableText(range) || selection.toString()).replace(/\s+/g, ' ').trim()
@@ -1796,10 +1816,10 @@ function unwrapMark(mark) {
 }
 
 export function highlightReaderSelection() {
-  const selection = window.getSelection && window.getSelection();
-  if (!selection || selection.isCollapsed || !selection.rangeCount || !state.readerSelection) return;
-  const range = selection.getRangeAt(0);
-  if (!el.readerContent.contains(range.commonAncestorContainer)) return;
+  if (!state.readerSelection) return;
+  const live = liveReaderRange();
+  if (!live) return;
+  const { range, selection } = live;
   const page = state.readerSelectionPage;
   const noteId = newReaderNoteId();
   const marks = markRange(range, noteId);
@@ -1809,7 +1829,8 @@ export function highlightReaderSelection() {
     if (!saved) delete mark.dataset.noteId;           // 저장 실패 — 이번 화면에만 표시
     else mark.dataset.noteId = saved.note.id;         // 이미 있던 같은 메모면 그 id에 묶는다
   }
-  selection.removeAllRanges();
+  if (selection && typeof selection.removeAllRanges === 'function') selection.removeAllRanges();
+  readerRange = null;
   state.readerSelection = '';
   state.readerSelectionPage = state.readerPage;
   updateReaderResearchTools();

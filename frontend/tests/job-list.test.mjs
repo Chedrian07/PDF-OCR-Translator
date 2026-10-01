@@ -8,13 +8,17 @@
 //    무장(armed)이 5초 폴링을 넘어 유지된다.
 //  · 줄이 옮겨지거나 지워져 포커스가 빠지면 같은 잡(없으면 같은 자리)으로 돌려준다.
 //  · 목록 갱신은 한 번에 하나, 주기 폴링은 진행 중이면 건너뛴다.
+//  · '더 보기': 최신 50건 뒤를 before 커서로 한 쪽씩 잇고, 폴링은 넓어진 창을 유지한다.
+//    커서 잡이 지워지면(422) 처음부터 다시 받는다. 서버 limit 상한(500)을 넘는 창은 커서로 잇는다.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { jobRowSignature } from '../js/core.js';
+import {
+  JOB_LIST_PAGE, appendJobPage, jobListMoreLabel, jobListUrl, jobRowSignature, normalizeJobPage,
+} from '../js/core.js';
 import { armTimers, el, state } from '../js/state.js';
-import { pollJobs, refreshJobs, renderJobList } from '../js/jobs.js';
+import { loadMoreJobs, pollJobs, refreshJobs, renderJobList } from '../js/jobs.js';
 import { assertSameNode, installFakeDom, mount } from './helpers/fake-dom.mjs';
 
 function job(id, status = 'done', extra = {}) {
@@ -26,9 +30,13 @@ function setup(t, jobs) {
   const savedState = { ...state };
   const savedEls = { ...el };
   el.jobList = mount(doc, 'ul');
+  el.jobListMore = mount(doc, 'button');
   el.jobListEmpty = mount(doc, 'p');
   el.toast = mount(doc, 'div');
-  Object.assign(state, { jobs, currentJobId: null, toastTimer: 0 });
+  Object.assign(state, {
+    jobs, currentJobId: null, toastTimer: 0,
+    jobListLimit: JOB_LIST_PAGE, jobsHasMore: false, jobsTotal: null, jobsLoadingMore: false,
+  });
   t.after(() => {
     for (const entry of armTimers.values()) clearTimeout(entry.t);
     armTimers.clear();
@@ -181,4 +189,138 @@ test('목록 갱신은 한 번에 하나 — 진행 중 명시적 갱신은 한 
   assert.equal(pending.length, 3);
   pending[2](reply([job('new')]));
   await next;
+});
+
+/* ---------------- '더 보기' 페이지 ---------------- */
+
+test('jobListUrl: 기본 창은 예전 URL, 그 밖은 limit(1–500)과 before 커서', () => {
+  assert.equal(jobListUrl(), '/api/jobs');
+  assert.equal(jobListUrl(50), '/api/jobs');
+  assert.equal(jobListUrl(100), '/api/jobs?limit=100');
+  assert.equal(jobListUrl(50, 'j_abc'), '/api/jobs?limit=50&before=j_abc');
+  assert.equal(jobListUrl(9999), '/api/jobs?limit=500', '서버 상한으로 묶는다');
+  assert.equal(jobListUrl(0), '/api/jobs', '비정상 값은 기본 창');
+  assert.equal(jobListUrl(10, 'a&b=c'), '/api/jobs?limit=10&before=a%26b%3Dc', '커서는 인코딩');
+});
+
+test('normalizeJobPage·appendJobPage·jobListMoreLabel: 구버전 응답과 겹친 경계를 견딘다', () => {
+  assert.deepEqual(normalizeJobPage({ jobs: [job('a')] }), { jobs: [job('a')], hasMore: false, total: null });
+  assert.deepEqual(normalizeJobPage({ jobs: [job('a'), null, { status: 'done' }], has_more: true, total: '7' }),
+    { jobs: [job('a')], hasMore: true, total: 7 });
+  assert.deepEqual(normalizeJobPage(null), { jobs: [], hasMore: false, total: null });
+  const merged = appendJobPage([job('a'), job('b')], [job('b'), job('c')]);
+  assert.deepEqual(merged.map((j) => j.job_id), ['a', 'b', 'c'], '경계에 걸친 잡은 한 번만');
+  assert.equal(jobListMoreLabel(50, 132), '더 보기 (50/132)');
+  assert.equal(jobListMoreLabel(50, null), '더 보기');
+  assert.equal(jobListMoreLabel(50, 50), '더 보기');
+});
+
+const many = (from, count) => Array.from({ length: count }, (_, i) => job(`j${String(from + i).padStart(4, '0')}`));
+
+// 서버 흉내 — 최신순 목록에서 limit·before로 자른다(api.list_jobs와 같은 규칙).
+function serverJobs(t, all, { missingCursor = () => false } = {}) {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (url) => {
+    calls.push(String(url));
+    const u = new URL(String(url), 'http://x');
+    const limit = Number(u.searchParams.get('limit') || 50);
+    const before = u.searchParams.get('before');
+    let rest = all();
+    if (before != null) {
+      const at = rest.findIndex((j) => j.job_id === before);
+      if (at < 0 || missingCursor(before)) {
+        return { ok: false, status: 422, headers: { get: () => null }, text: async () => '{"detail":"before"}' };
+      }
+      rest = rest.slice(at + 1);
+    }
+    const body = { jobs: rest.slice(0, limit), has_more: rest.length > limit, total: all().length };
+    return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(body) };
+  });
+  return calls;
+}
+
+test("'더 보기': 마지막 잡 다음 한 쪽을 before로 잇고 폴링은 넓어진 창을 유지한다", async (t) => {
+  setup(t, []);
+  const all = many(0, 120);
+  const calls = serverJobs(t, () => all);
+  await refreshJobs();
+  assert.equal(rows().length, 50);
+  assert.equal(el.jobListMore.hidden, false, '뒤에 더 있으면 버튼이 보인다');
+  assert.equal(el.jobListMore.textContent, '더 보기 (50/120)');
+  const firstRows = rows();
+  await loadMoreJobs();
+  assert.equal(calls.at(-1), '/api/jobs?limit=50&before=j0049', '마지막 잡 다음부터');
+  assert.equal(rows().length, 100);
+  assertSameNode(assert, rows()[0], firstRows[0], '앞 줄은 다시 만들지 않는다');
+  assert.equal(el.jobListMore.textContent, '더 보기 (100/120)');
+  await refreshJobs(); // 5초 폴링
+  assert.equal(calls.at(-1), '/api/jobs?limit=100', '넓어진 창을 그대로 다시 받는다');
+  assert.equal(rows().length, 100);
+  await loadMoreJobs();
+  assert.equal(rows().length, 120);
+  assert.equal(el.jobListMore.hidden, true, '끝까지 받으면 버튼이 사라진다');
+});
+
+test("'더 보기' 커서 잡이 그사이 지워지면(422) 넓힌 창을 처음부터 다시 받는다", async (t) => {
+  setup(t, []);
+  let all = many(0, 80);
+  const calls = serverJobs(t, () => all);
+  await refreshJobs();
+  all = all.filter((j) => j.job_id !== 'j0049'); // 다른 탭이 목록 끝 잡을 지웠다
+  await loadMoreJobs();
+  assert.deepEqual(calls.slice(-2), ['/api/jobs?limit=50&before=j0049', '/api/jobs?limit=100']);
+  assert.equal(rows().length, 79);
+  assert.ok(!ids().includes('j0049'));
+  assert.equal(el.jobListMore.hidden, true);
+  assert.doesNotMatch(el.toast.textContent || '', /불러오지 못했습니다/, '422는 오류로 알리지 않는다');
+});
+
+test("'더 보기' 응답을 기다리는 사이 목록 끝이 밀리면 틈 없이 처음부터 다시 받는다", async (t) => {
+  setup(t, []);
+  let all = many(1, 120);
+  const calls = serverJobs(t, () => all);
+  await refreshJobs();
+  const more = loadMoreJobs();
+  all = [job('j0000'), ...all]; // 새 업로드 — 50건 창의 끝(j0050)이 51번째로 밀린다
+  await refreshJobs();          // 그사이 폴링이 창을 다시 받았다
+  await more;
+  assert.equal(calls.at(-1), '/api/jobs?limit=100');
+  assert.deepEqual(ids().slice(48, 52), ['j0048', 'j0049', 'j0050', 'j0051'], '경계에 틈이 없다');
+});
+
+test('서버 limit 상한(500)을 넘는 창은 before 커서로 이어 받는다', async (t) => {
+  setup(t, []);
+  const all = many(0, 620);
+  const calls = serverJobs(t, () => all);
+  state.jobListLimit = 550;
+  await refreshJobs();
+  assert.deepEqual(calls, ['/api/jobs?limit=500', '/api/jobs?limit=50&before=j0499']);
+  assert.equal(rows().length, 550);
+  assert.equal(state.jobsHasMore, true);
+});
+
+test("구버전 서버(has_more 없음)에는 '더 보기'를 보이지 않는다", async (t) => {
+  setup(t, []);
+  t.mock.method(globalThis, 'fetch', async () => ({
+    ok: true, status: 200, headers: { get: () => null },
+    text: async () => JSON.stringify({ jobs: many(0, 50) }),
+  }));
+  await refreshJobs();
+  assert.equal(rows().length, 50);
+  assert.equal(el.jobListMore.hidden, true);
+});
+
+test("'더 보기'로 끝까지 받으면 포커스를 새로 붙은 첫 줄로 넘긴다", async (t) => {
+  const doc = setup(t, []);
+  serverJobs(t, () => many(0, 60));
+  await refreshJobs();
+  el.jobListMore.focus();
+  const loading = loadMoreJobs();
+  assert.equal(el.jobListMore.getAttribute('aria-busy'), 'true', '받는 중 표시');
+  assert.equal(el.jobListMore.disabled, false, '비활성으로 바꿔 포커스를 잃게 하지 않는다');
+  await loadMoreJobs(); // 연타 — 두 번째 요청은 보내지 않는다
+  await loading;
+  assert.equal(rows().length, 60);
+  assert.equal(el.jobListMore.hidden, true);
+  assertSameNode(assert, doc.activeElement, control('j0050', 'ji-open'), '새 첫 줄의 열기 버튼');
 });

@@ -84,6 +84,21 @@ MARKDOWN_EXCLUDED_LABELS = frozenset({
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _MATH_DELIM_RE = re.compile(r"(\$|\\\[|\\\()")
 
+# 앱이 소유한 figure 참조 문법의 여는 부분과 그 리터럴 표기. 문서 본문에 `[[FIGURE:0]]`이
+# 글자로 실려 있으면 모델이 그대로 옮겨 적고, 같은 index의 진짜 placeholder와 겹쳐
+# figure가 문장 한가운데로 옮겨 붙었다(감사 sidecar-9). `\[`로 이스케이프하면 렌더러가
+# 디스플레이 수식(`\[ … \]`)으로 읽으므로 숫자 문자 참조를 쓴다 — 렌더하면 `[[`로 보인다
+# (backend protocol의 리터럴 표기와 같다).
+_FIGURE_OPEN = "[[FIGURE:"
+_FIGURE_OPEN_LITERAL = "&#91;&#91;FIGURE:"
+
+
+def escape_literal_placeholders(text: str) -> str:
+    """본문의 리터럴 `[[FIGURE:`를 문자 참조로 바꾼다 — placeholder 정규식에 걸리지 않게.
+
+    치환문에는 `[`가 없어 결과에 `[[FIGURE:`가 새로 생길 수 없다(1회 치환으로 충분)."""
+    return text.replace(_FIGURE_OPEN, _FIGURE_OPEN_LITERAL)
+
 
 def _norm_coord(v: float, size: int) -> int:
     if size <= 0:
@@ -130,11 +145,16 @@ def _markdown_fragment(
     제외 여부는 **원시 라벨**(공식 파이프라인 기본값과 동일한 어휘)로, 서식 결정은
     **정규화 타입**으로 한다 — display_formula처럼 라벨 변형이 와도 수식 처리가
     동일하게 적용된다(원시 라벨로 분기하면 변형마다 조용히 누락된다).
+
+    블록 내용의 리터럴 `[[FIGURE:`는 **markdown 조각에서만** 이스케이프한다. placeholder로
+    해석되는 것은 페이지 markdown뿐이고, 블록 content(레이아웃·번역·PDF 원천)는 렌더 때
+    HTML 이스케이프돼 문자 참조가 `&#91;` 글자로 드러나기 때문이다.
     """
     if label in MARKDOWN_EXCLUDED_LABELS:
         return None
     if figure_ref is not None:
         return figure_ref
+    content = escape_literal_placeholders(content)
     if not content.strip():
         return None
     if label == "doc_title":

@@ -182,7 +182,7 @@ def _fitz():
     try:
         from ..pipeline.pdf import quiet_fitz
     except ImportError:  # pragma: no cover — 패키지 밖 단독 사용 대비
-        import fitz
+        import pymupdf as fitz  # 레거시 fitz 임포트는 1.28+에서 stdout 폐지 경고
 
         return fitz
     return quiet_fitz()

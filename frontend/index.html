@@ -119,6 +119,8 @@
           <h2>변환 기록</h2>
         </div>
         <ul id="job-list" class="job-list" aria-label="변환 작업 목록"></ul>
+        <!-- 최신 50건 뒤의 기록 — 서버가 더 있다고 할 때만 보인다(GET /api/jobs?before=…) -->
+        <button id="job-list-more" class="btn btn-small btn-block job-list-more" type="button" hidden>더 보기</button>
         <p id="job-list-empty" class="empty-note">아직 변환 기록이 없습니다.</p>
       </section>
     </aside>

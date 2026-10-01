@@ -4,7 +4,9 @@ Localight의 auto 추출(app/services/documents.py의 _native_text/_meaningful_l
 로컬 Tesseract 실행(app/services/ocr.py)을 B의 엔진 계약(base.py)으로 옮긴
 1급 엔진이다. 페이지별 동작:
 
-1) 원본 PDF의 텍스트 레이어를 PyMuPDF ``get_text("blocks", sort=True)``로 추출
+1) 원본 PDF의 텍스트 레이어를 읽기 순서대로 블록 단위로 추출
+   (pipeline/reading_order.py — 내용 스트림 순서 + 다단 인식 + 조각 병합.
+   ``sort=True``의 좌표 정렬은 2단 논문의 문단을 좌우 단 교차로 뒤섞는다)
 2) 영숫자 수가 ``settings.native_text_threshold`` 이상이면 그대로 사용
 3) 미만(스캔/이미지 페이지)이면 **이미 렌더된** 페이지 PNG를 로컬 Tesseract로
    OCR (stdin/stdout 파이프 — 네트워크 없음). Tesseract 미설치·실행 실패면 희박한
@@ -293,6 +295,9 @@ class TextLayerEngine(OCREngine):
         """텍스트 레이어 블록 추출 (Localight documents._native_text 이식) + bbox 정규화.
 
         전역 페이지 번호(1-based)는 렌더 파일명 page_%04d.png에서 파싱한다.
+        블록은 **읽기 순서**다(reading_order.page_text_blocks — 내용 스트림 순서 기준,
+        다단이면 띠별로 왼쪽 단 → 오른쪽 단, 한 문장·한 줄 조각은 병합). 좌표는
+        렌더 PNG와 같은 회전 반영 공간이다.
         반환: (0–999 정규화 bbox — 퇴화면 None, 정화된 블록 텍스트) 목록.
         """
         if doc is None:
@@ -304,28 +309,23 @@ class TextLayerEngine(OCREngine):
         page_number = int(match.group(1))
         if not 1 <= page_number <= doc.page_count:
             return []
+        fitz = _fitz()
         try:
+            from ..pipeline.reading_order import page_text_blocks
+
             page = doc[page_number - 1]
             rect = page.rect
-            # get_text("blocks") 좌표는 /Rotate 이전(비회전) 공간이고, rect와
-            # 렌더된 page_%04d.png는 회전 반영 공간이다 — rotation_matrix로
-            # 사상해야 레이아웃 뷰의 det 박스가 렌더 이미지와 정렬된다
-            # (회전 0이면 항등행렬이라 무해).
-            matrix = page.rotation_matrix
-            raw_blocks = page.get_text("blocks", sort=True)
+            text_blocks = page_text_blocks(page, fitz)
         except Exception as e:  # noqa: BLE001 — 손상 페이지는 OCR 경로로 격리
             logger.warning("%d페이지 텍스트 레이어 추출 실패 (%s: %s)",
                            page_number, e.__class__.__name__, str(e)[:200])
             return []
-        fitz = _fitz()
         blocks: list[tuple[tuple[int, int, int, int] | None, str]] = []
-        for block in raw_blocks:
-            if len(block) < 7 or block[6] != 0:  # 6번 필드 0 = 텍스트 블록 (이미지 제외)
-                continue
-            text = sanitize_text(str(block[4])).strip()
+        for block in text_blocks:
+            text = sanitize_text(block.text).strip()
             if not text:
                 continue
-            blocks.append((_norm_bbox(fitz.Rect(block[:4]) * matrix, rect), text))
+            blocks.append((_norm_bbox((block.x0, block.y0, block.x1, block.y1), rect), text))
         return blocks
 
     def _extract_page(self, doc, image_path: Path, job_dir: Path) -> tuple[str, str]:

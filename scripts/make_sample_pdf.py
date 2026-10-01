@@ -6,6 +6,7 @@
     python scripts/make_sample_pdf.py sample/sample-ko.pdf --korean   # 한국어 검증용
 
 의존성: pymupdf, pillow  (backend 환경: cd backend && uv run python ../scripts/make_sample_pdf.py)
+      PyMuPDF는 `import pymupdf as fitz`로 쓴다 — 레거시 `fitz` 모듈은 1.28+에서 폐지 경고를 찍는다.
 
 `--korean`은 PaddleOCR-VL의 한국어 보존을 검증하기 위한 문서를 만든다 — 한글 음절·
 자모·한자 혼용·숫자와 단위·표(셀 줄바꿈 포함)·수식 주변 한글·figure·각주·페이지
@@ -54,7 +55,7 @@ _KO_FONT = "korea-s"
 
 def _draw_korean_page(page) -> None:
     """한국어 검증 페이지 렌더 (make_korean_pdf·make_scan_pdf 공유 — 단일 진실)."""
-    import fitz
+    import pymupdf as fitz
 
     ko = {"fontname": _KO_FONT}
     page.insert_text((72, 90), "2026년 상반기 연구 보고서", fontsize=20, **ko)
@@ -93,7 +94,7 @@ def _draw_korean_page(page) -> None:
 
 def make_korean_pdf(out: Path) -> None:
     """한국어 보존 검증용 1페이지 문서 — 외부 폰트·저작권 자료 없이 생성한다."""
-    import fitz
+    import pymupdf as fitz
 
     doc = fitz.open()
     _draw_korean_page(doc.new_page(width=595, height=842))
@@ -111,7 +112,7 @@ def make_scan_pdf(out: Path) -> None:
     """
     import io
 
-    import fitz
+    import pymupdf as fitz
     from PIL import Image, ImageEnhance
 
     src = fitz.open()
@@ -147,7 +148,7 @@ def make_scan_pdf(out: Path) -> None:
 
 
 def main() -> None:
-    import fitz
+    import pymupdf as fitz
 
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     korean = "--korean" in sys.argv[1:]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_REVISION = "ee63731b6461c8afcdcc7b15352e7d2ffecc2ead"
 _DEFAULT_ALLOWED_HOSTS = "localhost,127.0.0.1"
+# 렌더 dpi 허용 범위 — 업로드의 요청별 dpi 검증(api.py)과 기본값 RENDER_DPI 검증이
+# 같은 범위를 쓴다. 어긋나면 dpi를 안 보내는 클라이언트의 모든 업로드가 400이 된다.
+RENDER_DPI_MIN = 72
+RENDER_DPI_MAX = 400
 
 
 def _find_dotenv() -> Path | None:
@@ -84,14 +89,67 @@ def _env_bool(name: str, default: bool) -> bool:
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _env_int(name: str, default: int) -> int:
+def _env_raw(name: str) -> str | None:
+    """빈 값(공백뿐인 값 포함)은 미설정으로 본다 — compose는 선택 키를 빈 문자열로 넘긴다."""
     v = os.environ.get(name)
-    return int(v) if v else default
+    return v if v is not None and v.strip() else None
 
 
-def _env_float(name: str, default: float) -> float:
-    v = os.environ.get(name)
-    return float(v) if v else default
+def _check_range(
+    name: str, raw: str, value: float, lo: float | None, hi: float | None,
+) -> None:
+    if lo is not None and hi is not None:
+        if not lo <= value <= hi:
+            raise ValueError(f"{name}={raw!r}: {lo}–{hi} 범위여야 합니다")
+    elif lo is not None and value < lo:
+        raise ValueError(f"{name}={raw!r}: {lo} 이상이어야 합니다")
+    elif hi is not None and value > hi:
+        raise ValueError(f"{name}={raw!r}: {hi} 이하여야 합니다")
+
+
+def _env_int(
+    name: str, default: int, *, lo: int | None = None, hi: int | None = None,
+) -> int:
+    """정수 env — 비정수·범위 밖 값은 **변수명을 담은** ValueError로 기동 시 실패한다.
+
+    예전에는 `invalid literal for int()`만 남아 어느 키가 틀렸는지 traceback을 읽어야
+    했고, RENDER_DPI=600·MAX_UPLOAD_MB=0처럼 범위 밖 값은 기동은 되지만 모든 업로드를
+    400/413으로 만들어 요청 쪽 문제로 보였다.
+    """
+    raw = _env_raw(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{name}={raw!r}: 정수여야 합니다") from None
+    _check_range(name, raw, value, lo, hi)
+    return value
+
+
+def _env_float(
+    name: str, default: float, *,
+    lo: float | None = None, hi: float | None = None, positive: bool = False,
+) -> float:
+    """실수 env — NaN·무한대는 어느 노브에서도 의미가 없어 거부한다(변수명 포함).
+
+    positive=True는 0보다 커야 하는 값(타임아웃)이다. requests는 0·음수·NaN
+    타임아웃에 RequestException이 아닌 ValueError를 던져, 기동은 정상인데 잡의
+    모든 페이지가 실패했다.
+    """
+    raw = _env_raw(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{name}={raw!r}: 숫자여야 합니다") from None
+    if not math.isfinite(value):
+        raise ValueError(f"{name}={raw!r}: 유한한 숫자여야 합니다")
+    if positive and value <= 0:
+        raise ValueError(f"{name}={raw!r}: 0보다 커야 합니다")
+    _check_range(name, raw, value, lo, hi)
+    return value
 
 
 def _env_limit(name: str, default: int) -> int | None:
@@ -160,7 +218,7 @@ def _translate_global_concurrency() -> int:
     # Compose는 선택 키를 빈 문자열로 명시 전달한다. 빈 값은 '미설정'과 같게
     # 취급해야 아래의 잡당 상한 fallback 계약이 컨테이너에서도 유지된다.
     if raw is not None and raw.strip():
-        return min(8, max(1, int(raw)))
+        return min(8, max(1, _env_int("TRANSLATE_GLOBAL_CONCURRENCY", 8)))
     try:
         return min(8, max(1, int(os.environ.get("TRANSLATE_CONCURRENCY") or 8)))
     except ValueError:
@@ -257,32 +315,40 @@ class Settings:
             preload_model=_env_bool("PRELOAD_MODEL", True),
             data_dir=Path(os.environ.get("DATA_DIR", "data")),
             frontend_dir=Path(frontend) if frontend else None,
-            render_dpi=_env_int("RENDER_DPI", 200),
-            pages_per_chunk=_env_int("PAGES_PER_CHUNK", 8),
+            # 범위 검증 — 범위 밖 값은 기동은 되지만 나중에 모든 업로드·페이지를
+            # 실패시킨다(요청 쪽 문제로 보임). 기동 시 변수명과 함께 바로 실패한다.
+            render_dpi=_env_int("RENDER_DPI", 200, lo=RENDER_DPI_MIN, hi=RENDER_DPI_MAX),
+            pages_per_chunk=_env_int("PAGES_PER_CHUNK", 8, lo=1),
             ocr_fidelity_threshold=_env_float("OCR_FIDELITY_THRESHOLD", 0.70),
             ocr_fidelity_max_retry_ratio=_env_float(
                 "OCR_FIDELITY_MAX_RETRY_RATIO", 0.2
             ),
-            max_pages=_env_int("MAX_PAGES", 200),
-            max_upload_mb=_env_int("MAX_UPLOAD_MB", 100),
-            max_length=_env_int("MAX_LENGTH", 32768),
+            max_pages=_env_int("MAX_PAGES", 200, lo=1),
+            max_upload_mb=_env_int("MAX_UPLOAD_MB", 100, lo=1),
+            max_length=_env_int("MAX_LENGTH", 32768, lo=1),
             max_page_output_chars=_env_limit("MAX_PAGE_OUTPUT_CHARS", 16_384),
             max_page_output_tokens=_env_limit("MAX_PAGE_OUTPUT_TOKENS", 6_144),
             page_separator=_env_unescaped("PAGE_SEPARATOR", "\n\n---\n\n"),
             cpu_threads=_env_int("OCR_CPU_THREADS", 0),
             fast_decode=_env_bool("OCR_FAST_DECODE", True),
-            decode_block=_env_int("OCR_DECODE_BLOCK", 8),
-            fake_delay=float(os.environ.get("FAKE_DELAY", "0.02")),
-            job_ttl_days=_env_int("JOB_TTL_DAYS", 0),
+            decode_block=_env_int("OCR_DECODE_BLOCK", 8, lo=1),
+            fake_delay=_env_float("FAKE_DELAY", 0.02, lo=0),
+            job_ttl_days=_env_int("JOB_TTL_DAYS", 0, lo=0),
             allowed_hosts=_split_hosts(os.environ.get("ALLOWED_HOSTS") or _DEFAULT_ALLOWED_HOSTS),
             sidecar_url=os.environ.get("OCR_SIDECAR_URL", "").strip().rstrip("/"),
-            sidecar_connect_timeout_s=_env_float("OCR_SIDECAR_CONNECT_TIMEOUT_S", 10.0),
-            sidecar_read_timeout_s=_env_float("OCR_SIDECAR_READ_TIMEOUT_S", 600.0),
-            sidecar_health_timeout_s=_env_float("OCR_SIDECAR_HEALTH_TIMEOUT_S", 5.0),
+            sidecar_connect_timeout_s=_env_float(
+                "OCR_SIDECAR_CONNECT_TIMEOUT_S", 10.0, positive=True,
+            ),
+            sidecar_read_timeout_s=_env_float(
+                "OCR_SIDECAR_READ_TIMEOUT_S", 600.0, positive=True,
+            ),
+            sidecar_health_timeout_s=_env_float(
+                "OCR_SIDECAR_HEALTH_TIMEOUT_S", 5.0, positive=True,
+            ),
             sidecar_max_response_mb=max(1, _env_int("OCR_SIDECAR_MAX_RESPONSE_MB", 20)),
             sidecar_retries=max(0, _env_int("OCR_SIDECAR_RETRIES", 1)),
             remote_page_concurrency=max(1, _env_int("OCR_REMOTE_PAGE_CONCURRENCY", 1)),
-            sidecar_model_wait_s=_env_float("OCR_SIDECAR_MODEL_WAIT_S", 900.0),
+            sidecar_model_wait_s=max(0.0, _env_float("OCR_SIDECAR_MODEL_WAIT_S", 900.0)),
             ocr_languages=os.environ.get("OCR_LANGUAGES", "eng+kor"),
             native_text_threshold=max(0, _env_int("NATIVE_TEXT_THRESHOLD", 120)),
             ollama_base_url=local_url(os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")),

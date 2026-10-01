@@ -304,3 +304,34 @@ def test_enrich_version_was_bumped_for_rotated_page_fix():
     from app.pipeline.pdf_fonts import ENRICH_VERSION
 
     assert ENRICH_VERSION >= 6
+
+
+def test_a_quarantined_page_is_skipped_without_giving_up_on_the_rest(tmp_path):
+    """앞서 렌더·분석이 PDF 워커 시간 상한을 넘은 페이지(격리 메모)는 기다리지 않고 그 페이지만
+    스탬프한다 — 상한을 새로 기다린 경우와 달리 나머지 페이지의 실측 주입을 포기하지 않는다."""
+    import fitz
+
+    from app.pipeline import pdf_worker
+    from app.pipeline.pdf_fonts import ENRICH_VERSION
+
+    doc = fitz.open()
+    for number in range(3):
+        doc.new_page(width=612, height=792).insert_text(
+            (100, 200), f"page {number} body text " * 4, fontsize=11,
+        )
+    pdf = tmp_path / "three.pdf"
+    doc.save(pdf)
+    doc.close()
+    pdf_worker.quarantine(pdf, 1)  # 2쪽이 앞서 상한을 넘었다
+
+    bx1, by1 = _norm(80, 180)
+    bx2, by2 = _norm(600, 215)
+    pages = [
+        {"page": n, "blocks": [{"type": "text", "bbox": [bx1, by1, bx2, by2], "content": "x"}]}
+        for n in (1, 2, 3)
+    ]
+    assert enrich_layout_fonts(pdf, pages) is True
+    assert "fs" in pages[0]["blocks"][0]
+    assert "fs" not in pages[1]["blocks"][0]  # 격리된 페이지는 실측 없이
+    assert "fs" in pages[2]["blocks"][0]  # 그 뒤 페이지는 계속 주입한다
+    assert [page["fonts_v"] for page in pages] == [ENRICH_VERSION] * 3

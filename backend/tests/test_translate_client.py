@@ -560,15 +560,123 @@ def test_reasoning_effort별_max_tokens_예산():
         cfg = TranslateConfig(base_url="https://h/v1", api_key="", model="m", reasoning=mode)
         assert cfg.max_output_tokens == budget
 
-    # from_env가 xhigh를 허용하고 payload에 effort로 실림
+    # from_env가 xhigh를 허용하고 payload에 effort로 실림. 단일 라벨 호스트("h")는
+    # auto가 로컬 서버로 보므로 OpenRouter 방식을 명시해 종전 페이로드를 고정한다.
     cfg = TranslateConfig.from_env({
         "OPENAI_BASE_URL": "https://h/v1", "OPENAI_MODEL": "m",
         "TRANSLATE_REASONING": "xhigh", "TRANSLATE_API_MODE": "chat",
+        "TRANSLATE_REASONING_STYLE": "openrouter",
     })
     assert cfg.reasoning == "xhigh" and cfg.max_output_tokens == 81920
     from app.translate.client import OpenAICompatClient
     p = OpenAICompatClient(cfg)._build_payload("chat", "s", "u", cfg.max_output_tokens)
     assert p["reasoning"] == {"effort": "xhigh"} and p["max_tokens"] == 81920
+
+
+# ── reasoning 전달 방식 (TRANSLATE_REASONING_STYLE) ─────────────────────────
+
+@pytest.mark.parametrize(("base_url", "style"), [
+    ("http://127.0.0.1:1235/v1", "chat_template_kwargs"),        # oMLX
+    ("http://localhost:1234", "chat_template_kwargs"),           # LM Studio
+    ("http://[::1]:8080/v1", "chat_template_kwargs"),            # mlx_lm.server
+    ("http://host.docker.internal:1235/v1", "chat_template_kwargs"),
+    ("http://vllm:8000/v1", "chat_template_kwargs"),             # compose 서비스명
+    ("http://192.168.0.10:8000/v1", "chat_template_kwargs"),     # 사설망
+    ("https://openrouter.ai/api/v1", "openrouter"),
+    ("https://api.openai.com/v1", "reasoning_effort"),
+    ("https://gateway.example.com/v1", "openrouter"),            # 알 수 없는 공개 호스트 = 종전
+])
+def test_auto_reasoning_style은_base_url로_확정(base_url, style):
+    from app.translate.types import resolve_reasoning_style
+
+    assert resolve_reasoning_style("auto", base_url) == style
+    assert resolve_reasoning_style("none", base_url) == "none"   # 명시값은 그대로
+
+
+@pytest.mark.parametrize(("style", "mode", "reasoning", "expected"), [
+    ("openrouter", "chat", "off", {"reasoning": {"enabled": False}}),
+    ("openrouter", "responses", "low", {"reasoning": {"effort": "low"}}),
+    ("chat_template_kwargs", "chat", "off", {"chat_template_kwargs": {"enable_thinking": False}}),
+    ("chat_template_kwargs", "chat", "high",
+     {"chat_template_kwargs": {"enable_thinking": True}, "reasoning_effort": "high"}),
+    ("chat_template_kwargs", "responses", "low",
+     {"chat_template_kwargs": {"enable_thinking": True}, "reasoning": {"effort": "low"}}),
+    ("reasoning_effort", "chat", "off", {"reasoning_effort": "none"}),
+    ("reasoning_effort", "chat", "medium", {"reasoning_effort": "medium"}),
+    ("reasoning_effort", "responses", "off", {"reasoning": {"effort": "none"}}),
+    ("none", "chat", "off", {}),
+])
+def test_reasoning_style별_페이로드(style, mode, reasoning, expected):
+    """mlx_lm·oMLX는 reasoning 필드를 무시하고 chat_template_kwargs만 읽는다(probe:MLX-01)."""
+    keys = ("reasoning", "chat_template_kwargs", "reasoning_effort")
+    c = OpenAICompatClient(_cfg(reasoning=reasoning, reasoning_style=style))
+    p = c._build_payload(mode, "s", "u", 100)
+    assert {k: p[k] for k in keys if k in p} == expected
+
+
+def test_reasoning_미설정이면_어떤_방식이든_필드를_보내지_않는다():
+    for style in ("auto", "openrouter", "chat_template_kwargs", "reasoning_effort"):
+        c = OpenAICompatClient(_cfg(base_url="http://127.0.0.1:1235/v1", reasoning_style=style))
+        p = c._build_payload("chat", "s", "u", 100)
+        assert not {"reasoning", "chat_template_kwargs", "reasoning_effort"} & set(p)
+
+
+def test_extra_body는_병합되고_객체값은_한단계_합친다():
+    cfg = TranslateConfig.from_env({
+        "OPENAI_BASE_URL": "http://127.0.0.1:1235/v1", "OPENAI_MODEL": "m",
+        "TRANSLATE_REASONING": "off",
+        "TRANSLATE_EXTRA_BODY": '{"chat_template_kwargs": {"thinking_budget": 0},'
+                                ' "repetition_penalty": 1.05, "temperature": 0.2}',
+    })
+    p = OpenAICompatClient(cfg)._build_payload("chat", "s", "u", 100)
+    assert p["chat_template_kwargs"] == {"enable_thinking": False, "thinking_budget": 0}
+    assert p["repetition_penalty"] == 1.05 and p["temperature"] == 0.2
+    assert p["messages"][1]["content"] == "u" and p["max_tokens"] == 100
+
+
+@pytest.mark.parametrize("value", [
+    "[1, 2]", "not json", '{"model": "other"}', '{"stream": true}', '{"store": true}',
+    '{"max_tokens": 10}', "{" + '"k": "' + "x" * 5000 + '"}',
+])
+def test_extra_body_검증(value):
+    from app.translate.types import TranslateError
+
+    env = {"OPENAI_BASE_URL": "https://h/v1", "OPENAI_MODEL": "m", "TRANSLATE_EXTRA_BODY": value}
+    with pytest.raises(TranslateError, match="TRANSLATE_EXTRA_BODY"):
+        TranslateConfig.from_env(env)
+
+
+def test_reasoning_style_검증():
+    from app.translate.types import TranslateError
+
+    env = {"OPENAI_BASE_URL": "https://h/v1", "OPENAI_MODEL": "m",
+           "TRANSLATE_REASONING_STYLE": "magic"}
+    with pytest.raises(TranslateError, match="TRANSLATE_REASONING_STYLE"):
+        TranslateConfig.from_env(env)
+
+
+def test_request_variant는_종전과_같은_요청이면_비어_있다():
+    """종전(OpenRouter 방식)과 바이트 동일한 요청이면 캐시 키를 바꾸지 않는다."""
+    legacy = _cfg(base_url="https://gateway.example.com/v1", reasoning="off")
+    assert legacy.request_variant == ""
+    assert _cfg(base_url="http://127.0.0.1:1235/v1").request_variant == ""  # reasoning 미설정
+    local_off = _cfg(base_url="http://127.0.0.1:1235/v1", reasoning="off")
+    assert local_off.request_variant == "reasoning_style=chat_template_kwargs"
+    extra = _cfg(extra_body='{"top_k":20}')
+    assert extra.request_variant == 'extra_body={"top_k":20}'
+
+
+def test_전부_잘림_오류는_서버측_thinking_끄기를_안내():
+    c = OpenAICompatClient(_cfg(api_mode="chat", base_url="https://gw.example.com/v1",
+                                reasoning="off"))
+    c._post = lambda p, pl: (200, {"choices": [{"message": {"content": ""},
+                                                "finish_reason": "length"}]}, {})
+    with pytest.raises(TranslateAPIError) as exc:
+        c.complete("s", "u", max_tokens=100)
+    msg = str(exc.value)
+    assert "잘렸습니다" in msg and "thinking" in msg
+    assert "TRANSLATE_REASONING_STYLE=chat_template_kwargs" in msg
+    assert "enable_thinking" in msg
 
 
 def test_translate_concurrency_default_and_server_cap():

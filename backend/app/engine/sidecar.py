@@ -143,7 +143,12 @@ class SidecarEngine(OCREngine):
         self._last_probe_ts = 0.0
         self._warn_lock = threading.Lock()
         self._warnings: list[str] = []
-        self._degraded_noted = False   # status 이상 신고를 이미 경고로 올렸는지
+        self._degraded_noted = False   # status 이상 신고를 이번 잡에 이미 경고로 올렸는지
+        self._degraded_refreshed = False  # 성공한 parse 뒤 이상 신고 캐시를 다시 확인했는지
+        self._job_key: Path | None = None  # 잡 단위 상태(신고 1회·장애 대기)의 기준 잡
+        # 장애 복귀 대기의 공유 데드라인 — 페이지마다 OCR_SIDECAR_MODEL_WAIT_S씩 따로
+        # 기다리지 않게 첫 대기 시작 시각을 기준으로 엔진 인스턴스에서 공유한다.
+        self._outage_deadline: float | None = None
 
     # ── 상태/메타 ──────────────────────────────────────────────
 
@@ -195,9 +200,9 @@ class SidecarEngine(OCREngine):
     def _note_if_degraded(self, h) -> None:
         """모델은 로드돼 있는데 status만 이상한 신고를 잡 경고로 올린다 (하드 실패 금지).
 
-        드레인 주기(= 잡/청크 경계)당 1회만 올린다 — /api/health 폴링(프런트 10초 주기)
-        마다 같은 문장이 경고 버퍼(_MAX_JOB_WARNINGS)를 채워 실제 페이지 경고를 밀어내지
-        않게. status가 ok로 돌아오면 플래그를 풀어 다음 신고를 다시 알린다."""
+        **잡당 1회**만 올린다 — 예전에는 드레인(= 청크, 기본 1페이지)마다 풀려서 200쪽
+        잡이면 같은 문장이 페이지마다 쌓여 잡 경고 상한을 채우고 실제 손실 경고를
+        밀어냈다. status가 ok로 돌아오면 플래그를 풀어 다음 신고를 다시 알린다."""
         degraded = h.model_loaded and h.status != "ok"
         with self._health_lock:
             if not degraded:
@@ -276,10 +281,37 @@ class SidecarEngine(OCREngine):
         """모델이 준비될 때까지 취소 가능하게 폴링 대기 (상한 sidecar_model_wait_s).
 
         최초 기동의 다운로드·컴파일 창에 업로드해도 잡을 실패시키지 않고 기다린다.
-        하드 실패(sidecar 자체 로드 실패)는 대기하지 않고 즉시 전파, 취소 시 JobCanceled."""
+        하드 실패(sidecar 자체 로드 실패)는 대기하지 않고 즉시 전파, 취소 시 JobCanceled.
+        워커가 잡 시작 때 부른다 — 잡마다 새 대기 예산으로 시작한다."""
+        with self._health_lock:
+            self._outage_deadline = None
         if self.loaded:
             return
-        deadline = time.monotonic() + self._settings.sidecar_model_wait_s
+        self._wait_ready(
+            cancel, time.monotonic() + self._settings.sidecar_model_wait_s, on_wait
+        )
+
+    def _await_recovery(self, cancel) -> None:
+        """잡 도중 관측한 장애에서 복귀를 기다린다 — 대기 예산은 엔진 인스턴스가 공유.
+
+        예전에는 청크 시작의 load()가 대기 없이 health를 한 번만 보고 실패해서, 재기동
+        중인 sidecar의 남은 페이지가 수 ms 만에 전부 플레이스홀더가 됐다. 반대로
+        페이지마다 sidecar_model_wait_s씩 기다리면 긴 장애에서 페이지 수만큼 곱해진다.
+        첫 대기 시작부터 한 번의 예산만 쓰고, 다 쓴 뒤로는 페이지마다 한 번만 확인한다.
+        """
+        now = time.monotonic()
+        with self._health_lock:
+            if self._outage_deadline is None:
+                self._outage_deadline = now + self._settings.sidecar_model_wait_s
+            deadline = self._outage_deadline
+        if now >= deadline:
+            self._check_ready(force=True)  # 여전히 내려가 있으면 예외 — 대기 없이 실패
+        else:
+            self._wait_ready(cancel, deadline, self._note)
+        with self._health_lock:
+            self._outage_deadline = None
+
+    def _wait_ready(self, cancel, deadline: float, on_wait=None) -> None:
         last = ""
         while True:
             if cancel.is_set():
@@ -341,13 +373,9 @@ class SidecarEngine(OCREngine):
     def drain_warnings(self) -> list[str]:
         with self._warn_lock:
             drained, self._warnings = self._warnings, []
-        # 이상 신고 1회 제한을 드레인 주기마다 푼다 — runner는 잡 시작 시 한 번
-        # 버리고(이전 잡 잔여 폐기) 청크마다 드레인하므로, 풀지 않으면 신고가
-        # 그 첫 드레인에 삼켜져 잡에 전달되지 않는다.
-        # (_warn_lock 밖에서 잡는다 — _note_if_degraded는 _health_lock → _warn_lock
-        #  순서라 여기서 뒤집으면 교착이 난다)
-        with self._health_lock:
-            self._degraded_noted = False
+        # 이상 신고 1회 제한은 여기서 풀지 않는다(풀면 청크마다 같은 신고가 쌓인다).
+        # 잡이 바뀌면 _begin_job이 푼다 — runner가 잡 시작 때 이전 잡 잔여를 버리는
+        # 드레인에 신고가 삼켜져도, 새 잡의 첫 준비 확인이 다시 올린다.
         # 페이지마다 반복되는 동일 경고는 1건으로 접는다 (순서 보존)
         seen: set[str] = set()
         unique: list[str] = []
@@ -393,10 +421,10 @@ class SidecarEngine(OCREngine):
         except SidecarUnavailableError as e:
             # sidecar 재시작/모델 재로드(HTTP 503·연결 끊김) — 컨테이너가 돌아오길
             # 기다렸다가 이 페이지만 1회 재시도한다. 기다리지 않으면 재기동+모델 로드
-            # 시간 동안의 페이지가 전부 플레이스홀더로 확정된다.
+            # 시간 동안의 페이지가 전부 플레이스홀더로 확정된다. 대기 예산은 공유한다.
             self._invalidate_health(str(e))
             self._note("sidecar 재시작/모델 재로드 대기 중… (해당 페이지는 복귀 후 재시도)")
-            self.wait_until_ready(cancel, on_wait=self._note)
+            self._await_recovery(cancel)
             resp = self._client.parse_page(
                 image_path,
                 page_index=local_page,
@@ -404,6 +432,7 @@ class SidecarEngine(OCREngine):
                 options={},
                 cancel=cancel,
             )
+        self._refresh_degraded_health()
         page, warnings = sanitize_page(resp.page)
         # 정화로 버려진 블록·절단은 사용자에게 알린다 (조용한 내용 손실 방지).
         # sidecar가 스스로 보고한 경고(해상도 강등 등)도 함께 승격한다.
@@ -416,6 +445,45 @@ class SidecarEngine(OCREngine):
                 self._note(w)
         return page
 
+    def _begin_job(self, image_paths: list[Path]) -> None:
+        """잡이 바뀌면 잡 단위 상태(이상 신고 1회·성공 뒤 재확인·장애 대기)를 푼다.
+
+        runner는 늘 {job.dir}/pages/page_%04d.png를 넘긴다 — 그 두 단계 위가 잡 키다
+        (textlayer 엔진의 잡당 1회 경고와 같은 방식)."""
+        key = image_paths[0].parent.parent if image_paths else None
+        with self._health_lock:
+            if key == self._job_key:
+                return
+            self._job_key = key
+            self._degraded_noted = False
+            self._degraded_refreshed = False
+            self._outage_deadline = None
+
+    def _refresh_degraded_health(self) -> None:
+        """parse가 성공했는데 캐시가 이상 신고를 들고 있으면 잡당 한 번 다시 확인한다.
+
+        sidecar는 성공 1회로 자가 복구 신고를 지우는데 backend 캐시는 그대로라, 복구된
+        뒤에도 잡이 계속 degraded로 보였다."""
+        h = self._last_health
+        if h is None or h.status == "ok":
+            return
+        with self._health_lock:
+            if self._degraded_refreshed:
+                return
+            self._degraded_refreshed = True
+        try:
+            fresh = self._client.health()
+        except SidecarError:
+            return
+        self._commit_health(fresh)
+
+    def _ensure_ready(self, cancel) -> None:
+        """청크 시작의 준비 확인 — 캐시가 '준비됨'이면 바로, 아니면 복귀를 기다린다."""
+        if self.loaded:
+            self._check_ready()  # 캐시 히트 — 이상 신고만 이 잡에 올린다
+            return
+        self._await_recovery(cancel)
+
     def _run_pages(
         self,
         image_paths: list[Path],
@@ -424,7 +492,8 @@ class SidecarEngine(OCREngine):
         cancel: threading.Event,
         single: bool,
     ) -> str:
-        self.load()
+        self._begin_job(image_paths)
+        self._ensure_ready(cancel)
         out_dir.mkdir(parents=True, exist_ok=True)
         # 텍스트 bbox가 없는 엔진(figure_only)은 raw_pages.json을 쓰지 않는다 — 쓰면
         # image 블록뿐인 layout.json이 생겨 HTML·PDF 내보내기가 OCR 텍스트를 잃는다.

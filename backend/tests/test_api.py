@@ -1313,8 +1313,19 @@ def test_result_block_has_layout_플래그(tmp_path):
 
     new = Job(id="j_new", filename="b.pdf", mode="multi", dpi=200, dir=tmp_path / "new", status="done")
     new.dir.mkdir()
-    (new.dir / "layout.json").write_text("[]", encoding="utf-8")
+    (new.dir / "layout.json").write_text(
+        '[{"page": 1, "blocks": [{"type": "text", "content": "본문"}]}]', encoding="utf-8",
+    )
     assert new.to_dict()["result"]["has_layout"] is True
+
+    # 파일이 있어도 텍스트 블록이 없으면(빈 layout·figure_only 옛 잡의 image 블록뿐) /layout·
+    # /pdf가 404·409다 — 플래그도 같은 기준(artifacts.has_usable_layout)으로 False다.
+    for name, content in (("empty", "[]"), ("figures", '[{"page": 1, "blocks": [{"type": "image"}]}]')):
+        job = Job(id=f"j_{name}", filename="c.pdf", mode="multi", dpi=200,
+                  dir=tmp_path / name, status="done")
+        job.dir.mkdir()
+        (job.dir / "layout.json").write_text(content, encoding="utf-8")
+        assert job.to_dict()["result"]["has_layout"] is False, name
 
 
 def test_queue_position_for_queued_jobs(tmp_path, sample_pdf):

@@ -424,3 +424,63 @@ def test_submit_survives_a_failed_submitted_marker_write(tmp_path):
     store.fail_ids.add(job.id)
     store.mark_submitted(job)                          # 예외가 새지 않는다
     assert job.submitted and job.submit_seq == 1
+
+
+# ── 잡별 페이지 구분자 (api-jobs-6) ──────────────────────────────────────────
+
+
+def test_legacy_jobs_get_the_current_separator_pinned_without_touching_ttl(tmp_path):
+    """구분자 기록 전에 만든 잡에 기동 시점 값을 한 번 고정한다 — meta.json mtime(TTL GC의
+    '마지막 활동' 시계)은 그대로다."""
+    import json
+
+    store = JobStore(tmp_path / "jobs")
+    legacy = _make_job(store, "done", age_days=30)
+    meta_path = legacy.dir / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.pop("page_separator", None)                    # 구버전 meta
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    past = time.time() - 30 * 86400
+    os.utime(meta_path, (past, past))
+    before = meta_path.stat().st_mtime_ns
+
+    revived = JobStore(store.jobs_dir)
+    revived.load_existing(default_page_separator="\n\n***\n\n")
+    assert revived.get(legacy.id).page_separator == "\n\n***\n\n"
+    assert json.loads(meta_path.read_text(encoding="utf-8"))["page_separator"] == "\n\n***\n\n"
+    assert meta_path.stat().st_mtime_ns == before
+    assert revived.gc_expired(7) == 1                   # 보존 기한이 늘지 않았다
+
+    pinned = JobStore(tmp_path / "jobs2")
+    job = pinned.create("doc.pdf", "multi", dpi=72, page_separator="\n\n===\n\n")
+    again = JobStore(pinned.jobs_dir)
+    again.load_existing(default_page_separator="\n\n---\n\n")
+    assert again.get(job.id).page_separator == "\n\n===\n\n"   # 기록된 값이 이긴다
+
+
+def test_worker_assembles_result_md_with_the_jobs_separator(tmp_path):
+    """재시작으로 다시 제출된 대기 잡이 바뀐 PAGE_SEPARATOR로 조립되면 meta와 result.md가
+    어긋난다 — 워커는 잡에 고정된 값으로 조립한다."""
+    store = JobStore(tmp_path / "jobs")
+    settings = Settings(
+        engine="fake", device="cpu", data_dir=tmp_path / "data",
+        preload_model=False, fake_delay=0.0, pages_per_chunk=1,
+    )
+    engine = FakeEngine(delay=0.0)
+    engine.load()
+    worker = Worker(store, EventBroker(), engine, settings, {})
+    job = store.create("doc.pdf", "multi", dpi=72, page_separator="\n\n=====\n\n")
+    (job.dir / "source.pdf").write_bytes(make_pdf_bytes(pages=3, with_image=False))
+    worker.start()
+    try:
+        worker.submit(job)
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline and job.status not in ("done", "error"):
+            time.sleep(0.02)
+    finally:
+        worker.stop()
+        worker.join(timeout=5.0)
+    assert job.status == "done"
+    text = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert text.count("\n\n=====\n\n") == 2
+    assert "\n\n---\n\n" not in text

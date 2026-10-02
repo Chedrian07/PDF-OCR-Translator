@@ -95,6 +95,7 @@ export const state = {
   readerActiveBlock: '',    // 클릭으로 고정한 현재 대응 블록 id
   readerSelection: '',      // 현재 페이지 텍스트에서 선택한 문장
   readerSelectionPage: 1,   // 선택이 실제로 속한 오른쪽 레일 페이지(sync off에서도 정확)
+  readerSelectionLang: 'orig', // 선택한 레일의 언어('orig' | 'ko') — 메모 언어는 저장 시점이 아니라 이것
   readerNotes: [],          // 이 잡의 인용·하이라이트 [{id,kind,page,lang,text,at}] (localStorage 영속)
   readerZoom: 100,          // PDF 페이지 이미지 폭 % (60–220, localStorage 'uocr-reader-zoom')
   readerImgTimers: new Map(), // page -> 이미지 재시도 타이머 (페이지별로 독립)

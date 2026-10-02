@@ -359,3 +359,90 @@ def test_router가_local_openai로_라우팅하고_구성여부를_알려준다(
             question="q", context="c", provider="local-openai", model=None,
             reasoning_effort="default", reasoning_summary="none", thinking=False,
         ))
+
+
+# ── security-2: 로컬 공급자는 환경 변수 프록시를 따르지 않는다 ─────────────────────
+# httpx는 기본(trust_env=True)으로 HTTP(S)_PROXY·ALL_PROXY를 따르고 루프백도 예외로 두지 않는다.
+# 사내망 운영자가 HF 다운로드용 프록시를 .env에 두면 local-openai·Ollama 요청이 그 프록시로
+# 가서 페이지 원문·질문·LLM_LOCAL_OPENAI_API_KEY가 평문 HTTP로 나갔다 — '루프백·
+# host.docker.internal 전용(온디바이스)' 경계가 조용히 깨지고 Q&A도 실패했다.
+
+
+@pytest.fixture
+def loopback_llm():
+    """실제 소켓으로 답하는 루프백 서버(local-openai·Ollama 경로) — 받은 요청을 기록한다."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    seen: list[tuple[str, str]] = []
+    replies = {
+        "/v1/models": {"data": [{"id": "qwen-local"}]},
+        "/v1/chat/completions": {"choices": [{"message": {"content": "로컬 답"},
+                                              "finish_reason": "stop"}]},
+        "/api/tags": {"models": [{"name": "qwen3:4b"}]},
+        "/api/chat": {"message": {"content": "올라마 답"}},
+    }
+
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args) -> None:
+            pass
+
+        def _reply(self) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            seen.append((self.path, self.headers.get("Authorization") or ""))
+            body = json.dumps(replies.get(self.path, {})).encode()
+            self.send_response(200 if self.path in replies else 404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = do_POST = _reply
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", seen
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.fixture
+def proxy_env(monkeypatch):
+    """프록시 env를 닫힌 루프백 포트로 — 따라가면 연결 거부로 드러난다(어디로도 보내지 않는다)."""
+    import socket
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    proxy = f"http://127.0.0.1:{probe.getsockname()[1]}"
+    probe.close()
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(key, proxy)
+    for key in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(key, raising=False)
+    return proxy
+
+
+def test_local_openai는_프록시_env를_따르지_않고_직접_보낸다(loopback_llm, proxy_env) -> None:
+    base, seen = loopback_llm
+    client = LocalOpenAIClient(f"{base}/v1", default_model="qwen-local", api_key="sk-local-key")
+    assert asyncio.run(client.available()) is True        # 예전에는 프록시(닫힘)로 가서 False
+    assert _ask(client).content == "로컬 답"
+    assert seen == [("/v1/models", "Bearer sk-local-key"),
+                    ("/v1/chat/completions", "Bearer sk-local-key")]
+
+
+def test_ollama는_프록시_env를_따르지_않고_직접_보낸다(loopback_llm, proxy_env) -> None:
+    base, seen = loopback_llm
+    client = OllamaClient(base, "qwen3:4b")
+    assert [model.name for model in asyncio.run(client.models())] == ["qwen3:4b"]
+    result = asyncio.run(client.generate(
+        model=None, system="answer", prompt="page", reasoning_effort="default",
+        reasoning_summary="none", thinking=False,
+    ))
+    assert result.content == "올라마 답"
+    assert [path for path, _auth in seen] == ["/api/tags", "/api/tags", "/api/chat"]

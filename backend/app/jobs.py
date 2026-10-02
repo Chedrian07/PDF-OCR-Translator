@@ -121,6 +121,11 @@ class Job:
     # 들어갔지만 시작하지 못한 잡'(다시 제출해도 안전)과 '업로드 도중 죽은 잡'(부분
     # source.pdf)을 이 표식으로 가른다. 구버전 meta에는 없다(=False, 예전처럼 오류 처리).
     submitted: bool = False
+    # 워커 큐 제출 순서 키(time.time_ns 기반, 스토어 안에서 단조 증가) — meta.json에 남아 재시작
+    # 때 대기 잡을 원래 큐 순서로 다시 제출한다. created_at은 초 단위라 같은 초에 올린 잡은
+    # 무작위 잡 ID로 순서가 갈렸고, 생성 순서는 큰 파일을 먼저 올리기 시작한 경우 실제 제출
+    # 순서와 다르다. 구버전 meta·미제출 잡은 None(복원은 created_at으로 대신한다).
+    submit_order: int | None = None
     # 워커가 큐에서 꺼내 실행을 맡았는가(런타임 전용). 상태는 모델 로딩 대기 동안
     # 여전히 queued라, '아직 아무도 맡지 않은 대기 잡'만 API가 즉시 취소할 수 있도록
     # 상태와 별도로 둔다 — JobStore.claim/try_cancel_queued가 같은 락에서 판정한다.
@@ -225,10 +230,19 @@ class Job:
             "model_revision": self.model_revision,
             "provider": self.provider,
             "submitted": self.submitted,
+            "submit_order": self.submit_order,
             "page_separator": self.page_separator,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
         }
+
+
+def _created_order(created_at: str) -> int:
+    """submit_order가 없는 잡(구버전 meta)의 복원 순서 키 — created_at(초)을 ns로."""
+    try:
+        return int(datetime.fromisoformat(created_at).timestamp()) * 1_000_000_000
+    except (TypeError, ValueError):
+        return 0
 
 
 class JobStore:
@@ -237,6 +251,7 @@ class JobStore:
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self._jobs: dict[str, Job] = {}
         self._submit_seq = 0
+        self._last_submit_order = 0
         self._lock = threading.RLock()
 
     def create(
@@ -319,6 +334,8 @@ class JobStore:
         with self._lock:
             self._submit_seq += 1
             job.submit_seq = self._submit_seq
+            self._last_submit_order = max(time.time_ns(), self._last_submit_order + 1)
+            job.submit_order = self._last_submit_order
             job.submitted = True
         try:
             self.save(job)
@@ -432,8 +449,8 @@ class JobStore:
         """서버 재시작 시 디스크의 잡 복원. 실행 중이던 잡은 오류로 마킹한다.
 
         업로드·검증을 마치고 대기열에 들어갔지만(submitted) 시작하지 못한 queued 잡은
-        대기 상태 그대로 두고 생성 순서로 돌려준다 — 호출자(앱 조립)가 워커에 다시
-        제출한다. 예전에는 이런 잡까지 '서버 재시작으로 중단' 오류로 확정해, 긴 잡 뒤에
+        대기 상태 그대로 두고 원래 큐 순서(submit_order, 구버전 meta는 created_at)로
+        돌려준다 — 호출자(앱 조립)가 워커에 다시 제출한다. 예전에는 이런 잡까지 '서버 재시작으로 중단' 오류로 확정해, 긴 잡 뒤에
         줄 세워 둔 PDF를 재시작(이미지 갱신·make dev 리로드)마다 다시 올려야 했다.
         제출 표식이 없는(업로드 도중 죽은) 잡은 원본이 부분일 수 있어 예전처럼 오류다.
 
@@ -475,6 +492,7 @@ class JobStore:
                     engine=m.get("engine"), model_id=m.get("model_id"),
                     model_revision=m.get("model_revision"), provider=m.get("provider"),
                     submitted=bool(m.get("submitted")),
+                    submit_order=_int_or_none(m.get("submit_order")),
                     page_separator=m.get("page_separator"),
                     started_at=m.get("started_at"), finished_at=m.get("finished_at"),
                 )
@@ -505,7 +523,22 @@ class JobStore:
                     self.save(job)
             except Exception:
                 logger.exception("잡 메타 복원 실패: %s", d)
-        return sorted(restored, key=lambda job: (job.created_at, job.id))
+        with self._lock:
+            for job in restored:
+                if job.submit_order is not None:
+                    # 시계가 뒤로 가도 다시 제출한 잡이 복원한 잡보다 앞서지 않게
+                    self._last_submit_order = max(self._last_submit_order, job.submit_order)
+        return sorted(restored, key=lambda job: (
+            job.submit_order if job.submit_order is not None else _created_order(job.created_at),
+            job.id,
+        ))
+
+
+def _int_or_none(value) -> int | None:
+    """meta의 정수 필드 — bool·숫자 아닌 값·손상 값은 None(없는 것과 같다)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def _source_intact(job_dir: Path) -> bool:

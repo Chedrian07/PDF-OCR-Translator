@@ -140,6 +140,13 @@ Uploaded PDFs, and the text an OCR model produces from them, are treated as host
   blob:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'` — and
   `<meta name="referrer" content="no-referrer">`. A file opened from disk renders
   normally but cannot fetch anything.
+- **Translated PDFs** do not carry the upload's active content. The single-view export
+  edits the uploaded file, so before saving it drops `/OpenAction` scripts, every `/AA`
+  (additional actions), document-level JavaScript, XFA forms, embedded files and file
+  attachments, and link or outline actions that run JavaScript, launch programs, submit
+  or import form data, open other files (`GoToR`/`GoToE`) or play rich media. Internal
+  links, URI links and the outline stay. The side-by-side export is a new document and
+  never had any.
 - **External images are never loaded automatically.** The server renderer only turns
   `images/<file>` and `data:image/(png|jpeg|gif|webp)` into `<img>`; any other source
   (remote URLs, LAN addresses, absolute paths) becomes a click-only link. The SPA also

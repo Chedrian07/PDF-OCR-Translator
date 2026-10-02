@@ -837,3 +837,28 @@ def test_scan_paragraphs_of_one_size_get_one_translated_size(tmp_path):
     long_ = _hangul_span_sizes(result.path, fitz.Rect(60, 240, 540, 400))
     assert short and long_, (short, long_)
     assert max(short) == pytest.approx(max(long_), abs=0.3), (short, long_)
+
+
+def test_small_single_line_blocks_do_not_shrink_a_scanned_paragraph(tmp_path):
+    """쪽 본문 크기는 여러 줄 text 블록으로만 낸다 — 7pt 차트 눈금·라벨 셋(한 줄, text로 OCR됨)이
+    중앙값에 들어가 11pt 문단 하나를 그 크기로 끌어내렸다(리뷰)."""
+    job_dir = tmp_path / "labels"
+    job_dir.mkdir()
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    page.insert_image(page.rect, stream=_scan_png())
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+    labels = [
+        {"type": "text", "bbox": _bbox(fitz.Rect(400 + i * 40, 300, 430 + i * 40, 309)), "content": text}
+        for i, text in enumerate(("0.25", "0.50", "Epoch"))
+    ]
+    _write_layout(job_dir, [
+        {"type": "text", "bbox": _bbox(BLOCK), "content": "\n".join(LINES)}, *labels,
+    ], {0: KO})
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    assert result.replaced == 1, result.report()
+    sizes = _hangul_span_sizes(result.path, fitz.Rect(60, 100, 540, 260))
+    assert sizes and max(sizes) >= 9.5, sizes

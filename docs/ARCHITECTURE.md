@@ -452,8 +452,12 @@ OvisOCR2 잡)도 같은 규칙으로 '레이아웃 없음'이다: `has_layout=fa
   않아 어느 경로에서도 정리되지 않았다. `meta.json` 없는 `j_<12hex>` 디렉터리(업로드
   도중 죽은 잔해)는 기동 때 지운다.
 - **대기 잡은 재시작을 넘긴다**: 제출된(`submitted`) 대기 잡 중 `source.pdf`가 `%PDF-`로
-  시작하는 것은 재시작 뒤 생성 순서대로 다시 제출한다. 실행 중이던 잡은 크래시 루프를
-  피하려고 종전대로 error로 마감한다(멈춘 시각을 몰라 `finished_at`은 비운다).
+  시작하는 것은 재시작 뒤 원래 큐 순서대로 다시 제출한다 — 제출 때 `meta.json`에 남긴
+  `submit_order`(ns 단위, 스토어 안에서 단조 증가)로 정렬하고, 그 값이 없는 구버전 meta는
+  `created_at`을 쓴다. 예전에는 초 단위 `created_at` + 무작위 잡 ID로 정렬해 같은 초에 올린
+  잡의 순서가 재시작 때 뒤바뀌었다. `Worker.stop()` 뒤에는 워커가 대기 잡을 새로 맡지 않으므로
+  종료 도중 시작돼 중단으로 마감되는 잡도 없다. 실행 중이던 잡은 크래시 루프를 피하려고 종전대로
+  error로 마감한다(멈춘 시각을 몰라 `finished_at`은 비운다).
 - **페이지 구분자는 잡에 고정**: `meta.json`의 `page_separator`가 그 잡의 `result.md`를
   조립한 값이다. `/html`·document.html 폴백·Q&A·번역이 모두 이 값으로 페이지를 나누므로
   `PAGE_SEPARATOR`를 나중에 바꿔도 옛 잡의 페이지 경계가 깨지지 않는다(옛 잡에는 기동 때
@@ -718,6 +722,12 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 - **서버 종료**: lifespan이 SIGINT/SIGTERM을 잡아 `ShutdownSignal`을 세우면 두 SSE 루프가
   다음 폴(≤1초)에 끝난다 — 실측: 열린 SSE가 있는 실행 중 잡에서 SIGTERM 후 0.75초에 종료
   (예전 13.8초, `docker stop`은 매번 SIGKILL). uvicorn도 `--timeout-graceful-shutdown 5`로 뜬다.
+  신호로 끝나는데 OCR 추론(잡 실행 또는 모델 프리로드)이 데몬 스레드에서 아직 돌면, 앱 정리(PDF
+  워커 풀·소유 락)를 마친 뒤 마지막 atexit 처리기가 로그만 비우고 `os._exit`한다(SIGTERM 0,
+  그 밖에는 128+신호). 그대로 두면 인터프리터 종료의 C++ 정적 소멸자(OpenMP·oneDNN 스레드 풀)가
+  커널을 도는 스레드 밑에서 부서져 `std::terminate` → abort였다 — 컨테이너 PID 1(uvicorn이 다시
+  올린 SIGTERM을 커널이 무시)에서 OCR 중 `docker stop`이 exit 133. 진행 중이던 잡은 다음 기동이
+  '서버 재시작으로 중단'으로 마감한다.
 - 잡 디렉터리가 사라지면(삭제) 루프가 끝난다.
 - 이벤트:
   - `event: progress` `data: {"phase":"ocr","current_page":3,"total_pages":12,"chunk":1,"total_chunks":2,"status":"running"}`

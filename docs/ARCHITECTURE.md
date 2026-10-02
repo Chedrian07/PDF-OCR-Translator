@@ -2353,7 +2353,11 @@ UI가 서버(oMLX·LM Studio·mlx_lm.server)를 켜고 `LLM_LOCAL_OPENAI_BASE_UR
 `LLM_LOCAL_OPENAI_MODEL`을 확인하라고 안내한다 — 오류 문구는 URL이 아니라 설정 이름을 적는다.
 프런트의 첫 공급자는 저장값 → 서버 기본(`LLM_PROVIDER`) → 그 밖의 순이되 `available`인 공급자를
 먼저 고른다(`core.pickQaProvider` — `LLM_PROVIDER`를 비운 배포에서 키 없는 `openai-responses`를
-골라 쓸 수 있는 `local-openai`를 두고 첫 질문이 막혔다). Thinking 토글은 사용자가 고른 적이
+골라 쓸 수 있는 `local-openai`를 두고 첫 질문이 막혔다). 단 의도(저장값, 없으면 서버 기본)가
+로컬(`remote: false`)이면 로컬 공급자로만 넘어가고, 없으면 의도 그대로 두어 전송 가드가 설정
+안내를 보인다 — 가용성은 실시간 프로브(2.5초)라 로컬 서버가 바쁘기만 해도 원격 OpenAI로 바뀌어
+원문이 원격으로 나갔다. 자동으로 고른 공급자는 localStorage에 저장하지 않는다(저장은 사용자가
+바꿀 때만 — 일시 상태가 사용자 선택으로 굳지 않게). Thinking 토글은 사용자가 고른 적이
 없으면 원격 공급자만 켜고 로컬(`remote: false` — Ollama·local-openai)은 끈다(`core.qaThinkingDefault`
 — 로컬 사고 모델은 8192토큰 예산을 사고로 다 써 503이 났다). 고른 값은 localStorage에 남아 그대로다.
 

@@ -994,7 +994,9 @@ def _drain_after_done(resp, chunks, abort: threading.Event) -> None:
     if sock is None:
         return
     try:
-        previous = sock.gettimeout()
+        # 되돌리지 않는다 — 다 읽으면 urllib3가 연결을 공유 풀에 즉시 반납해 다른 워커가 이미
+        # 쓰고 있을 수 있고, urllib3는 재사용 때 전송·응답 대기 직전에 타임아웃을 다시 건다.
+        # 못 다 읽으면 close()가 연결째 닫으므로 이 값이 남지 않는다.
         sock.settimeout(_DRAIN_TIMEOUT_S)
     except OSError:
         return
@@ -1007,11 +1009,6 @@ def _drain_after_done(resp, chunks, abort: threading.Event) -> None:
                 return
     except (requests.RequestException, OSError, Urllib3HTTPError):
         return  # 시간 초과·끊김 — 연결은 close()가 닫는다
-    finally:
-        try:
-            sock.settimeout(previous)
-        except OSError:
-            pass
 
 
 def _hopeless_truncation(text: str, user: str) -> str:

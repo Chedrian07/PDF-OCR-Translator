@@ -1012,7 +1012,7 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 - **기타**: 공백·NBSP가 같은 글리프인 폰트의 ToUnicode를 `<0020>`으로 고쳐 복사한 공백이 NBSP로
   나오지 않게 하고(OCR 레이어 스캔 표본 1,995 → 0), 퇴화 det 좌표는 블록만 건너뛰되 크롭 번호는
   소비한다. 보수적인 장애물 모델 때문에 일부 예전 겹쳐 찍기가 `no_fit`(원문 보존)으로 바뀌었고,
-  25쪽 표본 빌드는 약 12% 느려졌다(가짜 번역 95 → 108초).
+  25쪽 표본 빌드는 약 12% 느려졌다(가짜 번역 95 → 108초 — 조판 시험 빈 페이지 최적화 전 측정).
 - `view=dual`은 UI의 기본 내보내기다. 같은 번호의 원본 페이지를 왼쪽, 위 단일
   번역 PDF 페이지를 오른쪽에 원래 크기로 붙이고 중앙에 1pt 선을 그린다. 따라서
   A4 세로 원본은 A3 가로 대조 페이지가 되며, 래스터화하지 않아 벡터·그림·텍스트
@@ -2276,7 +2276,7 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
 | 상수 | 위치 | 현재 값 | 상향 시 무효화되는 것 | 비용 |
 |---|---|---|---|---|
 | `PROMPT_V` | `translate/types.py` | `"6"` | `translations/{lang}/units.json` **전체**(캐시 키 첫 재료) | **유료 API 전량 재호출** |
-| `PDF_EXPORT_FORMAT_VERSION` | `pipeline/pdf_export/report.py` | `17` | `export.{lang}.pdf`·`.dual.pdf`·`.report.json` | CPU (실측 9.4s/16p — 지금은 export 워커 프로세스) |
+| `PDF_EXPORT_FORMAT_VERSION` | `pipeline/pdf_export/report.py` | `17` | `export.{lang}.pdf`·`.dual.pdf`·`.report.json` | CPU (25쪽 0.33–1.0 s/쪽, CropBox 사본 5.7 s/쪽 — 조건별 실측은 OCR_BENCHMARK §번역 PDF 내보내기, 지금은 export 워커 프로세스) |
 | `ENRICH_VERSION` | `pipeline/pdf_fonts.py` | `6` | `layout.json`의 폰트 메타(`fonts_v`) → 뒤이어 export 캐시 | CPU (재조판) |
 
 - **가장 비싼 것은 번역이다**: 모델·샘플링(`TRANSLATE_TEMPERATURE`·`TRANSLATE_REASONING`)을
@@ -2528,7 +2528,8 @@ spawn 방식 상주 워커 프로세스가 이름 붙은 작업(`'모듈:함수'
   facsimile에서는 `PdfExportError`가 돼 좌표 텍스트 재조판으로 폴백한다. 렌더 중 취소·삭제는
   그 페이지를 그리던 워커를 바로 끝낸다(`render_pdf_pages(…, should_cancel=)`).
 - **빌드**: 번역·대조 PDF 빌드는 export 워커에서 `PDF_EXPORT_BUILD_TIMEOUT_S`(기본 900초) 안에 돈다
-  (실측 약 0.5초/쪽). 시간 초과·비정상 종료는 `PdfExportError`(409)다. 잡 락과 캐시 판정은 서버
+  (실측 0.33–1.0초/쪽 — 번역이 길수록 느리다, CropBox 사본 5.7초/쪽: OCR_BENCHMARK). 시간 초과·비정상
+  종료는 `PdfExportError`(409)다. 잡 락과 캐시 판정은 서버
   프로세스에 남는다(§5 `/pdf`). 실서버 확인: OCR·백필·빌드·대조 빌드·facsimile·document.html
   내내 서버 프로세스는 `_mupdf`를 한 번도 로드하지 않았다(lsof).
 - **워커 안에서는 inline**: 워커 안에서 다시 이 모듈을 거치는 호출(빌드 안의 폰트 주입 등)은 새

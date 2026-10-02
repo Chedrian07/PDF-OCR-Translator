@@ -253,6 +253,26 @@ def test_local_openai_사고_흔적은_답변에서_걷어낸다() -> None:
         _ask(local_client(unclosed))
 
 
+@pytest.mark.parametrize("content", [
+    # reasoning을 분리하지 않는 서버(llama.cpp --reasoning-format none 등)의 태그 없는 원시 사고
+    "Okay, the user asks about page 3. Let me think step by step. First, the figure shows",
+    "3쪽의 그림은 모델 구조를 보여 주며, 인코더는 여섯 개의 층으로",   # 중간에 잘린 답
+], ids=["raw-thinking", "cut-answer"])
+def test_local_openai_max_tokens에서_잘린_답은_돌려주지_않는다(content) -> None:
+    """finish_reason=length를 무시해 잘린 답이나 원시 사고를 완전한 답변으로 반환했다 —
+    '원시 chain-of-thought 비노출' 계약 위반이고 사용자는 잘린 줄 모른다(translate-11)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{
+            "index": 0, "finish_reason": "length",
+            "message": {"role": "assistant", "content": content},
+        }], "usage": {"completion_tokens": body["max_tokens"]}})
+
+    with pytest.raises(LlmError, match="max_tokens") as exc:
+        _ask(local_client(handler), thinking=True)
+    assert content not in str(exc.value)
+
+
 def test_local_openai_허용목록_밖_모델은_요청_전에_거절() -> None:
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
         raise AssertionError("허용목록 밖 모델로 요청이 나갔다")

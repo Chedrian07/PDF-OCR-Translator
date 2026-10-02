@@ -451,6 +451,34 @@ export function rateLimitNotice(retryAfter, detail, nowMs = Date.now()) {
   };
 }
 
+// 처음 고를 Q&A 공급자 — 저장값 → 서버 기본 → 그 밖의 순이되 쓸 수 있는(available) 공급자를
+// 먼저 고른다. 예전에는 LLM_PROVIDER를 비운 배포에서 서버 기본(openai-responses — 키가 없어
+// '설정 필요')을 골라, 쓸 수 있는 공급자가 local-openai뿐인데도 첫 질문이 안내 문구로 막혔다
+// (P4 실앱). 쓸 수 있는 공급자가 하나도 없으면 예전 순서 그대로(선택한 공급자의 설정 안내).
+export function pickQaProvider(catalog, savedProvider) {
+  const providers = (catalog && Array.isArray(catalog.providers))
+    ? catalog.providers.filter((p) => p && typeof p.id === 'string' && p.id)
+    : [];
+  const ids = providers.map((p) => p.id);
+  const usable = providers.filter((p) => p.available).map((p) => p.id);
+  const preferred = [savedProvider, catalog && catalog.default_provider];
+  for (const id of preferred) if (usable.includes(id)) return id;
+  if (usable.length) return usable[0];
+  for (const id of preferred) if (ids.includes(id)) return id;
+  return ids[0] || '';
+}
+
+// Thinking 토글의 값 — 사용자가 고른 적이 있으면 그 값, 없으면 원격(OpenAI) 공급자만 켠다.
+// 로컬 사고 모델(mlx_lm·Ollama의 Qwen 등)은 같은 출력 예산에서 사고가 답을 밀어내 잘렸다
+// (실측 로컬 0.8B: ON은 8192토큰 사고 뒤 32초 만에 '잘림' 503, OFF는 0.36초에 답 — P4 실앱).
+export function qaThinkingDefault(catalog, providerId, saved) {
+  if (saved === 'true') return true;
+  if (saved === 'false') return false;
+  const providers = (catalog && Array.isArray(catalog.providers)) ? catalog.providers : [];
+  const p = providers.find((x) => x && x.id === providerId) || null;
+  return !(p && p.remote === false);
+}
+
 // /api/providers 카탈로그에서 공급자 하나의 모델 목록/기본 모델/가용성 추출.
 // 모델 목록이 비어 있으면 default_model 하나로 폴백(선택지 유지), 카탈로그에
 // 없는 공급자·비정상 응답은 전부 빈 값/false — 소비처는 가드 문구로 처리.

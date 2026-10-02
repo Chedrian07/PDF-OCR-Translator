@@ -273,6 +273,18 @@ def test_local_openai_max_tokens에서_잘린_답은_돌려주지_않는다(cont
     assert content not in str(exc.value)
 
 
+def test_local_openai_연결_실패_문구에_주소를_싣지_않는다() -> None:
+    """Q&A 오류 문구는 /qa 응답으로 그대로 나간다 — 번역 클라이언트와 같은 규칙으로
+    설정 주소 대신 설정 이름만 안내한다(security-2)."""
+    def down(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    with pytest.raises(LlmError, match="not running") as exc:
+        _ask(local_client(down))
+    assert "LLM_LOCAL_OPENAI_BASE_URL" in str(exc.value)
+    assert "127.0.0.1" not in str(exc.value) and "1235" not in str(exc.value)
+
+
 def test_local_openai_허용목록_밖_모델은_요청_전에_거절() -> None:
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
         raise AssertionError("허용목록 밖 모델로 요청이 나갔다")

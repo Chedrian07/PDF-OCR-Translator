@@ -11,6 +11,7 @@
 //  · 잡을 삭제하면 저장값도 지운다.
 //  · 같은 잡을 연 다른 탭과 저장소를 공유한다 — 저장·삭제는 최신 저장값 위에 적용하고(덮어쓰기
 //    없음), 다른 탭의 변경은 storage 이벤트로 목록·하이라이트에 맞춘다(frontend-1).
+//  · 목록은 메모 id 기반 증분 렌더다 — 지운 줄의 키보드 포커스는 이웃 줄로 옮긴다(frontend-6).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,11 +26,11 @@ import {
 import { forgetReaderNotes, loadReaderNotes, saveReaderNotes } from '../js/notes.js';
 import { el, state } from '../js/state.js';
 import {
-  copyReaderNotes, deleteReaderNote, onReaderNotesStorage, renderReaderDocument, resetReaderForJob,
-  saveReaderCitation,
+  copyReaderNotes, deleteReaderNote, onReaderNotesStorage, renderReaderDocument, renderReaderNotes,
+  resetReaderForJob, saveReaderCitation,
 } from '../js/reader.js';
 import { deleteJob } from '../js/jobs.js';
-import { installFakeStorage, mount } from './helpers/fake-dom.mjs';
+import { assertSameNode, installFakeStorage, mount } from './helpers/fake-dom.mjs';
 import { alignment, setupReader } from './helpers/reader-setup.mjs';
 
 const note = (over = {}) => ({
@@ -368,4 +369,58 @@ test('storage 이벤트: 다른 탭의 저장·삭제를 목록과 하이라이�
   assert.deepEqual(state.readerNotes, []);
   assert.deepEqual(marks(), []);
   assert.equal(el.readerNotesBadge.hidden, true);
+});
+
+/* ---------------- 런타임: 삭제 뒤 키보드 포커스 (frontend-6) ---------------- */
+
+// [선택 문장 도구] details 안에 목록을 둔다(실제 index.html과 같은 자리).
+function notesInTools(doc) {
+  const tools = mount(doc, 'details');
+  const summary = doc.createElement('summary');
+  tools.append(summary, el.readerNotesList);
+  return summary;
+}
+
+test('목록에서 지우면 포커스가 같은 자리의 다음 삭제 버튼으로, 다 지우면 도구 제목으로 간다', (t) => {
+  const { doc } = setupNotes(t);
+  const summary = notesInTools(doc);
+  saveReaderNotes('job-a', [
+    note({ id: 'n1', page: 1, text: '첫째' }), note({ id: 'n2', page: 2, text: '둘째' }),
+    note({ id: 'n3', page: 3, text: '셋째' }),
+  ]);
+  resetReaderForJob();
+  const row = (id) => el.readerNotesList.querySelector(`[data-note-id="${id}"]`);
+  const del = (id) => row(id).querySelector('.reader-note-del');
+  const third = row('n3');
+
+  del('n2').focus();
+  del('n2').click();
+  assertSameNode(assert, row('n3'), third, '남은 줄은 다시 만들지 않는다');
+  assertSameNode(assert, document.activeElement, del('n3'),
+    '가운데 줄을 지우면 같은 자리(다음 줄)의 삭제 버튼으로 — 예전에는 body로 날아갔다');
+
+  del('n3').click(); // 마지막 줄 — 바로 앞 줄로
+  assertSameNode(assert, document.activeElement, del('n1'));
+
+  del('n1').click(); // 목록이 비면 도구 제목으로
+  assert.equal(el.readerNotesList.querySelectorAll('li').length, 0);
+  assertSameNode(assert, document.activeElement, summary);
+});
+
+test('다른 탭의 변경으로 목록을 다시 맞춰도 남은 줄의 포커스는 그대로다', (t) => {
+  const { doc } = setupNotes(t);
+  notesInTools(doc);
+  saveReaderNotes('job-a', [note({ id: 'k1', page: 1, text: '하나' }), note({ id: 'k2', page: 2, text: '둘' })]);
+  resetReaderForJob();
+  const page = el.readerNotesList.querySelector('[data-note-id="k2"] .reader-note-page');
+  page.focus();
+  saveReaderNotes('job-a', [
+    note({ id: 'k0', page: 1, text: '다른 탭의 새 메모', at: 0 }),
+    note({ id: 'k2', page: 2, text: '둘' }),
+  ]);
+  onReaderNotesStorage({ key: readerNotesKey('job-a') });
+  assert.deepEqual(el.readerNotesList.querySelectorAll('li').map((li) => li.dataset.noteId), ['k0', 'k2']);
+  assertSameNode(assert, document.activeElement, page, '포커스가 있던 줄은 옮기지도 다시 만들지도 않는다');
+  renderReaderNotes(); // 바뀐 것이 없으면 아무것도 건드리지 않는다
+  assertSameNode(assert, document.activeElement, page);
 });

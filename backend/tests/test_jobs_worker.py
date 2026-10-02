@@ -226,3 +226,50 @@ def test_interrupted_and_legacy_jobs_leave_unknown_times_empty(tmp_path):
     legacy = restored.get("j_0123456789ab")
     assert (legacy.started_at, legacy.finished_at) == (None, None)
     assert legacy.to_dict()["started_at"] is None
+
+
+# ── 종료 요청 뒤 워커는 새 잡을 맡지 않는다 (P4 docker stop) ─────────────────────
+
+
+def test_stopped_worker_leaves_queued_jobs_for_the_next_start(tmp_path):
+    """stop() 뒤에는 큐에 남은 대기 잡을 꺼내지 않는다 — queued·제출 표식 그대로 남아 다음
+    기동(load_existing)이 다시 제출한다. 예전에는 sentinel 앞의 잡을 이어서 맡아, 프로세스가
+    끝나는 순간 running으로 남아 재시작 때 '서버 재시작으로 중단' 오류가 됐다."""
+    import json
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class _Gated(FakeEngine):
+        def run_multi(self, image_paths, out_dir, sink, cancel):
+            started.set()
+            assert release.wait(10), "게이트가 열리지 않았다"
+            return super().run_multi(image_paths, out_dir, sink, cancel)
+
+    engine = _Gated(delay=0.0)
+    store = JobStore(tmp_path / "jobs")
+    settings = Settings(engine="fake", device="cpu", data_dir=tmp_path / "data")
+    worker = Worker(store, EventBroker(), engine, settings, {})
+    first, second = (store.create("doc.pdf", "multi", dpi=72) for _ in range(2))
+    for job in (first, second):
+        (job.dir / "source.pdf").write_bytes(make_pdf_bytes(pages=1, with_image=False))
+    engine.load()
+    worker.start()
+    try:
+        worker.submit(first)
+        worker.submit(second)
+        assert started.wait(10)
+        assert worker.current_job_id == first.id
+        worker.stop()                    # 앞 잡이 도는 중에 종료 요청
+    finally:
+        release.set()
+        worker.join(timeout=15)
+    assert not worker.is_alive()
+    assert first.status == "done"                       # 진행 중이던 잡은 끝까지
+    assert worker.current_job_id is None
+    assert second.status == "queued" and not second.claimed
+    meta = json.loads((second.dir / "meta.json").read_text(encoding="utf-8"))
+    assert (meta["status"], meta["submitted"]) == ("queued", True)
+    restored = JobStore(tmp_path / "jobs").load_existing()
+    assert [job.id for job in restored] == [second.id]   # 다음 기동이 다시 제출한다

@@ -22,7 +22,13 @@ from ..engine.base import (
 from ..engine.objc_pool import autorelease_pool
 from .fidelity import PageFidelity, evaluate_layout_pages, evaluate_raw_page
 from .layout import blocks_to_raw
-from .merge import ChunkResult, IncrementalMerger, keep_leading_pages, split_pages
+from .merge import (
+    ChunkResult,
+    CompletedPrefix,
+    IncrementalMerger,
+    keep_leading_pages,
+    split_pages,
+)
 from .pdf import extract_embedded_page_markdown, render_pdf_pages
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -302,11 +308,12 @@ def chunk_length_budget_note(settings: "Settings", engine: OCREngine) -> str | N
 
     최악 길이 = 쪽 수 × (MAX_PAGE_OUTPUT_TOKENS + 쪽당 이미지 토큰) + 프롬프트 텍스트.
     배포 기본값(MAX_LENGTH 32,768 < 8쪽 × (6,144 + 273) + 5 = 51,341)에서 늘 참이라,
-    예전처럼 잡마다 WARNING으로 내면 모든 multi 잡이 경고로 시작했다. 넘쳐도 잃는 것은
-    없다 — 잘린 청크는 끝까지 생성된 앞 페이지를 지키고 잘린 페이지부터 페이지별로 다시
-    처리한다(시간만 더 든다). 그래서 설정 안내로 한 번만 알린다. MAX_LENGTH를 쓰는
-    생성 엔진(unlimited: torch·MLX)이 토큰을 스트리밍하는 multi 청크에만 해당한다 —
-    아니면 None."""
+    예전처럼 잡마다 WARNING으로 내면 모든 multi 잡이 경고로 시작했다. 넘쳐도 잘린 청크는
+    끝까지 생성된 앞 페이지(텍스트 레이어가 있으면 원본과 대조해 확인한 페이지)를 지키고
+    잘린 페이지부터 페이지별로 다시 처리한다(시간이 더 든다). 그래서 설정 안내로 한 번만
+    알린다. 대조할 텍스트 레이어가 없는 스캔은 모델의 페이지 마커를 그대로 믿으므로 '내용이
+    빠지지 않는다'고 단정하지 않는다. MAX_LENGTH를 쓰는 생성 엔진(unlimited: torch·MLX)이
+    토큰을 스트리밍하는 multi 청크에만 해당한다 — 아니면 None."""
     if engine.name != "unlimited":
         return None  # 능력 조회 전에 거른다(textlayer는 Tesseract 버전을 프로세스로 묻는다)
     caps = engine.capabilities()
@@ -323,10 +330,10 @@ def chunk_length_budget_note(settings: "Settings", engine: OCREngine) -> str | N
         f"참고: MAX_LENGTH={settings.max_length:,}는 {pages}쪽 청크의 최악 길이 "
         f"{worst:,}토큰({pages}쪽 × (MAX_PAGE_OUTPUT_TOKENS {page_tokens:,} + 이미지 "
         f"{_MULTI_IMAGE_TOKENS_PER_PAGE}) + 프롬프트 {_MULTI_PROMPT_TEXT_TOKENS})보다 작습니다. "
-        "출력이 아주 긴 청크는 꼬리 페이지가 MAX_LENGTH에서 잘리지만, 끝까지 생성된 앞 "
-        "페이지는 그대로 쓰고 잘린 페이지부터 페이지별로 다시 처리하므로 내용은 빠지지 "
-        "않습니다(시간만 더 듭니다). 재처리를 줄이려면 MAX_LENGTH를 늘리거나 "
-        "PAGES_PER_CHUNK를 줄이세요."
+        "출력이 아주 긴 청크는 꼬리 페이지가 MAX_LENGTH에서 잘립니다. 끝까지 생성된 앞 "
+        "페이지(텍스트 레이어가 있으면 원본 본문과 대조해 확인한 페이지)는 그대로 쓰고 잘린 "
+        "페이지부터 페이지별로 다시 처리하므로 시간이 더 듭니다. 재처리를 줄이려면 "
+        "MAX_LENGTH를 늘리거나 PAGES_PER_CHUNK를 줄이세요."
     )
 
 
@@ -396,23 +403,20 @@ def _failure_reason(error: BaseException) -> str:
     return "변환 실패"
 
 
-def _completed_pages(error: BaseException, num_pages: int) -> tuple[int, str]:
-    """MAX_LENGTH에서 잘린 multi 출력 중 **끝까지 생성된** 앞 페이지 수와 그 마크다운.
+def _truncated_segments(error: BaseException) -> list[str]:
+    """MAX_LENGTH에서 잘린 multi 출력의 페이지 세그먼트 — 마지막이 잘린 페이지다.
 
     엔진이 OutputLimitError.partial_output에 run_multi 형식(`<PAGE>` 구분, 산출물은
-    out_dir에 있음)의 출력을 실어 주면, 마지막 세그먼트(잘린 페이지)를 뺀 앞 페이지는
-    그대로 살린다. 판단할 수 없으면 (0, "") — 청크 전체를 페이지별로 다시 처리한다.
+    out_dir에 있음)의 출력을 실어 줬을 때만이다. 어느 앞부분을 살릴지는 병합기가 원본과
+    대조해 정한다(IncrementalMerger.completed_prefix). 판단할 수 없으면 빈 목록 — 청크
+    전체를 페이지별로 다시 처리한다.
     """
     if not isinstance(error, OutputLimitError):
-        return 0, ""
+        return []
     partial = error.partial_output
     if not isinstance(partial, str) or "<PAGE>" not in partial:
-        return 0, ""
-    segments = split_pages(partial)
-    keep = len(segments) - 1
-    if not 0 < keep < num_pages:
-        return 0, ""
-    return keep, "<PAGE>\n" + "\n<PAGE>\n".join(segments[:keep])
+        return []
+    return split_pages(partial)
 
 
 def _add_failed_chunk(
@@ -524,6 +528,21 @@ def execute_job(
                 f"{engine.name} 엔진은 페이지 단위 모델이라 문서를 페이지별로 처리했습니다"
                 " (결과는 동일하게 하나의 Markdown으로 병합됨)"
             )
+
+        def _relive_text(page_number: int) -> str:
+            """이미 병합한 페이지를 라이브에 **다시** 내보낼 때 쓸 본문.
+
+            병합된 마크다운을 그대로 흘리면 `<|det|>` 태그가 없어 그 페이지들의
+            레이아웃 박스가 라이브 뷰에서 사라진다(RAW·미리보기만 남는다).
+            layout 블록에서 grounding을 복원해 박스 귀속을 지킨다.
+            """
+            for entry in merger.layout_pages:
+                if int(entry.get("page") or 0) == page_number:
+                    restored = blocks_to_raw(entry.get("blocks") or [])
+                    if restored.strip():
+                        return restored
+                    break
+            return merger.pages_md[page_number - 1]
 
         def _try_embedded_text_fallback(
             page_number: int,
@@ -748,21 +767,6 @@ def execute_job(
                     degraded = sorted(chosen)
                 first = degraded[0]
 
-                def _relive_text(page_number: int) -> str:
-                    """이미 병합한 페이지를 라이브에 **다시** 내보낼 때 쓸 본문.
-
-                    병합된 마크다운을 그대로 흘리면 `<|det|>` 태그가 없어 그 페이지들의
-                    레이아웃 박스가 라이브 뷰에서 사라진다(RAW·미리보기만 남는다).
-                    layout 블록에서 grounding을 복원해 박스 귀속을 지킨다.
-                    """
-                    for entry in merger.layout_pages:
-                        if int(entry.get("page") or 0) == page_number:
-                            restored = blocks_to_raw(entry.get("blocks") or [])
-                            if restored.strip():
-                                return restored
-                            break
-                    return merger.pages_md[page_number - 1]
-
                 # 라이브 뷰는 페이지 단위로만 되감을 수 있다. 첫 열화 페이지까지
                 # 물린 뒤, 그 뒤 정상 페이지는 병합된 마크다운으로 다시 내보낸다.
                 sink.rewind_to(first, "충실도 게이트 — 열화 페이지 재처리")
@@ -898,7 +902,17 @@ def execute_job(
                 if cancel.is_set():
                     raise JobCanceled()
                 span = _page_span(start_page, len(chunk))
-                keep, kept_md = _completed_pages(chunk_error, len(chunk))
+                segments = _truncated_segments(chunk_error)
+                # 살릴 앞부분은 세그먼트 수만으로 정하지 않는다 — 잘리기 전에 모델이 페이지를
+                # 쪼개거나 건너뛰었으면 앞 페이지가 밀리고 잘린 페이지 직전 본문이 사라진다.
+                # 모델 마커로 페이지를 나누는 엔진이면 원본 텍스트 레이어와 대조해 확인한다.
+                prefix = (
+                    merger.completed_prefix(
+                        start_page, len(chunk), segments, verify=caps.supports_multi_page,
+                    )
+                    if segments else CompletedPrefix()
+                )
+                keep = prefix.pages
                 # 닿은 상한의 이름(엔진 계약) — keep>0은 OutputLimitError뿐이다
                 limit = chunk_error.limit_label if isinstance(chunk_error, OutputLimitError) else ""
                 if isinstance(chunk_error, OutputLimitError):
@@ -916,10 +930,22 @@ def execute_job(
                 merger.notices.append(f"{span}: {head} ({str(chunk_error)[:200]})")
 
                 if keep:
-                    # 잘린 페이지·시작 못 한 페이지의 산출물만 지우고 앞 페이지는 병합한다.
-                    keep_leading_pages(work_dir, keep)
-                    sink.rewind_to(start_page + keep, f"{limit} 도달 — 잘린 페이지부터 재처리")
-                    merger.add_chunk(ChunkResult(work_dir, start_page, keep, kept_md))
+                    # 잘린 페이지·시작 못 한 페이지의 산출물만 지우고 앞 페이지는 병합한다
+                    # (산출물 이름은 모델 세그먼트 번호를 따른다 — 남길 세그먼트 수로 자른다).
+                    keep_leading_pages(work_dir, len(prefix.segments))
+                    reason = f"{limit} 도달 — 잘린 페이지부터 재처리"
+                    if prefix.alignment is None:
+                        sink.rewind_to(start_page + keep, reason)
+                    else:
+                        # 라이브 스트림의 세그먼트는 모델 마커를 따라 물리 페이지와 어긋나 있다
+                        # — 청크 시작부터 물리고 병합한 앞 페이지를 제자리에 다시 내보낸다.
+                        sink.rewind_to(start_page, reason)
+                    merger.add_chunk(ChunkResult(
+                        work_dir, start_page, keep, prefix.markdown, alignment=prefix.alignment,
+                    ))
+                    if prefix.alignment is not None:
+                        for page_number in range(start_page, start_page + keep):
+                            sink.emit_page(page_number, _relive_text(page_number))
                     _gate(start_page, chunk[:keep])
                 else:
                     # multi와 single은 이미지/레이아웃 파일명 규약이 다르다. 부분 multi

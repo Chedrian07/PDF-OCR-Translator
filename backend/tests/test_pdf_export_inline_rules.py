@@ -178,3 +178,58 @@ def test_qed_box_and_long_rules_inside_a_translated_paragraph_survive(tmp_path):
 
     assert before == 5
     assert len(_drawings(result.path)) == 5
+
+
+def test_zero_thickness_rules_inside_a_figure_are_not_owned():
+    """get_drawings는 스트로크 선('s'·'l')을 높이 0인 사각형으로 보고한다. 빈 사각형의 intersects는
+    늘 거짓이라 '그림 영역에 걸친 선은 건드리지 않는다' 가드가 가장 흔한 TeX·matplotlib 선에서
+    꺼져 있었다 — 같은 자리의 0.4pt 채움 사각형만 걸렸다(delta-pdf-translate-6)."""
+    from app.pipeline.pdf_export import build as build_mod
+
+    figure = fitz.Rect(148, 158, 452, 398)
+    caption = fitz.Rect(140, 385, 460, 420)         # OCR bbox가 그림 아래쪽에 몇 pt 겹친 캡션
+    blocks = [{"type": "text", "content": "Figure 1: results"}]
+    legend = fitz.Rect(160, 392, 185, 392)           # 그림 안 범례 선 — 높이 0
+    assert legend.is_empty and not legend.intersects(figure) and figure.contains(legend)
+    assert build_mod._inline_rule_owner(legend, [caption], blocks, [figure]) is None
+    filled = fitz.Rect(160, 391.8, 185, 392.2)       # 대조군: 두께 있는 같은 선
+    assert build_mod._inline_rule_owner(filled, [caption], blocks, [figure]) is None
+    # 그림 밖(캡션 글줄 안)의 두께 0 분수선은 여전히 캡션이 주인이다
+    fraction = fitz.Rect(300, 410, 306, 410)
+    assert build_mod._inline_rule_owner(fraction, [caption], blocks, [figure]) == 0
+
+
+def test_translating_a_caption_keeps_the_figure_legend_line(tmp_path):
+    """그림 아래쪽에 OCR bbox가 몇 pt 겹친 캡션을 번역해도 그림 속 범례 선(높이 0 스트로크)은
+    남는다. 예전에는 캡션이 그 선을 '자기 수식 선'으로 소유해 캡션 교체와 함께 지웠다."""
+    job_dir, doc, page = _new_source(tmp_path, "legend")
+    shape = page.new_shape()
+    shape.draw_rect(fitz.Rect(150, 160, 450, 380))
+    shape.finish(color=(0, 0, 0), width=0.6)
+    shape.commit()
+    shape = page.new_shape()
+    shape.draw_line(fitz.Point(160, 392), fitz.Point(185, 392))          # 범례 표본 선
+    shape.finish(color=(0.1, 0.3, 0.8), width=1.0, closePath=False)
+    shape.commit()
+    page.insert_text(fitz.Point(190, 395), "TurboQuant", fontsize=8, fontname="helv")
+    caption_text = ("Figure 2: Mean squared error versus bit width for the proposed quantizer "
+                    "and the baselines on synthetic data.")
+    page.insert_textbox(fitz.Rect(72, 404, 540, 430), caption_text, fontsize=9, fontname="tiro")
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+    figure = fitz.Rect(148, 158, 452, 398)
+    caption = fitz.Rect(70, 386, 542, 432)        # 캡션 글자보다 8pt 위(그림의 범례 줄)에서 시작
+    blocks = [
+        {"type": "image", "bbox": _bbox(figure), "content": ""},
+        {**_block(caption, caption_text), "type": "image_caption"},
+    ]
+    _write_job(tmp_path, "legend", blocks,
+               {1: "그림 2: 합성 데이터에서 제안한 양자화기와 기준선의 비트 폭에 따른 평균 제곱 오차."})
+
+    result = build_translated_pdf(job_dir, "ko")
+    assert result.replaced == 1                    # 캡션은 번역문으로 바뀌었다
+    legend_lines = [
+        rect for rect in _drawings(result.path)
+        if abs(rect.y0 - 392) < 1 and rect.x0 < 165 and rect.x1 > 180 and rect.height < 2
+    ]
+    assert legend_lines, _drawings(result.path)

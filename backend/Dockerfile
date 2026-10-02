@@ -12,7 +12,7 @@ ARG TORCH_VARIANT=cpu
 # 갱신: `docker buildx imagetools inspect <이미지:태그>`의 Digest로 교체하고 릴리스
 # 노트에 남긴다. digest 고정만 하면 OS 보안 패치가 멈추므로 런타임 단계의
 # apt-get upgrade와 반드시 함께 간다(Dependabot docker 생태계가 갱신 PR을 연다).
-FROM ghcr.io/astral-sh/uv:0.11.33@sha256:77280f2f771df71f90786c314fe1bbc1e023feac652969bbf139c280babf2eb7 AS uv
+FROM ghcr.io/astral-sh/uv:0.12.22@sha256:f513a91fc62fe7c17567eee97230dd198e43edb8a9fbecca843714a4358fe1bc AS uv
 
 # ── 1단계: 의존성 + 네이티브 모듈 빌드 ─────────────────────────
 FROM python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS builder

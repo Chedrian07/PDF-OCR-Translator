@@ -371,7 +371,13 @@ def _radicals(page, clip) -> list[fitz.Rect]:
 
 
 @pytest.mark.skipif(not _SAMPLE_PDF.is_file(), reason="sample/2504.19874v1.pdf 없음")
-def test_translated_bullet_takes_its_protruding_radical_with_it(tmp_path):
+@pytest.mark.parametrize("rot", [0, 90, 270])
+def test_translated_bullet_takes_its_protruding_radical_with_it(tmp_path, rot):
+    """회전 쪽(내용을 돌려 그리고 /Rotate로 바로 세운 쪽)도 같다 — span 방향이 회전 전 좌표로
+    (0,-1)이라 예전에는 '가로로 쓴 줄'이 아니라며 근호를 붙이지 않아 번역문 위에 '√'가 남았다
+    (delta-pdf-translate-2)."""
+    from tests.test_pdf_export_inline_rules import rotate_display_preserving
+
     job_dir = tmp_path / "radical"
     job_dir.mkdir()
     with fitz.open(_SAMPLE_PDF) as doc:
@@ -381,6 +387,8 @@ def test_translated_bullet_takes_its_protruding_radical_with_it(tmp_path):
         single.close()
         source_text = doc[9].get_text(clip=fitz.Rect(85, 668, 496, 695)).replace("\n", " ")
         assert _radicals(doc[9], fitz.Rect(380, 665, 400, 680))      # 원문에는 근호가 있다
+    if rot:
+        rotate_display_preserving(job_dir / "source.pdf", rot)
     original = [{"page": 1, "width": 1700, "height": 2200, "blocks": [
         {"type": "text", "bbox": _RADICAL_BBOX, "content": "- " + source_text, "fs": 1.78},
     ]}]
@@ -396,10 +404,15 @@ def test_translated_bullet_takes_its_protruding_radical_with_it(tmp_path):
     assert result.replaced == 1, result.report()
     with fitz.open(result.path) as exported:
         page = exported[0]
-        assert _radicals(page, fitz.Rect(380, 665, 400, 680)) == []
+        # 화면 좌표의 근호 자리 — 회전 쪽은 회전 전 좌표로 옮겨 찾는다
+        clip = fitz.Rect(380, 665, 400, 680) * page.derotation_matrix
+        clip.normalize()
+        above = fitz.Rect(60, 600, 560, 668) * page.derotation_matrix
+        above.normalize()
+        assert _radicals(page, clip) == []
         assert "상한이 있다" in page.get_text().replace("\xa0", " ")
         # 블록 밖 윗줄(정리 1 본문 — 레이아웃에 없어 원문 그대로)은 남는다
-        assert "Theorem 1" in page.get_text(clip=fitz.Rect(60, 600, 560, 668))
+        assert "Theorem 1" in page.get_text(clip=above)
 
 
 def _symbol(text: str, rect: tuple, *, direction=(1.0, 0.0)) -> _SourceSpan:

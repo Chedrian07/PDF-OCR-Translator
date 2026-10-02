@@ -283,7 +283,9 @@ def sanitize_translation(
     # '$b \\geq 0 <m3/>'처럼 짝을 잃어 알아볼 수 없으므로 달러 규칙보다 먼저 본다
     retyped = 0
     if masked and mapping:
-        out, retyped = _strip_retyped_math(out, mapping)
+        out, retyped = _strip_retyped_math(
+            out, mapping, open_runs="$" not in _outside_placeholder_tags(masked),
+        )
     # 이중 달러를 지운 뒤 — `$$<m1/>$$`는 위에서 이미 맨 플레이스홀더가 됐다
     out, wrapped = _DOLLAR_WRAPPED_MATH_RE.subn(r"\1", out)
     if masked:
@@ -330,11 +332,18 @@ def _source_after_tag(masked: str, pid: str) -> str:
 
 def _strip_tag_tails(out: str, masked: str) -> tuple[str, int]:
     count = 0
+    # 부등호는 출력의 '>'가 원문보다 많은 만큼만 지운다 — 원문 '$x$ > 0'을 모델이 '<m1/>>0'으로
+    # 붙여 쓴 것은 꼬리가 아니라 옮긴 부등호다
+    extra_gt = (
+        _outside_placeholder_tags(out).count(">") - _outside_placeholder_tags(masked).count(">")
+    )
 
     def _tail(match: re.Match) -> str:
-        nonlocal count
-        if _source_after_tag(masked, match.group(2)).startswith(match.group(3)):
+        nonlocal count, extra_gt
+        after = _source_after_tag(masked, match.group(2))
+        if extra_gt <= 0 or after.startswith(match.group(3)) or after.lstrip(" \t").startswith(">"):
             return match.group(0)
+        extra_gt -= 1
         count += 1
         return match.group(1)
 
@@ -424,7 +433,9 @@ def _retyped_fix(typed: str, tag: str, original) -> str | None:
     return None
 
 
-def _strip_retyped_math(out: str, mapping: dict) -> tuple[str, int]:
+def _strip_retyped_math(out: str, mapping: dict, *, open_runs: bool = True) -> tuple[str, int]:
+    """open_runs=False면 닫는 '$' 없는 꼴은 보지 않는다 — 원문 산문에 '$'(통화)가 있으면 그
+    '$'가 다시 친 식의 여는 '$'인지 통화인지 가릴 수 없다."""
     count = 0
 
     def _before(match: re.Match) -> str:
@@ -445,7 +456,8 @@ def _strip_retyped_math(out: str, mapping: dict) -> tuple[str, int]:
 
     out = _RETYPED_BEFORE_RE.sub(_before, out)
     out = _RETYPED_AFTER_RE.sub(_after, out)
-    out = _RETYPED_OPEN_RE.sub(_before, out)
+    if open_runs:
+        out = _RETYPED_OPEN_RE.sub(_before, out)
     return out, count
 
 

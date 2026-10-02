@@ -2210,13 +2210,13 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
 
 이 리포에는 산출물 캐시를 무효화하는 **버전 상수가 셋** 있다. 오르면 기존 배포를 올린 뒤
 잡마다 1회씩 아래가 실제로 일어난다. **코드 변경 없이 조용히 일어나므로**, 모르면 "왜 갑자기
-느리고 청구서가 늘었나"가 된다. 0.1.0 이후 사이클에서는 `PDF_EXPORT_FORMAT_VERSION`(→ 11)과
+느리고 청구서가 늘었나"가 된다. 0.1.0 이후 사이클에서는 `PDF_EXPORT_FORMAT_VERSION`(→ 16)과
 `ENRICH_VERSION`(→ 6)이 올랐고 `PROMPT_V`는 그대로다(아래 '이번 업그레이드').
 
 | 상수 | 위치 | 현재 값 | 상향 시 무효화되는 것 | 비용 |
 |---|---|---|---|---|
 | `PROMPT_V` | `translate/types.py` | `"6"` | `translations/{lang}/units.json` **전체**(캐시 키 첫 재료) | **유료 API 전량 재호출** |
-| `PDF_EXPORT_FORMAT_VERSION` | `pipeline/pdf_export/report.py` | `11` | `export.{lang}.pdf`·`.dual.pdf`·`.report.json` | CPU (실측 9.4s/16p — 지금은 export 워커 프로세스) |
+| `PDF_EXPORT_FORMAT_VERSION` | `pipeline/pdf_export/report.py` | `16` | `export.{lang}.pdf`·`.dual.pdf`·`.report.json` | CPU (실측 9.4s/16p — 지금은 export 워커 프로세스) |
 | `ENRICH_VERSION` | `pipeline/pdf_fonts.py` | `6` | `layout.json`의 폰트 메타(`fonts_v`) → 뒤이어 export 캐시 | CPU (재조판) |
 
 - **가장 비싼 것은 번역이다**: 모델·샘플링(`TRANSLATE_TEMPERATURE`·`TRANSLATE_REASONING`)을
@@ -2244,7 +2244,7 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
 
 #### 이번 업그레이드(0.1.0 → 현재)에서 운영자가 보게 되는 것
 
-- **내보내기 캐시 1회 재생성**: `PDF_EXPORT_FORMAT_VERSION` 11과 새 빌드 스탬프(§5 `/pdf` —
+- **내보내기 캐시 1회 재생성**: `PDF_EXPORT_FORMAT_VERSION` 16과 새 빌드 스탬프(§5 `/pdf` —
   옛 `export.{lang}.font.txt`는 스탬프가 아니라 무효), `archive.zip`의 내용 서명 때문에 잡마다
   번역 PDF·대조 PDF·ZIP을 한 번씩 다시 만든다. `ENRICH_VERSION` 6이라 layout 폰트 메타도 잡마다
   한 번 다시 주입된다(회전 페이지 수정).

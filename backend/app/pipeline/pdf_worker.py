@@ -46,9 +46,11 @@ MuPDF C 호출은 GIL을 쥔 채 돌고(`nm -u _mupdf.so`에 PyEval_SaveThread�
   `__main__`도 다시 실행하지 않는다(_spawn_without_main 참조).
 - 로그는 stderr로(서버 콘솔·docker logs에 그대로 섞인다), 프로세스 이름(pdf-ocr-1 등)을 붙인다.
 - SIGINT는 무시한다(개발 서버 Ctrl+C는 부모가 정리한다).
-- 임시 파일(tempfile — 폰트 서브셋 등)은 워커 전용 디렉터리(시스템 임시 경로의
-  pdfocr-worker-<풀>-<pid>)에 만든다. 상한 초과로 종료된 워커는 정리 코드를 못 돌리므로
-  부모가 그 디렉터리를 지우고, 이전 서버가 SIGKILL로 남긴 것은 첫 풀 생성 때 쓸어 낸다.
+- 임시 파일(tempfile — 폰트 서브셋 등)은 워커 전용 디렉터리에 만든다. 부모가 워커마다
+  mkdtemp로 새로 만들어(시스템 임시 경로의 pdfocr-worker-<풀>-<서버 pid>-<임의>, 0700) 경로를
+  넘긴다 — 이름을 예측할 수 없고 이미 있는 경로(다른 사용자가 미리 심은 심볼릭 링크 등)를
+  받아들이지 않는다. 상한 초과로 종료된 워커는 정리 코드를 못 돌리므로 부모가 그 디렉터리를
+  지우고, 이전 서버가 SIGKILL로 남긴 것은 첫 풀 생성 때 쓸어 낸다(자기 소유의 진짜 디렉터리만).
 - 작업마다 `signal.alarm(상한 + 여유)`를 건다. SIGALRM 기본 동작은 커널이 프로세스를 끝내는
   것이라 GIL이 필요 없다 — 부모가 SIGKILL로 사라져 아무도 죽여 주지 않아도 적대적 작업이 영원히
   CPU를 태우지 않는다.
@@ -82,6 +84,7 @@ import pickle
 import re
 import shutil
 import signal
+import stat
 import sys
 import tempfile
 import threading
@@ -509,20 +512,45 @@ def _drop_secret_env() -> None:
 _SCRATCH_PREFIX = "pdfocr-worker-"
 
 
-def _scratch_dir(pool_name: str, pid: int) -> Path:
-    """워커 전용 임시 디렉터리 — 부모·워커가 같은 규칙으로 찾는다(TMPDIR 상속)."""
-    return Path(tempfile.gettempdir()) / f"{_SCRATCH_PREFIX}{pool_name}-{pid}"
+def _owned_dir(info: os.stat_result) -> bool:
+    """(lstat 결과) 자기 소유의 진짜 디렉터리인가 — 심볼릭 링크·다른 사용자의 것이 아니다."""
+    getuid = getattr(os, "getuid", None)
+    return stat.S_ISDIR(info.st_mode) and (getuid is None or info.st_uid == getuid())
 
 
-def _use_scratch_dir(pool_name: str) -> Path | None:
-    """(워커) tempfile 기본 경로를 워커 전용 디렉터리로 돌린다."""
-    scratch = _scratch_dir(pool_name, os.getpid())
+def _owned_private_dir(info: os.stat_result) -> bool:
+    """자기 소유의 진짜 디렉터리이고 다른 사용자에게 열려 있지 않은가(0700)."""
+    return _owned_dir(info) and not info.st_mode & 0o077
+
+
+def _make_scratch_dir(pool_name: str) -> Path | None:
+    """(부모) 워커 전용 임시 디렉터리를 새로 만든다.
+
+    예전에는 워커가 `pdfocr-worker-<풀>-<pid>`를 mkdir(exist_ok=True)로 만들어, 공유 /tmp(비컨테이너
+    Linux)에서 다른 사용자가 그 이름으로 미리 심어 둔 심볼릭 링크·디렉터리를 검사 없이 채택했다
+    (폰트 서브셋이 남의 디렉터리에 쌓이거나 내보내기가 실패 — 감사 security-4). mkdtemp는 이름을
+    예측할 수 없고 이미 있는 경로를 받아들이지 않는다(0700). 이름의 pid는 만든 서버의 것이다 —
+    서버가 SIGKILL로 사라진 뒤의 고아 정리(_sweep_orphan_scratch)가 쓴다."""
     try:
-        scratch.mkdir(mode=0o700, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix=f"{_SCRATCH_PREFIX}{pool_name}-{os.getpid()}-"))
     except OSError:
         return None
-    tempfile.tempdir = str(scratch)
-    return scratch
+
+
+def _use_scratch_dir(scratch: str | None) -> Path | None:
+    """(워커) 부모가 만든 전용 디렉터리를 tempfile 기본 경로로 쓴다 — 자기 소유의 진짜
+    디렉터리(0700)일 때만. 아니면 시스템 기본 경로(tempfile의 무작위 이름)를 그대로 쓴다."""
+    if not scratch:
+        return None
+    path = Path(scratch)
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if not _owned_private_dir(info):
+        return None
+    tempfile.tempdir = str(path)
+    return path
 
 
 _SWEPT_SCRATCH = False
@@ -530,7 +558,11 @@ _SWEPT_GUARD = threading.Lock()
 
 
 def _sweep_orphan_scratch() -> None:
-    """이전 서버가 SIGKILL로 남긴 워커 임시 디렉터리를 지운다(그 pid가 살아 있으면 둔다)."""
+    """이전 서버가 SIGKILL로 남긴 워커 임시 디렉터리를 지운다(만든 프로세스가 살아 있으면 둔다).
+
+    이름은 `pdfocr-worker-<풀>-<pid>[-<임의>]`다(pid는 만든 프로세스 — 예전 형식도 같은 자리).
+    자기 소유의 진짜 디렉터리만 지운다 — 같은 이름으로 심어 둔 심볼릭 링크·다른 사용자의
+    디렉터리는 건드리지 않는다."""
     global _SWEPT_SCRATCH
     with _SWEPT_GUARD:
         if _SWEPT_SCRATCH:
@@ -542,8 +574,13 @@ def _sweep_orphan_scratch() -> None:
         return
     for entry in entries:
         try:
-            pid = int(entry.name.rsplit("-", 1)[1])
+            pid = int(entry.name[len(_SCRATCH_PREFIX):].split("-")[1])
         except (IndexError, ValueError):
+            continue
+        try:
+            if not _owned_dir(entry.lstat()):
+                continue
+        except OSError:
             continue
         try:
             os.kill(pid, 0)
@@ -584,7 +621,9 @@ except AttributeError:  # pragma: no cover — POSIX 밖
 _HAS_ALARM = _ALARM_SIGNAL is not None and hasattr(signal, "alarm")
 
 
-def _child_main(conn, pool_name: str, mem_limit_mb: int, log_level: int) -> None:
+def _child_main(
+    conn, pool_name: str, mem_limit_mb: int, log_level: int, scratch_dir: str | None = None,
+) -> None:
     """워커 프로세스 본체 — 작업을 하나씩 받아 실행하고 결과를 돌려준다."""
     global _IN_WORKER, _START_MAXRSS
     _IN_WORKER = True
@@ -596,7 +635,7 @@ def _child_main(conn, pool_name: str, mem_limit_mb: int, log_level: int) -> None
     _configure_child_logging(log_level)
     _apply_memory_limit(mem_limit_mb)
     _prefer_oom_kill()
-    scratch = _use_scratch_dir(pool_name)
+    scratch = _use_scratch_dir(scratch_dir)
     try:
         while True:
             try:
@@ -689,14 +728,24 @@ class _WorkerProcess:
         parent_conn, child_conn = ctx.Pipe(duplex=True)
         self.pool_name = pool_name
         self.name = f"pdf-{pool_name}-{index}"
+        # 워커 전용 임시 디렉터리는 부모가 만들어 넘긴다(예측할 수 없는 이름, 0700)
+        self.scratch = _make_scratch_dir(pool_name)
         self.process = ctx.Process(
             target=_child_main,
-            args=(child_conn, pool_name, worker_mem_limit_mb(), _child_log_level()),
+            args=(
+                child_conn, pool_name, worker_mem_limit_mb(), _child_log_level(),
+                str(self.scratch) if self.scratch is not None else None,
+            ),
             name=self.name,
             daemon=True,
         )
-        with _SPAWN_LOCK, _spawn_without_main():
-            self.process.start()
+        try:
+            with _SPAWN_LOCK, _spawn_without_main():
+                self.process.start()
+        except BaseException:
+            if self.scratch is not None:
+                shutil.rmtree(self.scratch, ignore_errors=True)
+            raise
         child_conn.close()
         self.conn = parent_conn
         self.tasks = 0
@@ -826,15 +875,15 @@ class _WorkerProcess:
         try:
             if self.process.is_alive():
                 return  # 살아 있는 프로세스는 닫지 않는다(kill이 먼저다)
-            pid = self.process.pid
             self.last_exitcode = self.process.exitcode
             self.process.close()
         except (ValueError, AttributeError):
-            pid = None
+            pass
         self._closed = True
-        if pid is not None and self.last_exitcode not in (None, 0):
-            # 종료당한 워커는 자기 임시 디렉터리를 못 지웠다(폰트 서브셋 등)
-            shutil.rmtree(_scratch_dir(self.pool_name, pid), ignore_errors=True)
+        if self.scratch is not None:
+            # 종료당한 워커는 자기 임시 디렉터리를 못 지웠다(폰트 서브셋 등) — 정상 종료한
+            # 워커는 이미 지웠으니 없는 경로다
+            shutil.rmtree(self.scratch, ignore_errors=True)
 
 
 def _rebuild_exception(payload: tuple) -> BaseException:

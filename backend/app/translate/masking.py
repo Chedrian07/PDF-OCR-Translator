@@ -293,7 +293,22 @@ def sanitize_translation(
         wrapped += invented
         out, tails = _strip_tag_tails(out, masked)
         wrapped += tails
+        out, marks = _strip_invented_heading_marks(out, masked)
+        wrapped += marks
     return out, count + wrapped + retyped
+
+
+# 원문에 없는 마크다운 제목 표시 — 소형 모델이 제목 블록('2 Preliminaries')을 '## 2 예비 연구'로 옮겨
+# 리더 개요·문서 개요 API·document.html에 '## '가 그대로 찍혔다(실앱 4B; PDF는 평문화로 지운다).
+# 원문(마스킹본)의 어느 줄도 제목 표시로 시작하지 않을 때만 지운다 — md 제목 유닛('## Results')은
+# 원문에 표시가 있으니 그대로다.
+_HEADING_MARK_RE = re.compile(r"^([ \t]*)#{1,6}[ \t]+(?=\S)", re.MULTILINE)
+
+
+def _strip_invented_heading_marks(out: str, masked: str) -> tuple[str, int]:
+    if _HEADING_MARK_RE.search(masked):
+        return out, 0
+    return _HEADING_MARK_RE.subn(r"\1", out)
 
 
 # 플레이스홀더 바로 뒤에 모델이 덧붙인 꼬리 — 미리보기(v)가 잘린 식('\\( [50, 6, 1')이거나 백슬래시로

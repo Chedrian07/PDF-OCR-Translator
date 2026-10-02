@@ -196,15 +196,71 @@ _LEADING_SOURCE_HEADER_RE = re.compile(r"\A\s*\[번역할 원문\][ \t]*\n")
 # 번역 PDF에 '$〈 y, x̃ 〉$를'). 원문의 `$x$`는 달러까지 한 플레이스홀더로 마스킹되고(통화 `$5`는
 # 수식이 아니라 산문으로 남는다) 플레이스홀더 양옆에 달러가 붙을 일이 없으니 모델이 지어낸 것이다.
 _DOLLAR_WRAPPED_MATH_RE = re.compile(r"\$[ \t]*(<\s*m\d+\b" + _PH_ATTRS + r"\s*/?\s*>)[ \t]*\$")
+# 한쪽에만 붙은 달러('$<m3/>에'·'<m3/>$의') — 원문(마스킹본)의 같은 플레이스홀더 옆에 '$'가 없을
+# 때만 지운다(원문 산문 '$' 바로 옆의 수식은 원문 표기다). 뒤 달러는 통화('$10')를 피한다.
+_DOLLAR_BEFORE_MATH_RE = re.compile(r"\$[ \t]*(<\s*(m\d+)\b" + _PH_ATTRS + r"\s*/?\s*>)")
+_DOLLAR_AFTER_MATH_RE = re.compile(r"(<\s*(m\d+)\b" + _PH_ATTRS + r"\s*/?\s*>)[ \t]*\$(?!\d)")
 
 
-def sanitize_translation(raw: str) -> tuple[str, int]:
+def _source_dollar_next_to(masked: str, ph_id: str, *, before: bool) -> bool:
+    """마스킹된 원문에서 그 플레이스홀더 바로 앞(before)·뒤에 '$'가 있는가."""
+    tag = r"<\s*" + re.escape(ph_id) + r"\b" + _PH_ATTRS + r"\s*/?\s*>"
+    pattern = r"\$[ \t]*" + tag if before else tag + r"[ \t]*\$"
+    return re.search(pattern, masked) is not None
+
+
+def _strip_one_sided_math_dollars(out: str, masked: str) -> tuple[str, int]:
+    count = 0
+
+    def _before(match: re.Match) -> str:
+        nonlocal count
+        if _source_dollar_next_to(masked, match.group(2), before=True):
+            return match.group(0)
+        count += 1
+        return match.group(1)
+
+    def _after(match: re.Match) -> str:
+        nonlocal count
+        if _source_dollar_next_to(masked, match.group(2), before=False):
+            return match.group(0)
+        count += 1
+        return match.group(1)
+
+    out = _DOLLAR_BEFORE_MATH_RE.sub(_before, out)
+    out = _DOLLAR_AFTER_MATH_RE.sub(_after, out)
+    return out, count
+
+
+# 복원된 수식(\(…\)·\[…\]) 옆의 '$' — 원출력 단계 정리가 생기기 전에 캐시된 번역에 남아 있다
+# ('$\(〈y, x̃〉\)$를'·'$\(\tilde{x}…\)에'). 캐시는 복원문을 담으므로 원문 수식 문자열로 찾는다.
+def strip_math_dollars(text: str, mapping: dict, src: str) -> str:
+    """복원문에서 수식 원문 바로 옆에 모델이 붙인 '$'를 지운다 — 원문에 같은 표기가 있으면 둔다.
+
+    양쪽 감싸기('$ 수식 $')는 수식 원문이 무엇이든, 한쪽 달러는 \\(…\\)·\\[…\\] 수식에만 지운다
+    (`$…$` 수식은 그 자체가 달러로 끝난다). 뒤 달러는 통화('$10')를 피한다(감사
+    delta-pdf-translate-5)."""
+    for original in sorted({str(v) for v in mapping.values()}, key=len, reverse=True):
+        if not original.startswith(("\\(", "\\[", "$")):
+            continue
+        quoted = re.escape(original)
+        patterns = [r"\$[ \t]*" + quoted + r"[ \t]*\$"]
+        if original.startswith(("\\(", "\\[")):
+            patterns += [r"(?<!\d)\$" + quoted, quoted + r"\$(?!\d)"]
+        for pattern in patterns:
+            if re.search(pattern, src) is None:
+                text = re.sub(pattern, lambda _match, keep=original: keep, text)
+    return text
+
+
+def sanitize_translation(raw: str, masked: str = "") -> tuple[str, int]:
     """모델 발명 수식 딜리미터·리터럴 <PAGE>를 제거. (정리문, 치환 건수) 반환.
 
     엔진의 모든 complete() 출력 경로(최초·repair·분할 반쪽)에 unmask 직전 적용한다.
     치환들은 서로 겹치는 문자열을 만들지 않으므로 순서·연쇄 재매칭 문제가 없다.
     치환은 전체에 적용하되 **카운트는 플레이스홀더 태그 밖만** 센다 — v 속성의
     수식 미리보기(v="\\( E=mc…")까지 세면 리포트가 실측(25p 784건)처럼 부풀려진다.
+    masked(마스킹된 원문)를 주면 수식 플레이스홀더 한쪽에만 붙은 '$'도, 원문의 같은 자리에
+    '$'가 없을 때 지운다(delta-pdf-translate-5).
     """
     count = 0
     # 소형 로컬 모델(실측 Qwen3.5-0.8B)이 프롬프트의 마지막 헤더 '[번역할 원문]' 한 줄을
@@ -221,6 +277,9 @@ def sanitize_translation(raw: str) -> tuple[str, int]:
             out = out.replace(needle, repl)
     # 이중 달러를 지운 뒤 — `$$<m1/>$$`는 위에서 이미 맨 플레이스홀더가 됐다
     out, wrapped = _DOLLAR_WRAPPED_MATH_RE.subn(r"\1", out)
+    if masked:
+        out, single = _strip_one_sided_math_dollars(out, masked)
+        wrapped += single
     return out, count + wrapped
 
 

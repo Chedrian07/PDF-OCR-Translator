@@ -967,62 +967,173 @@ def job_html(request: Request, job_id: str, lang: str | None = None) -> HTMLResp
     return HTMLResponse(html, headers=headers)
 
 
-def _backfill_layout_fonts(job, pages: list, lang: str | None = None, st=None) -> None:
-    """기존 잡 지연 백필: layout.json에 실측 폰트 크기(fs)가 빠진 비이미지 블록이
-    있고 source.pdf가 있으면, 텍스트 레이어에서 뽑아 in-place 주입 후 원자적 저장.
-    재변환 없이 이미 변환된 잡도 개선된다. enrichment 실패는 절대 500을 내지 않음.
+# ── 폰트 메타 지연 백필 ─────────────────────────────────────────────────────
+# 실측은 export 풀의 PDF 워커에서 돈다(pdf_fonts.enrich_layout_fonts → pdf_worker.run_page).
+# 그 풀은 번역·대조 PDF 빌드가 빌드 내내(상한 PDF_EXPORT_BUILD_TIMEOUT_S, 기본 900초) 워커를
+# 쥐고, 빈 워커를 기다리는 쪽에는 상한이 없다. 요청 스레드가 직접 백필하면 빌드가 도는 동안
+# 아직 백필하지 않은 잡의 /viewer/pages·/alignment·/outline·/layout·/page/{n}·document.html이
+# 그 빌드가 끝날 때까지 멈췄고, 같은 잡의 동시 요청은 저마다 전 문서 백필을 따로 돌았다(감사
+# api-1). 그래서 백필은 산출물(layout[.lang].json)마다 하나뿐인 백그라운드 스레드가 맡고,
+# 요청은 그 백필이 **시작된 뒤** 아래 유예 안에서만 결과를 기다린다. 빈 풀이면 보통 문서는
+# 그 안에 끝나(M4 Max process 모드 실측: 25쪽 0.25초) 지금처럼 실측 메타로 답하고, 풀이 막혀
+# 있으면 지금 layout(폴백 휴리스틱)으로 답한다. 유예가 지난 백필에 붙는 요청은 기다리지
+# 않는다. 백필이 끝나 파일이 바뀌면 다음 요청(ETag 재검증 포함)이 새 값을 읽는다.
+_FONT_BACKFILL_GRACE_S = 2.0
+
+
+class _FontBackfill:
+    """산출물 하나의 진행 중 백필 — 같은 산출물을 읽은 요청들이 함께 기다린다."""
+
+    __slots__ = ("done", "started")
+
+    def __init__(self) -> None:
+        self.started = time.monotonic()
+        self.done = threading.Event()
+
+
+_FONT_BACKFILLS: dict[str, _FontBackfill] = {}
+_FONT_BACKFILL_GUARD = threading.Lock()
+
+
+def _has_stale_font_pages(pages: list, version: int) -> bool:
+    """fonts_v 스탬프가 version보다 낮은 페이지가 있는가 — 없거나 숫자가 아닌 스탬프도
+    낮다고 본다(예전에는 int()가 던져 레이아웃 라우트가 500이 됐다)."""
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        try:
+            stamp = int(page.get("fonts_v") or 0)
+        except (TypeError, ValueError):
+            stamp = 0
+        if stamp < version:
+            return True
+    return False
+
+
+def _backfill_layout_fonts(
+    job, pages: list, lang: str | None = None, st=None, *, wait: bool = True,
+) -> None:
+    """기존 잡 지연 백필: 페이지의 fonts_v 스탬프가 ENRICH_VERSION보다 낮고 source.pdf가
+    있으면, 텍스트 레이어의 실측 폰트 메타(fs·굵기·글꼴 계열·정렬·세로쓰기)를 주입해
+    원자적으로 저장한다. 재변환 없이 이미 변환된 잡도 개선된다. 실패는 절대 500을 내지 않는다.
 
     lang을 주면 파생 산출물 layout.{lang}.json에 같은 백필을 적용하고 그 경로에 쓴다 —
     번역본 블록은 원본을 깊은 복사해 bbox가 동일하므로 주입 값도 동일하다. 이 경로가
     없으면 ENRICH_VERSION 상향 시 원본 뷰만 갱신되고 번역 뷰는 구버전 폰트 메타로
-    고정된다(원문/번역 화면이 서로 다른 조판을 보게 된다)."""
-    src = artifacts.source_pdf(job.dir)
-    if not src.exists():
+    고정된다(원문/번역 화면이 서로 다른 조판을 보게 된다).
+
+    백필은 백그라운드에서 돈다(위 설명). 유예 안에 끝나면 pages를 저장된 내용으로 제자리
+    교체하고, 아니면 그대로 둔다. wait=False면 백필만 시작하고 기다리지 않는다(폰트 메타가
+    필요 없는 호출부 — /page/{n}의 페이지 번호)."""
+    if not artifacts.source_pdf(job.dir).exists():
         return
     try:
-        from .pipeline.pdf_fonts import ENRICH_VERSION, enrich_layout_fonts
-    except Exception:
+        from .pipeline.pdf_fonts import ENRICH_VERSION
+    except Exception:  # noqa: BLE001 — 실측을 못 쓰면 폴백 휴리스틱으로 표시한다
         return
     # 버전 스탬프 기반: enrichment 스키마가 갱신되면(예: 세로쓰기 감지 추가)
     # 기존 잡도 1회 재백필된다. 스탬프가 최신이면 매 요청 재스캔하지 않는다.
-    needs = any(
-        isinstance(pg, dict) and int(pg.get("fonts_v") or 0) < ENRICH_VERSION
-        for pg in pages
-    )
-    if not needs:
+    if not _has_stale_font_pages(pages, ENRICH_VERSION):
         return
+    target = artifacts.layout(job.dir, lang)
+    task = _start_font_backfill(job, lang, st, target)
+    if task is None or not wait:
+        return
+    remaining = task.started + _FONT_BACKFILL_GRACE_S - time.monotonic()
+    if remaining <= 0 or not task.done.wait(remaining):
+        return  # 백필은 뒤에서 계속된다 — 이번 응답은 지금 layout(폴백 휴리스틱)
     try:
-        # 텍스트 실측은 PDF 워커에서 돈다 — 요청 경로라 OCR 풀이 아니라 export 풀을 쓴다
-        # (OCR 잡의 렌더·분석이 이 백필 뒤에 줄서지 않게).
-        with pdf_worker.pool_scope(pdf_worker.POOL_EXPORT):
-            enriched = enrich_layout_fonts(src, pages)
-        if enriched:
-            target = artifacts.layout(job.dir, lang)
-            serialized = json.dumps(pages, ensure_ascii=False)
-            try:
-                unchanged = target.read_text(encoding="utf-8") == serialized
-            except OSError:
-                unchanged = False
-            if unchanged:
-                # 같은 백필을 동시에 시작한 다른 요청(리더가 /viewer/pages·/alignment·
-                # /outline을 한꺼번에 부른다)이 같은 내용을 이미 썼다. 다시 교체하면
-                # inode·mtime만 바뀌어 내보내기 PDF 캐시를 또 무효화하고 예열을 띄운다.
-                return
-            # 요청별 고유 tmp — 동시 백필 요청이 같은 tmp에 겹쳐 쓰는 레이스 차단.
-            # (병합 워커의 .layout.json.tmp와도 이름이 겹치지 않는다.)
-            tmp = artifacts.layout_tmp(job.dir)
-            try:
-                tmp.write_text(serialized, encoding="utf-8")
-                os.replace(tmp, target)
-            finally:
-                tmp.unlink(missing_ok=True)
-            # 방금 layout.{lang}.json의 mtime이 올라가 export.{lang}.pdf 캐시가
-            # 무효해졌다. 그 무효화 자체는 옳다(내보내기의 입력이 실제로 바뀌었다)
-            # — 다만 다음 다운로드 클릭이 그 빌드를 통째로 기다리게 두지 않는다.
-            if st is not None and lang is not None:
-                _warm_export_pdf(st, job, lang)
-    except Exception:
-        pass  # 백필 실패는 렌더를 막지 않는다 (폴백 휴리스틱으로 표시)
+        fresh = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(fresh, list) and artifacts.layout_has_text_blocks(fresh):
+        pages[:] = fresh
+
+
+def _start_font_backfill(job, lang: str | None, st, target: Path) -> _FontBackfill | None:
+    """target의 백필을 시작하거나, 이미 도는 백필을 돌려준다(산출물마다 하나)."""
+    key = str(target)
+    with _FONT_BACKFILL_GUARD:
+        task = _FONT_BACKFILLS.get(key)
+        if task is not None:
+            return task
+        task = _FONT_BACKFILLS[key] = _FontBackfill()
+    try:
+        threading.Thread(
+            target=_run_font_backfill, args=(task, key, job, lang, st, target),
+            name=f"font-backfill-{job.id}-{lang or 'src'}", daemon=True,
+        ).start()
+    except Exception:  # noqa: BLE001 — 스레드를 못 띄우면 이번 응답은 백필 없이 낸다
+        logger.warning("폰트 백필 시작 실패: %s", target, exc_info=True)
+        _finish_font_backfill(task, key)
+        return None
+    return task
+
+
+def _finish_font_backfill(task: _FontBackfill, key: str) -> None:
+    with _FONT_BACKFILL_GUARD:
+        if _FONT_BACKFILLS.get(key) is task:
+            del _FONT_BACKFILLS[key]
+    task.done.set()
+
+
+def _run_font_backfill(
+    task: _FontBackfill, key: str, job, lang: str | None, st, target: Path,
+) -> None:
+    try:
+        _font_backfill_once(job, lang, st, target)
+    except Exception:  # noqa: BLE001 — 백필 실패는 렌더를 막지 않는다(폴백 휴리스틱으로 표시)
+        logger.debug("폰트 백필 실패: %s", target, exc_info=True)
+    finally:
+        _finish_font_backfill(task, key)
+
+
+def _font_backfill_once(job, lang: str | None, st, target: Path) -> None:
+    """(백그라운드) target을 다시 읽어 실측 폰트 메타를 주입하고, 그 사이 아무도 파일을
+    바꾸지 않았을 때만 원자적으로 교체한다."""
+    from .pipeline.pdf_fonts import ENRICH_VERSION, enrich_layout_fonts
+
+    try:
+        with target.open("rb") as handle:
+            seen = os.fstat(handle.fileno())
+            pages = json.loads(handle.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return
+    # 요청은 낡은 사본을 읽었을 수 있다 — 앞선 백필이 이미 끝냈으면 할 일이 없다. 같은 결과를
+    # 다시 쓰면 inode·mtime만 바뀌어 내보내기 PDF 캐시를 또 무효화하고 예열을 띄운다.
+    if not isinstance(pages, list) or not _has_stale_font_pages(pages, ENRICH_VERSION):
+        return
+    # 텍스트 실측은 PDF 워커에서 돈다 — OCR 풀이 아니라 export 풀(OCR 잡의 렌더·분석이 이
+    # 백필 뒤에 줄서지 않게). 빈 워커가 날 때까지는 요청 밖인 여기서 기다린다.
+    with pdf_worker.pool_scope(pdf_worker.POOL_EXPORT):
+        if not enrich_layout_fonts(artifacts.source_pdf(job.dir), pages):
+            return
+    # 종료 중에는 쓰지 않는다 — 풀이 닫히거나 워커가 죽으면 enrich_layout_fonts는 남은
+    # 페이지를 실측 없이 스탬프만 해 돌려준다. 그것을 저장하면 그 잡은 다음 ENRICH_VERSION
+    # 상향 전까지 실측 메타를 얻지 못한다(main.py lifespan은 풀을 닫기 전에 표식을 세운다).
+    if getattr(getattr(st, "shutdown", None), "requested", False):
+        return
+    # 요청별 고유 tmp — 병합 워커의 .layout.json.tmp와도 이름이 겹치지 않는다.
+    tmp = artifacts.layout_tmp(job.dir)
+    try:
+        tmp.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
+        # 기다리는 사이 다른 쓰기(재번역·재병합)가 산출물을 바꿨으면 낡은 입력의 결과로 덮지
+        # 않는다 — 새 산출물은 그것을 읽는 다음 요청이 다시 백필한다.
+        current = target.stat()
+        if (current.st_ino, current.st_size, current.st_mtime_ns) != (
+            seen.st_ino, seen.st_size, seen.st_mtime_ns
+        ):
+            return
+        os.replace(tmp, target)
+    except OSError:
+        return  # 잡이 지워졌다 — 쓸 곳이 없다
+    finally:
+        tmp.unlink(missing_ok=True)
+    # 방금 layout.{lang}.json의 mtime이 올라가 export.{lang}.pdf 캐시가
+    # 무효해졌다. 그 무효화 자체는 옳다(내보내기의 입력이 실제로 바뀌었다)
+    # — 다만 다음 다운로드 클릭이 그 빌드를 통째로 기다리게 두지 않는다.
+    if st is not None and lang is not None:
+        _warm_export_pdf(st, job, lang)
 
 
 # 좌표 텍스트 블록이 하나도 없는 layout(그림 전용 엔진의 옛 잡·전면 스캔)의 404 문구
@@ -1032,12 +1143,16 @@ _NO_TEXT_LAYOUT = (
 )
 
 
-def _load_layout_pages(job, lang: str | None = None, st=None) -> list:
+def _load_layout_pages(
+    job, lang: str | None = None, st=None, *, wait_fonts: bool = True,
+) -> list:
     """lang=None이면 원본 layout.json, lang이면 번역본 layout.{lang}.json을 로드.
 
     텍스트 블록이 없는 layout(image 블록뿐 — figure_only 엔진의 옛 잡, 전면 스캔)은
     파일이 없는 것과 같게 404다(artifacts.layout_has_text_blocks — has_layout·내보내기와
-    같은 기준). 그대로 쓰면 /layout·/alignment·/outline이 OCR 텍스트 없는 캔버스를 낸다."""
+    같은 기준). 그대로 쓰면 /layout·/alignment·/outline이 OCR 텍스트 없는 캔버스를 낸다.
+    st(앱 상태)는 폰트 백필의 종료 확인·내보내기 예열에 쓴다. wait_fonts=False면 백필을
+    시작만 하고 기다리지 않는다(_backfill_layout_fonts)."""
     if lang is not None:
         p = artifacts.layout(job.dir, lang)
         missing = "한국어 번역본이 없습니다 — 먼저 번역을 실행하세요"
@@ -1056,7 +1171,7 @@ def _load_layout_pages(job, lang: str | None = None, st=None) -> list:
     # 번역본 페이지는 번역 시점의 fonts_v 스탬프를 복사해 온다 — 보통은 최신이라
     # no-op이지만, 번역 뒤 ENRICH_VERSION이 오르면 번역본만 구버전으로 남는다.
     # 각 산출물을 자기 경로에 백필해 원문/번역 뷰가 같은 폰트 메타를 쓰게 한다.
-    _backfill_layout_fonts(job, pages, lang, st)
+    _backfill_layout_fonts(job, pages, lang, st, wait=wait_fonts)
     return pages
 
 
@@ -1112,11 +1227,12 @@ def _busy_as_503(e: PdfExportBusyError) -> HTTPException:
     return HTTPException(503, str(e), headers={"Retry-After": str(e.retry_after)})
 
 
-def _cached_page_numbers(job, lang: str | None) -> list[int]:
+def _cached_page_numbers(job, lang: str | None, st=None) -> list[int]:
     """페이지 번호만 필요한 호출부(/page/{n})용 캐시.
 
     예전에는 페이지 이미지 요청마다 layout.json 전체를 재파싱했다. 파일 크기·mtime을
-    키에 넣어 산출물이 갱신되면 자동으로 다시 읽는다."""
+    키에 넣어 산출물이 갱신되면 자동으로 다시 읽는다. 페이지 번호는 폰트 메타와 무관하다 —
+    낡은 산출물이면 폰트 백필만 시작하고 기다리지 않는다."""
     path = artifacts.layout(job.dir, lang)
     try:
         stat = path.stat()
@@ -1127,7 +1243,7 @@ def _cached_page_numbers(job, lang: str | None) -> list[int]:
         cached = _LAYOUT_PAGE_NUMBERS.get(key)
     if cached is not None:
         return list(cached)
-    numbers = tuple(_page_numbers(_load_layout_pages(job, lang)))
+    numbers = tuple(_page_numbers(_load_layout_pages(job, lang, st, wait_fonts=False)))
     with _LAYOUT_PAGE_NUMBERS_GUARD:
         if len(_LAYOUT_PAGE_NUMBERS) >= _LAYOUT_PAGE_NUMBERS_MAX:
             _LAYOUT_PAGE_NUMBERS.clear()
@@ -1264,7 +1380,7 @@ def job_page_image(
         if page_number < 1 or not path.is_file():
             raise HTTPException(404, "페이지 이미지를 찾을 수 없습니다")
         return _JobFileResponse(path, media_type="image/png")
-    page_numbers = _cached_page_numbers(job, lang)
+    page_numbers = _cached_page_numbers(job, lang, _state(request))
     if page_number not in set(page_numbers):
         raise HTTPException(404, "페이지를 찾을 수 없습니다")
     settings = _state(request).settings
@@ -1392,7 +1508,7 @@ def job_alignment(
     if lang is not None:
         _check_lang(lang)
 
-    source_pages = _load_layout_pages(job)
+    source_pages = _load_layout_pages(job, st=_state(request))
     source_page = _layout_page(source_pages, page)
     if source_page is None:
         raise HTTPException(404, "페이지를 찾을 수 없습니다")
@@ -1577,7 +1693,7 @@ def job_viewer_pages(
     if _etag_matches(request, cache_headers["ETag"]):
         return Response(status_code=304, headers=cache_headers)
 
-    source_pages = _load_layout_pages(job)
+    source_pages = _load_layout_pages(job, st=_state(request))
     target_pages = _load_layout_pages(job, lang, _state(request)) if lang else source_pages
     source_by_number = {
         page.get("page"): page

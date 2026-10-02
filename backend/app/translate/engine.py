@@ -42,6 +42,7 @@ from .segment import (
     assemble_markdown,
     layout_covers_unit,
     layout_line_map,
+    line_runs,
     layout_line_sources,
     layout_units,
     map_unit_lines,
@@ -149,12 +150,13 @@ def _repair_worthy(masked: str, clean: str, missing: list, dup: list) -> bool:
     return len(clean) <= 4 * max(1, len(masked))
 
 
-def _fully_covered(src: str, covered: set[str]) -> bool:
+def _fully_covered(src: str, covered: set[str], runs=None) -> bool:
     """유닛이 layout 번역으로 완전히 덮이는가 — 유닛 전체가 블록 하나와 같거나(여러 줄
     블록 포함) 비어있지 않은 모든 줄이 단일 줄 블록 또는 여러 줄 블록의 연속 줄 묶음과 같다
     (map_unit_lines와 같은 규칙). 저자 블록 넷(각 3줄)이 섞인 1쪽 md 유닛(19줄)은 묶음을 못 봐
-    지연되지 않고 따로 번역됐다가 실패해 1쪽 전체가 영어로 남았다(실앱 4B)."""
-    return layout_covers_unit(src, covered)
+    지연되지 않고 따로 번역됐다가 실패해 1쪽 전체가 영어로 남았다(실앱 4B). runs는
+    line_runs(covered) — 유닛마다 다시 만들지 않게 호출자가 한 번 만든다."""
+    return layout_covers_unit(src, covered, runs)
 
 
 _SIGNATURE_PUNCT_RE = re.compile(r"[^\w\s]")
@@ -507,7 +509,7 @@ class _TranslationRun:
         )
         return masked, mapping, pairs, first, keep, key
 
-    def _read_cache(self, u, key: str, mapping: dict) -> tuple[bool, str]:
+    def _read_cache(self, u, key: str, mapping: dict, masked: str | None = None) -> tuple[bool, str]:
         """캐시 조회 — 이전 run이 남긴 항목은 현재 출력 게이트로 다시 검증한다.
 
         이번 run에서 게시된 값은 방금 게이트를 통과했으므로 그대로 쓴다. 이전 캐시가
@@ -519,7 +521,7 @@ class _TranslationRun:
             return hit, text
         # 원출력 단계 정리('$…$' 감싸기·한쪽 달러·지어낸 '$'·다시 친 수식)가 생기기 전에 캐시된
         # 번역에는 그 흔적이 남아 있다 — 재번역해도 캐시 적중으로 그대로 쓰였다(delta-pdf-translate-5)
-        text = tidy_cached_translation(text, mapping, u.src)
+        text = tidy_cached_translation(text, mapping, u.src, masked)
         reason = untranslated_reason(u.src, text, mapping) if text.strip() else "empty"
         if not reason:
             return True, text
@@ -571,7 +573,7 @@ class _TranslationRun:
             return u, u.src, "canceled", "", stats
         masked, mapping, pairs, first, keep, key = precomputed or self._unit_key(u)
         if not self.force:
-            hit, cached_text = self._read_cache(u, key, mapping)
+            hit, cached_text = self._read_cache(u, key, mapping, masked)
             if hit:
                 # 캐시 적중은 API를 타지 않으므로 progressed를 세우지 않는다 —
                 # 죽은 엔드포인트에서도 신규 유닛이 조용히 강등되는 것을 막는다.
@@ -702,7 +704,7 @@ class _TranslationRun:
             return u, u.src, "canceled", "", _zero_stats()
         precomputed = self._unit_key(u)
         key = precomputed[5]
-        hit, cached_text = self._read_cache(u, key, precomputed[1])
+        hit, cached_text = self._read_cache(u, key, precomputed[1], precomputed[0])
         if hit:
             # translate_unit과 동일 — 캐시 적중은 엔드포인트 건강의 증거가 아니다.
             return u, cached_text, "cached", key, _zero_stats()
@@ -977,8 +979,9 @@ class _TranslationRun:
             covered = layout_line_sources(self.layout_pages, multiline=True) & lay_final_srcs
             if covered:
                 remaining = []
+                runs = line_runs(covered)
                 for u in self.targets:
-                    if u.id.startswith("md:") and _fully_covered(u.src, covered):
+                    if u.id.startswith("md:") and _fully_covered(u.src, covered, runs):
                         self.deferred.append(u)
                     else:
                         remaining.append(u)
@@ -1103,7 +1106,8 @@ class _TranslationRun:
         new_pages, mapping = self._layout_mapping()
         # 지연된 md 유닛 중 layout 번역으로 덮이지 않는 것(그 블록이 번역에 실패·축퇴)은
         # 지금 번역한다(2단 패스). SSE는 total 증가를 허용한다.
-        pending = [u for u in self.deferred if map_unit_lines(u.src, mapping) is None]
+        runs = line_runs(mapping)
+        pending = [u for u in self.deferred if map_unit_lines(u.src, mapping, runs=runs) is None]
         if pending:
             self.total += len(pending)
             self.write_state("running", self.done, self.total)
@@ -1159,10 +1163,11 @@ class _TranslationRun:
         """
         out: dict[str, str] = {}
         kept = set(self.kept_original)
+        runs = line_runs(mapping)
         for u in self.md_units:
             if u.skip_reason or u.id in self.md_skipped:
                 continue
-            mapped = map_unit_lines(u.src, mapping) if mapping else None
+            mapped = map_unit_lines(u.src, mapping, runs=runs) if mapping else None
             if mapped is not None:
                 out[u.id] = mapped
             elif u.id in self.results and u.id not in kept:
@@ -1171,7 +1176,9 @@ class _TranslationRun:
                 # 자기 번역이 실패(원문 유지·축퇴)한 유닛도 layout 번역이 덮는 줄은 옮긴다 — 1쪽 md
                 # 유닛(19줄)이 실패하자 같은 문장의 layout 번역(제목·초록·서론)까지 버려 한국어
                 # 미리보기·result.ko.md의 1·6·12·20쪽이 통째로 영어였다(실앱 4B, PDF·리더는 한국어).
-                partial = map_unit_lines(u.src, mapping, partial=True) if mapping else None
+                partial = (
+                    map_unit_lines(u.src, mapping, partial=True, runs=runs) if mapping else None
+                )
                 if partial is not None:
                     out[u.id] = partial
                 elif u.id in self.results:

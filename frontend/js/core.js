@@ -808,6 +808,115 @@ export function splitInlineMath(text) {
   return out;
 }
 
+/* ── 리더 카드의 표 (순수 — tests/에서 검증) ──────────────────────────────────
+ * Unlimited-OCR는 표를 HTML(<table><tr><td>…)로 낸다. 정렬 API는 그 원문을 그대로 싣는데
+ * 리더 레일 카드는 텍스트 노드로만 그려, 기본 화면(읽기 탭·논문 뷰어)에 태그가 글자 그대로
+ * 보였다(fresh-user-2). 표 구조 태그(table·thead·tbody·tfoot·tr·th·td)와 숫자 colspan/rowspan만
+ * 읽어 행·셀 배열로 바꾼다 — 서버 렌더러(render._restore_table_tags)와 같은 허용 목록이다.
+ * 그 밖의 태그·속성은 셀 글자로 남고(`<br>`만 줄바꿈), 호출부는 innerHTML 없이 새 노드로
+ * 그린다 — 업로드 PDF에서 온 태그가 요소가 되지 않는다.
+ *  · 반환: [{type:'text', value} | {type:'table', rows:[[{header, text, colspan, rowspan}]]}]
+ *  · 셀 글자의 HTML 엔티티(&amp; &lt; &#62; …)는 푼다. 표 밖 글자는 원문 그대로다.
+ *  · 잘린 표(닫는 태그 없음)도 읽고, 중첩 표는 바깥 표의 셀로 펼친다.
+ */
+const HTML_TABLE_TAG = /<(\/?)(table|thead|tbody|tfoot|tr|th|td)(?=[\s/>])([^<>]{0,300}?)\s*\/?>|<br\s*\/?>/gi;
+const HTML_TABLE_SPAN = /(?:^|\s)(colspan|rowspan)\s*=\s*["']?(\d{1,3})(?![\d])/gi;
+export const READER_TABLE_MAX_SPAN = 64;
+const HTML_ENTITY = /&(#\d{1,7}|#x[0-9a-f]{1,6}|amp|lt|gt|quot|apos|nbsp);/gi;
+const HTML_NAMED_ENTITY = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+
+function decodeHtmlEntities(text) {
+  return text.replace(HTML_ENTITY, (whole, body) => {
+    const key = body.toLowerCase();
+    if (key[0] !== '#') return HTML_NAMED_ENTITY[key];
+    const code = key[1] === 'x' ? parseInt(key.slice(2), 16) : parseInt(key.slice(1), 10);
+    return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)
+      ? String.fromCodePoint(code) : whole;
+  });
+}
+
+function tableSpan(attrs, name) {
+  let value = 1;
+  for (const m of String(attrs || '').matchAll(HTML_TABLE_SPAN)) {
+    if (m[1].toLowerCase() === name) value = Number(m[2]);
+  }
+  return Math.min(Math.max(value, 1), READER_TABLE_MAX_SPAN);
+}
+
+export function splitHtmlTables(text) {
+  const s = String(text == null ? '' : text);
+  const out = [];
+  let table = null;
+  let row = null;
+  let cell = null;
+  let nested = 0;
+  const addText = (value) => {
+    if (!value) return;
+    const last = out[out.length - 1];
+    if (last && last.type === 'text') last.value += value;
+    else out.push({ type: 'text', value });
+  };
+  const openRow = () => {
+    cell = null;
+    row = [];
+    table.rows.push(row);
+  };
+  const openCell = (header, attrs) => {
+    if (!row) openRow();
+    cell = {
+      header, text: '', colspan: tableSpan(attrs, 'colspan'), rowspan: tableSpan(attrs, 'rowspan'),
+    };
+    row.push(cell);
+  };
+  const consume = (raw) => {
+    if (!raw) return;
+    if (cell) cell.text += decodeHtmlEntities(raw);
+    else if (!table) addText(raw);
+    else if (raw.trim()) { // 셀 밖에 떨어진 글자(망가진 표) — 버리지 않고 셀로
+      openCell(false, '');
+      cell.text += decodeHtmlEntities(raw);
+    }
+  };
+  let pos = 0;
+  for (const m of s.matchAll(HTML_TABLE_TAG)) {
+    consume(s.slice(pos, m.index));
+    pos = m.index + m[0].length;
+    if (m[2] === undefined) { // <br>
+      if (cell) cell.text += '\n';
+      else if (!table) addText(m[0]);
+      continue;
+    }
+    const closing = m[1] === '/';
+    const tag = m[2].toLowerCase();
+    if (!table) {
+      if (tag === 'table' && !closing) {
+        table = { type: 'table', rows: [] };
+        out.push(table);
+        row = null;
+        cell = null;
+      } else {
+        addText(m[0]); // 표 밖의 구조 태그는 글자 그대로
+      }
+      continue;
+    }
+    if (tag === 'table') {
+      if (!closing) nested += 1;
+      else if (nested > 0) nested -= 1;
+      else { table = null; row = null; cell = null; }
+    } else if (tag === 'td' || tag === 'th') {
+      if (closing) cell = null;
+      else openCell(tag === 'th', m[3]);
+    } else if (tag === 'tr' && !closing && nested === 0) {
+      openRow();
+    } else if (nested === 0) { // </tr>·thead·tbody·tfoot — 행 경계로만 쓴다
+      row = null;
+      cell = null;
+    }
+  }
+  consume(s.slice(pos));
+  return out.filter((part) => part.type === 'text' || part.rows.some((r) => r.length));
+}
+
 /* ── KaTeX 크기 상한 (순수 — tests/에서 검증) ─────────────────────────────────
  * KaTeX maxSize는 양수 크기만 묶는다(calculateSize = min(크기, maxSize)). 음수 크기 —
  * \raisebox{-4000em}{x}·\rule[-3000em]{1em}{1em}·\kern-5000em·a\\[-900em] b — 는 그대로라

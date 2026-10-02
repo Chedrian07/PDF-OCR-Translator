@@ -169,6 +169,52 @@ def test_old_meta_without_notices_is_split_in_memory_only(tmp_path):
     assert meta_path.stat().st_mtime_ns == 1_700_000_000_000_000_000
 
 
+# 0.1.0(a9a4400) sidecar 엔진이 복구에 성공한 재시작 경위를 warnings에 남긴 문구 — runner가
+# '{쪽 범위}: …'를 붙였다. 지금 코드는 같은 상황을 notices(_RECOVERED_NOTICE·_RESUMED_NOTICE)로
+# 남긴다. 표식에서 빠져 정상 복구된 옛 잡이 '주의 2건'·degraded로 보였다(migration-3).
+SIDECAR_010_NOTES = [
+    "1–4페이지: sidecar 재시작/모델 재로드 대기 중… (해당 페이지는 복귀 후 재시도)",
+    "1–4페이지: 모델 로딩 대기 중… (최초 기동은 다운로드·컴파일로 수 분 소요)",
+]
+
+
+def test_sidecar_recovery_notes_from_0_1_0_count_as_notices():
+    lost = "3페이지: OCR 실패 후 PDF 내장 텍스트 레이어로 복구 (이미지·정밀 레이아웃 제외; x)"
+    degraded = "1–4페이지: sidecar가 이상 상태를 보고했습니다(x) — 모델은 로드돼 있어 그대로 진행합니다."
+    warnings, notices = split_legacy_warnings([*SIDECAR_010_NOTES, lost, degraded])
+    assert notices == SIDECAR_010_NOTES
+    assert warnings == [lost, degraded]          # 실제 손실·이상 신고는 여전히 경고다
+
+
+def test_pinning_the_separator_keeps_the_legacy_warnings_list(tmp_path):
+    """앱 기동(load_existing(default_page_separator=…))은 page_separator가 없는 옛 meta에 지금
+    값을 고정해 다시 쓴다. 예전에는 그때 분리 결과(notices 키)까지 써 넣어, 나중에 표식을 고쳐도
+    이미 이식된 잡은 다시 가르지 못했다(migration-3). 원래의 합쳐진 warnings를 그대로 두고
+    notices 키는 쓰지 않는다 — 기동마다 지금 표식으로 다시 가른다(mtime 보존)."""
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "j_0123456789ab"
+    combined = [*LEGACY_MESSAGES, *SIDECAR_010_NOTES]
+    _write_meta(job_dir, warnings=combined)
+    meta_path = job_dir / "meta.json"
+    os.utime(meta_path, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+
+    store = JobStore(jobs_dir)
+    store.load_existing(default_page_separator="\n\n---\n\n")
+    job = store.get("j_0123456789ab")
+    assert job.page_separator == "\n\n---\n\n"
+    assert job.notices == LEGACY_MESSAGES[:4] + SIDECAR_010_NOTES
+    assert job.warnings == LEGACY_MESSAGES[4:]
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert meta["page_separator"] == "\n\n---\n\n"       # 이식은 기록된다
+    assert meta["warnings"] == combined and "notices" not in meta   # 분리는 기록하지 않는다
+    assert meta_path.stat().st_mtime_ns == 1_700_000_000_000_000_000
+
+    again = JobStore(jobs_dir)                               # 다음 기동도 같은 분류
+    again.load_existing(default_page_separator="\n\n---\n\n")
+    restored = again.get("j_0123456789ab")
+    assert (restored.warnings, restored.notices) == (job.warnings, job.notices)
+
+
 def test_meta_with_notices_is_restored_verbatim(tmp_path):
     """notices 키가 있으면 기록된 분류를 그대로 믿는다(문구로 다시 가르지 않는다)."""
     jobs_dir = tmp_path / "jobs"

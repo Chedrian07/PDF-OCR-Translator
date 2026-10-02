@@ -1,7 +1,7 @@
 import {
   ICON, READER_ALIGNMENT_COOLDOWN_MS, READER_DEFAULT_RATIO, READER_FOCUS_RATIO,
   READER_HYDRATE_RADIUS, READER_KEEP_RADIUS, READER_SYNC_KEY, READER_SYNC_QUIET_MS,
-  READER_ZOOM_KEY, READER_ZOOM_MAX, READER_ZOOM_MIN, katexOptions, readerPosKey,
+  READER_ZOOM_KEY, READER_ZOOM_MAX, READER_ZOOM_MIN, katexOptions, readerNotesKey, readerPosKey,
 } from './constants.js';
 import {
   PDF_REPORT_MAX_WARNINGS, PDF_RETRY_MAX, addReaderNote, alignmentBatchPlan,
@@ -1647,18 +1647,62 @@ export function openReaderQa(prompt, page = state.readerPage) {
 const newReaderNoteId = () =>
   `n${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
+// 저장소가 정본이다 — 같은 잡을 연 다른 탭도 같은 키에 쓴다. 저장·삭제는 매번 저장소의
+// 최신 목록을 다시 읽어 그 위에 적용하고(read-modify-write), 다른 탭의 변경은 'storage'
+// 이벤트(onReaderNotesStorage)로 받아 맞춘다. 예전에는 잡을 열 때 한 번 읽은 사본에 더해
+// 목록 전체를 덮어써, 다른 탭에서 저장한 메모가 '저장했습니다' 토스트 뒤에 조용히
+// 사라지고 지운 메모가 되살아났다(frontend-1).
 function persistReaderNote(kind, page, text, id = newReaderNoteId()) {
-  const result = addReaderNote(state.readerNotes, {
+  const jobId = state.currentJobId;
+  const latest = loadReaderNotes(jobId);
+  const result = addReaderNote(latest, {
     id, kind, page, lang: readerLangKey(), text, at: Date.now(),
   });
   if (!result.note) return null;
-  if (result.added && !saveReaderNotes(state.currentJobId, result.items)) {
+  if (result.added && !saveReaderNotes(jobId, result.items)) {
+    syncReaderNotes(latest); // 이 메모는 못 남겼어도 다른 탭의 변경은 화면에 맞춘다
     showToast('이 브라우저 저장 공간에 남기지 못했습니다 — 저장 공간을 확인해 주세요.', 'error');
     return null;
   }
-  state.readerNotes = result.items;
-  renderReaderNotes();
+  // 방금 저장한(또는 이미 있던 같은) 메모는 호출부가 칠하므로 여기서 다시 칠하지 않는다.
+  syncReaderNotes(result.items, result.note.id);
   return result;
+}
+
+// 저장소에서 읽은 목록으로 화면을 맞춘다 — 사라진 메모의 하이라이트는 걷고, 새로 생긴
+// 하이라이트는 이미 그려진 레일 페이지에 칠하고, 목록을 다시 그린다. skipId는 호출부가
+// 직접 칠하는 메모다(같은 문장을 두 번 칠하지 않게).
+function syncReaderNotes(items, skipId = '') {
+  const prev = state.readerNotes || [];
+  const nextIds = new Set(items.map((n) => n.id));
+  const prevIds = new Set(prev.map((n) => n.id));
+  const removed = new Set(prev.filter((n) => !nextIds.has(n.id)).map((n) => n.id));
+  state.readerNotes = items;
+  if (removed.size && el.readerContent) {
+    for (const mark of el.readerContent.querySelectorAll('mark.reader-highlight')) {
+      if (removed.has(mark.dataset.noteId)) unwrapMark(mark);
+    }
+  }
+  const lang = readerLangKey();
+  const pages = new Set(items
+    .filter((n) => n.kind === 'highlight' && n.lang === lang && n.id !== skipId && !prevIds.has(n.id))
+    .map((n) => n.page));
+  for (const page of pages) {
+    const section = state.readerRailEls.get(page);
+    // 아직 안 그린 섹션은 그릴 때(renderRailPage) 저장된 하이라이트를 되살린다.
+    if (section && section.dataset.mode) applyStoredHighlights(page, section.lastElementChild);
+  }
+  renderReaderNotes();
+}
+
+// 같은 잡을 연 다른 탭이 메모를 바꾸면(저장·삭제·잡 삭제·보관 정리) 이 탭의 목록과
+// 하이라이트를 저장소에 맞춘다. storage 이벤트는 값을 바꾼 탭이 아닌 다른 탭에만 온다.
+// key가 null이면 저장소 전체가 비워진 것(localStorage.clear())이다.
+export function onReaderNotesStorage(ev) {
+  const jobId = state.currentJobId;
+  if (!jobId || !ev) return;
+  if (ev.key != null && ev.key !== readerNotesKey(jobId)) return;
+  syncReaderNotes(loadReaderNotes(jobId));
 }
 
 // 하이라이트를 칠할 수 있는 텍스트 노드. KaTeX 내부(쪼개면 수식이 깨진다)·카드 머리말·
@@ -1855,18 +1899,18 @@ export function saveReaderCitation() {
   }
 }
 
+// 삭제도 저장소의 최신 목록에서 뺀다 — 이 탭이 들고 있던 사본으로 덮어쓰면 그사이 다른
+// 탭이 저장한 메모까지 지운다(frontend-1). 다른 탭이 이미 지웠으면 화면만 맞춘다.
 export function deleteReaderNote(id) {
-  const next = removeReaderNote(state.readerNotes, id);
-  if (next.length === state.readerNotes.length) return;
-  if (!saveReaderNotes(state.currentJobId, next)) {
+  const jobId = state.currentJobId;
+  const latest = loadReaderNotes(jobId);
+  const next = removeReaderNote(latest, id);
+  if (next.length !== latest.length && !saveReaderNotes(jobId, next)) {
+    syncReaderNotes(latest);
     showToast('이 브라우저 저장 공간에 반영하지 못했습니다.', 'error');
     return;
   }
-  state.readerNotes = next;
-  for (const mark of el.readerContent.querySelectorAll('mark.reader-highlight')) {
-    if (mark.dataset.noteId === id) unwrapMark(mark);
-  }
-  renderReaderNotes();
+  syncReaderNotes(next); // 지운 메모의 하이라이트는 여기서 걷힌다
 }
 
 function readerNotesTitle() {

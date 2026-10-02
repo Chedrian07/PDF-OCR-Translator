@@ -1738,3 +1738,92 @@ def test_stream_설정_검증():
                         ("TRANSLATE_MAX_RESPONSE_MB", "abc")):
         with pytest.raises(TranslateError, match=name):
             TranslateConfig.from_env({**base, name: value})
+
+
+# ── 스트림 도중 폭주 차단 (P4 실앱: 0.8B 반복 루프가 8192토큰을 끝까지 태웠다) ──────────
+
+
+class _StreamingSession:
+    """SSE 응답을 조각으로 흘리는 session 대역 — 클라이언트가 몇 조각을 읽었는지 센다."""
+
+    def __init__(self, events: list[bytes]) -> None:
+        self.events = events
+        self.yielded = 0
+        self.closed = False
+        self.sent: list[dict] = []
+
+    def post(self, url, **kwargs):
+        self.sent.append(kwargs["json"])
+        session = self
+
+        class Response:
+            status_code = 200
+            headers = {"Content-Type": "text/event-stream"}
+
+            def iter_content(self, chunk_size=None):
+                for event in session.events:
+                    session.yielded += 1
+                    yield event
+
+            def close(self):
+                session.closed = True
+
+        return Response()
+
+
+_PROMPT = "번역하라: " + "The quick model translates each paragraph of the paper. " * 6   # ~350자
+
+
+def _looping_stream(tokens: int = 8192) -> list[bytes]:
+    """정상 문장 몇 개 뒤 같은 구절을 max_tokens까지 반복하다 length로 끝나는 스트림."""
+    events = [_chunk("모델은 논문의 각 문단을 번역한다. ")]
+    events += [_chunk("그리고 다시 같은 말을 한다, ") for _ in range(tokens)]
+    events += [_chunk(None, "length"), b"data: [DONE]\n\n"]
+    return events
+
+
+def _client(session) -> OpenAICompatClient:
+    c = OpenAICompatClient(_cfg(api_mode="chat", stream="on", max_retries=0))
+    c.session = session
+    return c
+
+
+def test_runaway_repetition_is_cut_mid_stream_instead_of_at_max_tokens():
+    from app.translate.types import TranslateOutputTruncated
+
+    session = _StreamingSession(_looping_stream())
+    with pytest.raises(TranslateOutputTruncated, match="반복 루프에 빠져") as info:
+        _client(session).complete("s", _PROMPT, max_tokens=8192)
+    assert "생성을 끊었습니다" in str(info.value)
+    # 루프는 프롬프트 2배(하한 2000자)를 넘긴 뒤 다음 검사에서 끊긴다 — 8192조각을 다 읽지 않는다
+    assert session.yielded < 400, session.yielded
+    assert session.closed                       # 연결을 닫아 서버 생성도 멈춘다
+    assert len(session.sent) == 1               # 2배 예산 재시도도 하지 않는다
+
+
+def test_overlong_output_is_cut_once_it_passes_four_times_the_prompt():
+    from app.translate.types import TranslateOutputTruncated
+
+    words = [f"단어{i:05d}" for i in range(4000)]          # 반복 없는 긴 본문
+    events = [_chunk(w + " ") for w in words] + [_chunk(None, "stop"), b"data: [DONE]\n\n"]
+    session = _StreamingSession(events)
+    with pytest.raises(TranslateOutputTruncated, match="입력의 4배를 넘어"):
+        _client(session).complete("s", "짧은 원문" * 50, max_tokens=8192)
+    assert session.yielded < 600, session.yielded
+
+
+def test_normal_long_translation_and_long_unsplit_thinking_are_not_cut():
+    """끝까지 정상인 출력은 그대로 받는다 — reasoning을 분리하지 않는 서버의 긴 <think>…는
+    본문으로 세지 않는다(사고가 길어도 그 뒤의 답이 정상이면 쓴다)."""
+    sentences = [f"{i}번째 문장은 원문의 내용을 충실히 옮긴 번역이다. " for i in range(120)]
+    prompt = "번역하라: " + "Each sentence carries a different fact about the method. " * 60
+    events = [_chunk(s) for s in sentences] + [_chunk(None, "stop"), b"data: [DONE]\n\n"]
+    session = _StreamingSession(events)
+    text = _client(session).complete("s", prompt, max_tokens=8192)
+    assert text.startswith("0번째 문장") and text.endswith("번역이다.")
+    assert session.yielded == len(events)
+
+    thinking = [_chunk("<think>")] + [_chunk("생각 중이다, 다시 생각한다. ") for _ in range(2000)]
+    answer = [_chunk("</think>짧은 정답 번역이다."), _chunk(None, "stop"), b"data: [DONE]\n\n"]
+    session = _StreamingSession(thinking + answer)
+    assert _client(session).complete("s", _PROMPT, max_tokens=8192) == "짧은 정답 번역이다."

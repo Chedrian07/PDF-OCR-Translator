@@ -7,11 +7,14 @@ stub은 업로드 파일명(runner 규약 page_NNNN.png)에서 전역 페이지 
 - 여러 쪽 figure_only 청크의 병합: 원출력(raw_pages.json)이 없다고 merge가 마커 불일치로
   오인해 원본 대조 재배치를 돌리고 거짓 '페이지 마커' 경고로 잡을 degraded로 만들던 회귀
   (감사 sidecar-1 — d4b667f).
+- 잡 도중 sidecar 재시작(엔진 사망 → 503 → 재기동 → 모델 재로드): 정상 복구된 잡이
+  대기 문구 경고로 degraded가 되던 문제(감사 sidecar-3).
 """
 
 import json
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 
@@ -104,6 +107,53 @@ class PageStub:
         self.server.server_close()
 
 
+class Lifecycle:
+    """sidecar 수명 상태기계 — 추론 엔진이 죽으면 503을 돌려주고 스스로 재기동한다.
+
+    ready → (엔진 사망) restarting(health restarting=true) → down(health도 503 — 컨테이너
+    재기동) → loading(model_loaded=false) → ready. 추론은 락으로 직렬화한다(실제 sidecar의
+    max_num_seqs=1+락·소유 스레드와 같다). kills(page, deaths)가 참이면 그 추론이 엔진을
+    죽인다."""
+
+    def __init__(self, kills, phase_s: float = 0.1) -> None:
+        self.kills = kills
+        self.phase_s = phase_s
+        self.died_at: float | None = None
+        self.deaths = 0
+        self.inferences = 0
+        self._lock = threading.Lock()
+
+    def _state(self) -> str:
+        if self.died_at is None:
+            return "ready"
+        elapsed = time.monotonic() - self.died_at
+        for state, until in (("restarting", 1), ("down", 2), ("loading", 3)):
+            if elapsed < until * self.phase_s:
+                return state
+        return "ready"
+
+    def health(self) -> dict | None:
+        state = self._state()
+        if state == "down":
+            return None
+        if state == "restarting":
+            return _health_body(model_loaded=False, restarting=True)
+        if state == "loading":
+            return _health_body(model_loaded=False)
+        return _health_body()
+
+    def parse(self, page: int):
+        with self._lock:
+            if self._state() != "ready":
+                return 503, {"detail": "모델이 아직 로드되지 않았습니다"}
+            self.inferences += 1
+            if self.kills(page, self.deaths):
+                self.deaths += 1
+                self.died_at = time.monotonic()
+                return 503, {"detail": "추론 엔진이 종료돼 sidecar를 재시작합니다"}
+        return None
+
+
 def page_body(page: int, markdown: str | None = None, **page_fields) -> dict:
     body = _parse_body()
     body["page"].update(
@@ -183,3 +233,29 @@ def test_truncated_page_keeps_leading_pages_without_a_marker_warning(tmp_path, s
     assert "Chapter 3 discusses the charlie protocol" in pages[2]
     assert pages[3:] == [_page_text(n) for n in range(4, 9)]
     assert stub.seen.count(3) == 1  # 잘린 페이지를 GPU에 다시 보내지 않았다
+
+
+# ── 잡 도중 sidecar 재시작 (감사 sidecar-3) ──────────────────────────────────
+
+@pytest.mark.parametrize("concurrency,pages,bad", [(1, 3, 2), (4, 4, 3)])
+def test_job_recovered_from_a_sidecar_restart_is_not_degraded(
+    tmp_path, stub, monkeypatch, concurrency, pages, bad
+):
+    """추론 엔진이 한 번 죽어 sidecar가 재기동돼도 모든 페이지가 정상 처리됐으면 잡은 'ok'다 —
+    예전에는 '재시작/모델 재로드 대기 중…'·'모델 로딩 대기 중… (최초 기동은…)' 같은 대기
+    문구가 경고로 쌓여 '주의 3건'(degraded)으로 끝났다. 경위는 참고 한 줄로 남는다."""
+    monkeypatch.setattr("app.engine.sidecar._MODEL_WAIT_POLL_S", 0.02)
+    life = Lifecycle(kills=lambda page, deaths: page == bad and deaths == 0)
+    stub.health_fn, stub.behavior = life.health, life.parse
+
+    body, quality, merged = _run_job(tmp_path, stub, pages, remote_page_concurrency=concurrency)
+
+    assert body["status"] == "done", body
+    assert life.deaths == 1
+    assert merged == [_page_text(n) for n in range(1, pages + 1)]
+    assert body["warnings"] == [], body["warnings"]
+    assert quality["state"] == "ok", quality
+    recovered = [n for n in body["notices"] if "다시 보내 처리" in n]
+    span = f"{bad}페이지" if concurrency == 1 else f"1–{pages}페이지"
+    assert len(recovered) == 1 and recovered[0].startswith(f"{span}: "), body["notices"]
+    assert not any("최초 기동" in m for m in body["warnings"] + body["notices"])

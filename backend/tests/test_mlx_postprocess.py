@@ -258,7 +258,8 @@ def test_p23_output_without_any_marker_is_one_page(tmp_path):
 # ── [P22] 쓸 수 없는 image 좌표도 크롭 번호를 소비한다 (torch와 같은 규칙) ──
 
 # 좌표를 못 읽거나(literal_eval 실패) 상자로 쓸 수 없는 image det — 실제 모델의 inline 문법
-# 기준. 뒤에 정상 그림이 오면 그 그림의 파일 번호가 마크다운 자리 번호와 같아야 한다.
+# 기준. 상자 목록이 아닌 det 값(문자열·빈 목록·0)과 기형 평평 목록도 image 매치당 번호 1개다
+# (torch-2). 뒤에 정상 그림이 오면 그 그림의 파일 번호가 마크다운 자리 번호와 같아야 한다.
 UNUSABLE_IMAGE_DETS = {
     "missing-comma": "<|det|>image [100, 120 500, 420]<|/det|>",
     "three-coords": "<|det|>image [100, 120, 500]<|/det|>",
@@ -269,6 +270,10 @@ UNUSABLE_IMAGE_DETS = {
     "bool": "<|det|>image [True, 0, 500, 500]<|/det|>",
     "ref-non-literal": "<|ref|>image<|/ref|><|det|>[[a, b, c, d]]<|/det|>",
     "ref-three-coords": "<|ref|>image<|/ref|><|det|>[[0, 0, 999]]<|/det|>",
+    "flat-strings": "<|det|>image ['x', 0, 500, 500]<|/det|>",
+    "ref-string-literal": "<|ref|>image<|/ref|><|det|>'abcd'<|/det|>",
+    "ref-empty-list": "<|ref|>image<|/ref|><|det|>[]<|/det|>",
+    "ref-zero": "<|ref|>image<|/ref|><|det|>0<|/det|>",
 }
 GOOD_IMAGE_DET = "<|det|>image [100, 450, 800, 900]<|/det|>"
 
@@ -484,13 +489,10 @@ def test_page_split_matches_torch_on_random_outputs(torch_vendor):
         assert pp._split_multi_pages(outputs) == tv._split_multi_pages(outputs), outputs
 
 
-# torch에도 남아 있는 업스트림 번호 규칙의 모서리(빈 목록·문자열 원소·라벨 공백·여러 상자)
-# — 규칙이 바뀌면 두 벤더가 함께 바뀌어야 한다.
+# 단일 상자 규칙 밖의 패리티 전용 모서리 — 공백 라벨 image ref는 좌표가 정상이라 크롭되고
+# (번호 판정은 마크다운 치환과 같은 _is_image_ref), 여러 상자 ref는 업스트림대로 상자마다
+# 번호 1개를 쓴다(마크다운 자리는 1개). 규칙이 바뀌면 두 벤더가 함께 바뀌어야 한다.
 QUIRK_IMAGE_DETS = {
-    "flat-strings": "<|det|>image ['x', 0, 500, 500]<|/det|>",
-    "ref-string-literal": "<|ref|>image<|/ref|><|det|>'abcd'<|/det|>",
-    "ref-empty-list": "<|ref|>image<|/ref|><|det|>[]<|/det|>",
-    "ref-zero": "<|ref|>image<|/ref|><|det|>0<|/det|>",
     "ref-label-spaces": "<|ref|> image <|/ref|><|det|>[[100, 100, 500, 400]]<|/det|>",
     "ref-two-boxes-bad-first": "<|ref|>image<|/ref|><|det|>[[0, 0, 999], [100, 100, 500, 400]]<|/det|>",
     "ref-two-boxes": "<|ref|>image<|/ref|><|det|>[[0, 0, 400, 400], [500, 500, 999, 999]]<|/det|>",

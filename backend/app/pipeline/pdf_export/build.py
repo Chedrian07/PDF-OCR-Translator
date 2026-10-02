@@ -420,6 +420,12 @@ _FIGURE_OVERLAP = 0.30
 # 같은 기하 폴백 — 극단적으로 좁고 긴 블록은 세로쓰기(여백의 arXiv 식별자 등)다.
 _VERTICAL_ASPECT = 6.0
 _VERTICAL_MIN_CHARS = 12
+# 세로쓰기는 **한 줄**이다. 세로 한 줄의 블록 폭은 줄 높이(≈글자 크기)라 글자 하나가
+# 블록 폭의 약 0.45배를 차지하고, 글자 수 × 그 폭이 블록 높이와 맞아야 한다(여유 1.5배).
+# 좁은 단에 가로 본문 여러 줄이 든 블록(신문·잡지 단)은 글자가 그 수십 배다 — 예전에는
+# 종횡비만 봐서 74×574pt 단(57줄)을 세로쓰기로 보존해 번역이 통째로 빠졌다(감사 pdf-4).
+_VERTICAL_ADVANCE_PER_WIDTH = 0.45
+_VERTICAL_LENGTH_SLACK = 1.5
 
 
 def _raster_block_looks_vertical(ctx: "_PageContext", block_index: int, block) -> bool:
@@ -427,6 +433,8 @@ def _raster_block_looks_vertical(ctx: "_PageContext", block_index: int, block) -
 
     텍스트 레이어가 있으면 폰트 백필이 줄 방향으로 `vertical`을 심지만, 스캔은
     그럴 수 없어 세로 스탬프를 덮은 뒤 한국어를 한 글자씩 세로로 쌓아 찍었다.
+    좁고 길어도 여러 줄 가로 본문(내용에 줄바꿈이 있거나 글자가 세로 한 줄에 들어갈
+    양보다 훨씬 많은 블록)은 세로쓰기가 아니다.
     """
     if block_index not in ctx.raster_blocks or not isinstance(block, dict):
         return False
@@ -437,9 +445,13 @@ def _raster_block_looks_vertical(ctx: "_PageContext", block_index: int, block) -
     shown.normalize()
     if shown.width <= 0:
         return False
+    content = str(block.get("content") or "").strip()
     return (
         shown.height / shown.width >= _VERTICAL_ASPECT
-        and len(str(block.get("content") or "").strip()) >= _VERTICAL_MIN_CHARS
+        and len(content) >= _VERTICAL_MIN_CHARS
+        and "\n" not in content
+        and len(content) * shown.width * _VERTICAL_ADVANCE_PER_WIDTH
+        <= shown.height * _VERTICAL_LENGTH_SLACK
     )
 
 
@@ -982,12 +994,19 @@ def _plan_page_targets(ctx: _PageContext, result: PdfExportResult):
                     result.specialist_kept.get(block_type, 0) + 1
                 )
             continue
-        if (
-            (tb.get("vertical") or ob.get("vertical")) in _VERTICAL_SKIP
-            or _raster_block_looks_vertical(ctx, block_index, ob)
-        ):
+        declared_vertical = (tb.get("vertical") or ob.get("vertical")) in _VERTICAL_SKIP
+        if declared_vertical or _raster_block_looks_vertical(ctx, block_index, ob):
             result.keep("vertical")
             result.specialist_kept["vertical"] = result.specialist_kept.get("vertical", 0) + 1
+            if not declared_vertical and (
+                str(tb.get("content") or "").strip() != str(ob.get("content") or "").strip()
+            ):
+                # 스캔의 세로쓰기는 줄 방향 정보 없이 모양으로만 추정한다 — 번역이 빠진
+                # 이유를 리포트에서 알 수 있게 남긴다.
+                result.warnings.append(
+                    f"p{ctx.pno}: 블록 {block_index + 1}을 세로쓰기로 보고 원문 보존"
+                    "(스캔 — 좁고 긴 한 줄 모양으로 추정)"
+                )
             continue
         candidate = _plan_text_block(
             ctx, block_index, block_type, ob, tb, targets, result,

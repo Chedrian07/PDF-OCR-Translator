@@ -971,3 +971,38 @@ def test_pipeline_keeps_page_one_when_the_model_omits_the_leading_marker(mlx_app
         # 그 쪽 대본의 image 상자(page_text(i))로 잘렸다 — 다른 쪽 좌표가 아니다
         box = boxes[name]
         assert box["x2"] == int((500 + 5 * i) / 999 * box["image_width"])
+
+
+# ── 고정 스냅샷은 캐시에서 먼저 (P4 Docker: 로드마다 huggingface.co 조회) ──
+
+
+def test_load_weights_uses_the_complete_cached_snapshot_without_the_hub(monkeypatch, tmp_path):
+    """snapshot_download는 캐시가 완전해도 리비전 정보를 Hub API로 조회했다 — 고정 커밋
+    스냅샷이 캐시에 완전하면 그 디렉터리를 model_path로 넘겨 Hub 해석을 건너뛴다."""
+    import app.vendor.unlimited_ocr_mlx as mlx_ocr
+
+    seen: dict = {}
+
+    def _fake_load(model_id, revision, **kwargs):
+        seen.update(model_id=model_id, revision=revision, **kwargs)
+        info = type("Info", (), {"parameter_bytes": 0, "load_seconds": 0.0,
+                                 "model_path": kwargs.get("model_path")})()
+        return "model", "tokenizer", info
+
+    snapshot = tmp_path / "snap"
+    lookups: list[tuple] = []
+    monkeypatch.setattr(mlx_ocr, "load", _fake_load, raising=False)
+    monkeypatch.setattr(
+        um, "complete_local_snapshot", lambda *args: lookups.append(args) or snapshot,
+    )
+    settings = Settings(engine="unlimited", device="mlx")
+    eng = UnlimitedMLXEngine(settings)
+    assert eng._load_weights() == ("model", "tokenizer")
+    assert lookups == [(settings.model_id, settings.model_revision)]
+    assert seen["model_path"] == snapshot
+    assert (seen["model_id"], seen["revision"]) == (settings.model_id, settings.model_revision)
+
+    # 캐시에 없거나 불완전하면 None — 예전처럼 vendor 로더가 Hub에서 해석·다운로드한다
+    monkeypatch.setattr(um, "complete_local_snapshot", lambda *args: None)
+    eng._load_weights()
+    assert seen["model_path"] is None

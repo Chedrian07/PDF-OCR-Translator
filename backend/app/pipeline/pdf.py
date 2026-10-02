@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from collections import Counter
 from pathlib import Path
 from typing import Callable
@@ -122,6 +123,16 @@ def _open_pdf(fitz, pdf_path: Path, context: str):
         raise ValueError(_OPEN_FAILED) from e
 
 
+# 업로드 검증을 기다리며 서버 스레드를 붙잡을 수 있는 요청 수(probe 워커 2 + 짧은 대기 2)와
+# 빈 워커를 기다리는 상한. API는 probe를 공용 anyio 스레드풀(모든 동기 라우트와 공유, 기본 40)
+# 에서 돌린다 — 예전에는 대기 상한이 검증 상한(60초)과 같아 적대적 업로드 수십 건이 그 스레드를
+# 60초씩 물고 /api/health·/api/jobs까지 굶겼다(감사 security-1). 넘치는 업로드는 기다리지 않고
+# 곧바로 바쁨(PdfWorkerBusy → API 503 + Retry-After)으로 끝낸다.
+_PROBE_MAX_IN_FLIGHT = 4
+_PROBE_QUEUE_WAIT_S = 5.0
+_PROBE_SLOTS = threading.BoundedSemaphore(_PROBE_MAX_IN_FLIGHT)
+
+
 def probe_pdf(pdf_path: Path, max_pages: int) -> int:
     """업로드 검증: 열 수 있는 PDF인지 확인하고 페이지 수를 돌려준다.
     문제가 있으면 사용자 메시지를 담은 ValueError(서버 경로 등 내부 정보 없음).
@@ -129,10 +140,14 @@ def probe_pdf(pdf_path: Path, max_pages: int) -> int:
     검증 자체(손상 xref repair·복잡도 게이트)도 MuPDF 작업이라 서버 프로세스가 아니라 probe
     풀 워커에서 돌린다(pdf_worker). 업로드가 수 분짜리 내보내기 빌드나 적대적 페이지를 처리
     중인 OCR 워커 뒤에 줄서지 않도록 풀을 따로 둔다. 시간 상한(PDF_PAGE_TIMEOUT_S)을 넘거나
-    워커가 죽은 PDF는 거부한다. 빈 워커를 상한 안에 얻지 못하면 PdfWorkerBusy(→ API 503)."""
+    워커가 죽은 PDF는 거부한다. 동시에 검증 중인 업로드가 _PROBE_MAX_IN_FLIGHT를 넘거나 빈
+    워커를 _PROBE_QUEUE_WAIT_S 안에 얻지 못하면 PdfWorkerBusy(→ API 503)."""
     from . import pdf_worker
 
     timeout = pdf_worker.page_timeout()
+    isolated = pdf_worker.mode() == pdf_worker.MODE_PROCESS
+    if isolated and not _PROBE_SLOTS.acquire(blocking=False):
+        raise pdf_worker.PdfWorkerBusy(pdf_worker.POOL_PROBE, 0.0)
     try:
         return pdf_worker.run(
             "app.pipeline.pdf:probe_pdf_local",
@@ -140,7 +155,8 @@ def probe_pdf(pdf_path: Path, max_pages: int) -> int:
                 pdf_path, max_pages,
                 pdf_worker.max_page_content_bytes(), pdf_worker.max_page_xobject_calls(),
             ),
-            pool=pdf_worker.POOL_PROBE, timeout=timeout, wait=timeout,
+            pool=pdf_worker.POOL_PROBE, timeout=timeout,
+            wait=min(timeout, _PROBE_QUEUE_WAIT_S) if timeout else _PROBE_QUEUE_WAIT_S,
         )
     except pdf_worker.PdfWorkerTimeout as error:
         raise ValueError(
@@ -152,6 +168,9 @@ def probe_pdf(pdf_path: Path, max_pages: int) -> int:
             "PDF 검증 중 처리 프로세스가 비정상 종료했습니다 — 손상되었거나 지원하지 않는 "
             "PDF입니다"
         ) from error
+    finally:
+        if isolated:
+            _PROBE_SLOTS.release()
 
 
 def probe_pdf_local(

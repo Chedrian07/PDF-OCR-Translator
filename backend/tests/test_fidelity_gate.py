@@ -835,6 +835,92 @@ def test_cancel_during_repair_leaves_no_hole_in_the_live_stream(tmp_path):
     assert markers == 4, f"되감은 자리가 비었다 — 마커 {markers}개"
 
 
+class _PartialOnCancelEngine(PageDroppingEngine):
+    """torch·MLX처럼 취소되면 예외 대신 그때까지의 부분 출력을 **정상 반환**하는 엔진.
+
+    단독 재처리가 시작되자마자 취소가 들어온다. partial_text가 있으면 그것을 낸다(정상 본문의
+    앞부분 — 점수가 원래보다 오를 수 있다), 없으면 거의 빈 출력을 낸다."""
+
+    def __init__(self, cancel, *, partial_text=None, **kwargs):
+        super().__init__(**kwargs)
+        self.cancel = cancel
+        self.partial_text = partial_text
+
+    def run_single(self, image_path, out_dir, sink, cancel):
+        page = self._page_of(image_path)
+        self.single_calls.append(page)
+        self.cancel.set()
+        (out_dir / "images").mkdir(parents=True, exist_ok=True)
+        body = self.partial_text(page) if self.partial_text else ""
+        raw = f"<|det|>text [60, 60, 930, 900]<|/det|>{body}"
+        self._write_raw_pages(out_dir, [raw])
+        sink.on_text(raw)
+        return f"# page {page}\n\n{body}\nPARTIAL-SINGLE\n"
+
+
+def _run_canceled_gate(tmp_path, engine, cancel, monkeypatch):
+    import app.pipeline.runner as runner_mod
+
+    judged = []
+    real = runner_mod.evaluate_raw_page
+    monkeypatch.setattr(
+        runner_mod, "evaluate_raw_page",
+        lambda *args, **kwargs: judged.append(args[2]) or real(*args, **kwargs),
+    )
+    store = JobStore(tmp_path / "jobs")
+    broker = EventBroker()
+    job = store.create("doc.pdf", "multi", dpi=72)
+    (job.dir / "source.pdf").write_bytes(make_texty_pdf(4))
+    settings = Settings(
+        engine="fake", device="cpu", data_dir=tmp_path / "data",
+        preload_model=False, fake_delay=0.0, pages_per_chunk=4,
+    )
+    q = broker.subscribe(job.id)
+    engine.load()
+    execute_job(job, store, broker, engine, settings, cancel)
+    events = []
+    while True:
+        try:
+            events.append(q.get_nowait())
+        except queue.Empty:
+            break
+    return job, events, judged
+
+
+@pytest.mark.parametrize("improves", [False, True], ids=["no-gain", "partial-scores-higher"])
+def test_cancel_during_a_retry_leaves_no_verdict_and_adopts_nothing(
+    tmp_path, monkeypatch, improves,
+):
+    """재처리 도중 취소 — 취소된 잡에 '개선되지 않아 원래 결과 유지' 품질 경고가 영구히 남고,
+    부분 출력의 점수가 오르면 잘린 단독 결과가 채택되기까지 했다(감사 pipeline-5). 판정 없이
+    원래 결과로 되돌리고 라이브 프레이밍도 지킨다."""
+    cancel = threading.Event()
+    engine = _PartialOnCancelEngine(
+        cancel, drop_pages={2}, partial_text=page_truth if improves else None,
+    )
+    job, events, judged = _run_canceled_gate(tmp_path, engine, cancel, monkeypatch)
+
+    assert job.status == "canceled"
+    assert engine.single_calls == [2]
+    assert judged == [], "취소된 재처리 결과를 판정했다"
+    assert job.warnings == [] and job.notices == []
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert "PARTIAL-SINGLE" not in md, "취소로 잘린 단독 결과를 채택했다"
+    assert client_view(events).count(PAGE_MARKER) == 4
+
+
+def test_raw_page_evaluation_stops_when_canceled(tmp_path):
+    from app.engine.base import JobCanceled
+    from app.pipeline.fidelity import evaluate_raw_page
+
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(make_texty_pdf(1))
+    raw = f"<|det|>text [60, 60, 930, 900]<|/det|>{page_truth(1)}"
+    with pytest.raises(JobCanceled):
+        evaluate_raw_page(path, raw, 1, should_cancel=lambda: True)
+    assert evaluate_raw_page(path, raw, 1, should_cancel=lambda: False).measurable
+
+
 class _CountingPage:
     """MuPDF 페이지 프록시 — 무거운 분석 호출 횟수를 센다."""
 

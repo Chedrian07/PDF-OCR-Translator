@@ -820,6 +820,80 @@ def test_연결_실패_문구는_URL과_쿼리를_담지_않는다(caplog):
     assert "sk-SECRET" not in printed and "api-key" not in printed, printed[-600:]
 
 
+_ECHO_KEY = "sk-live-p5-echoed-key-0123456789"
+_ECHO_TOKEN = "gw/p5+token=abcdef"           # 쿼리에는 인코딩돼 실린다
+
+
+def _echo_cfg(**kw):
+    from urllib.parse import quote
+
+    return _cfg(api_key=_ECHO_KEY, api_mode="chat",
+                base_url=f"https://gw.invalid/v1?api-key={quote(_ECHO_TOKEN, safe='')}", **kw)
+
+
+def _assert_no_echoed_credentials(message: str) -> None:
+    from urllib.parse import quote
+
+    assert "<redacted>" in message, message
+    for leak in (_ECHO_KEY, _ECHO_TOKEN, quote(_ECHO_TOKEN, safe="")):
+        assert leak not in message, message
+
+
+def test_상류_오류_본문이_되울린_키와_쿼리_값은_가린다():
+    """4xx 본문 미리보기는 state.json → 무인증 /translate/state·SSE로 나간다. 게이트웨이가 요청
+    URL·Authorization을 오류 본문에 되울려도 설정된 API 키와 base URL 쿼리 값은 남지 않는다."""
+    from urllib.parse import quote
+
+    from app.translate.types import TranslateUnitRejected
+
+    body = {"error": {"message": (
+        f"Invalid header 'Authorization: Bearer {_ECHO_KEY}' for "
+        f"/v1/chat/completions?api-key={quote(_ECHO_TOKEN, safe='')} ({_ECHO_TOKEN})"
+    )}}
+    c = OpenAICompatClient(_echo_cfg())
+    c._post = lambda path, payload: (400, body, {})
+    with pytest.raises(TranslateUnitRejected, match="HTTP 400") as info:
+        c.complete("s", "u", max_tokens=16)
+    _assert_no_echoed_credentials(str(info.value))
+
+    c2 = OpenAICompatClient(_echo_cfg())
+    c2._post = lambda path, payload: (409, f"conflict for key {_ECHO_KEY}", {})
+    with pytest.raises(TranslateAPIError, match="HTTP 409") as info2:
+        c2.complete("s", "u", max_tokens=16)
+    _assert_no_echoed_credentials(str(info2.value))
+
+    # 200자 미리보기 경계에 걸친 키 — 자른 뒤에 가리면 키 앞부분이 남는다
+    c3 = OpenAICompatClient(_echo_cfg())
+    c3._post = lambda path, payload: (400, "y" * 185 + _ECHO_KEY, {})
+    with pytest.raises(TranslateUnitRejected) as info3:
+        c3.complete("s", "u", max_tokens=16)
+    assert _ECHO_KEY[:12] not in str(info3.value) and "<redacted>" in str(info3.value)
+
+
+def test_스트림_오류_이벤트가_되울린_키도_가린다():
+    from app.translate.types import TranslateUnitRejected
+
+    hits: list = []
+    events = (b'data: {"error": {"code": 400, "message": "bad key '
+              + _ECHO_KEY.encode() + b'"}}\n\n')
+    with _serve(_flaky_stream_server(events, hits)) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_key=_ECHO_KEY, api_mode="chat"))
+        with pytest.raises(TranslateUnitRejected, match="스트림 오류") as info:
+            c.complete("s", "u", max_tokens=10)
+    assert _ECHO_KEY not in str(info.value) and "<redacted>" in str(info.value)
+
+
+def test_짧은_설정_값은_오류_문구를_망가뜨리지_않는다():
+    """'sk-x'·'tenant=x' 같은 짧은 값까지 가리면 오류 문구의 평범한 글자가 지워진다."""
+    from app.translate.types import TranslateUnitRejected
+
+    c = OpenAICompatClient(_cfg(api_mode="chat", base_url="https://host/v1?tenant=x"))
+    c._post = lambda path, payload: (400, {"error": {"message": "max_tokens too large"}}, {})
+    with pytest.raises(TranslateUnitRejected) as info:
+        c.complete("s", "u", max_tokens=16)
+    assert "max_tokens too large" in str(info.value) and "<redacted>" not in str(info.value)
+
+
 def test_연결_실패_원인은_고정_문구로만_요약한다():
     import socket
 

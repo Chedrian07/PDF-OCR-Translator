@@ -30,7 +30,10 @@ GitHub's private vulnerability reporting or another agreed private channel.
   - `LLM_LOCAL_OPENAI_API_KEY` is the only key the `local-openai` Q&A provider sends.
     Its `LLM_LOCAL_OPENAI_BASE_URL` must be `127.0.0.1`, `localhost`, `::1` or
     `host.docker.internal`; anything else (DNS names, other IPs, userinfo, query strings)
-    fails at startup, and redirects are not followed.
+    fails at startup, and redirects are not followed. The `local-openai` and Ollama
+    clients ignore `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` and system proxy settings, so a
+    proxy configured for model downloads never receives page text, questions or the
+    local key.
 - Keep `.env`, private keys, certificates, job data, and model caches outside Git and the
   Docker build context. The supplied ignore files enforce the common cases. Unknown
   `.env` keys are reported by name only (never by value) in the server log and in the

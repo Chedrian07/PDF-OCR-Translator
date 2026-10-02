@@ -8,7 +8,8 @@ stub은 업로드 파일명(runner 규약 page_NNNN.png)에서 전역 페이지 
   오인해 원본 대조 재배치를 돌리고 거짓 '페이지 마커' 경고로 잡을 degraded로 만들던 회귀
   (감사 sidecar-1 — d4b667f).
 - 잡 도중 sidecar 재시작(엔진 사망 → 503 → 재기동 → 모델 재로드): 정상 복구된 잡이
-  대기 문구 경고로 degraded가 되던 문제(감사 sidecar-3).
+  대기 문구 경고로 degraded가 되던 문제(감사 sidecar-3), 엔진을 결정적으로 죽이는 페이지
+  하나가 컨테이너 재시작을 3~5회 일으키던 문제(감사 sidecar-2).
 """
 
 import json
@@ -21,6 +22,9 @@ from io import BytesIO
 import pytest
 
 from app.config import Settings
+from app.engine.base import NullSink
+from app.engine.registry import build_engine
+from app.engine.sidecar import SidecarRestartLoopError
 from app.main import create_app
 
 from tests.conftest import wait_done
@@ -259,3 +263,111 @@ def test_job_recovered_from_a_sidecar_restart_is_not_degraded(
     span = f"{bad}페이지" if concurrency == 1 else f"1–{pages}페이지"
     assert len(recovered) == 1 and recovered[0].startswith(f"{span}: "), body["notices"]
     assert not any("최초 기동" in m for m in body["warnings"] + body["notices"])
+
+
+# ── 엔진을 죽이는 페이지 (감사 sidecar-2) ──────────────────────────────────────
+
+def _job_pages(tmp_path, count: int) -> list:
+    """runner 규약의 페이지 래스터 — stub이 파일명으로 페이지를 안다."""
+    from PIL import Image
+
+    pages = tmp_path / "job" / "pages"
+    pages.mkdir(parents=True)
+    paths = []
+    for page in range(1, count + 1):
+        path = pages / f"page_{page:04d}.png"
+        Image.new("RGB", (400, 560), "white").save(path)
+        paths.append(path)
+    return paths
+
+
+def test_page_that_kills_the_engine_again_after_recovery_is_not_retried(
+    tmp_path, stub, monkeypatch
+):
+    """복귀 뒤 다시 보낸 요청에서도 sidecar가 내려가면 retry_same_page=False로 올린다 —
+    runner가 같은 페이지를 또 보내지 않게. 페이지별 복구가 그 페이지를 한 번 더 보낼 때는
+    또 내려가도 기다려 다시 보내지 않는다(형제 페이지는 그 한 번으로 정상 처리된다)."""
+    monkeypatch.setattr("app.engine.sidecar._MODEL_WAIT_POLL_S", 0.02)
+    life = Lifecycle(kills=lambda page, deaths: page == 2)
+    stub.health_fn, stub.behavior = life.health, life.parse
+    eng = build_engine(_settings(tmp_path, stub, remote_page_concurrency=2))
+    eng.load()
+    p1, p2 = _job_pages(tmp_path, 2)
+
+    with pytest.raises(SidecarRestartLoopError) as ei:
+        eng.run_multi([p1, p2], tmp_path / "chunk", NullSink(), threading.Event())
+    assert ei.value.retry_same_page is False
+    assert life.deaths == 2            # 첫 요청 + 복귀 뒤 1회 재요청
+
+    # runner의 페이지별 복구 — 1쪽은 재기동을 기다렸다가 정상 처리된다
+    md = eng.run_single(p1, tmp_path / "f1", NullSink(), threading.Event())
+    assert md.startswith("Chapter 1 discusses")
+    # 2쪽은 한 번만 더 보낸다 — 또 내려가면 기다려 다시 보내지 않는다
+    sent = stub.seen.count(2)
+    with pytest.raises(SidecarRestartLoopError):
+        eng.run_single(p2, tmp_path / "f2", NullSink(), threading.Event())
+    assert stub.seen.count(2) == sent + 1 and life.deaths == 3
+    assert eng.drain_warnings() == []  # 손실 경고는 runner가 페이지 격리에서 남긴다
+
+
+def test_next_chunk_waits_for_the_restart_instead_of_sending_into_it(
+    tmp_path, stub, monkeypatch
+):
+    """복귀 뒤 재요청까지 실패하면 health 캐시를 다시 무효화한다 — 복귀 대기가 남긴
+    loaded=True를 믿으면 다음 청크가 재시작 중인 sidecar로 곧장 보내 503을 받고서야 기다렸다."""
+    monkeypatch.setattr("app.engine.sidecar._MODEL_WAIT_POLL_S", 0.02)
+    life = Lifecycle(kills=lambda page, deaths: page == 2)
+    stub.health_fn, stub.behavior = life.health, life.parse
+    eng = build_engine(_settings(tmp_path, stub))
+    eng.load()
+    p1, p2 = _job_pages(tmp_path, 2)
+    with pytest.raises(SidecarRestartLoopError):
+        eng.run_multi([p2], tmp_path / "c0", NullSink(), threading.Event())
+    assert not eng.loaded
+    eng.drain_notices()
+
+    md = eng.run_multi([p1], tmp_path / "c1", NullSink(), threading.Event())  # 다음 청크
+    assert "Chapter 1 discusses" in md
+    assert stub.seen.count(1) == 1     # 재기동이 끝난 뒤에 한 번만 보냈다
+    assert eng.drain_notices() == ["sidecar 재시작/모델 재로드가 끝나기를 기다린 뒤 이어서 진행했습니다"]
+
+
+def test_restart_loop_mark_does_not_outlive_the_next_chunk(tmp_path, stub, monkeypatch):
+    monkeypatch.setattr("app.engine.sidecar._MODEL_WAIT_POLL_S", 0.02)
+    life = Lifecycle(kills=lambda page, deaths: page == 2)
+    stub.health_fn, stub.behavior = life.health, life.parse
+    eng = build_engine(_settings(tmp_path, stub))
+    eng.load()
+    p1, p2 = _job_pages(tmp_path, 2)
+    with pytest.raises(SidecarRestartLoopError):
+        eng.run_multi([p2], tmp_path / "c0", NullSink(), threading.Event())
+    eng.run_multi([p1], tmp_path / "c1", NullSink(), threading.Event())  # 다음 청크
+    with pytest.raises(SidecarRestartLoopError):
+        eng.run_single(p2, tmp_path / "late", NullSink(), threading.Event())
+    assert life.deaths == 4  # 표식이 지워져 다시 '복귀 뒤 1회 재요청'을 탔다
+
+
+@pytest.mark.parametrize("concurrency,pages,bad,deaths", [(1, 3, 2, 2), (4, 4, 3, 3)])
+def test_page_that_kills_the_engine_costs_few_sidecar_restarts(
+    tmp_path, stub, monkeypatch, concurrency, pages, bad, deaths
+):
+    """같은 이미지에서 결정적으로 엔진이 죽는 페이지(EngineCore OOM·illegal memory access)
+    하나가 예전에는 컨테이너 재시작·모델 재로드를 3회(동시성 1)~5회(동시성 4) 일으킨 뒤에야
+    텍스트 레이어로 넘어갔다. 이제 첫 요청 + 복귀 뒤 1회(+동시성>1이면 페이지별 복구 1회)뿐이다."""
+    monkeypatch.setattr("app.engine.sidecar._MODEL_WAIT_POLL_S", 0.02)
+    life = Lifecycle(kills=lambda page, _deaths: page == bad)
+    stub.health_fn, stub.behavior = life.health, life.parse
+
+    body, quality, merged = _run_job(tmp_path, stub, pages, remote_page_concurrency=concurrency)
+
+    assert body["status"] == "done", body
+    assert life.deaths == deaths, (life.deaths, stub.seen)
+    assert len(body["warnings"]) == 1, body["warnings"]
+    warning = body["warnings"][0]
+    assert warning.startswith(f"{bad}페이지: ") and "텍스트 레이어로 복구" in warning
+    assert "SidecarRestartLoopError" in warning
+    assert "PDF 내장 텍스트 레이어에서 복구" in merged[bad - 1]
+    # 범인이 아닌 페이지는 모두 OCR 결과 그대로다
+    assert [m for n, m in enumerate(merged, 1) if n != bad] == [
+        _page_text(n) for n in range(1, pages + 1) if n != bad
+    ]

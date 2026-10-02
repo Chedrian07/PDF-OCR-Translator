@@ -31,16 +31,19 @@ setup-native:     ## C++ 가속 모듈 설치 (선택 — 없어도 순수 파�
 # 무시된다(.env는 이미 있는 환경변수를 덮지 않는다). 지정: make dev OCR_DEVICE=cpu
 # --timeout-graceful-shutdown 5: 열린 SSE 스트림·keep-alive 연결이 종료(Ctrl+C·--reload 재시작)를
 # 무기한 붙잡지 않게 한다 — Dockerfile의 uvicorn과 같은 값.
-dev:              ## 로컬 개발 서버 — http://127.0.0.1:8000 (디바이스 자동 선택)
-	cd backend && uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 \
+# PORT: 개발 서버 포트(기본 8000) — 8000을 다른 서버가 쓰면 make dev PORT=8010
+PORT ?= 8000
+
+dev:              ## 로컬 개발 서버 — http://127.0.0.1:$(PORT) (디바이스 자동 선택, 기본 8000)
+	cd backend && uv run uvicorn app.main:app --reload --host 127.0.0.1 --port $(PORT) \
 		--timeout-graceful-shutdown 5
 
 dev-metal:        ## torch MPS(Metal) 폴백으로 개발 서버 — MLX와 결과·속도 비교용
-	cd backend && OCR_DEVICE=metal uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 \
+	cd backend && OCR_DEVICE=metal uv run uvicorn app.main:app --reload --host 127.0.0.1 --port $(PORT) \
 		--timeout-graceful-shutdown 5
 
 dev-textlayer:    ## 모델 다운로드 없이 textlayer 엔진으로 개발 서버
-	cd backend && OCR_ENGINE=textlayer uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 \
+	cd backend && OCR_ENGINE=textlayer uv run uvicorn app.main:app --reload --host 127.0.0.1 --port $(PORT) \
 		--timeout-graceful-shutdown 5
 
 test:             ## 핵심 로컬 3종 — backend pytest · ruff · frontend (node --test)

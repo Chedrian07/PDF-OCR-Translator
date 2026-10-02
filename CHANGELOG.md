@@ -67,7 +67,7 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 - List items left untranslated (the unit kept its original text) keep their original typesetting instead of being redrawn as plain text with stray fraction bars.
 - Inline math rules (fraction bars, root overlines) inside a translated paragraph are removed with its text and no longer block its space, so translations are not shrunk below readable size and no stray bars remain (a 25-page paper went from seven shrink/no-fit warnings to one).
 - Inner-product brackets (`\langle`, `\rangle`) are drawn as ⟨ ⟩ (〈 〉 on fonts without them) instead of the words `langle`/`rangle`, and a symbol command right before `\boldsymbol{…}` or `\frac{…}{…}` no longer fuses with it (`langley`, `cdotx`).
-- Every piece of a large TeX delimiter (stacked `|`/`‖` bars) is removed with its paragraph, so no stray bars overlap the translation. Export format version 15 rebuilds cached PDFs.
+- Every piece of a large TeX delimiter (stacked `|`/`‖` bars) is removed with its paragraph, so no stray bars overlap the translation.
 - A short symbol that sticks out of its line and only grazes the OCR box (a radical `√`, a tall bracket, an accent) is removed with the paragraph it touches when that paragraph is translated, instead of staying on top of the translation.
 - The translated PDF no longer carries the upload's active content: open-actions and other automatic actions, document JavaScript, XFA forms, attachments, and links that run scripts, launch programs, submit forms or open other files are removed. Internal links, URI links and the outline stay. Export format version 17 rebuilds cached PDFs.
 - Scan covers leave overlapping figures and kept blocks intact; tiled and margined scans and searchable scans with the text layer under the image are recognised; narrow multi-line scan columns are no longer kept as vertical text; lines set in fonts with degenerate metrics are removed.
@@ -111,6 +111,8 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 ### Breaking and behaviour changes
 
 - Local runs default to `OCR_DEVICE=auto` (MLX on Apple Silicon, CUDA on Linux with the cu129 extra). Set `OCR_DEVICE=cpu` for the old behaviour.
+- Images started without Compose also pick the device automatically: a cu129 image run with `docker run --gpus all` now uses CUDA. Set `OCR_DEVICE=cpu` to keep the CPU.
+- Local runs read `.env` only from the working directory or the repository root; a `.env` in the directory above the repository is no longer read. Values are parsed like Compose (an unquoted value ends at ` #`, which starts a comment).
 - Rename `REASONING_EFFORT` in `.env` to `TRANSLATE_REASONING` (translation) or `LLM_REASONING_EFFORT` (Q&A); the old key was never read.
 - Translation streams by default in chat mode; set `TRANSLATE_STREAM=0` for gateways that cannot stream.
 - Layouts with only image blocks (old OvisOCR2 jobs) count as no layout: coordinate routes return 404 and `/pdf` returns 409.

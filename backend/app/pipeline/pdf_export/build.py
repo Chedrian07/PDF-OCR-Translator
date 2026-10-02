@@ -48,8 +48,9 @@ from .fonts import (
     _resolve_font,
     _unique_font_resource_name,
 )
-from .geometry import _rect_overlap_area
+from .geometry import _ink_collides, _rect_overlap_area
 from .models import _FlowCandidate, _Replacement, _SourceSpan, _TableCell, _TextFitPlan
+from .raster_tables import raster_table_grid
 from .report import PdfExportError, PdfExportResult
 from .spans import (
     _assign_source_spans,
@@ -491,6 +492,39 @@ def _raster_backed_blocks(block_rects, oblocks, source_records, visuals) -> froz
     return frozenset(out)
 
 
+def _align_to_baseline(page, plan: _TextFitPlan, baseline, cell_rect, avoid) -> _TextFitPlan:
+    """한 줄 계획을 원문 줄의 baseline(표시 공간 y)으로 옮긴다.
+
+    셀 조판은 셀 위쪽에서 시작하므로, 같은 행에 남는 영어(스캔 픽셀)보다 번역이 떠
+    보였다. 옮긴 글자 상자가 셀 안에 들고 남는 원문·괘선에 닿지 않을 때만 옮긴다.
+    """
+    if plan.origin is None or plan.ink_rect is None or baseline is None:
+        return plan
+    to_display, to_page = page.rotation_matrix, page.derotation_matrix
+    ox, oy = plan.origin
+    shown_x = ox * to_display.a + oy * to_display.c + to_display.e
+    shown_y = ox * to_display.b + oy * to_display.d + to_display.f
+    delta = float(baseline) - shown_y
+    if abs(delta) < 0.25:
+        return plan
+    ink = plan.ink_rect * to_display
+    ink.normalize()
+    cell = cell_rect * to_display
+    cell.normalize()
+    if ink.y0 + delta < cell.y0 - 0.01 or ink.y1 + delta > cell.y1 + 0.01:
+        return plan
+    moved = quiet_fitz().Rect(ink.x0, ink.y0 + delta, ink.x1, ink.y1 + delta) * to_page
+    moved.normalize()
+    if _ink_collides(moved, avoid):
+        return plan
+    new_y = shown_y + delta
+    origin = (
+        float(shown_x * to_page.a + new_y * to_page.c + to_page.e),
+        float(shown_x * to_page.b + new_y * to_page.d + to_page.f),
+    )
+    return replace(plan, origin=origin, first_origin=origin, ink_rect=moved)
+
+
 def _plan_table_block(
     ctx: _PageContext, block_index: int, ob: dict, tb: dict,
     result: PdfExportResult,
@@ -521,33 +555,54 @@ def _plan_table_block(
         return []
     old_cells, row_count, col_count = old_parsed
     new_cells = new_parsed[0]
-    cell_rects, grid_trusted = _table_cell_rects(
-        ctx.page, table_rect, old_cells, row_count, col_count, cache=ctx.analysis,
-    )
-    if not grid_trusted:
-        result.keep("table_grid_untrusted")
-        result.specialist_kept["table"] = result.specialist_kept.get("table", 0) + 1
-        result.warnings.append(
-            f"p{ctx.pno}: 표 셀 격자 추정 실패(원문 검색 불일치) — 원문 표 보존"
-        )
-        return []
-    table_targets: list[_Replacement] = []
-    changed_cell_specs = [
-        (old_cell, new_cell, cell_rect)
-        for old_cell, new_cell, cell_rect in zip(
-            old_cells, new_cells, cell_rects,
-        )
+    changed = [
+        index
+        for index, (old_cell, new_cell) in enumerate(zip(old_cells, new_cells))
         if (
             (new_text := _plain_text(new_cell.text))
             and new_text != (old_text := _plain_text(old_cell.text))
             and new_text.casefold() != old_text.casefold()
         )
     ]
+    raster_grid = None
+    if block_index in ctx.raster_blocks:
+        if not changed:
+            return []
+        # 스캔 표는 바뀐 셀을 바탕색으로 **덮는다** — 원문 검색이 비어 균등 분할로
+        # 떨어진 격자로 덮으면 이웃 셀 글자와 괘선까지 지워진다(감사 pdf-1). 픽셀의 빈
+        # 띠로 실제 열·행 경계를 찾고, 확정하지 못하면 표를 덮지 않고 보존한다.
+        raster_grid = raster_table_grid(
+            ctx.page, table_rect, old_cells, row_count, col_count,
+            cache=ctx.analysis, key=block_index,
+        )
+        if raster_grid is None:
+            result.keep("table_grid_untrusted")
+            result.specialist_kept["table"] = result.specialist_kept.get("table", 0) + 1
+            result.warnings.append(
+                f"p{ctx.pno}: 스캔 표의 열·행 경계를 픽셀에서 확정하지 못함 — 원문 표 보존"
+            )
+            return []
+        cell_rects = list(raster_grid.cell_rects)
+    else:
+        cell_rects, grid_trusted = _table_cell_rects(
+            ctx.page, table_rect, old_cells, row_count, col_count, cache=ctx.analysis,
+        )
+        if not grid_trusted:
+            result.keep("table_grid_untrusted")
+            result.specialist_kept["table"] = result.specialist_kept.get("table", 0) + 1
+            result.warnings.append(
+                f"p{ctx.pno}: 표 셀 격자 추정 실패(원문 검색 불일치) — 원문 표 보존"
+            )
+            return []
+    table_targets: list[_Replacement] = []
+    changed_cell_specs = [
+        (index, old_cells[index], new_cells[index], cell_rects[index]) for index in changed
+    ]
     changed_cells = len(changed_cell_specs)
     # 이 표에서 **지워지지 않는** 원문 span은 셀 조판의 장애물이다. 격자 추정은
     # 셀 경계를 대략만 맞추므로, 장애물 없이 조판하면 번역 셀이 옆 칸에 남은
     # 원문 글리프에 닿는다(실측 p3: 번역 "실세계"가 앞 칸 끝의 ")"와 겹침).
-    cell_zone = [rect for _o, _n, rect in changed_cell_specs]
+    cell_zone = [rect for _i, _o, _n, rect in changed_cell_specs]
     table_avoid = [
         span.rect
         for span in ctx.source_records
@@ -559,15 +614,29 @@ def _plan_table_block(
             for rect in cell_zone
         )
     ]
+    if raster_grid is not None:
+        # 스캔 표에는 span이 없다 — 남는 원문은 바뀌지 않은 셀의 글자 픽셀과 괘선이다.
+        changed_set = set(changed)
+        table_avoid.extend(raster_grid.rule_rects)
+        table_avoid.extend(
+            ink for index, ink in enumerate(raster_grid.ink_rects)
+            if ink is not None and index not in changed_set
+        )
     failed_cell: _TableCell | None = None
-    for old_cell, new_cell, cell_rect in changed_cell_specs:
-        old_text = _plain_text(old_cell.text)
+    for cell_index, old_cell, new_cell, cell_rect in changed_cell_specs:
         new_text = _portable_text_for_font(
             _plain_text(new_cell.text), ctx.fonts.table_ff,
         )
         base_pt, cell_align, cell_bold, source_redact = (
             _table_cell_source_style(ctx.page, cell_rect, ctx.source_records)
         )
+        # 덮개 — 원문이 픽셀인 셀은 셀 사각형이 아니라 그 셀 글자 잉크만 덮는다.
+        cover = cell_rect
+        if raster_grid is not None:
+            cover = raster_grid.ink_rects[cell_index]
+            cell_align = raster_grid.aligns[cell_index]
+            if raster_grid.font_pt:
+                base_pt = min(12.0, max(_MIN_FONT_PT, raster_grid.font_pt * 1.03))
         plan = _plan_single_line(
             ctx.page,
             cell_rect,
@@ -602,6 +671,10 @@ def _plan_table_block(
         if plan is None or plan.fontsize + 0.01 < readable_floor:
             failed_cell = old_cell
             break
+        if raster_grid is not None and raster_grid.baselines:
+            plan = _align_to_baseline(
+                ctx.page, plan, raster_grid.baselines[cell_index], cell_rect, table_avoid,
+            )
         table_targets.append(_Replacement(
             plan,
             new_text,
@@ -609,7 +682,7 @@ def _plan_table_block(
             source_redact,
             ctx.fonts.table_name,
             ctx.fonts.table_ff,
-            cell_rect,
+            cover,
             block_index,
         ))
     if failed_cell is not None:
@@ -1242,7 +1315,11 @@ _RASTER_DARK_LUMA = 0.5
 
 
 def _raster_erase_regions(ctx: _PageContext, targets) -> list:
-    """원문이 래스터인 교체 대상마다 덮을 원래 영역(번역이 옮겨 가도 원래 자리)."""
+    """원문이 래스터인 교체 대상마다 덮을 원래 영역(번역이 옮겨 가도 원래 자리).
+
+    표 셀의 `source_rect`는 셀 사각형이 아니라 그 셀 글자 잉크의 상자다
+    (raster_tables) — 괘선과 이웃 셀 글자를 덮지 않으므로 여유를 더하지 않는다.
+    """
     regions: list = []
     seen: set[tuple] = set()
     for target in targets:

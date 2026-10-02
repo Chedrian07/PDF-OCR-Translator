@@ -13,7 +13,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { KATEX_MAX_BOX_EM, KATEX_MAX_SIZE_EM, katexOptions } from '../js/constants.js';
+import {
+  KATEX_MAX_BOX_EM, KATEX_MAX_SIZE_EM, KATEX_MAX_TEX_CHARS, katexOptions,
+} from '../js/constants.js';
 import { clampTexSizes, katexStyleOversized } from '../js/core.js';
 
 const FRONTEND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -86,6 +88,48 @@ test('크기 묶기가 앱 clampTexSizes와 같다 — 고정 표와 무작위 �
     assert.equal(guard.clampTexSizes(tex), clampTexSizes(tex), tex);
   }
 });
+
+// 크기 묶기는 입력 길이에 선형이어야 한다 — 상한 없는 \s*·[^\]]* 스캔은 닫는 괄호 없는 '\\['
+// 반복·'\kern'+긴 공백에서 길이의 제곱 시간이 걸려, 적대적 PDF 한 쪽(수식 스팬 45만 자)이
+// 미리보기·리더·내려받은 HTML을 23초 멈췄다(감사 delta-api-frontend-infra-1). 백엔드
+// test_render_math_safety와 같은 판정: 절대 예산 안이면 통과, 넘으면 1/4 크기 대비 시간 비로
+// 2차 비용만 잡는다(선형 ~4배, 2차 ~16배).
+const LINEAR_SIZE = 200 * 1024;
+const LINEAR_BUDGET_MS = 1000;
+const LINEAR_MAX_SCALING = 8;
+const PATHOLOGICAL_TEX = {
+  '닫는 괄호 없는 \\\\[ 반복': (n) => `\\[${'\\\\['.repeat(Math.floor(n / 3))}`,
+  '\\kern + 긴 공백(단위 없음)': (n) => `\\kern${' '.repeat(n)}x`,
+  '\\kern + 긴 공백 + 부호': (n) => `\\kern${' '.repeat(n)}-5000em`,
+  '닫는 괄호 없는 \\rule[ 반복': (n) => '\\rule['.repeat(Math.floor(n / 6)),
+  '\\\\ + 긴 공백': (n) => `a\\\\${' '.repeat(n)}[-900em] b`,
+  '닫는 중괄호 없는 \\raisebox{ 반복': (n) => '\\raisebox{-4000em '.repeat(Math.floor(n / 18)),
+};
+
+function elapsedMs(fn, input) {
+  const start = performance.now();
+  fn(input);
+  return performance.now() - start;
+}
+
+function assertLinear(fn, build, label) {
+  const elapsed = elapsedMs(fn, build(LINEAR_SIZE));
+  if (elapsed < LINEAR_BUDGET_MS) return;
+  const quarter = elapsedMs(fn, build(LINEAR_SIZE / 4));
+  const ratio = elapsed / Math.max(quarter, 0.001);
+  assert.ok(ratio < LINEAR_MAX_SCALING,
+    `${label}: ${LINEAR_SIZE}자 ${elapsed.toFixed(0)}ms, 1/4 크기 ${quarter.toFixed(0)}ms(×${ratio.toFixed(1)}) — 2차 비용`);
+}
+
+for (const [label, build] of Object.entries(PATHOLOGICAL_TEX)) {
+  test(`크기 묶기는 입력 길이에 선형이다 — ${label} (앱·내려받기 둘 다)`, () => {
+    const guard = loadGuard();
+    assertLinear(clampTexSizes, build, `core ${label}`);
+    assertLinear(guard.clampTexSizes, build, `guard ${label}`);
+    const small = build(4096);
+    assert.equal(guard.clampTexSizes(small), clampTexSizes(small), '두 구현의 결과가 같다');
+  });
+}
 
 test('조판 결과 상한 판정이 앱 katexStyleOversized와 같다', () => {
   const guard = loadGuard();
@@ -168,6 +212,27 @@ test('renderMath: 크기를 묶어 조판하고, 매크로로 만든 거대 박�
   const throwing = { render() { throw new Error('boom'); } };
   assert.equal(guard.renderMath(throwing, broken, '\\frac{', false), false);
   assert.equal(broken.textContent, '\\frac{', '렌더 불가 TeX는 원문 유지');
+});
+
+test('renderMath: 상한보다 긴 TeX는 조판하지 않고 원문으로 둔다 — 앱 상한과 같은 값', () => {
+  // KaTeX 자체도 긴 입력에 초선형이다('x+' 20만 자 = 11초) — 상한이 앱(ui.renderMath)과 같아야
+  // 내려받은 HTML과 앱 화면이 같은 수식을 같은 모양으로 보인다.
+  const guard = loadGuard();
+  const katex = realKatexStub();
+  const atCap = 'x+'.repeat(KATEX_MAX_TEX_CHARS / 2);
+  assert.equal(atCap.length, KATEX_MAX_TEX_CHARS);
+  const fits = stubTarget(atCap);
+  assert.equal(guard.renderMath(katex, fits, atCap, false), true);
+  assert.equal(katex.seen.length, 1, '상한 길이까지는 조판한다');
+  assert.deepEqual(fits.attrs, {});
+
+  const tooLong = `${atCap}y`;
+  const target = stubTarget(tooLong);
+  assert.equal(guard.renderMath(katex, target, tooLong, true), true, '끝 — 다시 시도하지 않는다');
+  assert.equal(katex.seen.length, 1, 'KaTeX를 부르지 않는다');
+  assert.equal(target.textContent, tooLong);
+  assert.equal(target.attrs['data-math-fallback'], 'too-long');
+  assert.match(target.attrs.title, /원문 TeX/);
 });
 
 test('typesetMath: 문서의 인라인·디스플레이 수식을 모두 window.katex로 조판한다', () => {

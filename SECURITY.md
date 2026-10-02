@@ -89,7 +89,9 @@ Uploaded PDFs, and the text an OCR model produces from them, are treated as host
   workers set `oom_score_adj=1000` so the kernel kills a worker before the server, and
   `PDF_WORKER_MEM_LIMIT_MB` (off by default) adds an address-space limit.
 - Workers remove credential-like environment variables (names containing `KEY`,
-  `TOKEN`, `SECRET`, `PASSWORD` or `CREDENTIAL`) when they start. This only cleans the
+  `TOKEN`, `SECRET`, `PASSWORD` or `CREDENTIAL`) and variables whose values can carry
+  credentials (names ending in `_URL`/`_URI` such as `OPENAI_BASE_URL`, proxy variables
+  such as `HTTPS_PROXY`, and `TRANSLATE_EXTRA_BODY`) when they start. This only cleans the
   Python environment and processes the worker starts; the kernel keeps the original
   environment block (`/proc/self/environ`) and the server's own environment is readable by
   the same user, so treat API keys as exposed if a worker is ever compromised and rotate

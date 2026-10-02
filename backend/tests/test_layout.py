@@ -290,6 +290,29 @@ def test_document_standalone_no_traversal(tmp_path):
     assert "data:image/jpeg;base64," not in html
 
 
+def test_document_standalone_caps_inlined_image_bytes(tmp_path, monkeypatch, caplog):
+    """그림 참조는 비신뢰 마크다운(OCR·텍스트 레이어가 옮겨 적은 `![](images/…)`)에서 온다 —
+    같은 크롭을 수천 번 가리켜도 인라인 총량은 상한 안이고, 넘는 참조는 빈 이미지가 된다.
+    예전에는 참조마다 base64 사본을 붙여 1MB 크롭 100번이 140MB 문서가 됐다."""
+    from app.pipeline import layout as layout_mod
+    from app.pipeline.render import render_document_html
+
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "p0001_0.jpg").write_bytes(b"\xff\xd8" + b"x" * 3998)  # 4,000바이트
+    (tmp_path / "images" / "p0002_0.jpg").write_bytes(b"\xff\xd8tiny")
+    monkeypatch.setattr(layout_mod, "_DOCUMENT_MAX_INLINE_BYTES", 10_000, raising=False)
+    markdown = "![](images/p0002_0.jpg)\n\n" + " ".join(["![](images/p0001_0.jpg)"] * 50) + "\n"
+    inner = render_document_html(markdown, "/api/jobs/j_x/files")
+    assert inner.count("<img") == 51
+    with caplog.at_level("WARNING", logger="app.pipeline.layout"):
+        html = layout_mod.render_document_standalone(inner, tmp_path, "t", None)
+    assert html.count("data:image/jpeg;base64,") == 3   # 6 + 4,000 + 4,000 ≤ 10,000
+    assert html.count('src="data:,"') == 48
+    assert len(html) < 30_000                            # 상한 없으면 50 × 5,336자
+    assert "/api/jobs/" not in html
+    assert "상한" in caplog.text and "48" in caplog.text
+
+
 def test_vertical_blocks_render_writing_mode_class():
     pages = [{"page": 1, "width": 612, "height": 792, "blocks": [
         {"type": "text", "bbox": [10, 300, 40, 900], "content": "arXiv:1908.07836v1 [cs.CL]",

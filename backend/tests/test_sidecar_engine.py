@@ -321,7 +321,10 @@ def test_파싱중_503은_복귀를_기다렸다_같은_페이지를_재시도�
 
     assert calls["n"] == 2, "503 후 복귀 대기 + 1회 재시도"
     assert "본문" in md  # 플레이스홀더가 아니라 정상 결과
-    assert any("재시작" in w for w in eng.drain_warnings())
+    # 내용은 정상 처리됐다 — 복귀 경위는 참고(notice)다. 경고로 올리면 모든 페이지가 정상인
+    # 잡도 quality가 degraded가 된다(감사 sidecar-3)
+    assert eng.drain_warnings() == []
+    assert any("재시작" in n and "다시 보내 처리" in n for n in eng.drain_notices())
 
 
 def test_읽기_타임아웃은_엔진이_같은_페이지를_재추론하지_않는다(tmp_path, stub):
@@ -350,7 +353,17 @@ def test_읽기_타임아웃은_엔진이_같은_페이지를_재추론하지_�
 def test_동시성2에서_503_복귀대기가_AttributeError없이_돈다(tmp_path, stub, monkeypatch):
     """동시성>1 경로는 _AnyCancel(잡 취소 OR 형제 실패)을 넘긴다 — wait_until_ready가
     cancel.wait()를 호출하므로 wait()가 없으면 AttributeError로 페이지가 죽는다."""
+    from app.engine.sidecar import _AnyCancel
+
     monkeypatch.setattr("app.engine.sidecar._MODEL_WAIT_POLL_S", 0.05)
+    waits: list[float] = []
+    original_wait = _AnyCancel.wait
+
+    def _counting_wait(self, timeout):
+        waits.append(timeout)
+        return original_wait(self, timeout)
+
+    monkeypatch.setattr(_AnyCancel, "wait", _counting_wait)
     calls = {"n": 0}
 
     def flaky():
@@ -371,8 +384,11 @@ def test_동시성2에서_503_복귀대기가_AttributeError없이_돈다(tmp_pa
 
     assert md.count("<PAGE>") == 2
     assert "본문" in md
-    notes = eng.drain_warnings()
-    assert any("모델 로딩 대기" in w for w in notes), notes
+    assert waits, "복귀 대기가 _AnyCancel.wait로 돌았어야 한다"
+    # 대기 중 상태 문구는 잡 경고로 쌓지 않고, 복귀 경위만 참고 한 줄로 남긴다
+    assert eng.drain_warnings() == []
+    notices = eng.drain_notices()
+    assert len(notices) == 1 and "다시 보내 처리" in notices[0], notices
 
 
 def test_any_cancel_wait는_취소를_즉시_관측한다(tmp_path):

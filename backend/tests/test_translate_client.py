@@ -1485,6 +1485,71 @@ def test_스트림_중간의_오류_이벤트는_API_오류로_올린다():
             c.complete("s", "u", max_tokens=10)
 
 
+def _flaky_stream_server(first_events: bytes, hits: list):
+    """첫 요청만 스트림 중간 오류(first_events)로 끝나고, 이후 요청은 정상 스트림이다."""
+
+    class Flaky(_Quiet):
+        def do_POST(self):  # noqa: N802
+            self._body()
+            hits.append(1)
+            self._sse_head()
+            if len(hits) == 1:
+                self.wfile.write(_chunk("부분") + first_events)
+                return
+            self.wfile.write(_chunk("완전한 번역", "stop") + b"data: [DONE]\n\n")
+
+    return Flaky
+
+
+_OPENROUTER_502 = (
+    b'data: {"error": {"code": 502, "message": "Provider returned error"}, '
+    b'"choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": "error"}]}\n\n'
+)
+
+
+@pytest.mark.parametrize("events", [
+    _OPENROUTER_502,                                                        # OpenRouter 형식
+    b'data: {"error": {"code": "503", "message": "overloaded"}}\n\n',       # 문자열 코드
+    b'data: {"error": {"message": "upstream hiccup"}}\n\n',                 # 코드 없음
+    _chunk(None, "error"),                                                  # 오류 객체 없이 finish=error
+], ids=["openrouter-502", "string-503", "no-code", "finish-error"])
+def test_스트림_중간의_일시_오류_이벤트는_재시도한다(events):
+    """OpenRouter·LiteLLM은 스트림 시작 뒤의 공급자 장애를 200 본문 안의 오류 이벤트로
+    보낸다 — 비스트리밍이면 502로 와 재시도됐을 일시 장애 한 번에 잡 전체가 실패했다
+    (translate-5). finish_reason=error만 오면 부분 출력을 번역문으로 돌려줬다."""
+    hits: list = []
+    with _serve(_flaky_stream_server(events, hits)) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat", max_retries=2))
+        c._backoff = lambda headers, attempt: 0.0
+        assert c.complete("s", "u", max_tokens=10) == "완전한 번역"
+    assert len(hits) == 2
+
+
+def test_스트림_중간의_입력_거부_오류는_유닛_단위로_올린다():
+    from app.translate.types import TranslateUnitRejected
+
+    hits: list = []
+    events = (b'data: {"error": {"code": 400, "type": "BadRequestError", '
+              b'"message": "context length exceeded"}}\n\n')
+    with _serve(_flaky_stream_server(events, hits)) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat", max_retries=2))
+        with pytest.raises(TranslateUnitRejected, match="스트림 오류"):
+            c.complete("s", "u", max_tokens=10)
+    assert len(hits) == 1                       # 결정적 거부 — 같은 요청을 반복하지 않는다
+
+
+def test_스트림_중간의_인증_오류는_전역_오류로_올린다():
+    from app.translate.types import TranslateUnitRejected
+
+    hits: list = []
+    events = b'data: {"error": {"code": 401, "message": "invalid api key"}}\n\n'
+    with _serve(_flaky_stream_server(events, hits)) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat", max_retries=2))
+        with pytest.raises(TranslateAPIError, match="인증 실패") as exc:
+            c.complete("s", "u", max_tokens=10)
+    assert not isinstance(exc.value, TranslateUnitRejected) and len(hits) == 1
+
+
 def test_stream_설정_검증():
     from app.translate.types import TranslateError
 

@@ -997,6 +997,13 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   번역 PDF 페이지를 오른쪽에 원래 크기로 붙이고 중앙에 1pt 선을 그린다. 따라서
   A4 세로 원본은 A3 가로 대조 페이지가 되며, 래스터화하지 않아 벡터·그림·텍스트
   선택성을 유지한다.
+- **능동 콘텐츠 제거**(`pdf_export/active_content.py`): 단일판은 업로드 원본을 열어 고친 뒤
+  저장하므로, 저장 전에 원본의 `/OpenAction`·모든 `/AA`(추가 동작)·`/Names`의 JavaScript·
+  EmbeddedFiles·`/AcroForm`의 XFA·첨부 파일 주석의 파일과, JavaScript·Launch·SubmitForm·
+  ImportData·GoToR·GoToE·Rendition·RichMediaExecute 동작(`/Next` 사슬 포함)을 단 링크·목차
+  동작을 지운다 — 예전에는 그대로 실려 번역 PDF를 연 다른 사용자에게 원본 작성자의 스크립트·
+  폼 전송 비컨·실행 유도가 동작했다(감사 security-3). 내부 이동·URI 링크·목차·목적지
+  `/OpenAction`은 그대로다. 대조판은 새 문서라 처음부터 없다(포맷 버전 17).
 - 폰트: 원본 span의 실측 크기·굵기·정렬과 `font_style=serif|sans`를 추출한다.
   serif 블록은 시스템 한글 명조(macOS AppleMyungjo, Linux Noto Serif CJK),
   sans 블록은 시스템 한글 고딕에 대응하고 PyMuPDF 내장 CJK(`korea`)로 폴백한다.
@@ -1063,7 +1070,7 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   `fonts-noto-cjk`나 fontTools를 설치하면 폴백 폰트로 만든 PDF가 무효화된다. 대조판은
   원본·단일판보다 오래되면 재생성한다(mtime 규칙, 같은 잡 락 아래 직렬). 번역 완료 시 함께
   무효화한다. 리포트의 `format_version`이 현행 `PDF_EXPORT_FORMAT_VERSION`
-  (`pipeline/pdf_export/report.py`, 현재 **11**)과 다르면 캐시를 무시하고 재생성한다 —
+  (`pipeline/pdf_export/report.py` — 현재 값은 §15.1 표)과 다르면 캐시를 무시하고 재생성한다 —
   내보내기 동작이 바뀐 사이클에서는 기존 export 캐시가 전부 한 번 재생성된다(§15.1).
 - 레이아웃 폰트 백필(`ENRICH_VERSION`이 오른 layout을 처음 읽을 때 실측 폰트를 다시 주입)은
   산출물(layout[.lang].json)마다 하나뿐인 백그라운드 스레드가 export 워커 풀에서 돌린다. 요청은
@@ -2227,13 +2234,13 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
 
 이 리포에는 산출물 캐시를 무효화하는 **버전 상수가 셋** 있다. 오르면 기존 배포를 올린 뒤
 잡마다 1회씩 아래가 실제로 일어난다. **코드 변경 없이 조용히 일어나므로**, 모르면 "왜 갑자기
-느리고 청구서가 늘었나"가 된다. 0.1.0 이후 사이클에서는 `PDF_EXPORT_FORMAT_VERSION`(→ 16)과
+느리고 청구서가 늘었나"가 된다. 0.1.0 이후 사이클에서는 `PDF_EXPORT_FORMAT_VERSION`(→ 17)과
 `ENRICH_VERSION`(→ 6)이 올랐고 `PROMPT_V`는 그대로다(아래 '이번 업그레이드').
 
 | 상수 | 위치 | 현재 값 | 상향 시 무효화되는 것 | 비용 |
 |---|---|---|---|---|
 | `PROMPT_V` | `translate/types.py` | `"6"` | `translations/{lang}/units.json` **전체**(캐시 키 첫 재료) | **유료 API 전량 재호출** |
-| `PDF_EXPORT_FORMAT_VERSION` | `pipeline/pdf_export/report.py` | `16` | `export.{lang}.pdf`·`.dual.pdf`·`.report.json` | CPU (실측 9.4s/16p — 지금은 export 워커 프로세스) |
+| `PDF_EXPORT_FORMAT_VERSION` | `pipeline/pdf_export/report.py` | `17` | `export.{lang}.pdf`·`.dual.pdf`·`.report.json` | CPU (실측 9.4s/16p — 지금은 export 워커 프로세스) |
 | `ENRICH_VERSION` | `pipeline/pdf_fonts.py` | `6` | `layout.json`의 폰트 메타(`fonts_v`) → 뒤이어 export 캐시 | CPU (재조판) |
 
 - **가장 비싼 것은 번역이다**: 모델·샘플링(`TRANSLATE_TEMPERATURE`·`TRANSLATE_REASONING`)을
@@ -2261,7 +2268,7 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
 
 #### 이번 업그레이드(0.1.0 → 현재)에서 운영자가 보게 되는 것
 
-- **내보내기 캐시 1회 재생성**: `PDF_EXPORT_FORMAT_VERSION` 16과 새 빌드 스탬프(§5 `/pdf` —
+- **내보내기 캐시 1회 재생성**: `PDF_EXPORT_FORMAT_VERSION` 17과 새 빌드 스탬프(§5 `/pdf` —
   옛 `export.{lang}.font.txt`는 스탬프가 아니라 무효), `archive.zip`의 내용 서명 때문에 잡마다
   번역 PDF·대조 PDF·ZIP을 한 번씩 다시 만든다. `ENRICH_VERSION` 6이라 layout 폰트 메타도 잡마다
   한 번 다시 주입된다(회전 페이지 수정).

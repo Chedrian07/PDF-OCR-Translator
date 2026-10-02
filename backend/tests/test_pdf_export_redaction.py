@@ -273,3 +273,76 @@ def test_export_keeps_preserved_neighbour_lines_at_twelve_point_leading(tmp_path
         assert line in text, (line, text)
     assert "Translated paragraph" not in text, text
     assert "번역된 문단" in text, text
+
+
+# ── TeX 확장 괄호 조각 (CMEX10 막대를 위아래로 쌓은 span) ─────────────────────
+_SAMPLE_PDF = Path(__file__).resolve().parents[2] / "sample" / "2504.19874v1.pdf"
+# 실서버 25쪽 논문 5쪽 두 번째 글머리표 — `\left|…\right|^2` 큰 막대가 CMEX10 '\x0c' 조각
+# 세 개(기준선 670.8·677.4·683.9pt)로 그려진다. OCR 레이아웃 블록 bbox(0–999 좌표)다.
+_BULLET_BBOX = [139, 840, 808, 875]
+_BULLET_KO = (
+    r"- \(D_{\mathrm{prod}}(Q_{\mathrm{prod}}) := \mathbb{E}\left[\left|\langle \boldsymbol{y}, "
+    r"\boldsymbol{x}\rangle\right|^2\right]\)는 임의의 \(b \geq 0\)에 대해 성립한다."
+)
+
+
+def _cmex_pieces(page, clip) -> list[str]:
+    return [
+        char["c"]
+        for block in page.get_text("rawdict", clip=clip)["blocks"]
+        for line in block.get("lines", [])
+        for span in line["spans"] if span["font"].startswith("CMEX")
+        for char in span["chars"]
+    ]
+
+
+@pytest.mark.skipif(not _SAMPLE_PDF.is_file(), reason="sample/2504.19874v1.pdf 없음")
+def test_stacked_extension_pieces_are_owned_and_banded_per_piece():
+    """제어 코드('\\x0c')뿐인 span도 원문 span이고, 쌓인 조각마다 띠가 닿는다.
+
+    예전: `str.strip()`이 '\\x0c'를 공백으로 보고 span을 버려(어느 블록 소유도 아님) 막대가
+    통째로 남았고, 남은 span도 bbox 가운데 띠 하나라 위·아래 조각이 남았다.
+    """
+    with fitz.open(_SAMPLE_PDF) as doc:
+        page = doc[4]
+        records = _source_span_records(fitz, page)
+        bar = [span for span in records if span.text == "\x0c\x0c\x0c"]
+        assert len(bar) == 1, [span.text for span in records if "\x0c" in span.text]
+        assert bar[0].stack is not None
+        # 한 줄 글자는 쌓인 span이 아니다(첨자 기준선 차이 ≈ 0.1em)
+        assert all(span.stack is None for span in records if span.text.isalpha())
+        band = _span_redaction_band(fitz, bar[0])
+        _redact(page, [band])
+        assert "\x0c" not in "".join(_cmex_pieces(page, +bar[0].rect))
+
+
+@pytest.mark.skipif(not _SAMPLE_PDF.is_file(), reason="sample/2504.19874v1.pdf 없음")
+def test_translated_bullet_leaves_no_extension_pieces(tmp_path):
+    """번역으로 교체한 글머리표 자리에 원문 큰 막대 조각이 남아 번역문에 겹치지 않는다."""
+    job_dir = tmp_path / "cmex"
+    job_dir.mkdir()
+    with fitz.open(_SAMPLE_PDF) as doc:
+        single = fitz.open()
+        single.insert_pdf(doc, from_page=4, to_page=4)
+        single.save(job_dir / "source.pdf")
+        single.close()
+    original = [{"page": 1, "width": 1700, "height": 2200, "blocks": [
+        {"type": "text", "bbox": _BULLET_BBOX, "content": "- " + "x" * 40, "fs": 1.78},
+    ]}]
+    with fitz.open(_SAMPLE_PDF) as doc:
+        original[0]["blocks"][0]["content"] = "- " + doc[4].get_text(
+            clip=fitz.Rect(85, 666, 495, 694),
+        ).replace("\n", " ")
+    translated = json.loads(json.dumps(original))
+    translated[0]["blocks"][0]["content"] = _BULLET_KO
+    (job_dir / "layout.json").write_text(json.dumps(original), encoding="utf-8")
+    (job_dir / "layout.ko.json").write_text(
+        json.dumps(translated, ensure_ascii=False), encoding="utf-8",
+    )
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    assert result.replaced == 1, result.report()
+    with fitz.open(result.path) as exported:
+        assert _cmex_pieces(exported[0], fitz.Rect(85, 660, 495, 700)) == []
+        assert "성립한다" in exported[0].get_text()

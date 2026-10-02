@@ -272,6 +272,55 @@ def test_sanitize_keeps_a_moved_inequality_and_currency_before_retyped_math():
     assert unmask(clean, pmap, priced)[0].startswith("비용은 $5 x_{i}")
 
 
+def test_sanitize_resolves_invented_dollar_pairs_as_a_whole():
+    """짝을 이룬 지어낸 '$…$'는 통째로 본다 — 숫자로 시작하는 '$0.5$'를 통화 보호가 반쪽만 지워
+    '$0.5이다'가 되면 안 되고, TeX 표기('$\\alpha$')를 풀어 '\\alpha'를 글자로 남기면 안 된다(리뷰)."""
+    def restored(src, raw):
+        masked, mapping = mask(src)
+        return unmask(sanitize_translation(raw, masked, mapping)[0], mapping, masked)[0]
+
+    assert restored("The learning rate is 0.5 for all runs.",
+                    "학습률은 모든 실행에서 $0.5$이다.") == "학습률은 모든 실행에서 0.5이다."
+    assert restored("We use 4-bit codes.", "$4$-비트 코드를 쓴다.") == "4-비트 코드를 쓴다."
+    assert restored("The angle alpha and the index i matter.",
+                    "각 $\\alpha$ 와 인덱스 $x_{i}$ 가 중요하다.") == (
+        r"각 \( \alpha \) 와 인덱스 \( x_{i} \) 가 중요하다.")
+    assert restored("It costs 10 dollars.", "$10이 든다.") == "$10이 든다."     # 짝 없는 통화는 그대로
+
+
+def test_sanitize_keeps_quote_pairs_around_and_after_placeholders():
+    """인용을 여는 따옴표('<c1/> "어텐션 메커니즘"을')와 닫는 따옴표('"벡터 <m1/>"라')는 꼬리가 아니다 —
+    꼬리 모양(조사+공백·문장부호 앞, 앞에 짝 없는 따옴표 없음)만 지운다(리뷰)."""
+    def run(src, build):
+        masked, mapping = mask(src)
+        tags = re.findall(r"<[mkgucft]\d+[^>]*>", masked)
+        clean, n = sanitize_translation(build(tags), masked, mapping)
+        return unmask(clean, mapping, masked)[0], n
+
+    assert run("See [12] on attention mechanisms here.",
+               lambda t: f'{t[0]} "어텐션 메커니즘"을 보라.') == ('[12] "어텐션 메커니즘"을 보라.', 0)
+    assert run(r"The slice \( x_{i:j} \) is called this.",
+               lambda t: f'"벡터의 슬라이스 {t[0]}"라 부른다.') == (
+        r'"벡터의 슬라이스 \( x_{i:j} \)"라 부른다.', 0)
+    # 꼬리 둘(실앱 4B: '…"의 …"이')은 따옴표 수가 짝수여도 둘 다 지운다
+    assert run(r"Approaches \( [50, 6, 15] \) and \( [11, 66] \) differ.",
+               lambda t: f'접근법 {t[0]}"의 구조와 {t[1]}"이 다르다.') == (
+        r"접근법 \( [50, 6, 15] \)의 구조와 \( [11, 66] \)이 다르다.", 2)
+
+
+def test_cached_tidy_handles_formulas_that_repeat_in_the_source():
+    """같은 원문 수식이 두 번 나오는 유닛(플레이스홀더 둘)은 되돌리기가 첫 id로만 몰려 정리를
+    통째로 건너뛰었다(리뷰) — 새 번역은 정리되는데 캐시 번역은 '$x$'가 남았다."""
+    from app.translate.masking import tidy_cached_translation
+
+    src = r"Here \( i \) and again \( i \) with letters such as x."
+    masked, mapping = mask(src)
+    cached = r"여기 \( i \) 와 다시 \( i \) 그리고 $x$ 같은 글자."
+    expected = r"여기 \( i \) 와 다시 \( i \) 그리고 x 같은 글자."
+    assert tidy_cached_translation(cached, mapping, src) == expected
+    assert tidy_cached_translation(cached, mapping, src, masked) == expected
+
+
 def test_cached_translation_drops_tails_after_restored_math():
     from app.translate.masking import tidy_cached_translation
 

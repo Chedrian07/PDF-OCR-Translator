@@ -22,6 +22,7 @@ import {
 } from '../js/constants.js';
 import { clampTexSizes, katexStyleOversized } from '../js/core.js';
 import { renderMath, typesetMath } from '../js/ui.js';
+import { mathTextNodes } from '../js/reader.js';
 import { installFakeDom, mount } from './helpers/fake-dom.mjs';
 
 const FRONTEND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -98,16 +99,18 @@ test('katexOptions: 상한과 trust·strict를 명시한 새 객체를 돌려준
   assert.ok(Number.isFinite(inline.maxExpand) && inline.maxExpand > 0);
 });
 
-test('앱의 모든 katex.render 호출은 katexOptions를 쓴다', () => {
-  let calls = 0;
+test('앱의 katex.render는 ui.renderMath 한 곳뿐이고, 크기를 묶은 TeX와 katexOptions를 쓴다', () => {
+  const sites = [];
   for (const file of frontendSources()) {
     const src = fs.readFileSync(file, 'utf8');
     for (const m of src.matchAll(/katex\.render\(([^;]*?)\);/gs)) {
-      calls += 1;
-      assert.match(m[1], /katexOptions\(/, `${path.relative(FRONTEND, file)}: ${m[0].slice(0, 120)}`);
+      sites.push({ file: path.relative(FRONTEND, file), args: m[1] });
     }
   }
-  assert.ok(calls >= 1, `katex.render 호출부를 찾지 못했다 (${calls})`);
+  // 다른 모듈이 katex.render를 직접 부르면 음수 크기 상한·원문 폴백(frontend-4)을 건너뛴다.
+  assert.deepEqual(sites.map((site) => site.file), [path.join('js', 'ui.js')], JSON.stringify(sites));
+  assert.match(sites[0].args, /^clampTexSizes\(/);
+  assert.match(sites[0].args, /katexOptions\(/);
 });
 
 test('maxSize: 거대한 \\rule 박스가 상한으로 잘린다', () => {
@@ -246,4 +249,17 @@ test('renderMath·typesetMath: 크기를 묶어 조판하고, 그래도 거대�
   typesetMath(root);
   assert.equal(inline.dataset.mathDone, '1', '되돌린 수식도 다시 조판하지 않는다');
   assert.equal(inline.dataset.mathFallback, 'oversized');
+});
+
+test('리더 카드 수식(mathTextNodes)도 renderMath를 거친다 — 크기를 묶고 거대 결과는 원문 TeX', (t) => {
+  installFakeDom(t);
+  const seen = installKatexStub(t);
+  const nodes = mathTextNodes('앞 \\(\\raisebox{-4000em}{x}\\) 뒤 \\[\\def\\x{-4000em}\\kern\\x y\\]');
+  assert.deepEqual(seen, ['\\raisebox{-10em}{x}', '\\def\\x{-4000em}\\kern\\x y']);
+  const [inline, display] = nodes.filter((node) => node.nodeType === 1);
+  assert.equal(inline.className, 'math-inline');
+  assert.equal(inline.dataset.mathFallback, undefined);
+  assert.equal(display.className, 'math-display');
+  assert.equal(display.dataset.mathFallback, 'oversized');
+  assert.equal(display.textContent, '\\def\\x{-4000em}\\kern\\x y');
 });

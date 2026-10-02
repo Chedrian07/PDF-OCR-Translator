@@ -54,8 +54,20 @@ def _source_span_records(fitz, page) -> list[_SourceSpan]:
                         (float(origin[0]), float(origin[1])),
                         direction,
                         _span_is_visible(span),
+                        _span_metrics(span),
                     ))
     return out
+
+
+def _span_metrics(span: dict) -> tuple[float, float] | None:
+    """span dict의 원래 폰트 (ascender, descender). 없거나 숫자가 아니면 None."""
+    try:
+        ascender, descender = float(span["ascender"]), float(span["descender"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (math.isfinite(ascender) and math.isfinite(descender)):
+        return None
+    return ascender, descender
 
 
 # MuPDF char_flags의 칠하기/긋기 비트. 둘 다 없으면(렌더 모드 3) 화면에 그려지지 않는다.
@@ -506,6 +518,11 @@ def _listing_segments(
 _GLYPH_BOX_SHRINK = 0.10
 _BAND_HALF_EM = 0.25
 _BAND_PAD_PT = 0.25
+# 폰트의 원래 ascender−descender가 이보다 작으면(퇴화 메트릭) 띠를 쓰지 않는다. PyMuPDF는
+# 그런 span의 bbox를 1em으로 늘려 보고해, 거기서 거꾸로 구한 띠(기준선 위 0.25–0.75em)가
+# MuPDF의 실제 글리프 상자(예: 0–0.2em)에 닿지 않았다 — 원문이 남고 번역이 겹쳐 찍혔다
+# (감사 pdf-8: hhea 200/0 Arial, FontBBox [0 0 600 100] Type3). 실패 경계는 약 0.28em이다.
+_DEGENERATE_METRICS_EM = 0.5
 
 
 def _padded_rect(rect):
@@ -519,13 +536,18 @@ def _span_redaction_band(fitz, span: _SourceSpan):
 
     세로 범위는 span bbox에서 거꾸로 구한 ascender/descender로 계산하므로 폰트
     메트릭이 특이해도 MuPDF 글리프 상자의 가운데를 겨눈다. 크기·방향을 알 수
-    없거나 상자가 퇴화했으면 예전처럼 span bbox(+0.25pt)를 쓴다.
+    없거나 상자가 퇴화했으면 예전처럼 span bbox(+0.25pt)를 쓴다 — 폰트의 원래
+    ascender−descender가 0.5em 미만이라 PyMuPDF가 bbox를 1em으로 늘려 보고한 span도
+    그렇다(`_DEGENERATE_METRICS_EM`).
     """
     rect = span.rect
     size = float(span.size or 0.0)
     dx, dy = span.dir
     norm = math.hypot(dx, dy)
     if size <= 0 or norm <= 1e-6:
+        return _padded_rect(rect)
+    metrics = getattr(span, "metrics", None)
+    if metrics is not None and metrics[0] - metrics[1] < _DEGENERATE_METRICS_EM:
         return _padded_rect(rect)
     dx, dy = dx / norm, dy / norm
     # 글리프 위쪽 방향(y가 아래로 커지는 PDF 좌표에서 진행 방향을 반시계 90°).

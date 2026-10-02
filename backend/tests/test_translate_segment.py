@@ -444,3 +444,17 @@ def test_partial이면_덮이는_줄만_옮기고_나머지는_원문으로_둔�
         "TurboQuant: 온라인 벡터 양자화", *_PAGE_ONE[1:4], "초록", "벡터 양자화는 고차원 벡터를 양자화한다.",
     ])
     assert map_unit_lines("Nothing here maps.", mapping, partial=True) is None
+
+
+def test_여러_줄_블록_번역의_빈_줄은_md_문단을_가르지_않는다():
+    """3줄 블록이 'A\\n\\nB'로 번역되면 줄 수가 같다고 빈 줄째 넣어 md 문단이 둘로 갈라졌다(리뷰)."""
+    from app.translate.segment import line_runs
+
+    src = "\n".join(_PAGE_ONE)
+    source, translated, final = _page_one_pages("아미르 잔디에\n\n구글 리서치")
+    mapping = layout_line_map(source, translated, final)
+    mapped = map_unit_lines(src, mapping)
+    assert "" not in mapped.split("\n"), mapped
+    assert mapped.split("\n")[1:3] == ["아미르 잔디에", "구글 리서치"]
+    # 미리 만든 묶음(runs)을 넘겨도 결과는 같다 — 엔진은 유닛마다 다시 만들지 않는다
+    assert map_unit_lines(src, mapping, runs=line_runs(mapping)) == mapped

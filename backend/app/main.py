@@ -413,7 +413,8 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
     broker = EventBroker()
     engine = build_engine(settings)  # 잘못된 OCR_DEVICE/OCR_ENGINE은 여기서 즉시 실패
     # MAX_LENGTH < 청크 최악 길이는 설정의 성질이다 — 잡마다가 아니라 기동 시 한 번만,
-    # 경고가 아닌 안내로 남긴다(잘린 청크는 페이지별로 복구돼 내용이 빠지지 않는다).
+    # 경고가 아닌 안내로 남긴다(잘린 청크는 원본과 대조해 확인한 앞 페이지를 지키고 잘린
+    # 페이지부터 페이지별로 다시 처리한다).
     budget_note = chunk_length_budget_note(settings, engine)
     if budget_note:
         logger.info("%s", budget_note)

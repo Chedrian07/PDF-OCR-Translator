@@ -2064,6 +2064,12 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
     서버 생성도 멈춘다 — 그 출력은 끝까지 받아도 출력 게이트가 거부한다(루프는 늘기만 하고, 4배
     초과는 길이비 상한 밖). 예전에는 로컬 0.8B 번역에서 요청 415건 중 29건이 8192토큰을 끝까지
     태워 전체 요청 시간의 75%를 썼다(P4 실앱). 콜드 실행 규칙(첫 성공 전 잘림은 잡 실패)은 같다.
+    과다 길이 기준은 답이 사고와 **구분될 때만** 쓴다 — content에 `</think>`가 왔거나(그 뒤가 답)
+    reasoning이 별도 필드로 온 스트림이다. 템플릿이 `<think>`를 프롬프트 끝에 미리 넣는 thinking
+    모델(Qwen3·QwQ·R1 distill)을 reasoning 분리 없이 서빙하면(llama.cpp `--reasoning-format none`,
+    LM Studio 분리 끔, vLLM parser 없음) content가 여는 태그 없이 사고로 시작해 `</think>` 전에는
+    답과 가를 수 없다 — 그런 출력은 반복 루프만 보고, 길이는 완료 뒤 길이비 게이트가 판정한다
+    (사고를 답으로 세어 끊던 때는 그 구성의 콜드 런 잡이 전부 실패했다).
   - 스트림 중간 `{"error": …}` 이벤트와 `finish_reason: "error"`는 상태코드 정책을 따른다 —
     5xx·408·429·코드 없음은 5xx처럼 백오프 재시도, 400·413·422 또는 invalid_request·
     context_length 유형은 유닛 거부, 401·403은 인증 오류. 부분 출력은 번역문으로 쓰지 않는다.

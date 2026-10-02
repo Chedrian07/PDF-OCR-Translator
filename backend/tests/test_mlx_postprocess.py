@@ -42,7 +42,7 @@ PAGE_B = (
     "<|det|>text [0, 0, 999, 999]<|/det|>Page two text\n"
     "<|det|>image [100, 100, 500, 400]<|/det|>\n"
 )
-# 경계 밖·퇴화 좌표 — [local patch P22] 대상
+# 경계 밖·퇴화 좌표 — [P22] 대상
 PAGE_OOB = (
     "<|det|>image [-50, 100, 1200, 600]<|/det|>\n"
     "<|det|>image [500, 500, 400, 700]<|/det|>\n"
@@ -255,6 +255,84 @@ def test_p23_output_without_any_marker_is_one_page(tmp_path):
     assert _near(_crop_color(out / "images" / "page_0_0.jpg"), PAGE_COLORS[0])
 
 
+# ── [P22] 쓸 수 없는 image 좌표도 크롭 번호를 소비한다 (torch와 같은 규칙) ──
+
+# 좌표를 못 읽거나(literal_eval 실패) 상자로 쓸 수 없는 image det — 실제 모델의 inline 문법
+# 기준. 뒤에 정상 그림이 오면 그 그림의 파일 번호가 마크다운 자리 번호와 같아야 한다.
+UNUSABLE_IMAGE_DETS = {
+    "missing-comma": "<|det|>image [100, 120 500, 420]<|/det|>",
+    "three-coords": "<|det|>image [100, 120, 500]<|/det|>",
+    "five-coords": "<|det|>image [100, 120, 500, 600, 700]<|/det|>",
+    "inf": "<|det|>image [1e400, 0, 500, 500]<|/det|>",
+    "float-overflow": "<|det|>image [" + "9" * 400 + ", 0, 500, 500]<|/det|>",
+    "int-digit-limit": "<|det|>image [" + "9" * 5000 + ", 0, 500, 500]<|/det|>",
+    "bool": "<|det|>image [True, 0, 500, 500]<|/det|>",
+    "ref-non-literal": "<|ref|>image<|/ref|><|det|>[[a, b, c, d]]<|/det|>",
+    "ref-three-coords": "<|ref|>image<|/ref|><|det|>[[0, 0, 999]]<|/det|>",
+}
+GOOD_IMAGE_DET = "<|det|>image [100, 450, 800, 900]<|/det|>"
+
+
+@pytest.mark.parametrize(
+    "points,expected",
+    [
+        ([0, 0, 999, 999], (0, 0, 200, 100)),
+        ([100, 200, 500, 800], (20, 20, 100, 80)),
+        ([1_298_337_167, 0, 1_298_337_167 * 2, 999], None),  # 둘 다 W로 clamp → 퇴화
+        ([0, 0, 1_298_337_167, 1_298_337_167], (0, 0, 200, 100)),  # 거대 끝점 → 이미지 경계
+        ([-500, -10, 500, 500], (0, 0, 100, 50)),  # 음수 → 0
+        ([500, 500, 100, 100], None),  # 뒤집힌 상자
+        ([300, 300, 300, 600], None),  # 폭 0
+        ([10**400, 0, 10**401, 999], None),  # float 변환 오버플로
+        ([1e999, 0, 999, 999], None),  # inf
+        ([True, 0, 999, 999], None),  # bool은 좌표가 아니다
+        (["0", 0, 999, 999], None),  # 문자열
+        ([0, 0, 999], None),  # 개수 오류
+        ([0, 0, 999, 999, 5], None),
+        ([[0, 0, 999, 999]], None),  # 중첩
+        (7, None),  # 상자가 아닌 스칼라
+    ],
+)
+def test_p22_clamp_box_rule(points, expected):
+    """torch 벤더 _clamp_box와 같은 규칙 (tests/test_vendor_bbox_clamp.py와 같은 표)."""
+    assert pp._clamp_box(points, 200, 100) == expected
+
+
+@pytest.mark.parametrize("bad", list(UNUSABLE_IMAGE_DETS.values()), ids=list(UNUSABLE_IMAGE_DETS))
+def test_p22_unusable_image_box_still_consumes_its_figure_number(tmp_path, bad):
+    """예전 MLX 포팅은 이런 image det에서 번호를 소비하지 않아(예외 → ref 통째로 건너뜀) 뒤
+    그림이 한 칸 앞 번호로 저장됐다 — 마크다운 첫 자리에 둘째 그림이 붙고 둘째 자리는 깨졌다
+    (audit mlx-2·torch-1). bool 좌표는 크롭까지 만들었다."""
+    W, H = 300, 400
+    out = tmp_path / "o"
+    md = pp.save_results_multi(
+        f"<PAGE>{bad}\nfig A\n{GOOD_IMAGE_DET}\nfig B", _solid_pages(1, (W, H)), str(out)
+    )
+    assert md == "<PAGE>\n![](images/page_0_0.jpg)\n\nfig A\n![](images/page_0_1.jpg)\n\nfig B"
+    # 쓸 수 없는 그림은 파일이 없고, 정상 그림은 마크다운 둘째 자리 번호로 저장된다
+    assert sorted(p.name for p in (out / "images").iterdir()) == ["page_0_1.jpg"]
+    assert json.loads((out / "boxes.json").read_text(encoding="utf-8")) == {
+        "page_0_1.jpg": {
+            "x1": int(100 / 999 * W), "y1": int(450 / 999 * H),
+            "x2": int(800 / 999 * W), "y2": int(900 / 999 * H),
+            "image_width": W, "image_height": H,
+        }
+    }
+
+
+def test_p22_unusable_box_does_not_drop_the_rest_of_its_ref(tmp_path):
+    """여러 상자 ref에서 앞 상자를 못 써도 뒤 상자는 잘린다(번호는 상자마다 1개 — 업스트림
+    규칙). 예전 포팅은 첫 상자의 예외로 ref 전체를 건너뛰었다."""
+    out = tmp_path / "o"
+    pp.save_results_multi(
+        "<PAGE><|ref|>image<|/ref|><|det|>[[0, 0, 999], [100, 450, 800, 900]]<|/det|>\n"
+        + GOOD_IMAGE_DET,
+        _solid_pages(1),
+        str(out),
+    )
+    assert sorted(p.name for p in (out / "images").iterdir()) == ["page_0_1.jpg", "page_0_2.jpg"]
+
+
 # ── torch 벤더 흐름 패리티 ──
 
 
@@ -404,3 +482,108 @@ def test_page_split_matches_torch_on_random_outputs(torch_vendor):
     for _ in range(1000):
         outputs = "".join(rng.choice(pieces) for _ in range(rng.randrange(0, 14)))
         assert pp._split_multi_pages(outputs) == tv._split_multi_pages(outputs), outputs
+
+
+# torch에도 남아 있는 업스트림 번호 규칙의 모서리(빈 목록·문자열 원소·라벨 공백·여러 상자)
+# — 규칙이 바뀌면 두 벤더가 함께 바뀌어야 한다.
+QUIRK_IMAGE_DETS = {
+    "flat-strings": "<|det|>image ['x', 0, 500, 500]<|/det|>",
+    "ref-string-literal": "<|ref|>image<|/ref|><|det|>'abcd'<|/det|>",
+    "ref-empty-list": "<|ref|>image<|/ref|><|det|>[]<|/det|>",
+    "ref-zero": "<|ref|>image<|/ref|><|det|>0<|/det|>",
+    "ref-label-spaces": "<|ref|> image <|/ref|><|det|>[[100, 100, 500, 400]]<|/det|>",
+    "ref-two-boxes-bad-first": "<|ref|>image<|/ref|><|det|>[[0, 0, 999], [100, 100, 500, 400]]<|/det|>",
+    "ref-two-boxes": "<|ref|>image<|/ref|><|det|>[[0, 0, 400, 400], [500, 500, 999, 999]]<|/det|>",
+}
+
+
+@pytest.mark.parametrize(
+    "bad",
+    list(UNUSABLE_IMAGE_DETS.values()) + list(QUIRK_IMAGE_DETS.values()),
+    ids=list(UNUSABLE_IMAGE_DETS) + list(QUIRK_IMAGE_DETS),
+)
+def test_unusable_image_boxes_match_torch_infer_multi(torch_vendor, tmp_path, bad):
+    """[P22] 쓸 수 없는 image 좌표 뒤의 그림 번호·크롭·boxes.json이 torch 흐름과 바이트 동일."""
+    paths = _write_images(tmp_path, [(300, 400)])
+    tok = PieceTokenizer(["<PAGE>", f"{bad}\nfig A\n{GOOD_IMAGE_DET}\nfig B\n"])
+    generated = tok.ids_for(True)
+    t_md, _ = _run_torch_multi(torch_vendor, tok, paths, tmp_path / "torch", generated)
+    m_md, _ = _run_mlx_multi(tok, paths, tmp_path / "mlx", generated)
+    assert m_md == t_md
+    assert _snapshot(tmp_path / "mlx") == _snapshot(tmp_path / "torch")
+
+
+def _random_points(rng) -> object:
+    atoms = [
+        0, 1, 5, 450, 998, 999, 1000, -50, 1500, 2.5, -0.0, 1e-3, 10**400, -(10**400),
+        float("inf"), float("-inf"), float("nan"), True, False, None, "0", "x", [0, 0, 1, 1], (),
+    ]
+    kind = rng.randrange(4)
+    if kind == 0:  # 정상 범위 4좌표
+        return [rng.randrange(-100, 1200) for _ in range(4)]
+    if kind == 1:  # 이상 원소가 섞인 0~6좌표
+        return [rng.choice(atoms) for _ in range(rng.randrange(7))]
+    if kind == 2:  # 목록이 아닌 값
+        return rng.choice([7, "abcd", None, {1: 2, 3: 4, 5: 6, 7: 8}, b"\x00\x01\x02\x03", (1, 2, 3, 4)])
+    return [[rng.randrange(1000) for _ in range(4)]]  # 중첩
+
+
+def test_clamp_box_matches_torch_on_random_points(torch_vendor):
+    import random
+
+    from app.vendor.unlimited_ocr import modeling_unlimitedocr as tv
+
+    rng = random.Random(22)
+    for _ in range(3000):
+        points = _random_points(rng)
+        size = (rng.randrange(1, 2000), rng.randrange(1, 2000))
+        assert pp._clamp_box(points, *size) == tv._clamp_box(points, *size), (points, size)
+
+
+def _random_page(rng) -> str:
+    """라벨·문법·좌표가 뒤섞인 한 페이지 원문 — 정상·경계 밖·퇴화·해석 불가가 섞인다."""
+    odd = ["-50", "1200", "2.5", "1e400", "9" * 400, "True", "'x'", "a"]
+
+    def flat(k):
+        if k == 4 and rng.random() < 0.6:  # 정상 상자 (경계 밖 끝점도 가끔)
+            x1, y1 = rng.randrange(0, 800), rng.randrange(0, 800)
+            nums = [x1, y1, x1 + rng.randrange(1, 400), y1 + rng.randrange(1, 400)]
+            atoms = [str(v) for v in nums]
+        else:  # 이상 원소가 섞인 좌표
+            atoms = [rng.choice(odd) if rng.random() < 0.3 else str(rng.randrange(0, 1000)) for _ in range(k)]
+        sep = ", " if rng.random() < 0.9 else " "  # 가끔 쉼표 누락
+        return "[" + sep.join(atoms) + "]"
+
+    blocks = []
+    for _ in range(rng.randrange(1, 7)):
+        label = rng.choice(["image", "image", "image", "text", "title", "table"])
+        k = rng.choice([4, 4, 4, 3, 5, 0])
+        if rng.random() < 0.5:
+            blocks.append(f"<|det|>{label} {flat(k)}<|/det|>caption {rng.randrange(100)}")
+        else:
+            boxes = ", ".join(flat(rng.choice([4, 4, 3])) for _ in range(rng.randrange(0, 3)))
+            payload = rng.choice([f"[{boxes}]", flat(k), "[[a, b, c, d]]", "'abcd'", ""])
+            blocks.append(f"<|ref|>{label}<|/ref|><|det|>{payload}<|/det|>body {rng.randrange(100)}")
+    return "\n".join(blocks)
+
+
+def test_draw_bounding_boxes_matches_torch_on_random_pages(torch_vendor, tmp_path):
+    """크롭 파일 이름·바이트·boxes.json이 torch draw_bounding_boxes와 같다 — 번호 소비 규칙
+    전체(P22)를 무작위 페이지로 대조한다."""
+    import random
+
+    from app.vendor.unlimited_ocr import modeling_unlimitedocr as tv
+
+    rng = random.Random(2210)
+    image = Image.fromarray(np.random.default_rng(5).integers(0, 256, (90, 120, 3), dtype=np.uint8))
+    for i in range(150):
+        text = _random_page(rng)
+        refs = pp.re_match(text)[0]
+        assert refs == tv.re_match(text)[0]
+        snaps = []
+        for name, mod in (("torch", tv), ("mlx", pp)):
+            out = tmp_path / f"{i}_{name}"
+            (out / "images").mkdir(parents=True)
+            mod.draw_bounding_boxes(image.copy(), refs, str(out), image_prefix="page_0_")
+            snaps.append(_snapshot(out))
+        assert snaps[0] == snaps[1], text

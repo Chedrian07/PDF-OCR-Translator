@@ -26,7 +26,7 @@
 | 항목 | 내용 |
 |---|---|
 | 모델 | `baidu/Unlimited-OCR`, revision `ee63731b6461c8afcdcc7b15352e7d2ffecc2ead` 고정 |
-| 로딩 | 벤더링된 모델 코드(`backend/app/vendor/unlimited_ocr/`)의 `UnlimitedOCRForCausalLM.from_pretrained()` — `trust_remote_code` 불필요 |
+| 로딩 | 벤더링된 모델 코드(`backend/app/vendor/unlimited_ocr/`)의 `UnlimitedOCRForCausalLM.from_pretrained()` — `trust_remote_code` 불필요. 커밋 해시로 고정한 리비전은 `local_files_only`로 HF 캐시에서 먼저 읽고, 캐시에 없거나 불완전할 때만 Hub에 묻는다(`app/engine/hf_snapshot.py` — 예전에는 캐시가 완전해도 로드마다 선택 파일 HEAD 6회·API 1회로 huggingface.co에 접속했다). 브랜치·태그 리비전은 갱신을 받도록 예전처럼 Hub에 묻는다 |
 | 단일 이미지 | `model.infer(tokenizer, prompt='<image>document parsing.', ...)` — gundam(1024/640/crop) 또는 base(1024/1024) |
 | PDF/멀티페이지 | `model.infer_multi(tokenizer, prompt='<image>Multi page parsing.', image_files=[...], image_size=1024, max_length=32768, no_repeat_ngram_size=35, ngram_window=1024, save_results=True)` |
 | 페이지 구분 | 출력 텍스트에 `<PAGE>` 마커 |
@@ -1142,8 +1142,10 @@ auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은
 - dtype: `OCR_DTYPE=auto` → bfloat16(float16·float32도 가능), `OCR_MLX_QUANT_BITS=8`이면
   디코더만 인메모리 8비트(group 64, affine — SAM·CLIP·projector·MoE 게이트는 그대로)로
   health `dtype`은 `bfloat16+q8`. 0·8 밖의 값은 기동 시 실패한다.
-- `load()`: 가용성 확인 → 고정 스냅샷을 `huggingface_hub.snapshot_download`로 해석
-  (`HF_HOME`·`HF_HUB_CACHE`·`HF_HUB_OFFLINE` 존중, torch 경로와 같은 캐시) → strict 로드(키·모양이
+- `load()`: 가용성 확인 → 고정 스냅샷 해석 — 커밋 고정 리비전이 캐시에 완전하면(설정·토크나이저
+  설정·인덱스의 샤드 전부) 그 디렉터리를 바로 쓰고(Hub 조회 0회), 아니면
+  `huggingface_hub.snapshot_download`로 받는다(`HF_HOME`·`HF_HUB_CACHE`·`HF_HUB_OFFLINE` 존중,
+  torch 경로와 같은 캐시) → strict 로드(키·모양이
   정확히 같아야 한다) → `warmup()` 1회(약 0.45초 — 두 모드의 Metal 커널을 미리 JIT, 없으면 첫
   실행 TTFT가 약 4배). 멱등·스레드 세이프.
 - 스트리밍: HF `TextStreamer`와 같은 텍스트를 같은 단위로 낸다. 바이트 수준 토크나이저면

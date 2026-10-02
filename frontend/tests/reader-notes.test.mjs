@@ -9,6 +9,8 @@
 //  · 목록에서 페이지 이동·삭제, Markdown 복사·내보내기를 할 수 있다.
 //  · 레일을 다시 그려도 저장된 하이라이트를 텍스트 노드 조각 단위로 되살린다(중복 없이).
 //  · 잡을 삭제하면 저장값도 지운다.
+//  · 같은 잡을 연 다른 탭과 저장소를 공유한다 — 저장·삭제는 최신 저장값 위에 적용하고(덮어쓰기
+//    없음), 다른 탭의 변경은 storage 이벤트로 목록·하이라이트에 맞춘다(frontend-1).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,7 +25,8 @@ import {
 import { forgetReaderNotes, loadReaderNotes, saveReaderNotes } from '../js/notes.js';
 import { el, state } from '../js/state.js';
 import {
-  copyReaderNotes, deleteReaderNote, renderReaderDocument, resetReaderForJob, saveReaderCitation,
+  copyReaderNotes, deleteReaderNote, onReaderNotesStorage, renderReaderDocument, resetReaderForJob,
+  saveReaderCitation,
 } from '../js/reader.js';
 import { deleteJob } from '../js/jobs.js';
 import { installFakeStorage, mount } from './helpers/fake-dom.mjs';
@@ -283,4 +286,86 @@ test('잡을 삭제하면 그 잡의 인용·하이라이트 저장값도 지운
   }));
   await deleteJob('job-z');
   assert.equal(storage.getItem(readerNotesKey('job-z')), null);
+});
+
+/* ---------------- 런타임: 같은 잡을 연 다른 탭 (frontend-1) ---------------- */
+// 다른 탭은 같은 localStorage에 쓴다 — 여기서는 그 탭의 저장을 saveReaderNotes로 흉내 낸다.
+
+const storedNotes = (storage, jobId = 'job-a') => {
+  const raw = storage.getItem(readerNotesKey(jobId));
+  return raw ? JSON.parse(raw).items : [];
+};
+
+test('다른 탭이 그사이 저장한 메모를 덮어쓰지 않는다', (t) => {
+  const { storage } = setupNotes(t);
+  resetReaderForJob(); // 이 탭이 잡을 열 때는 메모가 없었다
+  saveReaderNotes('job-a', [note({ id: 'b1', page: 1, text: '다른 탭의 인용' })]);
+  state.readerSelection = '이 탭의 인용';
+  state.readerSelectionPage = 2;
+  saveReaderCitation();
+  assert.deepEqual(storedNotes(storage).map((n) => n.text).sort(), ['다른 탭의 인용', '이 탭의 인용'].sort(),
+    '예전에는 이 탭의 사본으로 목록 전체를 덮어써 다른 탭의 인용이 사라졌다');
+  assert.equal(el.readerNotesList.querySelectorAll('li').length, 2, '이 탭 목록에도 다른 탭의 메모가 보인다');
+  assert.match(el.toast.textContent, /2페이지 인용을 저장했습니다/);
+});
+
+test('다른 탭이 지운 메모를 다음 저장이 되살리지 않는다', (t) => {
+  const { storage } = setupNotes(t);
+  saveReaderNotes('job-a', [note({ id: 'x1', text: '지운 메모' }), note({ id: 'x2', text: '남은 메모' })]);
+  resetReaderForJob();
+  assert.equal(state.readerNotes.length, 2);
+  saveReaderNotes('job-a', [note({ id: 'x2', text: '남은 메모' })]); // 다른 탭이 x1을 지웠다
+  state.readerSelection = '새 인용';
+  state.readerSelectionPage = 1;
+  saveReaderCitation();
+  const texts = storedNotes(storage).map((n) => n.text);
+  assert.ok(!texts.includes('지운 메모'), texts.join(' | '));
+  assert.deepEqual(texts.sort(), ['남은 메모', '새 인용'].sort());
+  assert.ok(!el.readerNotesList.querySelector('[data-note-id="x1"]'), '목록에서도 사라진다');
+});
+
+test('삭제도 최신 저장값에서 뺀다 — 다른 탭이 새로 저장한 메모는 남는다', (t) => {
+  const { storage } = setupNotes(t);
+  saveReaderNotes('job-a', [note({ id: 'd1', text: '지울 메모' })]);
+  resetReaderForJob();
+  saveReaderNotes('job-a', [note({ id: 'd1', text: '지울 메모' }), note({ id: 'd2', text: '다른 탭의 새 메모' })]);
+  deleteReaderNote('d1');
+  assert.deepEqual(storedNotes(storage).map((n) => n.id), ['d2'],
+    '예전에는 이 탭의 사본([d1])에서 지운 빈 목록으로 키를 지워 d2까지 사라졌다');
+  assert.deepEqual(state.readerNotes.map((n) => n.id), ['d2']);
+  // 다른 탭이 이미 지운 메모를 지우면 저장 없이 화면만 맞춘다
+  saveReaderNotes('job-a', []);
+  deleteReaderNote('d2');
+  assert.deepEqual(state.readerNotes, []);
+  assert.equal(el.readerNotesList.querySelectorAll('li').length, 0);
+});
+
+test('storage 이벤트: 다른 탭의 저장·삭제를 목록과 하이라이트에 맞춘다', (t) => {
+  const { storage } = setupNotes(t);
+  saveReaderNotes('job-a', [note({ id: 'h1', kind: 'highlight', page: 1, lang: 'orig', text: 'Block p1-b1' })]);
+  state.readerNotes = loadReaderNotes('job-a'); // 잡을 열 때 읽은 목록
+  state.readerAlignments.orig.set(1, alignment(1, ['p1-b1', 'p1-b2']));
+  renderReaderDocument();
+  const marks = () => el.readerContent.querySelectorAll('mark.reader-highlight')
+    .map((m) => [m.dataset.noteId, m.textContent]);
+  assert.deepEqual(marks(), [['h1', 'Block p1-b1']]);
+
+  // 다른 탭: h1을 지우고 h2를 칠했다
+  saveReaderNotes('job-a', [note({ id: 'h2', kind: 'highlight', page: 1, lang: 'orig', text: 'Block p1-b2' })]);
+  onReaderNotesStorage({ key: readerNotesKey('job-a') });
+  assert.deepEqual(state.readerNotes.map((n) => n.id), ['h2']);
+  assert.deepEqual(marks(), [['h2', 'Block p1-b2']], '사라진 하이라이트는 걷고 새 하이라이트를 칠한다');
+  assert.equal(el.readerContent.querySelector('[data-block-id="p1-b1"] .reader-map-target').textContent,
+    'Block p1-b1', '걷어도 본문은 그대로');
+  assert.deepEqual(el.readerNotesList.querySelectorAll('li').map((li) => li.dataset.noteId), ['h2']);
+
+  // 다른 잡의 키는 무시하고, 저장소 전체 비우기(key=null)는 다시 읽는다
+  storage.setItem(readerNotesKey('job-b'), JSON.stringify({ v: 1, updated: 1, items: [note({ id: 'zz' })] }));
+  onReaderNotesStorage({ key: readerNotesKey('job-b') });
+  assert.deepEqual(state.readerNotes.map((n) => n.id), ['h2']);
+  storage.clear();
+  onReaderNotesStorage({ key: null });
+  assert.deepEqual(state.readerNotes, []);
+  assert.deepEqual(marks(), []);
+  assert.equal(el.readerNotesBadge.hidden, true);
 });

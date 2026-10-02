@@ -991,7 +991,9 @@ def test_load_weights_uses_the_complete_cached_snapshot_without_the_hub(monkeypa
 
     snapshot = tmp_path / "snap"
     lookups: list[tuple] = []
-    monkeypatch.setattr(mlx_ocr, "load", _fake_load, raising=False)
+    # 모듈 dict에 직접 넣는다 — setattr는 원래 값을 읽느라 지연 속성(PEP 562 __getattr__)으로
+    # loader를 임포트해, mlx가 없는 Linux에서 ModuleNotFoundError가 났다.
+    monkeypatch.setitem(mlx_ocr.__dict__, "load", _fake_load)
     monkeypatch.setattr(
         um, "complete_local_snapshot", lambda *args: lookups.append(args) or snapshot,
     )

@@ -2,14 +2,14 @@
 
 ## Unreleased
 
-Performance figures below were measured on an Apple M4 Max during this work, partly while other jobs shared the machine; they will be re-measured before release (see `docs/OCR_BENCHMARK.md`).
+Performance figures below were measured on an Apple M4 Max on a quiet machine on 2026-10-02, with nothing else running but the desktop (see `docs/OCR_BENCHMARK.md`).
 
 ### Apple Silicon / MLX
 
-- New in-process MLX OCR engine for Apple Silicon (`OCR_DEVICE=mlx`), the default on Macs through `OCR_DEVICE=auto`. It ports the Unlimited-OCR model code from mlx-vlm 0.7.4 without depending on mlx-vlm or torch, and reads the same pinned weights. About 3.9 s per page on 8-page chunks, versus 34 s per page on the previous torch MPS default, with the same text-layer recall.
-- Optional 8-bit decoder quantization with `OCR_MLX_QUANT_BITS=8` (about 2.7 s per page, same recall).
+- New in-process MLX OCR engine for Apple Silicon (`OCR_DEVICE=mlx`), the default on Macs through `OCR_DEVICE=auto`. It ports the Unlimited-OCR model code from mlx-vlm 0.7.4 without depending on mlx-vlm or torch, and reads the same pinned weights. About 3.8 s per page on 8-page chunks (a whole 25-page job takes 96 s, 3.85 s per page), versus 34 s per page on the previous torch MPS default, with the same text-layer recall.
+- Optional 8-bit decoder quantization with `OCR_MLX_QUANT_BITS=8` (about 2.6 s per page, same recall).
 - `make setup-mlx` installs the MLX engine, the torch MPS fallback and the C++ module together; `make setup-metal` now does the same, and `make dev-metal` runs the torch MPS fallback.
-- Faster, leaner torch MPS fallback: fused MoE decode, host-side ring slots and a fixed-size n-gram window take an 8-page chunk from 34 to 9.8 s per page, and Objective-C autorelease pools stop memory from growing over long sessions.
+- Faster, leaner torch MPS fallback: fused MoE decode, host-side ring slots and a fixed-size n-gram window take an 8-page chunk from 34 to 9.1 s per page, and Objective-C autorelease pools stop memory from growing over long sessions.
 - The device badge shows MLX with the chip name.
 
 ### OCR pipeline
@@ -55,7 +55,7 @@ Performance figures below were measured on an Apple M4 Max during this work, par
 - On scanned and image pages, translations are drawn over a cover in the page's background colour instead of over the original pixels.
 - Redaction removes a band per text line, so neighbouring lines survive. Rotated pages, list bullets, emphasis, LaTeX fractions, roots and accents, and HTML-like text such as `p < 0.05` are flattened correctly, and copied spaces are no longer non-breaking.
 - `GET /api/jobs/{id}/pdf/report` returns the build report; after a download the UI lists preserved-block reasons and per-page warnings.
-- Builds run in separate worker processes, truly in parallel, without slowing OCR. Export failures return 409 with a reason instead of 500, and caches are validated by a build stamp.
+- Builds run in separate worker processes, truly in parallel, without slowing OCR (a 25-page translated PDF builds in about 8 s; MLX decoding stays at about 290 tok/s meanwhile). Export failures return 409 with a reason instead of 500, and caches are validated by a build stamp.
 - Scanned tables are translated from a pixel grid: only the changed cells' text is covered, rules and untouched cells stay intact, and a table whose columns cannot be located is kept with a warning.
 - Rotated pages lay out multi-line translations in screen orientation.
 - List items left untranslated (the unit kept its original text) keep their original typesetting instead of being redrawn as plain text with stray fraction bars.

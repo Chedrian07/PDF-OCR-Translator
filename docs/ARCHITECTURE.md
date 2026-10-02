@@ -996,6 +996,11 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   읽으므로 사용자가 먼저 레이아웃 탭을 열지 않아도 원본 타이포를 기준으로 조판한다.
   폰트 메트릭 객체(`fitz.Font`)는 `lru_cache(maxsize=8)`로 재사용한다 — 조판
   dry-run이 블록마다 폰트 파일을 다시 파싱하던 비용 제거(결과 불변).
+  축소 조판 dry-run(`Shape.insert_textbox`)은 빌드마다 연 `trial_pages()` 안에서 원문 페이지와
+  기하(MediaBox·CropBox·변환 행렬·회전)가 같은 빈 페이지로 돈다(`fitting._trial_page` — 기하를
+  그대로 복제하지 못하면 원문 페이지). 시험마다 `insert_font`가 그 페이지의 폰트 리소스 전체를
+  다시 훑는데(폼 XObject 재귀 포함), 논문 페이지에서는 그 스캔이 빌드 시간의 3분의 1을 넘었다.
+  25쪽 논문 빌드 40→26초, CropBox 스트레스 사본 200→144초이고 렌더 픽셀·텍스트·리포트는 같다.
 - 상태코드: 400 미지원 lang **또는 미지원 `view`**(single|dual 외) · 404 번역본 없음 ·
   409 미완료 잡, 좌표 레이아웃을 쓸 수 없음(원문·번역 layout에 텍스트 블록이 없음 —
   figure_only 엔진 등, document.html 사용 안내), 내보내기 불가(`PdfExportError` — 입력 누락·

@@ -1,8 +1,14 @@
 """내보내기 결과 리포트와 사용자 대면 오류."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# 경고 문구의 페이지 접두사("p12: …") — warning_pages 집계용
+_WARNING_PAGE_RE = re.compile(r"p(\d+):")
+# report()에 싣는 경고 표본 상한 — 페이지 단위 집계(kept_pages·warning_pages)는 자르지 않는다
+_WARNINGS_SAMPLE = 50
 
 # 캐시된 export PDF가 이전 조판 규칙으로 생성됐는지 판별하는 공개 포맷 버전.
 # 조판 결과가 달라지는 변경에서는 반드시 올려 기존 잡도 다음 요청 때 재생성한다.
@@ -48,10 +54,13 @@ class PdfExportResult:
     raster_blocks_erased: int = 0
     specialist_kept: dict[str, int] = field(default_factory=dict)
     kept_reasons: dict[str, int] = field(default_factory=dict)
+    # 페이지(1-base)별 보존 블록 수 — 합은 페이지를 알고 기록한 kept와 같다. 경고는 50건
+    # 표본만 리포트에 실리므로, '이 페이지의 번역이 왜 PDF에 없나'는 이 집계로 답한다.
+    kept_pages: dict[int, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
-    def keep(self, reason: str, count: int = 1) -> None:
-        """보존 블록 수와 사유를 함께 기록한다.
+    def keep(self, reason: str, count: int = 1, page: int | None = None) -> None:
+        """보존 블록 수와 사유를 함께 기록한다(page를 알면 페이지별로도).
 
         경고는 사용자에게 보여줄 만한 이상 징후만 남기므로 `kept`의 일부만
         설명한다. 다음 미번역 신고를 코드 없이 진단하려면 보존된 *모든* 블록의
@@ -59,11 +68,20 @@ class PdfExportResult:
         """
         self.kept += count
         self.kept_reasons[reason] = self.kept_reasons.get(reason, 0) + count
+        if page is not None and count:
+            self.kept_pages[page] = self.kept_pages.get(page, 0) + count
 
-    def merge(self, other: "PdfExportResult") -> None:
-        """다른 집계를 흡수한다 — 계획을 여러 패스 시도할 때 마지막 것만 반영."""
+    def merge(self, other: "PdfExportResult", page: int | None = None) -> None:
+        """다른 집계를 흡수한다 — 계획을 여러 패스 시도할 때 마지막 것만 반영.
+
+        page를 주면 other의 보존 블록 전부를 그 페이지 몫으로 센다(페이지 하나의 계획)."""
         self.replaced += other.replaced
         self.kept += other.kept
+        if page is not None and other.kept:
+            self.kept_pages[page] = self.kept_pages.get(page, 0) + other.kept
+        for key, count in other.kept_pages.items():
+            if page is None:
+                self.kept_pages[key] = self.kept_pages.get(key, 0) + count
         self.relocated += other.relocated
         self.table_cells_replaced += other.table_cells_replaced
         self.listing_lines_replaced += other.listing_lines_replaced
@@ -90,6 +108,14 @@ class PdfExportResult:
             # 교체 대상 타입이 아닌 블록(image/equation/algorithm 등)은 애초에
             # kept로 세지 않고 specialist_kept로만 집계한다.
             "kept_reasons": dict(sorted(self.kept_reasons.items())),
+            # [[페이지, 보존 블록 수], …] — 페이지 순, 자르지 않는다(dict가 아닌 이유: 사유별
+            # 집계 dict와 섞이지 않게). warning_pages는 경고가 하나라도 있는 페이지 전부.
+            "kept_pages": [[page, count] for page, count in sorted(self.kept_pages.items())],
+            "warning_pages": sorted({
+                int(match.group(1))
+                for warning in self.warnings
+                if (match := _WARNING_PAGE_RE.match(str(warning)))
+            }),
             "warning_count": len(self.warnings),
-            "warnings": self.warnings[:50],
+            "warnings": self.warnings[:_WARNINGS_SAMPLE],
         }

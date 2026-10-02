@@ -51,7 +51,10 @@ class OutputLimitError(RepetitiveOutputError):
 
     partial_output: run_multi 형식(`<PAGE>` 구분, 크롭·raw_pages.json 등 산출물은
     out_dir에 있음)의 잘린 출력. 엔진이 실어 주면 runner가 **끝까지 생성된 앞 페이지**
-    (마지막 세그먼트를 뺀 나머지)를 그대로 병합하고 잘린 페이지부터만 다시 처리한다.
+    (마지막 세그먼트는 잘린 페이지)를 병합하고 잘린 페이지부터만 다시 처리한다. 모델이
+    페이지 마커를 내는 엔진(supports_multi_page)이면 세그먼트 수만 믿지 않고 원본 텍스트
+    레이어와 대조해 남길 물리 페이지와 배치를 정한다(IncrementalMerger.completed_prefix —
+    잘리기 전에 쪼개거나 건너뛴 페이지가 있으면 그 앞까지만 남긴다).
     None이면(run_single·모름) 청크 전체를 페이지별로 다시 처리한다. 출력 문자열은
     문서 내용이므로 메시지(로그·잡 경고에 남는다)에는 넣지 않는다.
 

@@ -234,9 +234,11 @@ def test_run_multi_produces_chunk_contract(tmp_path, stub):
     assert (out / "images" / "page_0_0.jpg").is_file()
     assert (out / "result_with_boxes_0.jpg").is_file()
     assert (out / "boxes.json").is_file()
-    # figure_only 엔진(Ovis)은 좌표 layout의 원천인 raw_pages.json을 쓰지 않는다 —
-    # 쓰면 image 블록뿐인 layout.json이 생겨 HTML·PDF 내보내기가 텍스트를 잃는다.
-    assert not (out / "raw_pages.json").exists()
+    # figure_only 엔진(Ovis)은 좌표 layout의 원천인 raw_pages.json에 좌표를 싣지 않는다 —
+    # 실으면 image 블록뿐인 layout.json이 생겨 HTML·PDF 내보내기가 텍스트를 잃는다.
+    # 파일은 페이지마다 빈 원출력으로 남는다 — merge가 원출력 개수로 페이지 수를 맞춰 본다.
+    raw = json.loads((out / "raw_pages.json").read_text(encoding="utf-8"))
+    assert raw == {"pages": [""]}
     # 페이지 단위 발행: <PAGE> 마커 후 페이지 전체 텍스트 (기존 SSE 계약)
     assert texts[0] == "<PAGE>\n"
     assert "본문" in "".join(texts)

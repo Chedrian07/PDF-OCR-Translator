@@ -869,6 +869,17 @@ def test_reasoning_effort별_max_tokens_예산():
     ("https://openrouter.ai/api/v1", "openrouter"),
     ("https://api.openai.com/v1", "reasoning_effort"),
     ("https://gateway.example.com/v1", "openrouter"),            # 알 수 없는 공개 호스트 = 종전
+    # translate-9 — OpenAI 데이터 레지던시 호스트와 사설 이름 규칙(종전엔 전부 openrouter)
+    ("https://eu.api.openai.com/v1", "reasoning_effort"),
+    ("https://us.api.openai.com/v1", "reasoning_effort"),
+    ("http://host.containers.internal:8080/v1", "chat_template_kwargs"),   # Podman
+    ("http://gateway.docker.internal:8080/v1", "chat_template_kwargs"),
+    ("http://llm.corp.internal/v1", "chat_template_kwargs"),
+    ("http://mlx.localhost:8080/v1", "chat_template_kwargs"),
+    ("http://studio.lan:1234/v1", "chat_template_kwargs"),
+    ("http://nas.home.arpa:8000/v1", "chat_template_kwargs"),
+    ("https://notapi.openai.com.example.net/v1", "openrouter"),   # 접미사만 닮은 공개 호스트
+    ("https://evil-lan.com/v1", "openrouter"),
 ])
 def test_auto_reasoning_style은_base_url로_확정(base_url, style):
     from app.translate.types import resolve_reasoning_style

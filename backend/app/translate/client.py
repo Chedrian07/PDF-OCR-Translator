@@ -19,7 +19,9 @@ effort 테이블(types.REASONING_MAX_TOKENS)로도 드물게 잘릴 수 있다.
 돌고 호출 스레드는 0.1초마다 취소를 본다 — 취소되면 즉시 반환하고 소켓을 끊어, 서버
 (mlx_lm 등)가 다음 토큰 쓰기에서 끊김을 보고 생성을 멈춘다. 비스트리밍 요청은 서버가
 끝까지 생성한 뒤에야 끊김을 알 수 있다(고아 생성, probe:MLX-04). 응답 본문은
-TRANSLATE_MAX_RESPONSE_MB를 넘으면 읽기를 멈춘다(라이브러리 버전과 무관한 상한).
+TRANSLATE_MAX_RESPONSE_MB를 넘으면 읽기를 멈춘다(라이브러리 버전과 무관한 상한) —
+선언된 Content-Length를 먼저 보고, 본문은 비스트리밍·SSE 모두 고정 크기 조각(압축이면
+풀린 크기)으로 읽어 청크 전송이 아닌 HTTP/1.0 스트림(mlx_lm.server)에서도 점진적으로 건다.
 """
 
 from __future__ import annotations
@@ -75,7 +77,7 @@ _OVERLONG_MIN_CHARS = 2000
 _MAX_TIMEOUT_RETRIES = 1
 # 헬퍼 스레드의 HTTP 왕복을 기다리는 동안 취소를 관측하는 주기(초)
 _CANCEL_POLL_S = 0.1
-# 비스트리밍 본문 수신 조각 크기
+# 본문 수신 조각 크기 — 비스트리밍·SSE 공통. 상한 검사가 이 단위로 점진적으로 걸린다.
 _BODY_CHUNK = 64 * 1024
 # auto 스트리밍을 서버가 거부했다고 보는 상태코드 — 같은 요청을 비스트리밍으로 1회 시도
 _STREAM_REJECTED = frozenset({400, 415, 422})
@@ -256,7 +258,7 @@ class OpenAICompatClient:
             hdrs = dict(resp.headers)
             ctype = _header(hdrs, "Content-Type").lower()
             if status == 200 and payload.get("stream") and "text/event-stream" in ctype:
-                return status, self._read_sse(resp, abort), hdrs
+                return status, self._read_sse(resp, hdrs, abort), hdrs
             return status, _decode_body(self._read_body(resp, hdrs, abort)), hdrs
         except requests.exceptions.ConnectionError as exc:
             # stream=True 본문 수신 중 read timeout은 requests가 ConnectionError로 감싼다 —
@@ -276,11 +278,15 @@ class OpenAICompatClient:
             "게이트웨이 이상이 아니라면 TRANSLATE_MAX_RESPONSE_MB를 올리세요"
         )
 
+    def _check_declared(self, hdrs: dict) -> None:
+        """선언된 Content-Length가 상한을 넘으면 본문을 읽기 전에 거절한다."""
+        declared = _header(hdrs, "Content-Length")
+        if declared.isdigit() and int(declared) > self._cap_bytes():
+            raise self._too_large()
+
     def _read_body(self, resp, hdrs: dict, abort: threading.Event) -> bytes:
         cap = self._cap_bytes()
-        declared = _header(hdrs, "Content-Length")
-        if declared.isdigit() and int(declared) > cap:
-            raise self._too_large()
+        self._check_declared(hdrs)
         buf = bytearray()
         for chunk in resp.iter_content(_BODY_CHUNK):
             if abort.is_set():
@@ -290,13 +296,21 @@ class OpenAICompatClient:
                 raise self._too_large()
         return bytes(buf)
 
-    def _read_sse(self, resp, abort: threading.Event) -> dict:
-        """SSE(chat.completion.chunk) 스트림을 비스트리밍 응답 모양의 dict로 조립한다."""
+    def _read_sse(self, resp, hdrs: dict, abort: threading.Event) -> dict:
+        """SSE(chat.completion.chunk) 스트림을 비스트리밍 응답 모양의 dict로 조립한다.
+
+        고정 크기(_BODY_CHUNK)로 읽는다. 종전 iter_content(chunk_size=None)은 청크 전송이
+        아닌 응답(HTTP/1.0·Connection: close — mlx_lm.server 형식)을 EOF까지 한 번에 읽고
+        urllib3의 압축 해제 상한도 꺼, 끝없이 보내는 서버에는 상한 검사가 본문 전체를
+        메모리에 올린 뒤에야 돌았다(translate-1). 파서는 [DONE] 전에는 부분 출력을 쓰지
+        않으므로 조각이 묶여 와도 결과·지연은 같다.
+        """
         cap = self._cap_bytes()
+        self._check_declared(hdrs)
         acc = _StreamAccumulator()
         received = 0
         pending = b""
-        for chunk in resp.iter_content(chunk_size=None):
+        for chunk in resp.iter_content(_BODY_CHUNK):
             if abort.is_set():
                 raise _RequestCancelled("번역 요청이 취소되었습니다")
             if not chunk:

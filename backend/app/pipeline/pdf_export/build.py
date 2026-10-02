@@ -992,6 +992,32 @@ def _plan_table_block(
     return table_targets
 
 
+def _estimated_fs_cqw(ctx: _PageContext, block_type: str, ob: dict) -> float | None:
+    """원본 텍스트 레이어에 글자 크기가 없는 블록(스캔 페이지)의 크기(cqw) — 원문 글자로 추정한다.
+
+    번역문으로 추정하면 블록마다 번역 길이 비가 달라 한 쪽의 본문이 8.8–13.3pt로 들쭉날쭉했다
+    (실측 스캔 쪽; 같은 쪽의 텍스트 레이어 PDF는 11.2pt 하나). 원문 글자는 원본에 실제로 그
+    블록 크기로 찍혀 있던 것이다. 본문(text)은 그 쪽 본문 블록 추정의 중앙값을 넘지 않게 해
+    한 단락만 커 보이지 않게 한다 — 더 작은 블록(각주 등)은 그대로 작다."""
+    own = estimate_font_size_cqw(ob.get("bbox"), str(ob.get("content") or ""), ctx.aspect)
+    if own is None or block_type != "text":
+        return own
+    body = ctx.analysis.get("body_fs_cqw")
+    if body is None:
+        estimates = sorted(
+            fs for fs in (
+                estimate_font_size_cqw(b.get("bbox"), str(b.get("content") or ""), ctx.aspect)
+                for b in ctx.oblocks
+                if isinstance(b, dict) and str(b.get("type") or "") == "text"
+                and not b.get("fs") and "image" not in b
+            )
+            if fs is not None
+        )
+        body = estimates[len(estimates) // 2] if estimates else 0.0
+        ctx.analysis["body_fs_cqw"] = body
+    return min(own, body) if body else own
+
+
 def _plan_text_block(
     ctx: _PageContext, block_index: int, block_type: str, ob: dict, tb: dict,
     targets: list[_Replacement], result: PdfExportResult,
@@ -1035,9 +1061,7 @@ def _plan_text_block(
         )
         result.warnings.append(f"p{ctx.pno}: 그림 위 텍스트 — 원문 보존")
         return None
-    fs_cqw = ob.get("fs") or tb.get("fs") or estimate_font_size_cqw(
-        tb.get("bbox"), str(tb.get("content") or ""), ctx.aspect,
-    ) or 1.8
+    fs_cqw = ob.get("fs") or tb.get("fs") or _estimated_fs_cqw(ctx, block_type, ob) or 1.8
     base_pt = min(_MAX_FONT_PT, max(
         _MIN_FONT_PT, fs_cqw / 100 * ctx.page.rect.width))
     # 같은 pt에서 AppleMyungjo/Noto Serif CJK는 Times 계열 영문보다

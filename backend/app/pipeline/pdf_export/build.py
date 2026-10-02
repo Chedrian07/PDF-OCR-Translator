@@ -1445,13 +1445,68 @@ _RASTER_ERASE_PAD_PT = 0.8
 _RASTER_DARK_LUMA = 0.5
 
 
-def _raster_erase_regions(ctx: _PageContext, targets) -> list:
+def _subtract_rect(fitz, rect, hole) -> list:
+    """`rect`에서 `hole`을 뺀 영역 — 겹치지 않으면 그대로, 겹치면 최대 네 조각."""
+    overlap = fitz.Rect(
+        max(rect.x0, hole.x0), max(rect.y0, hole.y0),
+        min(rect.x1, hole.x1), min(rect.y1, hole.y1),
+    )
+    if overlap.x1 <= overlap.x0 or overlap.y1 <= overlap.y0:
+        return [rect]
+    pieces = []
+    if overlap.y0 > rect.y0:
+        pieces.append(fitz.Rect(rect.x0, rect.y0, rect.x1, overlap.y0))
+    if overlap.y1 < rect.y1:
+        pieces.append(fitz.Rect(rect.x0, overlap.y1, rect.x1, rect.y1))
+    if overlap.x0 > rect.x0:
+        pieces.append(fitz.Rect(rect.x0, overlap.y0, overlap.x0, overlap.y1))
+    if overlap.x1 < rect.x1:
+        pieces.append(fitz.Rect(overlap.x1, overlap.y0, rect.x1, overlap.y1))
+    return pieces
+
+
+# 이 두께 이하로 남은 덮개 조각은 버린다 — 덮개의 여유와 남는 블록 쪽 여유가 겹친
+# 자리(예: 캡션 덮개가 그림 bbox 옆으로 삐져나온 1.6pt 띠)라 블록 자신의 글자가 아니라
+# 이웃의 가장자리 픽셀(눈금 라벨 끝 등)만 지운다.
+_RASTER_ERASE_MIN_PIECE_PT = 2 * _RASTER_ERASE_PAD_PT + 0.01
+
+
+def _raster_erase_regions(ctx: _PageContext, targets) -> tuple[list, set[int]]:
     """원문이 래스터인 교체 대상마다 덮을 원래 영역(번역이 옮겨 가도 원래 자리).
 
-    표 셀의 `source_rect`는 셀 사각형이 아니라 그 셀 글자 잉크의 상자다
-    (raster_tables) — 괘선과 이웃 셀 글자를 덮지 않으므로 여유를 더하지 않는다.
+    `(덮을 영역 목록, 덮을 곳이 남지 않은 블록 인덱스)`를 낸다. 표 셀의 `source_rect`는
+    셀 사각형이 아니라 그 셀 글자 잉크의 상자다(raster_tables) — 괘선과 이웃 셀 글자를
+    덮지 않으므로 여유를 더하지 않는다.
+
+    OCR bbox는 0–999 격자라 캡션과 그림, 문단과 수식 상자가 몇 pt씩 겹친다. 덮개가 그
+    겹침까지 덮으면 이웃 그림의 축 라벨·남는 수식·참고문헌 줄 픽셀이 지워졌다(감사
+    pdf-3). 그래서 남아야 하는 영역 — 레이아웃 그림·표 블록과 교체되지 않는 블록 —
+    을 덮개에서 뺀다. 경계가 맞닿은 정상 레이아웃이 예전과 같게, 이웃 쪽으로 여유
+    (`_RASTER_ERASE_PAD_PT`)만큼은 들어가도 된다.
     """
+    fitz = ctx.fitz
+    replaced = {target.block_index for target in targets if target.block_index >= 0}
+    protected: list[tuple[int, object]] = []
+    for index, (rect, block) in enumerate(zip(ctx.block_rects, ctx.oblocks)):
+        if rect is None or not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "")
+        if block_type in ("image", "table") or block.get("image"):
+            keep = True
+        else:
+            # 내용이 빈 블록은 자식 블록을 감싼 컨테이너(빈 list 등)다 — 제 픽셀이 없으므로
+            # 지키면 그 안의 교체 블록을 하나도 덮지 못한다(실측: 목록 항목 11개).
+            keep = index not in replaced and bool(str(block.get("content") or "").strip())
+        if keep:
+            keep_out = +rect
+            keep_out += (
+                _RASTER_ERASE_PAD_PT, _RASTER_ERASE_PAD_PT,
+                -_RASTER_ERASE_PAD_PT, -_RASTER_ERASE_PAD_PT,
+            )
+            if keep_out.x1 > keep_out.x0 and keep_out.y1 > keep_out.y0:
+                protected.append((index, keep_out))
     regions: list = []
+    uncovered: set[int] = set()
     seen: set[tuple] = set()
     for target in targets:
         if target.block_index not in ctx.raster_blocks:
@@ -1465,12 +1520,29 @@ def _raster_erase_regions(ctx: _PageContext, targets) -> list:
                 _RASTER_ERASE_PAD_PT, _RASTER_ERASE_PAD_PT,
             )
         region &= ctx.page.mediabox
-        key = tuple(round(value, 2) for value in region)
-        if region.is_empty or key in seen:
+        if region.is_empty:
             continue
-        seen.add(key)
-        regions.append(region)
-    return regions
+        pieces = [region]
+        for index, keep_out in protected:
+            if index != target.block_index:
+                pieces = [
+                    part for piece in pieces for part in _subtract_rect(fitz, piece, keep_out)
+                ]
+        pieces = [
+            piece for piece in pieces
+            if piece.width > _RASTER_ERASE_MIN_PIECE_PT
+            and piece.height > _RASTER_ERASE_MIN_PIECE_PT
+        ]
+        if not pieces:
+            uncovered.add(target.block_index)
+            continue
+        for piece in pieces:
+            key = tuple(round(value, 2) for value in piece)
+            if key in seen:
+                continue
+            seen.add(key)
+            regions.append(piece)
+    return regions, uncovered
 
 
 def _raster_background_fills(fitz, page, regions) -> list:
@@ -1825,15 +1897,21 @@ def _process_page(
 
     # 래스터 원문을 덮을 영역과 그 바탕색은 페이지를 건드리기 **전에** 정한다 —
     # 리댁션 뒤 렌더는 이미 덮인 색을 샘플링한다.
-    erase_regions = _raster_erase_regions(base_ctx, targets)
+    erase_regions, uncovered = _raster_erase_regions(base_ctx, targets)
     erase_fills = _raster_background_fills(fitz, page, erase_regions)
     _warn_unerased_raster_sources(base_ctx, targets, visuals, result)
+    for index in sorted(uncovered):
+        result.warnings.append(
+            f"p{pno}: 블록 {index + 1}의 원문 픽셀이 이웃 그림·보존 블록과 겹쳐 덮지 못함 — "
+            "번역이 원문과 겹쳐 보일 수 있음"
+        )
     _apply_page_redactions(
         fitz, page, targets, visuals.raster_rects, list(zip(erase_regions, erase_fills)),
     )
     result.raster_blocks_erased += len({
         target.block_index for target in targets
         if target.block_index in base_ctx.raster_blocks
+        and target.block_index not in uncovered
     })
     _insert_page_targets(page, targets, result)
 

@@ -76,10 +76,12 @@ _APP_ENV_KEYS = frozenset("""
     PDF_WORKER_MODE PDF_PAGE_TIMEOUT_S PDF_EXPORT_BUILD_TIMEOUT_S PDF_WORKER_MEM_LIMIT_MB
     PDF_MAX_PAGE_CONTENT_MB PDF_MAX_PAGE_XOBJECT_CALLS
 """.split())
-# docker compose가 같은 .env에서 읽는 배포 키 (sidecar 이미지 설정·메모리 상한·바인딩)
+# docker compose가 같은 .env에서 읽는 배포 키 (sidecar 이미지 설정·메모리 상한·바인딩).
+# 오버레이(compose.ollama.yaml)의 ${…}도 포함한다 — 그 주석이 '.env로 올릴 것'이라 안내한다.
 _DEPLOY_ENV_KEYS = frozenset("""
     BIND_HOST GPU_DEVICE HF_TOKEN CUDA_LAUNCH_BLOCKING
     OCR_CPU_MEM_LIMIT OCR_CUDA_MEM_LIMIT OCR_WEB_MEM_LIMIT OVIS_MEM_LIMIT PADDLE_MEM_LIMIT
+    OLLAMA_MEM_LIMIT
     OVIS_MODEL_ID OVIS_MODEL_REVISION OVIS_DTYPE OVIS_GPU_MEMORY_UTILIZATION OVIS_MAX_MODEL_LEN
     OVIS_MAX_OUTPUT_TOKENS OVIS_MAX_NUM_SEQS OVIS_MIN_PIXELS OVIS_MAX_PIXELS
     OVIS_GDN_PREFILL_BACKEND OVIS_MAX_UPLOAD_MB
@@ -95,13 +97,16 @@ _HARNESS_ENV_KEYS = frozenset("""
 KNOWN_ENV_KEYS: frozenset[str] = _APP_ENV_KEYS | _DEPLOY_ENV_KEYS | _HARNESS_ENV_KEYS
 
 # 다른 도구가 읽는 키 — 같은 .env에 두는 일이 흔하다(HF 캐시·torch·프록시·compose). 경고하지 않는다.
+# MLX_(libmlx 런타임 노브 — Apple Silicon 기본 OCR 엔진이 같은 프로세스에서 읽는다)·MTL_·
+# METAL_(Metal 디버그)·OBJC_(fork 안전성), TESSDATA_PREFIX(textlayer의 tesseract가 상속).
 _FOREIGN_ENV_PREFIXES = tuple("""
     HF_ HUGGINGFACE_ HUGGING_FACE_ TRANSFORMERS_ TOKENIZERS_ TORCH_ PYTORCH_ CUDA_ NVIDIA_
     NCCL_ OMP_ MKL_ OPENBLAS_ KMP_ COMPOSE_ DOCKER_ BUILDKIT_ UV_ PIP_ PYTHON LC_ SSL_
+    MLX_ MTL_ METAL_ OBJC_
 """.split())
 _FOREIGN_ENV_KEYS = frozenset("""
     TZ LANG LANGUAGE HOME PATH USER SHELL TERM TMPDIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE
-    HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY
+    HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY TESSDATA_PREFIX
 """.split())
 # 흔한 혼동의 명시 안내 — difflib가 엉뚱한 키를 고르는 경우(OPENAI_API_BASE → OPENAI_API_KEY)나
 # 뜻이 둘로 갈리는 경우. 키를 dict(...) 키워드로 적는 것도 위와 같은 이유(스캐너)다.
@@ -122,6 +127,10 @@ _MAX_CONFIG_WARNINGS = 20
 
 def _is_foreign_env_key(key: str) -> bool:
     upper = key.upper()
+    if f"OCR_{upper}" in KNOWN_ENV_KEYS:
+        # 이 앱의 키에서 OCR_ 접두사만 빠뜨린 이름(MLX_QUANT_BITS → OCR_MLX_QUANT_BITS,
+        # CUDA_GRAPHS → OCR_CUDA_GRAPHS)은 다른 도구의 접두사와 겹쳐도 오타로 안내한다.
+        return False
     return upper in _FOREIGN_ENV_KEYS or upper.startswith(_FOREIGN_ENV_PREFIXES)
 
 

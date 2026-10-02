@@ -35,7 +35,7 @@ import ssl
 import threading
 import time
 from collections.abc import Callable
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 import requests
 from urllib3.exceptions import HTTPError as Urllib3HTTPError
@@ -47,6 +47,7 @@ from .types import (
     TranslateCancelled,
     TranslateConfig,
     TranslateEmptyOutput,
+    TranslateError,
     TranslateOutputTruncated,
     TranslateTimeout,
     TranslateUnitRejected,
@@ -159,6 +160,7 @@ class OpenAICompatClient:
     ) -> None:
         self.cfg = cfg
         self.base_url = _normalize_base_url(cfg.base_url)
+        self._credentials = _credential_literals(cfg)
         self.session = requests.Session()
         self._request_semaphore = request_semaphore
         self._cancel_check = cancel_check
@@ -335,7 +337,7 @@ class OpenAICompatClient:
         """
         cap = self._cap_bytes()
         self._check_declared(hdrs)
-        acc = _StreamAccumulator()
+        acc = _StreamAccumulator(self._credentials)
         guard = _RunawayGuard(prompt) if prompt is not None else None
         lines = _LineBuffer()
         received = 0
@@ -367,7 +369,19 @@ class OpenAICompatClient:
         """번역문을 반환한다. 잘림이 남으면 TranslateOutputTruncated(유닛 단위 거부).
 
         잘린 출력은 어떤 경로로도 반환하지 않는다 — 호출자가 캐시·게시하지 않게.
+        오류 문구에서는 설정된 자격 증명 원문을 가린다(_credential_literals).
         """
+        try:
+            return self._complete(system, user, max_tokens)
+        except TranslateError as e:
+            if self._credentials:
+                e.args = tuple(
+                    _redact_literals(arg, self._credentials) if isinstance(arg, str) else arg
+                    for arg in e.args
+                )
+            raise
+
+    def _complete(self, system: str, user: str, max_tokens: int) -> str:
         text, truncated = self._complete_once(system, user, max_tokens)
         if not truncated:
             return text  # 빈 응답은 _parse가 TranslateEmptyOutput으로 이미 raise
@@ -643,7 +657,7 @@ class OpenAICompatClient:
             if status in (401, 403):
                 raise TranslateAPIError("번역 API 인증 실패 — OPENAI_API_KEY를 확인하세요")
             if status == 404 and mode == "chat":
-                raise TranslateAPIError(_not_found_message(self.cfg.model, body))
+                raise TranslateAPIError(_not_found_message(self.cfg.model, body, self._credentials))
             if status in _RETRYABLE and attempt < self.cfg.max_retries:
                 wait = self._backoff(headers, attempt)
                 ra = _header(headers, "Retry-After") or None
@@ -659,9 +673,11 @@ class OpenAICompatClient:
             # 죽는다. 엔진이 유닛 단위로 강등(래더 → 원문 유지)할 수 있게 구분한다.
             if status in _UNIT_REJECTED:
                 raise TranslateUnitRejected(
-                    f"번역 API 오류 (HTTP {status}): {_body_preview(body)}"
+                    f"번역 API 오류 (HTTP {status}): {_body_preview(body, self._credentials)}"
                 )
-            raise TranslateAPIError(f"번역 API 오류 (HTTP {status}): {_body_preview(body)}")
+            raise TranslateAPIError(
+                f"번역 API 오류 (HTTP {status}): {_body_preview(body, self._credentials)}"
+            )
 
     def _backoff(self, headers: dict, attempt: int) -> float:
         ra = _header(headers, "Retry-After") or None
@@ -680,7 +696,9 @@ class OpenAICompatClient:
         빈 응답은 오류지만, 잘려서 빈 경우(reasoning이 예산 소진)는 재시도 대상이므로
         raise하지 않고 ("", True)로 넘긴다."""
         if not isinstance(body, dict):
-            raise TranslateAPIError(f"번역 API 응답 파싱 실패: {_body_preview(body)}")
+            raise TranslateAPIError(
+                f"번역 API 응답 파싱 실패: {_body_preview(body, self._credentials)}"
+            )
         try:
             if mode == "responses":
                 truncated = body.get("status") == "incomplete"
@@ -694,7 +712,9 @@ class OpenAICompatClient:
                 truncated = choice.get("finish_reason") == "length"
                 text = choice["message"]["content"]
         except (KeyError, IndexError, TypeError, AttributeError) as e:
-            raise TranslateAPIError(f"번역 API 응답 파싱 실패: {_body_preview(body)}") from e
+            raise TranslateAPIError(
+                f"번역 API 응답 파싱 실패: {_body_preview(body, self._credentials)}"
+            ) from e
         text = _postprocess(text)
         if not text and not truncated:
             # 사고만 내고 끝났거나 빈 문자열 — 같은 프롬프트(온도 0)면 같은 결과라 유닛 단위.
@@ -741,7 +761,8 @@ class _StreamAccumulator:
     상태코드 정책대로 분류한다 — 부분 출력을 번역문으로 돌려주지 않는다.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, credentials: tuple[str, ...] = ()) -> None:
+        self.credentials = credentials  # 오류 문구에서 가릴 설정 원문(_credential_literals)
         self.data: list[bytes] = []
         self.parts: list[str] = []
         self.content_chars = 0
@@ -777,11 +798,13 @@ class _StreamAccumulator:
         try:
             event = json.loads(text)
         except ValueError as e:
-            raise TranslateAPIError(f"번역 API 스트림 파싱 실패: {text[:200]}") from e
+            raise TranslateAPIError(
+                f"번역 API 스트림 파싱 실패: {_body_preview(text, self.credentials)}"
+            ) from e
         if not isinstance(event, dict):
             return
         if event.get("error"):
-            raise _stream_error(event["error"])
+            raise _stream_error(event["error"], self.credentials)
         if isinstance(event.get("usage"), dict):
             self.usage = event["usage"]
         for choice in event.get("choices") or []:
@@ -889,7 +912,7 @@ def _status_code(value) -> int | None:
 _STREAM_UNIT_ERROR_KINDS = ("invalid_request", "context_length")
 
 
-def _stream_error(err) -> Exception:
+def _stream_error(err, credentials: tuple[str, ...] = ()) -> Exception:
     """스트림 중간 {"error": …} 이벤트를 HTTP 상태코드와 같은 정책으로 분류한다(translate-5).
 
     OpenRouter·LiteLLM 같은 게이트웨이는 스트림이 시작된 뒤의 공급자 장애를 HTTP 200 본문
@@ -899,7 +922,7 @@ def _stream_error(err) -> Exception:
       * 401·403 → 인증 실패(전역), 그 밖의 재시도 불가 4xx → 전역 API 오류
       * 5xx·408·429·코드 없음 → 일시 장애로 보고 백오프 재시도(_StreamErrorEvent)
     """
-    detail = _body_preview({"error": err})
+    detail = _body_preview({"error": err}, credentials)
     status = None
     kind = ""
     if isinstance(err, dict):
@@ -916,17 +939,17 @@ def _stream_error(err) -> Exception:
     return _StreamErrorEvent(f"번역 API 스트림 오류: {detail}")
 
 
-def _error_detail(body: dict | str) -> str:
+def _error_detail(body: dict | str, credentials: tuple[str, ...] = ()) -> str:
     """오류 본문의 서버 메시지 — JSON {"error": "…"|{"message": "…"}}일 때만."""
     if not isinstance(body, dict):
         return ""
     err = body.get("error")
     if isinstance(err, dict):
         err = err.get("message") or err.get("code") or ""
-    return str(err or body.get("detail") or "")[:300]
+    return _redact_literals(str(err or body.get("detail") or ""), credentials)[:300]
 
 
-def _not_found_message(model: str, body: dict | str) -> str:
+def _not_found_message(model: str, body: dict | str, credentials: tuple[str, ...] = ()) -> str:
     """chat 404 진단 — 경로가 없는 것인지 모델 ID가 틀린 것인지 구분한다(probe:MLX-07).
 
     종전에는 모든 404를 'OPENAI_BASE_URL이 /v1까지 포함하는지 확인'으로 바꾸고 서버
@@ -934,7 +957,7 @@ def _not_found_message(model: str, body: dict | str) -> str:
     모델을 언로드하므로, 사용자는 URL만 고치며 헤맸다. JSON 오류 본문이 있으면 모델
     ID 문제로 안내하고 서버 메시지를 보여 준다. 순수 'Not Found'만 경로 문제로 본다.
     """
-    detail = _error_detail(body)
+    detail = _error_detail(body, credentials)
     if detail:
         return (
             f"번역 API가 404를 반환했습니다 — 모델 ID(OPENAI_MODEL/TRANSLATE_MODEL={model})가 "
@@ -969,6 +992,36 @@ _QUERY_RE = re.compile(r"\?[^\s'\"()<>]*")
 def _redact_query(text: str) -> str:
     """URL 쿼리 문자열을 가린다 — base URL 쿼리에 자격증명을 싣는 게이트웨이 설정 대비."""
     return _QUERY_RE.sub("?<redacted>", text)
+
+
+# 이보다 짧은 설정 값은 가리지 않는다 — 테스트 더미 키('sk-x')·'tenant=x' 같은 짧은 값을 가리면
+# 오류 문구의 평범한 글자까지 지워진다. 실제 키·토큰은 훨씬 길다.
+_MIN_CREDENTIAL_LEN = 6
+
+
+def _credential_literals(cfg: TranslateConfig) -> tuple[str, ...]:
+    """오류 문구에서 가릴 설정 원문 — API 키, base URL 쿼리 값(인코딩 전후)·userinfo 비밀번호.
+
+    상류 오류 본문(HTTP 4xx 미리보기·스트림 오류 이벤트·404 진단)은 state.json을 거쳐 무인증
+    /translate/state·SSE로 나간다. 게이트웨이가 요청 URL·헤더를 오류 본문에 되울리면 쿼리 키나
+    API 키가 함께 나가므로, 클라이언트 경계(complete)에서 이 값들을 '<redacted>'로 바꾼다."""
+    found = {cfg.api_key or ""}
+    try:
+        parts = urlsplit(cfg.base_url or "")
+        found.add(parts.password or "")
+    except ValueError:  # 형식 오류 URL — 클라이언트가 요청 때 같은 오류로 실패한다
+        return ()
+    for pair in parts.query.split("&"):
+        raw = pair.partition("=")[2]
+        found.update((raw, unquote_plus(raw)))
+    # 긴 것부터 바꾼다 — 한 값이 다른 값을 품어도 남는 조각이 없게
+    return tuple(sorted((v for v in found if len(v) >= _MIN_CREDENTIAL_LEN), key=len, reverse=True))
+
+
+def _redact_literals(text: str, literals: tuple[str, ...]) -> str:
+    for value in literals:
+        text = text.replace(value, "<redacted>")
+    return text
 
 
 def _os_error_in(exc: BaseException) -> OSError | None:
@@ -1227,6 +1280,8 @@ def _postprocess(text) -> str:
     return text.strip()
 
 
-def _body_preview(body: dict | str) -> str:
+def _body_preview(body: dict | str, credentials: tuple[str, ...] = ()) -> str:
+    """상류 본문 미리보기(200자) — 자르기 **전에** 설정 자격 증명 원문을 가린다(경계에 걸친
+    키의 앞부분이 남지 않게)."""
     s = body if isinstance(body, str) else str(body)
-    return s[:200]
+    return _redact_literals(s, credentials)[:200]

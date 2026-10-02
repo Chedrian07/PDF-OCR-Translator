@@ -302,12 +302,14 @@ Q&A·번역 엔드포인트에는 잡·클라이언트 IP 단위 슬라이딩 �
 
 ### 컨테이너 하드닝
 
-모든 compose 서비스는 비루트(uid 1000)·`no-new-privileges`·`cap_drop: [ALL]`로 돌고, backend
-4개는 프로세스 수 상한(1024)이 있습니다. CPU 이미지 backend(`ocr-cpu`·`ocr-ovis`·`ocr-paddle`)는
+`docker-compose.yml`의 모든 서비스는 비루트(uid 1000)·`no-new-privileges`·`cap_drop: [ALL]`로
+돌고, backend 4개는 프로세스 수 상한(1024)이 있습니다. CPU 이미지 backend(`ocr-cpu`·`ocr-ovis`·`ocr-paddle`)는
 루트 파일시스템이 읽기 전용이라 쓰기는 `/data` 볼륨과 `/tmp` tmpfs(2 GB — `MAX_UPLOAD_MB`를
 크게 올리면 함께 올린다)뿐입니다. `ocr-cuda`와 GPU sidecar는 아직 읽기 전용이 아닙니다(GPU
 호스트 검증 필요). 이미지 안 앱 코드는 root 소유·읽기 전용이고 바이트코드를 미리 컴파일하며,
-uvicorn은 종료 시 열린 SSE를 5초 안에 정리합니다(`--timeout-graceful-shutdown 5`).
+uvicorn은 종료 시 열린 SSE를 5초 안에 정리합니다(`--timeout-graceful-shutdown 5`). 예외: 선택
+overlay `compose.ollama.yaml`의 `ollama`는 `no-new-privileges`만 걸려 있고 공식 이미지 그대로
+root·Docker 기본 캡으로 돕니다(포트는 Docker 내부 네트워크에만 열립니다).
 
 ### 원격 접속 (Tailscale) — HTTPS 권장
 

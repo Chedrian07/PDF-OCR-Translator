@@ -33,7 +33,9 @@ _WARNINGS_SAMPLE = 50
 # 13: `\langle`·`\rangle`을 ⟨⟩(폰트에 없으면 〈〉)로 평문화 — 예전에는 'langle'이 찍혔다.
 # 14: TeX 확장 괄호 조각(제어 코드 글리프·세로로 쌓인 span)도 원문으로 지움. 조판 결과가 달라진다.
 # 15: 기호 명령 바로 뒤의 감싸개·분수가 명령 이름에 붙지 않음('langley'·'cdotx' → '⟨y'·'·x').
-PDF_EXPORT_FORMAT_VERSION = 15
+# 16: 줄 위·아래로 튀어나와 OCR bbox와 조금만 겹치는 기호(근호 등)를 맞닿은 블록 하나에 붙여
+#     그 블록을 교체할 때 함께 지움 — 번역문 위에 '√'만 남지 않는다. 조판 결과가 달라진다.
+PDF_EXPORT_FORMAT_VERSION = 16
 
 
 class PdfExportError(RuntimeError):

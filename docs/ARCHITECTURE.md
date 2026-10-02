@@ -591,8 +591,9 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
                                     //  load_retry, restarting} (OCR_ENGINE_PROTOCOL.md)
                                     //  sidecar가 죽어도 health 자체는 200 —
                                     //  {status:"unreachable", error:"…"}로 구분
-  "config_warnings": []             // .env에 있지만 이 앱이 읽지 않는 키의 짧은 안내
-                                    //  (키 이름·오타 후보만, 값 없음 — §7). 기본 빈 목록
+  "config_warnings": []             // 앱이 직접 읽은 .env(로컬 uv 실행)에서 이 앱이 읽지 않는
+                                    //  키의 짧은 안내(키 이름·오타 후보만, 값 없음 — §7).
+                                    //  컨테이너에는 .env가 없어 Docker에서는 늘 빈 목록
 }
 ```
 
@@ -1251,7 +1252,12 @@ auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은
   `TRANSLATE_REASONING`(off|low|medium|high|xhigh — max 없음), Q&A는
   `LLM_REASONING_EFFORT`(max 허용), `OPENAI_API_BASE` → `OPENAI_BASE_URL`. 다른 도구가 읽는
   키라면 무시해도 된다(안내 문구도 그렇게 말한다). 예전에는 이런 키가 조용히 무시돼
-  `REASONING_EFFORT`로 번역 reasoning을 껐다고 믿은 설정이 효과가 없었다.
+  `REASONING_EFFORT`로 번역 reasoning을 껐다고 믿은 설정이 효과가 없었다. 대상은 위 로컬
+  `.env` 로딩이 읽은 파일뿐이다 — 이미지에는 `.env`가 없고(`.dockerignore`) compose도
+  `env_file` 없이 `environment:`에 적은 키만 넘기므로, Docker에서는 `config_warnings`가 늘
+  비어 있고 그 밖의 키는 경고 없이 버려진다. compose 배포는 README §빠른 시작 (Docker)의
+  `docker compose exec -T ocr-cpu python -c '…' < .env`로 호스트 `.env`를 같은 판정
+  (`config.unknown_dotenv_key_warnings`)에 돌린다(키 이름만 출력).
 - **키 레지스트리 계약**: 코드가 읽는 키, `.env.example`의 키 줄, compose `${…}` 키는 모두
   `config._APP_ENV_KEYS`·`_DEPLOY_ENV_KEYS`·`_HARNESS_ENV_KEYS` 중 하나에 있어야 한다
   (`tests/test_config_env_registry.py`가 양방향 대조). 이 블록은 공백 구분 문자열로 둔다 —
@@ -2074,8 +2080,10 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
 - **디바이스 기본값**: 로컬(uv) 실행의 `OCR_DEVICE` 기본이 `auto`다 — Apple Silicon은 MLX(없으면
   MPS), cu129 extra를 깐 Linux는 CUDA. compose는 서비스마다 고정이라 그대로다.
 - **번역은 기본 스트리밍**(chat 모드) — 스트리밍을 못 다루는 게이트웨이면 `TRANSLATE_STREAM=0`.
-- **`.env` 확인**: 이 앱이 읽지 않는 키가 기동 로그·`/api/health`의 `config_warnings`에 나온다.
-  `REASONING_EFFORT`는 번역 `TRANSLATE_REASONING` 또는 Q&A `LLM_REASONING_EFFORT`로 바꾼다.
+- **`.env` 확인**: 로컬(uv) 실행은 이 앱이 읽지 않는 키를 기동 로그·`/api/health`의
+  `config_warnings`로 알린다. Docker는 컨테이너에 `.env`가 없어 이 목록이 늘 비어 있으니 README
+  §빠른 시작 (Docker)의 점검 명령을 쓴다. `REASONING_EFFORT`는 번역 `TRANSLATE_REASONING` 또는
+  Q&A `LLM_REASONING_EFFORT`로 바꾼다.
 - **프록시 배포**: `TRUSTED_PROXY_HOPS>0`인데 프록시가 루프백이 아니면 `TRUSTED_PROXY_IPS`가
   필요하다(없으면 레이트리밋이 프록시 IP 하나로 붕괴하고 한 번 경고).
 - **`PDF_EXPORT_MAX_CONCURRENT=1`이면 예열하지 않는다.** 업로드 복잡도 게이트가 아주 조밀한

@@ -1666,7 +1666,10 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
     `scripts/require_hf_snapshot.py`가 `make dev`와 같은 `.env`(cwd → 저장소 루트)에서 HF 캐시 위치
     키(`HF_HOME`·`HF_HUB_CACHE`·`HUGGINGFACE_HUB_CACHE`·`XDG_CACHE_HOME`, 셸 값 우선)만 넘기고,
     코드 기본 스냅샷의 가중치(`*.safetensors`)가 없으면 pytest를 돌리지 않고 종료코드 2로 멈춘다.
-    mlx 업그레이드·MLX 포팅 수정·스냅샷 갱신 전후에 돌린다.
+    mlx 업그레이드·MLX 포팅 수정·스냅샷 갱신 전후에 돌린다. fp32 비교는 MLX 로짓을 먼저 구하고
+    MLX 모델·버퍼 캐시를 내린 뒤 torch 모델을 올려, 파일 전체 최고 메모리가 약 23GiB다(M4 Max
+    `/usr/bin/time -l` 실측 — 두 fp32 사본을 함께 들던 예전에는 44GiB, 16–36GB Mac에서 스왑·종료).
+    32GB 이상 Mac에서 돌린다(약 15초).
   - 두 타깃은 `uv run` 대신 `backend/.venv/bin/python`을 직접 부른다(extra·C++ 모듈이 기본
     동기화 밖이라).
 - `services/{ovisocr2,paddleocr_vl}/tests/`: sidecar 파서·어댑터·수명주기(로드 재시도·엔진 사망

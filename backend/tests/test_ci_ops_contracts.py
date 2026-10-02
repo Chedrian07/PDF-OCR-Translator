@@ -8,6 +8,7 @@ compose 스레딩 누락은 컨테이너 배포 후에야, 빌드 핀 해제는 
 
 import importlib.util
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -526,3 +527,109 @@ def test_scripts_do_not_import_the_legacy_fitz_module():
         if re.match(r"\s*(import fitz\b|from fitz\b)", line)
     ]
     assert not offenders, f"레거시 fitz 임포트: {offenders}"
+
+
+# ─────────────────── sidecar CI 웹 계층 = 배포 lock (감사 sidecar-6) ───────────────────
+
+@pytest.mark.parametrize("svc", ("ovisocr2", "paddleocr_vl"))
+def test_sidecar_ci_installs_the_web_layer_from_the_service_lock(ci, svc):
+    """sidecar 잡은 그 서비스 requirements.lock을 제약(-c)으로 걸어 웹 계층을 배포 이미지와 같은
+    버전으로 설치한다. fastapi가 starlette를 상한 없이 요구해(>=0.46) fastapi만 고정하면 CI가
+    PyPI 최신 starlette(1.7.0 — lock은 1.3.1)로 GHSA-82w8 회귀 가드를 돌렸다."""
+    job = ci["jobs"]["sidecar"]
+    assert svc in job["strategy"]["matrix"]["svc"]
+    assert job["defaults"]["run"]["working-directory"] == "services/${{ matrix.svc }}"
+    installs = re.findall(r"uv pip install\b(?:[^\n]*\\\n)*[^\n]*", _job_script(job))
+    assert installs, "sidecar 잡의 설치 스텝이 사라졌다"
+    for cmd in installs:
+        assert re.search(r"(?:-c|--constraints?)[ =]requirements\.lock\b", cmd), cmd
+        # 버전을 워크플로에 따로 적으면 lock 갱신 때 둘이 어긋난다 — 버전은 lock에만 둔다
+        assert "==" not in cmd, cmd
+    lock = (REPO / "services" / svc / "requirements.lock").read_text(encoding="utf-8")
+    # 제약이 실제로 웹 계층을 묶는가 — fastapi가 상한 없이 끌어오는 의존성까지
+    for pkg in ("fastapi", "starlette", "anyio", "h11", "python-multipart", "annotated-doc"):
+        assert re.search(rf"^{re.escape(pkg)}==\S+ \\$", lock, re.MULTILINE), f"{svc}: {pkg} 고정 없음"
+
+
+# ─────────────────── Docker 빌드 컨텍스트 (감사 infra-docs-6) ───────────────────
+# .dockerignore 패턴은 .gitignore와 달리 컨텍스트 루트 기준이다 — `.env`·`data/`는 backend/.env
+# (make dev가 cwd에서 먼저 찾는 실키)·backend/data(개발 서버 잡 저장소 — 사용자 PDF)를 거르지
+# 못했다. BuildKit은 COPY 대상만 보내 드러나지 않았지만 레거시 빌더·넓은 COPY에서는 이미지에
+# 실린다. 판정은 moby/patternmatcher 규칙을 옮긴 것이다(BuildKit `COPY . /ctx` 실측과 대조).
+
+def _docker_pattern(pattern: str) -> re.Pattern:
+    """`**`는 디렉터리 0개 이상, `*`·`?`는 '/'를 넘지 않는다."""
+    out, i = "^", 0
+    while i < len(pattern):
+        if pattern.startswith("**", i):
+            i += 2
+            if pattern.startswith("/", i):
+                i += 1
+            out += ".*" if i == len(pattern) else "(.*/)?"
+            continue
+        ch = pattern[i]
+        out += "[^/]*" if ch == "*" else "[^/]" if ch == "?" else re.escape(ch)
+        i += 1
+    return re.compile(out + "$")
+
+
+def _dockerignore_rules() -> list[tuple[bool, re.Pattern]]:
+    rules = []
+    for raw in (REPO / ".dockerignore").read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        negate = line.startswith("!")
+        pattern = posixpath.normpath(line[1:].strip() if negate else line).lstrip("/")
+        assert "[" not in pattern, f"문자 클래스는 이 판정기가 다루지 않는다: {raw}"
+        rules.append((negate, _docker_pattern(pattern)))
+    return rules
+
+
+def _docker_excludes(rel: str, rules: list[tuple[bool, re.Pattern]]) -> bool:
+    """파일이나 상위 디렉터리가 걸리면 제외 — 마지막으로 일치한 규칙이 이긴다."""
+    parts = rel.split("/")
+    candidates = ["/".join(parts[: i + 1]) for i in range(len(parts))]
+    excluded = False
+    for negate, rx in rules:
+        if negate != excluded:
+            continue
+        if any(rx.match(c) for c in candidates):
+            excluded = not negate
+    return excluded
+
+
+@pytest.mark.parametrize("rel", (
+    ".env", "backend/.env", "backend/.env.local", "frontend/.env",
+    "backend/data/jobs/0123abcd/source.pdf", "backend/data/jobs/.owner.lock",
+    "data/jobs/0123abcd/source.pdf", "backend/certs/dev.pem", "backend/server.key",
+    "backend/credentials/gcp.json", "backend/secrets/token", "backend/uvicorn.log",
+    "backend/hf-cache/hub/blob", "backend/tmp/verify-e2e/api.log",
+))
+def test_docker_context_drops_dev_job_data_and_secrets_at_any_depth(rel):
+    assert _docker_excludes(rel, _dockerignore_rules()), f"빌드 컨텍스트에 들어간다: {rel}"
+
+
+def test_docker_context_keeps_every_build_input():
+    """반대 방향 — 패턴을 넓히다(예: `**/data/`) 앱 내장 데이터(backend/app/translate/data)를 빼면
+    이미지가 조용히 깨진다. Dockerfile이 COPY하는 추적 파일은 의도한 제외(frontend/tests)
+    말고는 전부 컨텍스트에 남아야 한다."""
+    df = (REPO / "backend" / "Dockerfile").read_text(encoding="utf-8")
+    sources = [
+        src
+        for line in df.splitlines() if line.startswith("COPY ") and "--from=" not in line
+        for src in line.split()[1:-1] if not src.startswith("--")
+    ]
+    assert {"backend/app", "native", "frontend"} <= set(sources), sources
+    try:
+        listed = subprocess.run(
+            ["git", "-C", str(REPO), "ls-files", "-z", "--", *sources],
+            capture_output=True, text=True, check=True, timeout=30,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        pytest.skip("git 체크아웃이 아니다 — 추적 파일 목록 없음")
+    files = [f for f in listed.split("\0") if f]
+    assert any(f.startswith("backend/app/translate/data/") for f in files)
+    rules = _dockerignore_rules()
+    dropped = [f for f in files if _docker_excludes(f, rules) and not f.startswith("frontend/tests/")]
+    assert not dropped, f".dockerignore가 빌드 입력을 뺀다: {dropped[:10]}"

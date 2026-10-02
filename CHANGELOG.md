@@ -38,6 +38,7 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 - Responses API requests send `store: false`.
 - The response size cap is enforced while reading, including length-less HTTP/1.0 streams (mlx_lm.server), declared `Content-Length` on streams and compressed bodies; long stream lines parse in linear time.
 - A translation endpoint that stops responding fails the job after a wave of timed-out units instead of finishing hours later with English text.
+- Streamed translations stop a runaway output early: once the answer is twice as long as the prompt, a repetition loop or an answer over four times the prompt ends the request and closes the connection, instead of generating to `max_tokens` (small local models spent most of their time on such loops).
 - Transient mid-stream provider errors (OpenRouter-style error events) are retried like HTTP 5xx, and streamed requests reuse keep-alive connections.
 - A truncation retry that exceeds the response cap is treated as a truncated unit, not a failed job.
 - `TRANSLATE_REASONING_STYLE=auto` recognises regional OpenAI hosts (`eu.api.openai.com`) and Podman, LAN and `.internal` host names.

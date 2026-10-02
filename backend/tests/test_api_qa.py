@@ -108,6 +108,33 @@ def test_qa_full_flow(client, sample_pdf):
 
 
 # ── 2. 프로바이더 명시 오버라이드 (로컬 경로 local_only) ────────────────────
+def test_qa_answer_comes_with_safely_rendered_html(client, sample_pdf):
+    """로컬 모델 답변은 마크다운·TeX다 — 질문 탭이 '**TURBOQUANT**'·'$$D…$$'를 글자 그대로 보였다.
+    /html과 같은 안전 렌더러의 조각을 함께 준다(스크립트는 글자로, 외부 이미지는 링크로)."""
+    fake = FakeRouter()
+
+    async def ask(**kwargs):
+        fake.ask_calls.append(kwargs)
+        return GenerationResult(
+            content=("이름은 **TURBOQUANT**이다.\n\n$$D_{\\mathrm{mse}}(Q) := 1$$\n\n"
+                     "<script>alert(1)</script> ![t](https://evil.example/t.png) $x$"),
+            model="fake:openai", provider="openai-responses", reasoning_effort="low",
+            thinking_requested=False, reasoning_summary=None, usage={},
+        )
+
+    fake.ask = ask
+    client.app.state.llm_router = fake
+    jid = _done_job(client, sample_pdf)
+
+    body = client.post(f"/api/jobs/{jid}/qa", json={"question": "이름은?", "page": 1}).json()
+    html = body["answer_html"]
+    assert body["answer"].startswith("이름은 **TURBOQUANT**")      # 원문은 그대로
+    assert "<strong>TURBOQUANT</strong>" in html
+    assert '<div class="math-display">' in html and '<span class="math-inline">x</span>' in html
+    assert "<script>" not in html and "&lt;script&gt;" in html
+    assert "<img" not in html and 'class="blocked-image"' in html
+
+
 def test_qa_provider_override_local(client, sample_pdf):
     client.app.state.llm_router = FakeRouter()
     jid = _done_job(client, sample_pdf)

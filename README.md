@@ -362,6 +362,12 @@ tun이 아닌 tailscaled 내부 netstack을 타므로 **tailscaled 재시작까�
 cp .env.example .env   # 키 설정 후 docker compose up -d 로 재기동
 ```
 
+로컬(uv — `make dev`·`make dev-metal`)로 띄웠다면 `.env`를 고친 뒤 서버를 Ctrl+C로 끄고 다시
+실행하세요 — `.env`는 기동할 때 한 번만 읽고, `--reload`는 `backend/`의 파이썬 파일만 지켜봐
+`.env` 변경으로는 재시작하지 않습니다. 예시 블록을 `.env.example`을 복사한 `.env`에 붙여 넣을 때는
+같은 키의 빈 줄이 뒤에 남지 않게 하세요(뒤쪽 줄이 이깁니다 — 남아 있으면 `/api/health`의
+`config_warnings`가 그 키를 알려 줍니다).
+
 `.env`에 아래 값을 설정하면 활성화됩니다:
 
 - `OPENAI_BASE_URL` — OpenAI 호환 base URL. `https://host`처럼 origin만 쓰면
@@ -596,7 +602,8 @@ AI에게 물을 수 있습니다 (Localight에서 이식). 공급자는 넷 중 
   폴백으로도 재사용하지 않습니다. `LLM_OPENAI_BASE_URL`이 공식 `https://api.openai.com`
   호스트로 고정돼 있어, OpenRouter·로컬 게이트웨이용 번역 키를 공유하면 그 키가 무관한
   제3자(OpenAI)로 전송되기 때문입니다. `.env`에 `LLM_OPENAI_API_KEY=`를 채우고
-  `docker compose up -d`로 재기동하면 됩니다(compose가 네 backend 서비스 모두에 전달).
+  `docker compose up -d`로 재기동하면 됩니다(compose가 네 backend 서비스 모두에 전달 — 로컬
+  `make dev`는 Ctrl+C 뒤 다시 실행).
   미설정이면 `openai-*` 공급자는 `/api/providers`에서 `available:false`,
   `/api/health`의 `qa_available`도 false가 되고 UI가 키 설정을 안내합니다 — Ollama
   공급자는 이 키 없이 동작합니다.

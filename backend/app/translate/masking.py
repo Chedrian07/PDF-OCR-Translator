@@ -503,6 +503,23 @@ def _numbers_dropped(residual: str, out_text: str) -> bool:
     return not any(n in flat for n in numbers)
 
 
+# 원문을 통째로 품은 출력 — 소형 모델이 원문 영문을 한국어 메타 문장으로 감싸면 한글
+# 비율·길이비를 모두 통과해 번역 PDF에 실렸다(실서버 로컬 MLX 0.8B 실측). 진짜 번역은
+# 원문 문장을 통째로 옮겨 적지 않는다 — 실번역 쌍(real_translation_pairs 168건)의 최장
+# 연속 원문 단어열은 8단어 이상 원문에서 최대 39%(참고문헌 표제)다. 80% 이상이 한 덩어리로
+# 같은 순서로 남으면 번역이 아니라 echo다. 8단어 미만 원문은 고유명사·라벨 echo 면제와 같다.
+_ECHO_MIN_SRC_WORDS = 8
+
+
+def _embeds_source_run(src_words: list[str], out_words: list[str]) -> bool:
+    """원문 단어의 80% 이상(최소 8개)이 출력에 같은 순서로 **연속해** 나오는가."""
+    need = max(_ECHO_MIN_SRC_WORDS, (len(src_words) * 4 + 4) // 5)
+    if len(out_words) < need:
+        return False
+    grams = {tuple(out_words[i:i + need]) for i in range(len(out_words) - need + 1)}
+    return any(tuple(src_words[i:i + need]) in grams for i in range(len(src_words) - need + 1))
+
+
 def looks_untranslated(src: str, out: str, mapping: dict) -> bool:
     """출력 측 최소 검증 — 거부문·요약·원문 echo면 True(엔진이 래더로 보낸다).
 
@@ -515,7 +532,7 @@ def untranslated_reason(src: str, out: str, mapping: dict) -> str:
     """게이트 판정 사유 — 통과면 "", 거부면 어느 규칙이 걸었는지 나타내는 슬러그.
 
     사유: scaffold / refusal / repetition / label-sentence / number-mismatch /
-    hangul-ratio / length-ratio.
+    hangul-ratio / echo / length-ratio.
 
     **오탐 관측용이다.** 게이트는 오탐해도 조용하다 — 정상 번역이 거부되면 래더
     왕복이 늘고, 래더가 소진되면 그 문단이 영어로 남는다(kept_reason=gate-rejected).
@@ -578,6 +595,12 @@ def untranslated_reason(src: str, out: str, mapping: dict) -> str:
         retention = sum(1 for w in src_words if w in out_words) / len(src_words)
         if hangul_ratio < 0.05 or retention >= 0.9:
             return "hangul-ratio"  # 한글이 사실상 없음 / 원문 영단어 그대로 → 거부문·echo
+    # 한국어 메타 문장으로 감싼 원문 echo('…번역하지 않습니다. 문서: <원문> 번역: …')는 한글
+    # 비율도 길이비도 통과한다 — 원문 문장이 통째로 남았는지를 따로 본다.
+    if len(src_words) >= _ECHO_MIN_SRC_WORDS and _embeds_source_run(
+        src_words, [w.lower() for w in re.findall(r"[A-Za-z]{2,}", out_text)],
+    ):
+        return "echo"
     # 한국어 거부문·한 줄 요약은 한글 비율을 통과하므로 길이비로 잡는다.
     # 하한은 **원문 길이로 나눈다** — 한국어는 짧은 명사구일수록 압축이 극단적이다
     # ('Writing the introduction'→'서론 쓰기' 0.208). 실측 165쌍 분포:

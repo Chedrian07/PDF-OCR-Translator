@@ -1761,6 +1761,50 @@ def test_1차에서_축퇴로_판정된_출력은_2차_패스에서도_축퇴다
     assert canned not in cache.values()
 
 
+def test_2차_스윕이_지운_layout_번역은_layout_ko와_result_ko에_남지_않는다(tmp_path, cfg):
+    """1차에서 원문 2종(L1·L2)만 같은 캔드 응답을 받아 통과하고, 2차 패스의 지연 md 유닛이
+    세 번째 원문이 되면 2차 스윕이 layout 결과를 지운다. 그런데 layout.ko.json·result.ko.md는
+    스윕 전 매핑으로 기록돼, 리포트는 '원문 유지'라면서 캔드 문장이 번역 PDF·한국어
+    레이아웃·마크다운에 그대로 실렸다(translate-3)."""
+    from dataclasses import replace
+
+    l1 = "Alpha beta gamma words here."
+    l2 = "Another quite different sentence."
+    l3 = "Delta epsilon zeta theta iota."
+    canned = "가나다라 마바사 아자차카 타파하 출력입니다"
+    (tmp_path / "result.md").write_text(f"{l1}\n\n{l3}\n", encoding="utf-8")
+    (tmp_path / "layout.json").write_text(
+        json.dumps(_layout_of([l1, l2, l3]), ensure_ascii=False), encoding="utf-8")
+
+    class Canned(EchoClient):
+        """L3의 첫 요청만 거부문(→ layout L3 원문 유지 → md L3가 2차 패스), 나머지는 캔드."""
+
+        def __init__(self):
+            super().__init__()
+            self.l3_calls = 0
+
+        def complete(self, system, user, *, max_tokens):
+            src = _marker(user)
+            self._count(src is not None)
+            if src is None:
+                return ""
+            if src.startswith("Delta"):
+                with self._count_lock:
+                    self.l3_calls += 1
+                    first = self.l3_calls == 1
+                if first:
+                    return "I cannot translate this text."
+            return canned
+
+    res = run_translation(tmp_path, "ko", replace(cfg, concurrency=1), client=Canned())
+
+    assert {"lay:1:0", "lay:1:1", "lay:1:2", "md:0:1"} <= set(res.kept_original)
+    lay_ko = json.loads((tmp_path / "layout.ko.json").read_text(encoding="utf-8"))
+    assert [b["content"] for b in lay_ko[0]["blocks"]] == [l1, l2, l3]
+    md_ko = (tmp_path / "result.ko.md").read_text(encoding="utf-8")
+    assert canned not in md_ko and md_ko == f"{l1}\n\n{l3}\n"
+
+
 def test_같은_라벨의_표기_변형이_같은_번역으로_수렴하는_것은_축퇴가_아니다(tmp_path, cfg):
     """대소문자·복수형만 다른 짧은 라벨 3종이 같은 정답으로 수렴하면 정상이다 —
     종전에는 축퇴로 원문 유지되고 캐시가 지워져 매 실행 재과금됐다(translate-llm-15)."""

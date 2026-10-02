@@ -23,6 +23,9 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 _COMMIT_REVISION = re.compile(r"[0-9a-f]{40}")
+# 토크나이저 본체 — 빠른 토크나이저(tokenizer.json) 또는 sentencepiece 원본(tokenizer.model).
+# tokenizer_config.json만으로는 로드할 수 없다(완전성 판정용, complete_local_snapshot)
+_TOKENIZER_FILES = ("tokenizer.json", "tokenizer.model")
 
 
 def is_pinned_revision(revision: str | None) -> bool:
@@ -35,15 +38,20 @@ def pretrained_local_first(
 ) -> Any:
     """`load(model_id, revision=…, **kwargs)`(from_pretrained) — 고정 리비전은 캐시만 먼저 본다.
 
-    transformers는 캐시에 필요한 파일이 하나라도 없으면 local_files_only에서 OSError를 낸다
-    (huggingface_hub의 LocalEntryNotFoundError도 OSError다). 그때만 Hub에 묻는 호출로 다시 한다."""
+    캐시만 보는 시도가 **어떤 예외로든** 실패하면 Hub에 묻는 호출로 한 번 다시 한다. 필요한 파일이
+    통째로 없으면 OSError(huggingface_hub의 LocalEntryNotFoundError도 OSError)지만, 부분 캐시는
+    다른 예외로 끝난다 — 중단된 첫 다운로드처럼 tokenizer_config.json만 있고 tokenizer.json이
+    없으면 AutoTokenizer가 느린 토크나이저 변환으로 넘어가 ImportError(protobuf)를,
+    tokenizer_config.json이 없으면 config.json의 auto_map 때문에 ValueError(trust_remote_code)를
+    낸다. OSError만 폴백하던 때는 그런 캐시에서 Hub가 빠진 파일을 채우지 못해 엔진 로드가 영구히
+    실패했다(감사 delta-core-1). 진짜 오류라면 Hub 호출이 같은 예외를 다시 낸다."""
     if is_pinned_revision(revision):
         try:
             return load(model_id, revision=revision, local_files_only=True, **kwargs)
-        except OSError as error:
+        except Exception as error:  # noqa: BLE001 — 부분 캐시는 OSError가 아닐 수 있다(위)
             logger.info(
-                "HF 캐시에 고정 스냅샷 %s@%s가 완전하지 않아 Hub에서 받습니다: %s",
-                model_id, str(revision)[:8], str(error)[:200],
+                "HF 캐시에 고정 스냅샷 %s@%s가 완전하지 않아 Hub에서 받습니다: %s: %s",
+                model_id, str(revision)[:8], type(error).__name__, str(error)[:200],
             )
     return load(model_id, revision=revision, **kwargs)
 
@@ -51,9 +59,12 @@ def pretrained_local_first(
 def complete_local_snapshot(model_id: str, revision: str | None) -> Path | None:
     """고정 리비전의 스냅샷이 캐시에 **완전히** 있으면 그 경로, 아니면 None(→ Hub 경로).
 
-    완전 = config.json·tokenizer_config.json과, 가중치 인덱스가 가리키는 샤드 전부(인덱스가
-    없으면 *.safetensors 하나 이상). snapshot_download(local_files_only)는 스냅샷 폴더만 있으면
-    파일이 빠져 있어도 돌려주므로 여기서 확인한다 — 중단된 다운로드는 예전처럼 Hub가 채운다."""
+    완전 = config.json·tokenizer_config.json, 토크나이저 본체(tokenizer.json 또는
+    tokenizer.model — vendor 로더 ALLOW_PATTERNS가 받는 것)와, 가중치 인덱스가 가리키는 샤드
+    전부(인덱스가 없으면 *.safetensors 하나 이상). snapshot_download(local_files_only)는 스냅샷
+    폴더만 있으면 파일이 빠져 있어도 돌려주므로 여기서 확인한다 — 중단된 다운로드는 예전처럼
+    Hub가 채운다. 토크나이저 본체를 보지 않던 때는 tokenizer.json이 빠진 캐시에도 경로를 돌려줘
+    6.7GB 가중치를 다 올린 뒤 토크나이저 로드가 ImportError(protobuf)로 실패했다(delta-core-1)."""
     if not is_pinned_revision(revision):
         return None
     try:
@@ -63,6 +74,8 @@ def complete_local_snapshot(model_id: str, revision: str | None) -> Path | None:
     except Exception:  # noqa: BLE001 — LocalEntryNotFoundError 등: 캐시에 없음
         return None
     if not all((snap / name).is_file() for name in ("config.json", "tokenizer_config.json")):
+        return None
+    if not any((snap / name).is_file() for name in _TOKENIZER_FILES):
         return None
     index = snap / "model.safetensors.index.json"
     if index.is_file():

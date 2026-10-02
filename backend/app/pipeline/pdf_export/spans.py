@@ -249,6 +249,45 @@ def _source_span_matches_rect(span: _SourceSpan, rect) -> bool:
     return inside or overlap >= 0.35
 
 
+# 줄 위·아래로 튀어나온 기호의 소유 규칙(_edge_symbol_owner)
+_EDGE_SYMBOL_MAX_CHARS = 2
+_EDGE_SYMBOL_MIN_VERTICAL = 0.25
+_EDGE_SYMBOL_MIN_HORIZONTAL = 0.8
+
+
+def _edge_symbol_owner(
+    span: _SourceSpan, block_rects: list[object | None], block_texts: list[str],
+) -> int | None:
+    """어느 블록에도 배정되지 않은 짧은 기호 span의 소유자 — 닿는 블록이 하나뿐일 때만.
+
+    근호(√)·큰 괄호·악센트처럼 줄 위·아래로 튀어나온 기호는 줄에 딱 맞는 OCR bbox와 겹침이
+    35%에 못 미치고 가운데도 bbox 밖이라 어느 블록 것도 아니게 됐다. 그 블록을 번역으로 바꾸면
+    기호만 남아 번역문 바로 위에 떴다(P4 실앱: 25쪽 논문 10쪽 CMSY8 '√' — 겹침 32.5%, 가운데가
+    bbox 위 1.4pt). 가로로 쓴 줄의 1–2글자 span이 다른 블록과는 전혀 닿지 않고, 가로로는
+    80% 이상 그 블록 안이며 세로로 25% 이상 겹칠 때만 붙인다 — 이웃 블록의 글자를 지울 여지를
+    남기지 않는다."""
+    if span.dir != (1.0, 0.0):
+        return None
+    text = span.text.strip(_BLANK_SPAN_CHARS)
+    if not text or len(text) > _EDGE_SYMBOL_MAX_CHARS:
+        return None
+    rect = span.rect
+    if rect.width <= 0 or rect.height <= 0:
+        return None
+    touching = [
+        index for index, block_rect in enumerate(block_rects)
+        if block_rect is not None and _rect_overlap_area(rect, block_rect) > 0
+    ]
+    if len(touching) != 1 or not block_texts[touching[0]]:
+        return None
+    block_rect = block_rects[touching[0]]
+    horizontal = (min(rect.x1, block_rect.x1) - max(rect.x0, block_rect.x0)) / rect.width
+    vertical = (min(rect.y1, block_rect.y1) - max(rect.y0, block_rect.y0)) / rect.height
+    if horizontal < _EDGE_SYMBOL_MIN_HORIZONTAL or vertical < _EDGE_SYMBOL_MIN_VERTICAL:
+        return None
+    return touching[0]
+
+
 def _assign_source_spans(
     page,
     block_rects: list[object | None],
@@ -335,7 +374,11 @@ def _assign_source_spans(
                 index,
             ))
         if not choices:
-            unowned.append(span)
+            edge_owner = _edge_symbol_owner(span, block_rects, block_texts)
+            if edge_owner is None:
+                unowned.append(span)
+            else:
+                owned[edge_owner].append(replace(span, edge=True))
             continue
         matching_blocks = {
             index for score, index in choices if score[0] > 0.5

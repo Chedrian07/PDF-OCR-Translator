@@ -366,13 +366,40 @@ def test_orphan_worker_temp_dirs_are_swept_once(monkeypatch, tmp_path):
     monkeypatch.setattr(pdf_worker, "_SWEPT_SCRATCH", False)
     finished = subprocess.Popen([sys.executable, "-c", "pass"])
     finished.wait()
-    orphan = tmp_path / f"pdfocr-worker-export-{finished.pid}"
-    alive = tmp_path / f"pdfocr-worker-export-{os.getpid()}"
-    for path in (orphan, alive):
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        orphan = tmp_path / f"pdfocr-worker-export-{finished.pid}"
+        alive = tmp_path / f"pdfocr-worker-export-{other.pid}-0badc0de-abc123"
+        for path in (orphan, alive):
+            (path / "font").mkdir(parents=True)
+        pdf_worker._sweep_orphan_scratch()
+        assert not orphan.exists()  # 주인이 없는(이전 서버가 SIGKILL로 남긴) 디렉터리
+        assert alive.exists()  # 살아 있는 다른 프로세스(다른 서버)의 것은 건드리지 않는다
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_previous_boot_with_the_same_pid_leaves_no_orphans(monkeypatch, tmp_path):
+    """컨테이너의 서버는 exec 형식 CMD라 기동마다 pid 1이다. 이름에 pid만 있으면 이전 기동이
+    SIGKILL로 남긴 디렉터리를 '살아 있는 프로세스(=자기 자신) 것'으로 보고 영원히 남겼다 — 강제
+    종료할 때마다 쌓였다(delta-core-3). 기동 토큰이 다르면 같은 pid라도 고아다."""
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(pdf_worker, "_SWEPT_SCRATCH", False)
+    pid = os.getpid()
+    mine = pdf_worker._make_scratch_dir("export")       # 이번 기동이 만든 디렉터리
+    assert mine is not None and mine.parent == tmp_path
+    (mine / "font").mkdir()
+    previous = tmp_path / f"pdfocr-worker-export-{pid}-0badc0de-abc123"   # 이전 기동(다른 토큰)
+    legacy = tmp_path / f"pdfocr-worker-ocr-{pid}-xyz789"                 # 토큰 없는 예전 형식
+    oldest = tmp_path / f"pdfocr-worker-probe-{pid}"                      # 그보다 오래된 형식
+    for path in (previous, legacy, oldest):
         (path / "font").mkdir(parents=True)
     pdf_worker._sweep_orphan_scratch()
-    assert not orphan.exists()  # 주인이 없는(이전 서버가 SIGKILL로 남긴) 디렉터리
-    assert alive.exists()  # 살아 있는 프로세스의 것은 건드리지 않는다
+    assert not previous.exists() and not legacy.exists() and not oldest.exists()
+    assert (mine / "font").is_dir()  # 이번 기동의 것은 그대로
 
 
 def test_worker_scratch_dir_is_fresh_private_and_unpredictable(pdf_worker_processes):

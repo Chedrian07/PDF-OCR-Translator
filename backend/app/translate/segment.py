@@ -374,16 +374,81 @@ def layout_line_map(
     return {source: next(iter(values)) for source, values in candidates.items() if len(values) == 1}
 
 
-def map_unit_lines(src: str, mapping: dict[str, str]) -> str | None:
+def _line_runs(sources) -> dict[str, list[tuple[tuple[str, ...], str]]]:
+    """여러 줄 layout 원문 → {첫 줄: [(줄 튜플, 원문 키), …]}(긴 것부터).
+
+    md 유닛 하나가 layout 블록 여럿(단일 줄 제목·초록 + 여러 줄 저자 블록)을 이어 붙인 경우가
+    있다 — Unlimited-OCR 25쪽 논문의 1쪽 md 유닛(19줄)은 7줄만 단일 줄 블록과 같고 나머지 12줄은
+    3줄짜리 저자 블록 넷이었다. 연속한 md 줄 묶음이 여러 줄 블록과 줄 단위로 같으면 그 블록의
+    번역으로 덮는다. 블록 안에 빈 줄이 있으면 묶음 매칭에 쓰지 않는다(유닛 전체 매칭만)."""
+    runs: dict[str, list[tuple[tuple[str, ...], str]]] = {}
+    for source in sources:
+        if "\n" not in source:
+            continue
+        lines = tuple(line.strip() for line in source.split("\n"))
+        if len(lines) < 2 or not all(lines):
+            continue
+        runs.setdefault(lines[0], []).append((lines, source))
+    for candidates in runs.values():
+        candidates.sort(key=lambda candidate: len(candidate[0]), reverse=True)
+    return runs
+
+
+def _line_segments(lines: list[str], keys, runs) -> list[tuple[int, int, str | None]]:
+    """md 유닛 줄을 layout 원문으로 덮은 구간 [(시작, 끝, 원문 키)] — 빈 줄은 '', 못 덮은 줄은 None.
+
+    여러 줄 블록(연속 줄 묶음)이 같은 자리의 단일 줄 블록보다 먼저다."""
+    segments: list[tuple[int, int, str | None]] = []
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if not stripped:
+            segments.append((index, index + 1, ""))
+            index += 1
+            continue
+        for run, source in runs.get(stripped, ()):
+            end = index + len(run)
+            if tuple(line.strip() for line in lines[index:end]) == run:
+                segments.append((index, end, source))
+                index = end
+                break
+        else:
+            segments.append((index, index + 1, stripped if stripped in keys else None))
+            index += 1
+    return segments
+
+
+def layout_covers_unit(src: str, sources) -> bool:
+    """md 유닛이 layout 원문으로 완전히 덮이는가 — 유닛 전체가 블록 하나와 같거나, 비어 있지 않은
+    모든 줄이 단일 줄 블록 또는 여러 줄 블록의 연속 줄 묶음과 같다(map_unit_lines와 같은 규칙)."""
+    if src.strip() in sources:
+        return True
+    segments = _line_segments(src.split("\n"), sources, _line_runs(sources))
+    return any(key for _start, _end, key in segments) and all(
+        key is not None for _start, _end, key in segments
+    )
+
+
+def _keep_spacing(line: str, text: str) -> str:
+    leading = line[:len(line) - len(line.lstrip())]
+    trailing = line[len(line.rstrip()):]
+    return f"{leading}{text}{trailing}"
+
+
+def map_unit_lines(src: str, mapping: dict[str, str], *, partial: bool = False) -> str | None:
     """md 유닛이 layout 번역으로 완전히 덮이면 그 결과, 아니면 None.
 
     유닛 전체가 블록 하나와 같으면 그 번역을 통째로, 아니면 비어 있지 않은 **모든**
-    줄이 (단일 줄 블록) 매핑에 있을 때 줄별 치환 결과를 돌려준다.
+    줄이 단일 줄 블록 또는 여러 줄 블록의 연속 줄 묶음으로 덮일 때 그 번역으로 바꾼 결과를
+    돌려준다. 줄 앞뒤 공백은 보존한다(여러 줄 블록은 번역 줄 수가 같을 때 줄마다).
 
     reconcile을 유닛 단위로 한다(translate-llm-1). 종전 줄 단위 reconcile은 원문 줄로
     출력을 다시 만들어 매핑되지 않은 줄(여러 줄 블록·상충 중복·수식 정의 줄)을 영어로
     남기고, 1차에서 번역한 md 유닛 결과는 통째로 버렸다. 이제 한 줄이라도 매핑이
-    없으면 그 유닛은 자기 번역(md 유닛 번역)을 쓴다. 줄 앞뒤 공백은 보존한다.
+    없으면 그 유닛은 자기 번역(md 유닛 번역)을 쓴다.
+
+    partial=True면 덮이지 않는 줄은 원문 그대로 두고 덮이는 줄만 바꾼다(하나도 없으면 None) —
+    자기 번역이 실패해 원문으로 남은 유닛이 같은 문장의 layout 번역까지 버리지 않게 한다.
     """
     whole = mapping.get(src.strip())
     if whole is not None:
@@ -394,16 +459,24 @@ def map_unit_lines(src: str, mapping: dict[str, str]) -> str | None:
     lines = src.split("\n")
     out: list[str] = []
     mapped_any = False
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            out.append(line)
+    for start, end, key in _line_segments(lines, mapping, _line_runs(mapping)):
+        if key == "":
+            out.append(lines[start])
             continue
-        translated = mapping.get(stripped)
-        if translated is None:
-            return None
+        if key is None:
+            if not partial:
+                return None
+            out.extend(lines[start:end])
+            continue
         mapped_any = True
-        leading = line[:len(line) - len(line.lstrip())]
-        trailing = line[len(line.rstrip()):]
-        out.append(f"{leading}{translated}{trailing}")
+        translated = mapping[key]
+        if end - start == 1:
+            out.append(_keep_spacing(lines[start], translated))
+            continue
+        pieces = translated.split("\n")
+        if len(pieces) == end - start:
+            out.extend(_keep_spacing(line, piece.strip()) for line, piece in zip(lines[start:end], pieces))
+        else:
+            lead = lines[start][:len(lines[start]) - len(lines[start].lstrip())]
+            out.extend(f"{lead}{piece.strip()}" for piece in pieces if piece.strip())
     return "\n".join(out) if mapped_any else None

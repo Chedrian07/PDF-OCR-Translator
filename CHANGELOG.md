@@ -64,7 +64,7 @@ Performance figures below were measured on an Apple M4 Max during this work, par
 - Content Security Policy on all HTML responses, including `frame-ancestors 'none'`; the SPA meta policy matches the header, and downloaded HTML carries its own offline-only policy. External images are never loaded automatically.
 - KaTeX 0.18.10 with size and macro-expansion limits.
 - `TRUSTED_PROXY_IPS` limits which peers may set `X-Forwarded-For`; rate limits are checked atomically; live-preview renders and event-stream subscribers are capped.
-- Unknown `.env` keys are reported by name in the log and `/api/health`.
+- Unknown keys in a `.env` the app reads itself (local runs) are reported by name in the log and `/api/health`. Containers have no `.env`, so `config_warnings` stays empty under Docker; the README shows how to check a Compose `.env` from the host.
 - Only one backend may own a job store; `.env` is parsed with python-dotenv; numeric settings are validated at startup.
 - Dependency upgrades: PyMuPDF 1.28.2 (MuPDF CVE-2026-3308), Pillow 12.3.0, urllib3 2.8.0, anyio 4.14.2. Sidecars install from hash-checked locks.
 - CI audits dependencies and builds and smoke-tests the CPU image on amd64 and arm64. Releases wait for CI, gate images on `trivy`, and attach offline image tarballs with `SHA256SUMS`. Actions are pinned to commit SHAs and Dependabot proposes updates.

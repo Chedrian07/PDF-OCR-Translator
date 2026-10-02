@@ -23,10 +23,12 @@ from app.main import create_app
 
 # ── 페이크 run_translation ────────────────────────────────────────────────
 def _make_fake(*, gate: threading.Event | None = None, wait_cancel: bool = False,
-               total: int = 2):
+               total: int = 2, gate_timeouts: list | None = None):
     """계약을 지키는 페이크 run_translation을 만든다.
 
     gate: 주어지면 running 상태를 쓴 뒤 이 이벤트가 set될 때까지 블록(진행 관찰용).
+    gate_timeouts: 주어지면 게이트가 열리지 않고 시간 초과로 지나간 횟수를 여기에 남긴다 —
+      테스트가 '해제해서 진행됐는지'와 '기다리다 지나갔는지'를 가린다.
     wait_cancel: True면 cancel 이벤트를 기다렸다가 취소로 종료.
     """
     md = "# 번역본\n\n안녕하세요. 번역된 문서입니다.\n"
@@ -57,8 +59,8 @@ def _make_fake(*, gate: threading.Event | None = None, wait_cancel: bool = False
                                 finished_at="2026-07-07T00:00:01+00:00")
                     return TranslateResult(status="canceled", total=total)
 
-        if gate is not None:
-            gate.wait(timeout=10)
+        if gate is not None and not gate.wait(timeout=10) and gate_timeouts is not None:
+            gate_timeouts.append("gate")
 
         if progress is not None:
             progress(1, total)
@@ -171,9 +173,47 @@ def test_translate_global_concurrency_빈값은_잡당_설정으로_fallback(mon
     assert Settings.from_env().translate_global_concurrency == 2
 
 
+def _live_translate_events(client, jid, on_event, *, lang="ko", timeout=8.0) -> list[str]:
+    """번역 SSE 본문을 실시간으로 받는다 — 이벤트 이름마다 on_event(이름)를 부른다.
+
+    TestClient는 스트림 본문을 끝까지 모은 뒤에야 iter_lines에 넘겨(starlette testclient),
+    '스냅샷을 받은 뒤 해제' 같은 순서를 재현할 수 없었다 — 해제는 페이크의 10초 시간 초과가
+    대신했고 테스트마다 10초가 들었다(P4 macOS 스위트). 라우트의 body_iterator를 직접 돈다."""
+    from starlette.requests import Request
+
+    from app.api import translate_events
+
+    async def drive() -> list[str]:
+        request = Request({"type": "http", "app": client.app, "headers": []})
+
+        async def receive():
+            await asyncio.sleep(3600)
+            return {"type": "http.disconnect"}
+
+        request._receive = receive
+        response = await translate_events(request, jid, lang)
+        events: list[str] = []
+        try:
+            async for chunk in response.body_iterator:
+                for line in str(chunk).splitlines():
+                    if line.startswith("event: "):
+                        events.append(line.removeprefix("event: ").strip())
+                        on_event(events[-1])
+                if events and events[-1] in ("done", "error"):
+                    break
+        finally:
+            await response.body_iterator.aclose()
+        return events
+
+    return asyncio.run(asyncio.wait_for(drive(), timeout=timeout))
+
+
 def test_translate_post_then_events_stream(client, sample_pdf, provider_env, monkeypatch):
     gate = threading.Event()
-    monkeypatch.setattr("app.api.run_translation", _make_fake(gate=gate))
+    gate_timeouts: list[str] = []
+    monkeypatch.setattr(
+        "app.api.run_translation", _make_fake(gate=gate, gate_timeouts=gate_timeouts),
+    )
     jid = _done_job(client, sample_pdf)
 
     r = client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"})
@@ -183,20 +223,17 @@ def test_translate_post_then_events_stream(client, sample_pdf, provider_env, mon
     # 페이크가 running을 기록하고 게이트에서 대기할 때까지 (state가 있어야 events가 404 안 남)
     _wait_until_status(client, jid, "running")
 
-    events = []
-    with client.stream("GET", f"/api/jobs/{jid}/translate/events?lang=ko") as s:
-        for line in s.iter_lines():
-            if line.startswith("event: "):
-                ev = line.removeprefix("event: ").strip()
-                events.append(ev)
-                # 스냅샷 progress를 받은 뒤 페이크를 해제 → live progress/done이 이어진다
-                if ev == "progress" and not gate.is_set():
-                    gate.set()
-            if "event: done" in line or "event: error" in line:
-                break
+    def _on_event(name: str) -> None:
+        # 스냅샷 progress를 받은 뒤 페이크를 해제 → live progress/done이 이어진다
+        if name == "progress" and not gate.is_set():
+            gate.set()
 
-    assert "progress" in events, events
-    assert "done" in events, events
+    events = _live_translate_events(client, jid, _on_event)
+
+    assert events[0] == "progress", events               # 해제 전에 받은 스냅샷
+    assert events.count("progress") >= 2, events          # 해제 뒤의 실시간 진행
+    assert events[-1] == "done", events
+    assert gate_timeouts == []                            # 시간 초과가 아니라 스냅샷이 해제했다
     _wait_no_task(client, jid)
     # done 이벤트 시점에 산출물이 존재한다
     assert client.get(f"/api/jobs/{jid}/markdown?lang=ko").status_code == 200
@@ -470,7 +507,7 @@ def test_translate_events_open_right_after_202(client, sample_pdf, provider_env,
 
     def _slow_start(job_dir, lang, cfg, **kwargs):
         started.set()
-        release.wait(timeout=10)          # state.json을 쓰기 전에 멈춰 있는다
+        assert release.wait(timeout=10)   # state.json을 쓰기 전에 멈춰 있는다
         return _make_fake()(job_dir, lang, cfg, **kwargs)
 
     monkeypatch.setattr("app.api.run_translation", _slow_start)
@@ -483,18 +520,21 @@ def test_translate_events_open_right_after_202(client, sample_pdf, provider_env,
     ).exists(), settings_state_path
     assert _tstate(client, jid)["status"] == "running"
 
+    released_by_stream: list[str] = []
+
+    def _on_event(name: str) -> None:
+        # state.json을 쓰기 전(워커가 멈춰 있는 동안) 이미 진행 스냅샷이 왔다 → 그때 해제
+        if not release.is_set():
+            released_by_stream.append(name)
+            release.set()
+
     try:
-        with client.stream(
-            "GET", f"/api/jobs/{jid}/translate/events?lang=ko"
-        ) as stream:
-            assert stream.status_code == 200
-            for line in stream.iter_lines():
-                if line.startswith("event: "):
-                    assert line.removeprefix("event: ").strip() == "progress"
-                    break
+        events = _live_translate_events(client, jid, _on_event)
     finally:
         release.set()
         _wait_no_task(client, jid)
+    assert released_by_stream == ["progress"]             # 워커가 멈춘 동안 받은 첫 이벤트
+    assert events[0] == "progress" and events[-1] == "done", events
 
 
 @pytest.mark.parametrize("previous_status", ["done", "error", "canceled"])

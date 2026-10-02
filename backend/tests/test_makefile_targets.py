@@ -18,11 +18,11 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 
 
-def _recipe(target: str) -> str:
+def _recipe(target: str, *variables: str) -> str:
     if shutil.which("make") is None:
         pytest.skip("make 없음")
     out = subprocess.run(
-        ["make", "-s", "-n", "-C", str(REPO), target],
+        ["make", "-s", "-n", "-C", str(REPO), target, *variables],
         capture_output=True, text=True, timeout=30, check=True,
     )
     return out.stdout
@@ -35,6 +35,16 @@ def test_dev_servers_bound_their_graceful_shutdown(target):
     recipe = _recipe(target)
     assert "uvicorn app.main:app" in recipe
     assert re.search(r"--timeout-graceful-shutdown\s+5\b", recipe), recipe
+
+
+@pytest.mark.parametrize("target", ["dev", "dev-metal", "dev-textlayer"])
+def test_dev_servers_take_the_port_from_make(target):
+    """8000을 다른 개발 서버가 쓰고 있으면 make dev가 'address already in use'로 실패하는데,
+    포트가 레시피에 박혀 있어 Makefile을 고치거나 명령을 옮겨 적어야 했다(fresh-user-6).
+    기본은 8000 그대로, `make dev PORT=8010`으로 바꾼다."""
+    assert re.search(r"--port 8000\b", _recipe(target)), _recipe(target)
+    moved = _recipe(target, "PORT=8010")
+    assert re.search(r"--port 8010\b", moved) and "8000" not in moved, moved
 
 
 @pytest.mark.parametrize("target,switch,files", [

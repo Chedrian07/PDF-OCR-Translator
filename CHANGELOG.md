@@ -32,7 +32,7 @@ Performance figures below were measured on an Apple M4 Max during this work, par
 
 - Chat requests stream by default (`TRANSLATE_STREAM`). Cancelling stops generation on the server, and `TRANSLATE_TIMEOUT_S` now bounds the gap between tokens.
 - `TRANSLATE_REASONING=off` works on local servers: `TRANSLATE_REASONING_STYLE=auto` sends `chat_template_kwargs` to loopback and private hosts. New `TRANSLATE_EXTRA_BODY` and `TRANSLATE_MAX_RESPONSE_MB` settings.
-- Truncated, empty and timed-out responses are never used or cached; the unit stays in the original language with a recorded reason. Stricter output checks catch repetition loops, labels turned into sentences, dropped numbers and canned outputs repeated across units, and old cache entries are re-checked.
+- Truncated, empty and timed-out responses are never used or cached; the unit stays in the original language with a recorded reason. Stricter output checks catch repetition loops, labels turned into sentences, dropped numbers, canned outputs repeated across units and the source copied verbatim inside Korean filler text (`echo`), and old cache entries are re-checked.
 - Markdown and layout translations are matched per unit, so partially covered paragraphs no longer keep English lines, with far fewer LLM calls.
 - Responses API requests send `store: false`.
 - The response size cap is enforced while reading, including length-less HTTP/1.0 streams (mlx_lm.server), declared `Content-Length` on streams and compressed bodies; long stream lines parse in linear time.

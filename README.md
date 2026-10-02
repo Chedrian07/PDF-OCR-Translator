@@ -423,6 +423,18 @@ Apple Silicon에서는 번역 모델도 로컬로 돌릴 수 있습니다. 세 �
 | LM Studio | `http://127.0.0.1:1234/v1` | 서버 `/v1/models`가 보고하는 id |
 | mlx_lm.server | `http://127.0.0.1:8080/v1` | `default_model` (= `--model`로 띄운 모델) |
 
+mlx_lm.server는 이 리포에 들어 있지 않습니다 — 별도 도구 환경에 설치해 띄웁니다:
+
+```bash
+uv tool install mlx-lm      # 별도 환경(~/.local/bin/mlx_lm.server). backend/.venv에 넣지 마세요
+mlx_lm.server --model mlx-community/Qwen3.5-4B-MLX-8bit --port 8080   # 첫 실행에 약 4.8GB 다운로드
+curl http://127.0.0.1:8080/v1/models                                  # 떠 있는지 확인
+```
+
+`backend/.venv`에 `uv pip install mlx-lm`을 하면 mlx-lm이 transformers 5.x를 끌어와 고정한
+4.57.1을 바꿉니다 — torch MPS 폴백과 `.venv/bin/python`으로 부르는 테스트가 import 단계에서
+깨지고, 다음 `make setup-mlx`(uv sync)는 mlx-lm을 다시 지웁니다.
+
 - Docker 컨테이너의 backend에서 호스트 서버로 갈 때는 `127.0.0.1` 대신 `host.docker.internal`.
 - 모델 id가 틀리면 서버가 404를 내고, 오류 문구가 모델 id를 확인하라고 알려 줍니다.
 - **thinking 끄기**: `TRANSLATE_REASONING=off` — `TRANSLATE_REASONING_STYLE=auto`(기본)가 루프백·
@@ -623,8 +635,10 @@ AI에게 물을 수 있습니다 (Localight에서 이식). 공급자는 넷 중 
 - **`local-openai`**: oMLX·LM Studio·mlx_lm.server 같은 로컬 OpenAI 호환 서버로 묻습니다.
   `LLM_LOCAL_OPENAI_BASE_URL`(루프백 `127.0.0.1`·`localhost`·`::1` 또는
   `host.docker.internal`만 허용 — 그 밖은 기동 실패)과 `LLM_LOCAL_OPENAI_MODEL`(서버
-  `/v1/models`의 id, 주소를 두면 필수)을 설정하면 목록에 나타나고, 서버가 떠 있는지는
-  `/models`로 확인합니다. `LLM_LOCAL_OPENAI_MODELS`는 추가 선택지, 키는 전용
+  `/v1/models`의 id, 주소를 두면 필수 — mlx_lm.server는 `default_model`. 그 서버의 `/v1/models`는
+  `--model`로 띄운 모델 대신 HF 캐시의 모델 전부를 보이는데, 그중 다른 id를 고르면 서버가 지금
+  모델을 내리고 그 모델로 갈아 끼워 번역과 번갈아 쓰일 때마다 다시 올린다)을 설정하면 목록에
+  나타나고, 서버가 떠 있는지는 `/models`로 확인합니다. `LLM_LOCAL_OPENAI_MODELS`는 추가 선택지, 키는 전용
   `LLM_LOCAL_OPENAI_API_KEY`만 씁니다(다른 키로 폴백하지 않음). 서버가 꺼져 있으면 UI가
   서버를 켜고 두 설정을 확인하라고 안내합니다. 위 §로컬 MLX 서버의 `.env` 예시 참조.
 - 지원 effort는 모델마다 다르므로 API가 거부하는 조합은 UI 오류로 그대로 안내합니다.

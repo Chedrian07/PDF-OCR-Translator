@@ -1801,14 +1801,80 @@ def test_runaway_repetition_is_cut_mid_stream_instead_of_at_max_tokens():
     assert len(session.sent) == 1               # 2배 예산 재시도도 하지 않는다
 
 
-def test_overlong_output_is_cut_once_it_passes_four_times_the_prompt():
+def _reasoning_chunk(text: str) -> bytes:
+    """reasoning을 별도 필드로 분리하는 서버(mlx_lm·oMLX·vLLM parser)의 사고 조각."""
+    obj = {"choices": [{"index": 0, "delta": {"reasoning_content": text}, "finish_reason": None}]}
+    return f"data: {_json.dumps(obj)}\n\n".encode()
+
+
+def _untagged_thinking(chars: int) -> list[bytes]:
+    """채팅 템플릿이 프롬프트 끝에 `<think>`를 미리 넣는 thinking 모델(Qwen3·QwQ·R1 distill)을
+    reasoning 분리 없이 서빙한 content — 여는 태그 없이 사고가 흐르다 `</think>` 뒤에 답이 온다
+    (llama.cpp --reasoning-format none, LM Studio 분리 끔, vLLM parser 없음). 반복은 없다."""
+    events, total, i = [], 0, 0
+    while total < chars:
+        piece = f"Step {i}: weigh how sentence {i} of the source should read in Korean. "
+        events.append(_chunk(piece))
+        total += len(piece)
+        i += 1
+    return events
+
+
+_OVERLONG_WORDS = [f"단어{i:05d}" for i in range(4000)]   # 반복 없는 긴 본문(약 40,000자)
+_DONE = [_chunk(None, "stop"), b"data: [DONE]\n\n"]
+
+
+@pytest.mark.parametrize(
+    "before",
+    [
+        pytest.param(lambda: _untagged_thinking(3000) + [_chunk("</think>\n\n")], id="after-think"),
+        pytest.param(lambda: [_chunk("<think>짧게 생각한다.</think>")], id="after-tagged-think"),
+        pytest.param(lambda: [_reasoning_chunk("사고 조각 ") for _ in range(40)],
+                     id="reasoning-separated"),
+    ],
+)
+def test_overlong_answer_is_cut_once_it_passes_four_times_the_prompt(before):
+    """답이 사고와 구분되면(`</think>` 뒤, 또는 reasoning을 분리하는 서버의 content) 그 답이
+    프롬프트의 4배를 넘는 순간 끊는다 — 끝까지 받아도 길이비 게이트가 거부할 출력이다."""
     from app.translate.types import TranslateOutputTruncated
 
-    words = [f"단어{i:05d}" for i in range(4000)]          # 반복 없는 긴 본문
-    events = [_chunk(w + " ") for w in words] + [_chunk(None, "stop"), b"data: [DONE]\n\n"]
+    events = before() + [_chunk(w + " ") for w in _OVERLONG_WORDS] + _DONE
     session = _StreamingSession(events)
     with pytest.raises(TranslateOutputTruncated, match="입력의 4배를 넘어"):
         _client(session).complete("s", "짧은 원문" * 50, max_tokens=8192)
+    assert session.yielded < len(events) - 3000, session.yielded
+
+
+def test_long_untagged_thinking_before_the_answer_is_not_cut():
+    """여는 태그 없는 사고는 `</think>`가 오기 전까지 답과 구별되지 않는다 — 그 사고를 본문으로
+    세어 '입력의 4배'로 끊었더니 thinking 모델의 유닛이 전부 잘렸고, 콜드 런에서는 성공한 유닛이
+    없어 잡 전체가 실패했다(delta-pdf-translate-1). 사고 뒤의 정상 답은 그대로 받는다."""
+    events = _untagged_thinking(6000) + [
+        _chunk("</think>\n\n"), _chunk("모델은 논문의 각 문단을 번역한다."),
+    ] + _DONE
+    session = _StreamingSession(events)
+    assert _client(session).complete("s", _PROMPT, max_tokens=8192) == "모델은 논문의 각 문단을 번역한다."
+    assert session.yielded == len(events)
+
+
+def test_overlong_untagged_output_is_left_to_the_output_gates():
+    """사고 표식도 reasoning 필드도 없는 출력은 길이로 끊지 않는다 — 아직 `</think>`가 오지 않은
+    사고일 수 있다. 끝까지 받고 엔진의 길이비 게이트가 판정한다(반복 루프는 위처럼 끊는다)."""
+    events = [_chunk(w + " ") for w in _OVERLONG_WORDS] + _DONE
+    session = _StreamingSession(events)
+    text = _client(session).complete("s", "짧은 원문" * 50, max_tokens=8192)
+    assert text.startswith("단어00000") and text.endswith("단어03999")
+    assert session.yielded == len(events)
+
+
+def test_untagged_thinking_that_loops_is_still_cut():
+    """사고인지 답인지 몰라도 반복 루프는 끝까지 받아도 쓸 수 없다 — 그대로 끊는다."""
+    from app.translate.types import TranslateOutputTruncated
+
+    events = _untagged_thinking(1500) + _looping_stream()
+    session = _StreamingSession(events)
+    with pytest.raises(TranslateOutputTruncated, match="반복 루프에 빠져"):
+        _client(session).complete("s", _PROMPT, max_tokens=8192)
     assert session.yielded < 600, session.yielded
 
 

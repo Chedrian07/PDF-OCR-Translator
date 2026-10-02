@@ -130,3 +130,33 @@ def test_env_example_moe_switches_name_the_vendor_default_devices():
     assert fast.group(1).upper() in fast_doc, f"OCR_MOE_FAST 설명에 P18 기본 디바이스가 없다: {fast_doc}"
     # P18은 이제 P17이 받지 않을 때의 폴백이다 — 그 관계가 빠지면 FAST=1이 기본 경로를 바꾼다고 읽힌다
     assert "OCR_MOE_FUSED=0" in fast_doc, fast_doc
+
+
+# ── docs-final-3: 캐시 버전 상수의 '현재 값'은 한 곳(§15.1 표)에서 코드와 같다 ─────────
+# §5 /pdf 절이 PDF_EXPORT_FORMAT_VERSION을 '현재 **11**'로 따로 적어, 표만 16으로 고친 갱신이
+# 그 줄을 놓쳤다 — 같은 SSOT 안에서 11과 16이 갈렸다.
+
+
+def test_architecture_cache_version_table_matches_the_code():
+    from app.pipeline.pdf_export.report import PDF_EXPORT_FORMAT_VERSION
+    from app.pipeline.pdf_fonts import ENRICH_VERSION
+    from app.translate.types import PROMPT_V
+
+    code = {
+        "PDF_EXPORT_FORMAT_VERSION": str(PDF_EXPORT_FORMAT_VERSION),
+        "ENRICH_VERSION": str(ENRICH_VERSION),
+        "PROMPT_V": str(PROMPT_V),
+    }
+    arch = _read("docs/ARCHITECTURE.md")
+    table = {
+        m.group(1): m.group(2)
+        for m in re.finditer(r'^\| `(\w+)` \| `[^`]+` \| `"?([^`"]+)"?` \|', arch, re.M)
+    }
+    assert {name: table.get(name) for name in code} == code
+    # 다른 절은 현재 값을 따로 적지 않는다(표를 가리킨다) — 따로 적으면 다음 상향 때 갈린다
+    stale = re.findall(r"`(PDF_EXPORT_FORMAT_VERSION|ENRICH_VERSION|PROMPT_V)`[^\n]{0,80}현재 \*\*", arch)
+    assert not stale, stale
+    upgrade = re.search(r"`PDF_EXPORT_FORMAT_VERSION`\(→ (\d+)\)", arch)
+    assert upgrade and upgrade.group(1) == code["PDF_EXPORT_FORMAT_VERSION"]
+    changelog = re.search(r"`PDF_EXPORT_FORMAT_VERSION` is now (\d+)", _read("CHANGELOG.md"))
+    assert changelog and changelog.group(1) == code["PDF_EXPORT_FORMAT_VERSION"]

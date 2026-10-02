@@ -374,7 +374,7 @@ def layout_line_map(
     return {source: next(iter(values)) for source, values in candidates.items() if len(values) == 1}
 
 
-def _line_runs(sources) -> dict[str, list[tuple[tuple[str, ...], str]]]:
+def line_runs(sources) -> dict[str, list[tuple[tuple[str, ...], str]]]:
     """여러 줄 layout 원문 → {첫 줄: [(줄 튜플, 원문 키), …]}(긴 것부터).
 
     md 유닛 하나가 layout 블록 여럿(단일 줄 제목·초록 + 여러 줄 저자 블록)을 이어 붙인 경우가
@@ -418,12 +418,13 @@ def _line_segments(lines: list[str], keys, runs) -> list[tuple[int, int, str | N
     return segments
 
 
-def layout_covers_unit(src: str, sources) -> bool:
+def layout_covers_unit(src: str, sources, runs=None) -> bool:
     """md 유닛이 layout 원문으로 완전히 덮이는가 — 유닛 전체가 블록 하나와 같거나, 비어 있지 않은
-    모든 줄이 단일 줄 블록 또는 여러 줄 블록의 연속 줄 묶음과 같다(map_unit_lines와 같은 규칙)."""
+    모든 줄이 단일 줄 블록 또는 여러 줄 블록의 연속 줄 묶음과 같다(map_unit_lines와 같은 규칙).
+    runs는 line_runs(sources) — 유닛마다 다시 만들지 않게 호출자가 한 번 만들어 넘긴다."""
     if src.strip() in sources:
         return True
-    segments = _line_segments(src.split("\n"), sources, _line_runs(sources))
+    segments = _line_segments(src.split("\n"), sources, line_runs(sources) if runs is None else runs)
     return any(key for _start, _end, key in segments) and all(
         key is not None for _start, _end, key in segments
     )
@@ -435,7 +436,9 @@ def _keep_spacing(line: str, text: str) -> str:
     return f"{leading}{text}{trailing}"
 
 
-def map_unit_lines(src: str, mapping: dict[str, str], *, partial: bool = False) -> str | None:
+def map_unit_lines(
+    src: str, mapping: dict[str, str], *, partial: bool = False, runs=None,
+) -> str | None:
     """md 유닛이 layout 번역으로 완전히 덮이면 그 결과, 아니면 None.
 
     유닛 전체가 블록 하나와 같으면 그 번역을 통째로, 아니면 비어 있지 않은 **모든**
@@ -449,6 +452,7 @@ def map_unit_lines(src: str, mapping: dict[str, str], *, partial: bool = False) 
 
     partial=True면 덮이지 않는 줄은 원문 그대로 두고 덮이는 줄만 바꾼다(하나도 없으면 None) —
     자기 번역이 실패해 원문으로 남은 유닛이 같은 문장의 layout 번역까지 버리지 않게 한다.
+    runs는 line_runs(mapping) — 같은 mapping으로 여러 유닛을 볼 때 한 번 만들어 넘긴다.
     """
     whole = mapping.get(src.strip())
     if whole is not None:
@@ -459,7 +463,7 @@ def map_unit_lines(src: str, mapping: dict[str, str], *, partial: bool = False) 
     lines = src.split("\n")
     out: list[str] = []
     mapped_any = False
-    for start, end, key in _line_segments(lines, mapping, _line_runs(mapping)):
+    for start, end, key in _line_segments(lines, mapping, line_runs(mapping) if runs is None else runs):
         if key == "":
             out.append(lines[start])
             continue
@@ -473,10 +477,11 @@ def map_unit_lines(src: str, mapping: dict[str, str], *, partial: bool = False) 
         if end - start == 1:
             out.append(_keep_spacing(lines[start], translated))
             continue
-        pieces = translated.split("\n")
+        # 번역 안의 빈 줄은 버린다 — md 문단 안에 빈 줄이 들어가면 문단이 둘로 갈라진다
+        pieces = [piece.strip() for piece in translated.split("\n") if piece.strip()]
         if len(pieces) == end - start:
-            out.extend(_keep_spacing(line, piece.strip()) for line, piece in zip(lines[start:end], pieces))
+            out.extend(_keep_spacing(line, piece) for line, piece in zip(lines[start:end], pieces))
         else:
             lead = lines[start][:len(lines[start]) - len(lines[start].lstrip())]
-            out.extend(f"{lead}{piece.strip()}" for piece in pieces if piece.strip())
+            out.extend(f"{lead}{piece}" for piece in pieces)
     return "\n".join(out) if mapped_any else None

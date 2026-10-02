@@ -28,11 +28,28 @@ def _block_rect(fitz, page, bbox):
     return rect if not rect.is_empty else None
 
 
+# 글자가 없는(그려지는 잉크가 없는) span으로 볼 문자 — 진짜 공백류만. TeX 기호 폰트(CMEX10)는
+# 확장 괄호 조각(|·‖ 막대)을 0x0C·0x0D 같은 제어 코드로 담고 PyMuPDF는 그 코드를 그대로
+# 문자로 낸다. 예전 `str.strip()`은 이것들(\t\n\x0b\x0c\r\x1c–\x1f)까지 공백으로 보고 span을 버려,
+# 그 조각은 어느 블록의 원문도 아니게 됐다 — 문단을 번역문으로 바꾸면 세로 막대만 남아
+# 번역문에 겹쳤다(실측 25쪽 논문: CMEX10 span 19개).
+_BLANK_SPAN_CHARS = (
+    " \u00a0\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009"
+    "\u200a\u200b\u202f\u205f\u3000\ufeff"
+)
+# 한 span 안 글자 기준선이 줄 위쪽 방향으로 이만큼(em) 넘게 벌어지면 세로로 쌓인 span이다.
+# 같은 줄의 첨자·기호는 기준선이 1pt 남짓만 다르다(실측 MSBM10 'E' 1.0pt = 0.09em) — 확장 괄호
+# 조각은 0.6em씩 쌓인다(CMEX10 '\x0c' 6.6pt).
+_STACKED_ORIGIN_EM = 0.3
+
+
 def _source_span_records(fitz, page) -> list[_SourceSpan]:
     """페이지 텍스트 span과 소유권·스타일 판정에 필요한 메타를 읽는다."""
     out: list[_SourceSpan] = []
     try:
-        blocks = page.get_text("dict").get("blocks", ())
+        # rawdict — dict와 같은 구조에 글자별 원점이 붙는다(비용 같음, 실측 25쪽 0.16 s).
+        # 세로로 쌓인 span(_STACKED_ORIGIN_EM)은 글자 원점으로만 알 수 있다.
+        blocks = page.get_text("rawdict").get("blocks", ())
     except Exception:  # noqa: BLE001 — 텍스트 레이어가 없으면 빈 목록
         return out
     for block in blocks:
@@ -44,20 +61,52 @@ def _source_span_records(fitz, page) -> list[_SourceSpan]:
                 direction = (1.0, 0.0)
             for span in line.get("spans", ()):
                 bbox = span.get("bbox")
-                text = str(span.get("text") or "")
-                if bbox and len(bbox) == 4 and text.strip():
+                chars = span.get("chars")
+                text = (
+                    "".join(str(char.get("c") or "") for char in chars)
+                    if isinstance(chars, list) else str(span.get("text") or "")
+                )
+                if bbox and len(bbox) == 4 and text.strip(_BLANK_SPAN_CHARS):
                     origin = span.get("origin") or (bbox[0], bbox[3])
+                    size = float(span.get("size") or 0.0)
                     out.append(_SourceSpan(
                         fitz.Rect(bbox),
                         text,
-                        float(span.get("size") or 0.0),
+                        size,
                         int(span.get("flags") or 0),
                         (float(origin[0]), float(origin[1])),
                         direction,
                         _span_is_visible(span),
                         _span_metrics(span),
+                        _char_origin_stack(chars, direction, size, origin),
                     ))
     return out
+
+
+def _char_origin_stack(
+    chars, direction: tuple[float, float], size: float, origin,
+) -> tuple[float, float] | None:
+    """글자 원점이 줄 위쪽 방향으로 `_STACKED_ORIGIN_EM`보다 벌어지면 (최저, 최고) 높이.
+
+    높이는 span `origin` 기준 pt다(위가 +). 쌓이지 않았으면 None.
+    """
+    if not isinstance(chars, list) or len(chars) < 2 or size <= 0:
+        return None
+    dx, dy = direction
+    norm = math.hypot(dx, dy)
+    if norm <= 1e-6:
+        return None
+    ux, uy = dy / norm, -dx / norm  # 글리프 위쪽 방향(_span_redaction_band와 같은 정의)
+    ox0, oy0 = float(origin[0]), float(origin[1])
+    heights = []
+    for char in chars:
+        try:
+            ox, oy = char["origin"]
+            heights.append((float(ox) - ox0) * ux + (float(oy) - oy0) * uy)
+        except (KeyError, TypeError, ValueError):
+            return None
+    low, high = min(heights), max(heights)
+    return (low, high) if high - low > _STACKED_ORIGIN_EM * size else None
 
 
 def _span_metrics(span: dict) -> tuple[float, float] | None:
@@ -631,6 +680,9 @@ def _span_redaction_band(fitz, span: _SourceSpan):
     # 글리프 위쪽 방향(y가 아래로 커지는 PDF 좌표에서 진행 방향을 반시계 90°).
     ux, uy = dy, -dx
     ox, oy = span.origin
+    stack = getattr(span, "stack", None)
+    if stack is not None:
+        return _stacked_span_band(fitz, span, stack, (dx, dy), (ux, uy))
     corners = (
         (rect.x0, rect.y0), (rect.x1, rect.y0), (rect.x0, rect.y1), (rect.x1, rect.y1),
     )
@@ -645,6 +697,42 @@ def _span_redaction_band(fitz, span: _SourceSpan):
     center = (inner_top + inner_bottom) / 2
     half = min(_BAND_HALF_EM, (inner_top - inner_bottom) * 0.4)
     low, high = (center - half) * size, (center + half) * size
+    start, end = min(along) - _BAND_PAD_PT, max(along) + _BAND_PAD_PT
+    xs = [ox + dx * t + ux * h for t in (start, end) for h in (low, high)]
+    ys = [oy + dy * t + uy * h for t in (start, end) for h in (low, high)]
+    return fitz.Rect(min(xs), min(ys), max(xs), max(ys))
+
+
+def _stacked_span_band(fitz, span: _SourceSpan, stack, along_dir, up_dir):
+    """세로로 쌓인 span의 띠 — 글자마다의 가운데 띠를 이어 붙인 것.
+
+    span bbox는 쌓인 글자 상자의 합집합이라 거기서 거꾸로 구한 가운데 띠는 가운데 조각만
+    덮는다(TeX 확장 괄호의 위·아래 조각이 남아 번역문에 겹쳤다 — 실측 25쪽 논문 p5). MuPDF가
+    글리프 상자를 잡는 원래 폰트 메트릭으로 조각 하나의 띠를 구하고, 가장 낮은·높은 원점까지
+    잇는다. 메트릭을 모르면 span bbox(+0.25pt)로 지운다.
+    """
+    metrics = getattr(span, "metrics", None)
+    if metrics is None:
+        return _padded_rect(span.rect)
+    size = float(span.size)
+    ascender, descender = metrics
+    height = ascender - descender
+    inner_top = ascender - _GLYPH_BOX_SHRINK * height
+    inner_bottom = descender + _GLYPH_BOX_SHRINK * height
+    if inner_top - inner_bottom <= 0.05:
+        return _padded_rect(span.rect)
+    center = (inner_top + inner_bottom) / 2
+    half = min(_BAND_HALF_EM, (inner_top - inner_bottom) * 0.4)
+    low = (center - half) * size + stack[0]
+    high = (center + half) * size + stack[1]
+    dx, dy = along_dir
+    ux, uy = up_dir
+    ox, oy = span.origin
+    rect = span.rect
+    corners = (
+        (rect.x0, rect.y0), (rect.x1, rect.y0), (rect.x0, rect.y1), (rect.x1, rect.y1),
+    )
+    along = [(x - ox) * dx + (y - oy) * dy for x, y in corners]
     start, end = min(along) - _BAND_PAD_PT, max(along) + _BAND_PAD_PT
     xs = [ox + dx * t + ux * h for t in (start, end) for h in (low, high)]
     ys = [oy + dy * t + uy * h for t in (start, end) for h in (low, high)]

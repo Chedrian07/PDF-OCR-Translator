@@ -729,6 +729,9 @@ async def create_job(
             raise HTTPException(
                 503, str(e), headers={"Retry-After": str(_PROBE_BUSY_RETRY_AFTER_S)},
             ) from e
+        except pdf_worker.PdfWorkerUnavailable as e:
+            # 워커가 빈 작업도 못 끝낸다 — 서버 설정 문제(재시도로 낫지 않는다, Retry-After 없음)
+            raise HTTPException(500, str(e)) from e
     except HTTPException:
         await anyio.to_thread.run_sync(st.store.delete_dir, job)
         raise

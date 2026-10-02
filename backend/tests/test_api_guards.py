@@ -54,6 +54,26 @@ def test_weighted_hits_and_retry_after():
     assert api_mod._SlidingWindowLimiter(0).hit_many(("k",), cost=99) is None   # 비활성
 
 
+def test_retry_after_is_rounded_up_so_waiting_that_long_is_enough():
+    """api-3: Retry-After를 버림(int)해 실제 남은 창보다 짧게 알렸다 — 0.4초 뒤 두 번째
+    요청이 '59'를 받고, 59초를 쉬고 다시 보내면 창이 0.6초 남아 429를 한 번 더 받았다."""
+    import pytest
+    from fastapi import HTTPException
+
+    import app.api as api_mod
+
+    guard = api_mod._AbuseGuard(1, 0)
+    hits = guard.limiter._hits
+    guard.check_rate(("k",))
+    hits["k"] = [t - 0.4 for t in hits["k"]]              # 첫 요청이 0.4초 전이었다
+    with pytest.raises(HTTPException) as excinfo:
+        guard.check_rate(("k",))
+    retry_after = int(excinfo.value.headers["Retry-After"])
+    assert retry_after == 60                              # 남은 59.6초 → 올림
+    hits["k"] = [t - retry_after for t in hits["k"]]      # 안내받은 만큼 기다렸다
+    guard.check_rate(("k",))                              # 이번에는 통과한다
+
+
 # ── security-1: /render-preview 레이트리밋·동시 렌더 상한 ───────────────────────
 def test_render_preview_rate_limit_is_weighted_by_body_size(client, sample_pdf, monkeypatch):
     """라이브 미리보기의 잦은 작은 요청은 통과하고, 상한 크기 본문을 쏟아붓는 요청은

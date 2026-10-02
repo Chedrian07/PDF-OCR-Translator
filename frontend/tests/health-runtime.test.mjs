@@ -5,6 +5,8 @@
 // 예전에는 한 번 정상이면 health를 다시 묻지 않아 나중에 죽은 sidecar·워커가 배지로 안
 // 보였고, model_load_error·worker_alive를 무시해 프리로드 실패가 '모델 로딩 중…'과
 // '로딩이 끝나는 대로 자동 변환' 안내로 끝없이 보였다(frontend-8).
+// 상시 폴링이 생긴 뒤로는 같은 응답에도 aria-live 배지 영역과 role=alert 안내를 매번 다시 써서
+// 스크린리더가 같은 내용을 세션 내내 되풀이해 읽었다 — 바뀐 것만 고친다(frontend-2).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -13,7 +15,7 @@ import {
   HEALTH_POLL_FAST_MS, HEALTH_POLL_SLOW_MS, healthPollDelay, healthStatus,
 } from '../js/core.js';
 import { EL_IDS, el, state } from '../js/state.js';
-import { loadHealth, renderHealth, setupHealthPolling } from '../js/health.js';
+import { loadHealth, renderHealth, renderHealthError, setupHealthPolling } from '../js/health.js';
 import { installFakeDom, mount } from './helpers/fake-dom.mjs';
 
 test('healthStatus: 로딩 중·로드 실패·워커 중지를 구분한다 (필드 부재는 정상)', () => {
@@ -157,4 +159,109 @@ test('MLX 디바이스는 Apple GPU 배지(칩 이름·Metal 스타일)로 보�
   renderHealth({ model_loaded: true, device: 'cpu', gpu_name: 'ignored' });
   assert.equal(device().textContent, 'CPU');
   assert.ok(device().classList.contains('is-cpu'));
+});
+
+/* ---------------- 같은 응답은 DOM을 건드리지 않는다 (frontend-2) ---------------- */
+
+// 노드와 그 하위 요소에 쓰기 기록기를 단다 — 속성·클래스·hidden·글자·자식 목록을 바꾸는 모든
+// 호출을 log에 남긴다. 브라우저는 같은 값으로 setAttribute해도 변이 기록을 만들므로 값 비교
+// 없이 호출 자체를 센다. classList 토글은 실제로 바뀔 때만 센다(브라우저와 같다).
+const elementsUnder = (root) => root.children.flatMap((child) => [child, ...elementsUnder(child)]);
+
+function watchWrites(root, log) {
+  const nodes = [root, ...elementsUnder(root)];
+  for (const node of nodes) {
+    const label = node.dataset.badge || node.id || node.className || node.tagName;
+    for (const method of ['setAttribute', 'removeAttribute', 'appendChild', 'insertBefore', 'removeChild', 'append', 'prepend']) {
+      const orig = node[method];
+      node[method] = function watched(...args) { log.push(`${label}.${method}(${args[0]})`); return orig.apply(this, args); };
+    }
+    for (const prop of ['hidden', 'textContent', 'className', 'innerHTML', 'title']) {
+      let owner = node;
+      let desc;
+      while (owner && !(desc = Object.getOwnPropertyDescriptor(owner, prop))) owner = Object.getPrototypeOf(owner);
+      let value = desc && 'value' in desc ? desc.value : undefined;
+      Object.defineProperty(node, prop, {
+        configurable: true,
+        get() { return desc && desc.get ? desc.get.call(node) : value; },
+        set(v) {
+          log.push(`${label}.${prop}=`);
+          if (desc && desc.set) desc.set.call(node, v); else value = v;
+        },
+      });
+    }
+    const list = node.classList;
+    for (const method of ['add', 'remove', 'toggle']) {
+      const orig = list[method].bind(list);
+      list[method] = (...args) => {
+        const before = list.toString();
+        const out = orig(...args);
+        if (list.toString() !== before) log.push(`${label}.classList.${method}(${args[0]})`);
+        return out;
+      };
+    }
+  }
+}
+
+const FAILING = {
+  model_loaded: false, model_load_error: 'CUDA out of memory', worker_alive: false, engine: 'fake',
+  device: 'cuda', gpu_name: 'NVIDIA GeForce RTX 4090', provider: 'local-sidecar',
+  provider_health: { status: 'error', error: 'connection refused' },
+};
+
+test('같은 health 응답을 다시 받으면 배지·업로드 안내를 전혀 다시 쓰지 않는다', (t) => {
+  setup(t, [{}]);
+  for (const data of [FAILING, { model_loaded: true, worker_alive: true, device: 'mlx', gpu_name: 'Apple M4 Max' }]) {
+    renderHealth(data);
+    const nodes = elementsUnder(el.healthBadges);
+    const noticeText = el.uploadModelNoticeText.firstChild;
+    const log = [];
+    watchWrites(el.healthBadges, log);
+    watchWrites(el.uploadModelNotice, log);
+    watchWrites(el.uploadModelNoticeText, log);
+    watchWrites(el.uploadModelNoticeSpinner, log);
+    renderHealth(data);
+    renderHealth({ ...data });
+    assert.deepEqual(log, [], `다시 쓴 곳: ${log.join(', ')}`);
+    const after = elementsUnder(el.healthBadges);
+    assert.ok(after.length === nodes.length && after.every((n, i) => n === nodes[i]), '배지 노드가 그대로다');
+    assert.ok(el.uploadModelNoticeText.firstChild === noticeText, '안내 글자 노드가 그대로다');
+  }
+});
+
+test('상태가 바뀌면 바뀐 배지만 고친다 — 나머지 배지 노드는 그대로', (t) => {
+  setup(t, [{}]);
+  const healthy = { model_loaded: true, worker_alive: true, device: 'cuda', gpu_name: 'RTX 4090',
+    provider: 'local-sidecar', provider_health: { status: 'ok' } };
+  renderHealth(healthy);
+  const [model, device] = el.healthBadges.children;
+  assert.deepEqual(badges(), ['baidu/Unlimited-OCR', 'CUDA · RTX 4090']);
+  renderHealth({ ...healthy, provider_health: { status: 'error', error: 'refused' } });
+  assert.deepEqual(badges(), ['baidu/Unlimited-OCR', 'CUDA · RTX 4090', '엔진 서버 연결 안 됨']);
+  assert.ok(el.healthBadges.children[0] === model && el.healthBadges.children[1] === device,
+    '그대로인 배지는 다시 만들지 않는다');
+  // 사유(툴팁)만 바뀌면 같은 노드의 title만 고친다 — 글자를 다시 쓰지 않는다
+  const provider = el.healthBadges.children[2];
+  const text = provider.firstChild;
+  renderHealth({ ...healthy, provider_health: { status: 'error', error: 'timeout' } });
+  assert.ok(el.healthBadges.children[2] === provider && provider.firstChild === text);
+  assert.match(provider.getAttribute('title'), /timeout/);
+  // 로딩 → 로드 실패: 같은 자리 배지가 새 글자로 바뀐다(전이는 한 번 알린다)
+  renderHealth({ ...healthy, model_loaded: false });
+  assert.ok(badges().includes('모델 로딩 중…'));
+  renderHealth({ ...healthy, model_loaded: false, model_load_error: 'OOM' });
+  assert.ok(badges().includes('모델 로드 실패') && !badges().includes('모델 로딩 중…'));
+  assert.ok(el.healthBadges.children[0] === model, '모델 배지는 끝까지 같은 노드');
+});
+
+test('연결 실패 배지도 반복 조회마다 다시 쓰지 않고, 회복하면 정상 배지로 돌아간다', (t) => {
+  setup(t, [{}]);
+  renderHealthError();
+  const log = [];
+  watchWrites(el.healthBadges, log);
+  renderHealthError();
+  assert.deepEqual(log, []);
+  assert.deepEqual(badges(), ['서버 연결 실패']);
+  renderHealth({ model_loaded: true, device: 'cpu' });
+  assert.deepEqual(badges(), ['baidu/Unlimited-OCR', 'CPU']);
 });

@@ -460,6 +460,8 @@ def _page_visual_obstacles(
     horizontal_segments: list | None = []
     # 인라인 수식 선 후보 — 소유 블록은 그림 영역을 안 뒤에 정한다(_inline_rule_owner).
     rule_candidates: list = []
+    # 선 모양(가로·두께·길이)은 화면에서 본다 — 회전 쪽만 좌표를 옮긴다(_is_inline_rule_shape)
+    display = page.rotation_matrix if page.rotation else None
     drawings: list = []
     try:
         drawings = page.get_drawings()
@@ -471,7 +473,7 @@ def _page_visual_obstacles(
             if bbox is None:
                 continue
             drawing_rect = fitz.Rect(bbox)
-            if _is_inline_rule_shape(drawing):
+            if _is_inline_rule_shape(drawing, display):
                 pad = 0.5 + float(drawing.get("width") or 0.0) / 2
                 rule_rect = drawing_rect + (-pad, -pad, pad, pad)
                 rule_rect &= page.mediabox
@@ -520,7 +522,7 @@ def _page_visual_obstacles(
         if index not in scan_members and 0 < r.width * r.height < page_area * 0.85
     ]
     inline_rules: dict[int, list] = {}
-    box_edges = _box_edge_candidates(drawings, rule_candidates)
+    box_edges = _box_edge_candidates(drawings, rule_candidates, display)
     for index, (raw_rect, rule_rect) in enumerate(rule_candidates):
         owner = None
         if index not in box_edges:
@@ -558,18 +560,20 @@ _BOX_EDGE_MAX_LENGTH_PT = 30.0
 _BOX_CORNER_TOLERANCE_PT = 1.0
 
 
-def _box_edge_candidates(drawings: list, rule_candidates: list) -> set[int]:
+def _box_edge_candidates(drawings: list, rule_candidates: list, matrix=None) -> set[int]:
     """끝점에 짧은 세로 선이 닿는 후보 — 상자(QED □를 선 네 개로 그린 경우)·괄호의 변.
 
     가로 변만 인라인 수식 선으로 지우면 세로 변만 남은 깨진 상자가 된다 — 이런 선은
     예전처럼 보존한다. 후보 끝점 주변 1pt 격자만 색인하므로 path가 수십만 개인 차트
     페이지에서도 메모리는 후보 수에 비례하고, 후보가 없으면 다시 훑지 않는다.
+    가로·세로는 화면(표시 공간 — matrix = page.rotation_matrix)에서 본다.
     """
     if not rule_candidates:
         return set()
     tol = _BOX_CORNER_TOLERANCE_PT
     cells: dict[tuple[int, int], list[tuple[int, float, float]]] = {}
     for index, (raw, _rule) in enumerate(rule_candidates):
+        raw = _shown_rect(raw, matrix)
         y = (raw.y0 + raw.y1) / 2
         for x in (raw.x0, raw.x1):
             for dx in (-1, 0, 1):
@@ -581,7 +585,7 @@ def _box_edge_candidates(drawings: list, rule_candidates: list) -> set[int]:
             try:
                 if item[0] != "l":
                     continue
-                start, end = item[1], item[2]
+                start, end = _shown_point(item[1], matrix), _shown_point(item[2], matrix)
                 height = abs(start.y - end.y)
                 if abs(start.x - end.x) > 0.3 or not 0.5 <= height <= _BOX_EDGE_MAX_LENGTH_PT:
                     continue
@@ -595,8 +599,27 @@ def _box_edge_candidates(drawings: list, rule_candidates: list) -> set[int]:
     return touching
 
 
-def _is_inline_rule_shape(drawing: dict) -> bool:
-    """도형이 얇고 짧은 가로 선 하나인가(인라인 수식의 분수선·근호 윗선 모양)."""
+def _shown_point(point, matrix):
+    """회전 전 좌표의 점 → 화면(표시 공간) 좌표. matrix가 없으면(회전 0) 그대로."""
+    return point if matrix is None else point * matrix
+
+
+def _shown_rect(rect, matrix):
+    """회전 전 좌표의 사각형 → 화면 좌표(정규화). matrix가 없으면 그대로."""
+    if matrix is None:
+        return rect
+    shown = rect * matrix
+    shown.normalize()
+    return shown
+
+
+def _is_inline_rule_shape(drawing: dict, matrix=None) -> bool:
+    """도형이 얇고 짧은 가로 선 하나인가(인라인 수식의 분수선·근호 윗선 모양).
+
+    가로·두께·길이는 화면(matrix = page.rotation_matrix)에서 본다. get_drawings는 회전 전
+    좌표라, 내용을 돌려 그리고 /Rotate로 세운 쪽(pdflscape 가로 쪽 등)의 화면 가로 분수선이
+    세로선으로 보고돼 하나도 소유되지 못했다 — 번역 문단이 5–6pt로 축소되고 원문 분수선이
+    번역문 사이에 떠 있었다(감사 delta-pdf-translate-2)."""
     items = drawing.get("items") or ()
     rect = drawing.get("rect")
     if len(items) != 1 or rect is None:
@@ -605,15 +628,16 @@ def _is_inline_rule_shape(drawing: dict) -> bool:
     stroke = float(drawing.get("width") or 0.0) if "s" in str(drawing.get("type") or "") else 0.0
     try:
         if item[0] == "l":
-            start, end = item[1], item[2]
+            start, end = _shown_point(item[1], matrix), _shown_point(item[2], matrix)
             if abs(start.y - end.y) > 0.3:
                 return False
             thickness = stroke
         elif item[0] == "re":
-            thickness = abs(item[1].height) + stroke
+            thickness = abs(_shown_rect(item[1], matrix).height) + stroke
         else:
             return False
-        length = abs(rect.x1 - rect.x0)
+        shown = _shown_rect(rect, matrix)
+        length = abs(shown.x1 - shown.x0)
     except (AttributeError, IndexError, TypeError, ValueError):
         return False
     return (

@@ -15,7 +15,7 @@ transformers>=5.14를 요구해 backend의 transformers==4.57.1 고정과 해소
   (tests/test_mlx_runtime.py가 torch·mlx_vlm 임포트를 막고 전 구간을 돌려 고정).
   단, transformers는 torch가 설치돼 있으면 `AutoTokenizer` 임포트 때 torch를 함께 올린다.
 - 수치 레퍼런스: torch 벤더 `app/vendor/unlimited_ocr` (P1–P21 적용본, 기준 커밋 77224246 —
-  후처리는 P22·P23까지 들어간 커밋 f2899c0 판을 따른다).
+  후처리는 P22(det 모양 검사·`_is_image_ref` 포함)·P23까지 들어간 커밋 1958c50 판을 따른다).
   전처리·후처리·infer 흐름은 baidu/Unlimited-OCR `modeling_unlimitedocr.py`(MIT,
   Copyright (c) 2026 Baidu — 전문은 `../unlimited_ocr/LICENSE`)에서 직접 옮겼다.
 
@@ -46,14 +46,14 @@ transformers>=5.14를 요구해 backend의 transformers==4.57.1 고정과 해소
 | `loader.py` | `mlx_vlm/utils.py` (load_model·quantize 흐름) | `2045e18d1a16222d07b157251e4a5108b2b12bf740b885f9682a071c8dc59134` |
 | `LICENSE` | `mlx_vlm-0.7.4.dist-info/licenses/LICENSE` | `f74c448746be3376e27dee43e2be9ec9d55f4820cd7466c603a6c7d1fd2d25b8` |
 | `processing.py` | torch 벤더 `modeling_unlimitedocr.py` (infer/infer_multi 전처리) | `ed56bc28084da20c1306d92ce57ccc41bf78ae743ae4dc7d0e112f17a55f7b8f` |
-| `postprocess.py` | 같은 파일 f2899c0 판 (re_match·_clamp_box·draw_bounding_boxes·_split_multi_pages·save_results) | `168e04669842e5cd1eafeb20cb8135f86df00ae12735925f6d2386c1ce707f7f` |
+| `postprocess.py` | 같은 파일 1958c50 판 (re_match·_is_image_ref·extract_coordinates_and_label·_clamp_box·draw_bounding_boxes·_split_multi_pages·save_results) | `4facb67a63233191810ad30995524b0035a3dab52eacbfb3570fab384f4130da` |
 | `inference.py` | 같은 파일 (infer/infer_multi 흐름) + 로컬 `warmup()` | 〃 |
 | `ngram.py` | 로컬 (스파이크 `mlx_bench.py` NoRepeatNgramGPU 정리, 원본 `145fb8ee…873a`) | — |
 | `resample.py` | 로컬 (M7) | — |
 
 업스트림 sha256은 설치된 휠 파일의 hex 다이제스트이며 휠 RECORD 해시와 일치함을 확인했다.
 torch 벤더 sha256은 기준 커밋 77224246의 패치 적용본이다(`postprocess.py` 행만 P22·P23 적용본
-f2899c0 — `deepencoder.py`
+1958c50 — `deepencoder.py`
 `bae51b96…227c`, `modeling_deepseekv2.py` `f9807cb0…bd35`, 레퍼런스 ngram
 `app/native_ops.py` `25506e25…b04a`).
 
@@ -68,7 +68,7 @@ SwitchGLU 소배치 가속·오프로드 경로.
 | M1 | (`vision.py`) CLIP MLP 활성함수 `nn.GELU` → `quick_gelu`(`x*sigmoid(1.702x)`), 층 LayerNorm eps 1e-6 → 1e-5 | torch `deepencoder.py` NoTPFeedForward·`layernorm_epsilon=1e-5`와 다름(MLX-02). 미수정 시 CLIP 출력 상대오차 0.309, 1쪽 det 블록 19 → 11 | 실가중치 fp32 1쪽(teacher-forced 74토큰): SAM 4.1e-5, CLIP 3.9e-5, projector 3.2e-5, 로짓 4.08e-6(KL 1.8e-6, top-4 동일) |
 | M2 | (`cache.py`, `generation.py`) 원샷 프리필 — 첫 update가 프롬프트 전체를 받아 `prefill_length = P`를 기록, 버퍼를 P+W로 선할당 | mlx-vlm 기본 chunked prefill은 마지막 프롬프트 토큰을 따로 넣어 P-1을 기록 → 그 토큰이 링에 들어갔다가 축출(8쪽 출력이 토큰 105에서 갈림, MLX-04). torch는 첫 q_len>1 forward 뒤 P를 기록 | 작은 무작위 모델(W=4, 프리필+12스텝, 링 3바퀴): torch 대비 로짓 상대오차 ≤2.5e-6. W를 5로 바꾸면 워밍업 뒤 갈라짐(음성 대조) |
 | M3 | (`generation.py`, `ngram.py`) 그리디 생성 모듈 — EOS 포함 종료, 총 길이 `max_length`(+`hit_max_length`), 토큰 콜백 `on_token`, 토큰마다 `should_stop`, GPU no-repeat-ngram(n·창, 프롬프트+생성 기준), `mx.async_eval` 파이프라이닝(멈출 때 버리는 스텝 ≤1, 상한 스텝은 미예약) | mlx-vlm에는 ngram이 없고(반복 루프 방어 부재) 생성기는 잘림을 알리지 않는다. 엔진이 스트리밍·취소·반복 감지·OutputLimitError를 처리할 계약 필요 | ngram: 경계 18건 + 무작위 600건 + 생성 경로 증분 상태 20,557스텝이 레퍼런스와 일치. 작은 모델 그리디 40토큰(ngram 3/16 금지 발동 17스텝)이 torch fast_greedy_decode+앱 프로세서와 동일 |
-| M4 | (`postprocess.py`, `inference.py`) torch-free 후처리 이식: `re_match`·`extract_coordinates_and_label`(**ast.literal_eval만**, P9)·`draw_bounding_boxes`(+P13 boxes.json)·`_dump_raw_pages`(P14)·save_results 흐름 + torch 벤더 **P22**(`_clamp_box` 규칙 그대로: 픽셀 좌표 `int(v/999*size)`를 x∈[0,W]·y∈[0,H]로 자르고, 퇴화(`x2<=x1 or y2<=y1`)·숫자 아님(bool 포함)·비유한·4개가 아닌 상자는 크롭·boxes.json·오버레이를 건너뜀. 건너뛴 image 상자와 좌표를 못 읽은 image ref도 번호 `img_idx`를 소비) + **P23**(`_split_multi_pages`: 첫 `<PAGE>` 앞이 공백뿐일 때만 버림 — 마커 0개면 출력 전체가 1쪽) | 후처리가 torch를 임포트하는 모듈에 묶여 있었다(MLX-07). 경계 밖 좌표는 업스트림이 검은 패딩 크롭·경계 밖 bbox를 남겼다. P22의 번호 소비·P23은 torch 벤더에 나중에 들어가 이 포팅에서 빠져 있었다 — 좌표를 못 읽은 image det 뒤 그림이 한 칸 앞 번호 파일로 저장돼 마크다운 앞 자리에 붙었고, 모델이 선행 마커를 생략하면 1쪽이 사라지고 뒤 페이지가 한 칸씩 밀렸다(audit mlx-1·mlx-2·torch-1) | 모델 없는 torch infer/infer_multi와 파일·마크다운 동일(tests/test_mlx_postprocess.py — 선행 마커 생략·마커 0개·빈 출력, 쉼표 누락·좌표 3/5개·inf·거대 숫자·bool·비리터럴 image 좌표, `_clamp_box`·`_split_multi_pages`·`draw_bounding_boxes` 무작위 대조). 실가중치 8쪽: MLX infer_multi 산출물(마크다운·figure 크롭 바이트·boxes.json·raw_pages.json)이 같은 토큰을 넣은 torch 흐름과 바이트 동일 |
+| M4 | (`postprocess.py`, `inference.py`) torch-free 후처리 이식: `re_match`·`extract_coordinates_and_label`(**ast.literal_eval만**, P9)·`draw_bounding_boxes`(+P13 boxes.json)·`_dump_raw_pages`(P14)·save_results 흐름 + torch 벤더 **P22**(`_clamp_box` 규칙 그대로: 픽셀 좌표 `int(v/999*size)`를 x∈[0,W]·y∈[0,H]로 자르고, 퇴화(`x2<=x1 or y2<=y1`)·숫자 아님(bool 포함)·비유한·4개가 아닌 상자는 크롭·boxes.json·오버레이를 건너뜀. 건너뛴 image 상자와 좌표를 못 읽은 image ref도 번호 `img_idx`를 소비. det 값은 비어 있지 않은 list/tuple일 때만 상자 목록으로 읽고(문자열·빈 목록·0은 좌표를 못 읽은 ref로 번호 1개), 중첩되지 않은 목록은 상자 하나로 감싼다. image 판정은 마크다운 치환과 같은 `_is_image_ref`(공백 라벨 포함)) + **P23**(`_split_multi_pages`: 첫 `<PAGE>` 앞이 공백뿐일 때만 버림 — 마커 0개면 출력 전체가 1쪽) | 후처리가 torch를 임포트하는 모듈에 묶여 있었다(MLX-07). 경계 밖 좌표는 업스트림이 검은 패딩 크롭·경계 밖 bbox를 남겼다. P22의 번호 소비·P23은 torch 벤더에 나중에 들어가 이 포팅에서 빠져 있었다 — 좌표를 못 읽은 image det 뒤 그림이 한 칸 앞 번호 파일로 저장돼 마크다운 앞 자리에 붙었고, 모델이 선행 마커를 생략하면 1쪽이 사라지고 뒤 페이지가 한 칸씩 밀렸다(audit mlx-1·mlx-2·torch-1·torch-2) | 모델 없는 torch infer/infer_multi와 파일·마크다운 동일(tests/test_mlx_postprocess.py — 선행 마커 생략·마커 0개·빈 출력, 쉼표 누락·좌표 3/5개·inf·거대 숫자·bool·비리터럴·문자열·빈 목록·0·기형 평평 목록 image 좌표, `_clamp_box`·`_split_multi_pages`·`draw_bounding_boxes` 무작위 대조). 실가중치 8쪽: MLX infer_multi 산출물(마크다운·figure 크롭 바이트·boxes.json·raw_pages.json)이 같은 토큰을 넣은 torch 흐름과 바이트 동일 |
 | M5 | (`loader.py`) 인메모리 8비트 양자화(affine, group 64) — 디코더만(embed_tokens·q/k/v/o·dense·shared·switch_mlp·lm_head). SAM·CLIP·projector·MoE 게이트 제외. 8 이외 비트 수는 거부 | 스파이크(MLX-06): 8비트 처리량 1.44배·품질 동등, 4비트는 arXiv 번호 2504 → 2304 오인식 | 8쪽 청크 21.5 s(2.69 s/쪽), 413 tok/s, 파라미터 3.92 GB·피크 5.52 GB, 텍스트층 재현율 0.9748(bf16과 같음), bf16 대비 문자 유사도 0.9995(MPS 대비 0.9992 — 스파이크 변환본 0.9970) |
 | M6 | **기각(미적용)** MoE 게이트 로짓·softmax·가중합을 torch MPS 경로처럼 fp32로 | torch MPS/CPU는 게이트를 fp32 linear로, CUDA autocast는 bf16 linear로 계산한다 | bf16 8쪽: 스파이크 대비 0.9975, MPS 대비 텍스트 유사도 0.9972로 업스트림 수치(0.9993)보다 **멀어졌다**. 1쪽 384토큰은 스파이크와 135번째에서 갈림. 업스트림 수치를 유지한다 |
 | M7 | (`resample.py`, `sam.py`, `vision.py`) 위치 임베딩 리샘플을 torch `F.interpolate`와 같은 가중치로: CLIP 16→10·SAM 64→40은 bicubic antialias, SAM 전역 블록 상대 위치표 127→79는 linear(반-픽셀 중심) | gundam 640 크롭에서만 쓰인다. mlx-vlm CLIP은 채널-우선 텐서에 `nn.Upsample`(채널-마지막 규약)을 걸어 (1,640,10,16) 모양 — 채널 축을 리샘플하고 reshape로 뒤섞는다. SAM rel_pos 보간은 `i*scale` 좌표라 torch 대비 상대오차 0.48. (SAM 절대 위치 커널은 torch와 2e-6로 일치했지만 같은 행렬 경로로 통일) | 가중치 행렬 vs torch: bicubic 최대 1.4e-6, linear 2.5e-7. 실가중치 fp32 gundam 1쪽 전체(12타일, P=1517) 로짓 상대오차 6.9e-5·top-5 동일 |

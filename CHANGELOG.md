@@ -35,6 +35,7 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 - `TRANSLATE_REASONING=off` works on local servers: `TRANSLATE_REASONING_STYLE=auto` sends `chat_template_kwargs` to loopback and private hosts. New `TRANSLATE_EXTRA_BODY` and `TRANSLATE_MAX_RESPONSE_MB` settings.
 - Truncated, empty and timed-out responses are never used or cached; the unit stays in the original language with a recorded reason. Stricter output checks catch repetition loops, labels turned into sentences, dropped numbers, canned outputs repeated across units and the source copied verbatim inside Korean filler text (`echo`), and old cache entries are re-checked.
 - Markdown and layout translations are matched per unit, so partially covered paragraphs no longer keep English lines, with far fewer LLM calls.
+- A paragraph that follows a list on the same page stays a separate paragraph in the translated Markdown (`result.ko.md`, the Korean preview and the reader's flow view); it used to be pulled into the last list item. Translations made before this release keep the old structure until they are translated again.
 - Responses API requests send `store: false`.
 - The response size cap is enforced while reading, including length-less HTTP/1.0 streams (mlx_lm.server), declared `Content-Length` on streams and compressed bodies; long stream lines parse in linear time.
 - A translation endpoint that stops responding fails the job after a wave of timed-out units instead of finishing hours later with English text.

@@ -433,13 +433,39 @@ def open_document(pdf_path):
         doc.close()
 
 
-def _peak_rss_bytes() -> int:
+# 워커 자신의 최대 RSS를 읽는 곳(Linux procfs) — 없으면 ru_maxrss로 폴백한다
+_PROC_STATUS = "/proc/self/status"
+# (워커) 기동 시점의 ru_maxrss(바이트) — 물려받은 값과 이 워커가 키운 값을 가르는 기준
+_START_MAXRSS = 0
+
+
+def _ru_maxrss_bytes() -> int:
     try:
         import resource
     except ImportError:  # pragma: no cover — POSIX 전용 배포
         return 0
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return int(peak if sys.platform == "darwin" else peak * 1024)
+
+
+def _peak_rss_bytes() -> int:
+    """(워커) 이 워커 자신의 최대 RSS(바이트) — 반납 시 교체 판단(_RECYCLE_RSS_BYTES)에 쓴다.
+
+    Linux의 ru_maxrss는 fork·exec를 넘어 부모의 최댓값을 물려받는다(커널 signal->maxrss).
+    모델을 올린 서버(수 GB)가 띄운 워커는 첫 작업부터 상한을 넘은 것으로 보여 작업마다 폐기·
+    재생성됐다(상주 워커·문서 캐시 무력화, 감사 infra-docs-1). /proc/self/status의 VmHWM은
+    exec마다 새로 시작하는 이 프로세스 메모리 맵의 최댓값이라 그것을 먼저 읽는다. 없으면(macOS
+    등) ru_maxrss를 쓰되 기동 시점 값(물려받은 몫)을 넘지 않았으면 이 워커의 값이 아니므로 0이다.
+    """
+    try:
+        with open(_PROC_STATUS, "rb") as status:
+            for line in status:
+                if line.startswith(b"VmHWM:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    peak = _ru_maxrss_bytes()
+    return peak if peak > _START_MAXRSS else 0
 
 
 def _apply_memory_limit(limit_mb: int) -> None:
@@ -560,8 +586,9 @@ _HAS_ALARM = _ALARM_SIGNAL is not None and hasattr(signal, "alarm")
 
 def _child_main(conn, pool_name: str, mem_limit_mb: int, log_level: int) -> None:
     """워커 프로세스 본체 — 작업을 하나씩 받아 실행하고 결과를 돌려준다."""
-    global _IN_WORKER
+    global _IN_WORKER, _START_MAXRSS
     _IN_WORKER = True
+    _START_MAXRSS = _ru_maxrss_bytes()
     _drop_secret_env()
     with contextlib.suppress(ValueError, OSError, AttributeError):
         signal.signal(signal.SIGINT, signal.SIG_IGN)

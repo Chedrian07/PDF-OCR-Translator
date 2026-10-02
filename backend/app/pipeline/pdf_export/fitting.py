@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import re
 import math
 from collections import Counter
@@ -40,6 +42,71 @@ from .text import _TULU_MICROFIX
 _TEXT_ORIGIN_RE = re.compile(
     r"1 0 0 1 ([-+0-9.]+) ([-+0-9.]+) Tm"
 )
+
+# 조판 시험(dry-run)용 빈 페이지 — 빌드마다 build가 trial_pages()로 연다(밖에서는 원문 페이지).
+_TRIAL_PAGES: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "pdf_export_trial_pages", default=None,
+)
+# Shape(insert_textbox)가 읽는 페이지 기하 — 시험 페이지가 이것을 모두 같게 복제할 때만 쓴다
+_SHAPE_GEOMETRY = (
+    "mediabox", "cropbox", "mediabox_size", "cropbox_position", "transformation_matrix",
+    "rotation", "rect",
+)
+
+
+@contextlib.contextmanager
+def trial_pages():
+    """빌드 한 번 동안 조판 시험용 빈 페이지를 기하별로 재사용하고 끝나면 닫는다."""
+    cache: dict = {}
+    token = _TRIAL_PAGES.set(cache)
+    try:
+        yield
+    finally:
+        _TRIAL_PAGES.reset(token)
+        for doc, _page in cache.values():
+            if doc is not None:
+                with contextlib.suppress(Exception):
+                    doc.close()
+
+
+def _new_trial_page(page):
+    """(시험 문서, 시험 페이지) — 원문 페이지의 Shape 기하를 그대로 복제하지 못하면 (None, None)."""
+    fitz = quiet_fitz()
+    doc = fitz.open()
+    try:
+        mediabox = page.mediabox
+        scratch = doc.new_page(width=mediabox.width, height=mediabox.height)
+        scratch.set_mediabox(mediabox)
+        scratch.set_cropbox(page.cropbox)
+        if page.rotation:
+            scratch.set_rotation(page.rotation)
+        if all(getattr(scratch, name) == getattr(page, name) for name in _SHAPE_GEOMETRY):
+            return doc, scratch
+    except Exception:  # noqa: BLE001 — 복제할 수 없는 기하면 원문 페이지로 시험한다
+        pass
+    with contextlib.suppress(Exception):
+        doc.close()
+    return None, None
+
+
+def _trial_page(page):
+    """조판 시험을 돌릴 페이지 — 빌드 중이면 기하가 같은 빈 페이지, 아니면 page 자체.
+
+    Shape.insert_textbox는 시험마다 page.insert_font → CheckFont → get_page_fonts로 그 페이지의
+    리소스 전체(폼 XObject 재귀 포함)를 다시 훑는다. 원문 논문 페이지는 폰트·폼이 많아 그 스캔이
+    빌드 시간의 3분의 1을 넘었다(25쪽 cProfile: 시험 58,004회에 33s/87s, CropBox 사본 239,292회에
+    110s/309s — P4). 빈 시험 페이지에는 우리 폰트만 있어 스캔이 거의 없다. 시험 결과(남는 높이·
+    줄 위치·잉크)는 Shape가 읽는 기하(MediaBox 크기·CropBox 위치·변환 행렬·회전)와 폰트 파일로만
+    정해지므로 원문 페이지에서 시험한 것과 같다. 폰트 리소스 이름은 빌드가 문서 전체에서 겹치지
+    않게 예약하므로(_reserve_font_resource_names) 원문 페이지의 같은 이름 폰트를 재사용할 일도 없다."""
+    cache = _TRIAL_PAGES.get()
+    if cache is None:
+        return page
+    key = (tuple(page.mediabox), tuple(page.cropbox), page.rotation)
+    entry = cache.get(key)
+    if entry is None:
+        entry = cache[key] = _new_trial_page(page)
+    return entry[1] if entry[1] is not None else page
 
 
 def _plan_listing_lines(
@@ -380,6 +447,7 @@ def _plan_shrink_to_fit(
     if cleared is not None:
         candidates.append((cleared, True))
     orphan_fallback: _TextFitPlan | None = None
+    trial = _trial_page(page)
 
     # OCR bbox는 원본 글리프에 딱 맞지만 CJK 폰트의 ascender/descender는 더 높다.
     # 같은 크기에서 원래 상자 → 충돌 없는 확장 상자 순으로 시도한 뒤에야 축소한다.
@@ -411,7 +479,7 @@ def _plan_shrink_to_fit(
                         # CJK 획이 서로 붙지 않는 얇은 합성 볼드를 만든다.
                         "border_width": 0.02,
                     })
-                shape = page.new_shape()
+                shape = trial.new_shape()
                 spare = shape.insert_textbox(candidate, text, **kwargs)
                 if spare >= 0:
                     ink = _textbox_ink_rect(

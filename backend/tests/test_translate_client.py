@@ -1292,6 +1292,47 @@ def test_압축된_SSE는_풀린_크기로_조금씩_읽어_상한을_건다():
     assert peak < 16 * 1024 * 1024   # 풀린 64MB를 한 번에 메모리에 올리지 않는다
 
 
+def test_개행_없는_긴_SSE_줄도_선형_시간에_상한까지_읽는다():
+    """종전 파서는 조각마다 누적 버퍼를 복사·재분할해(pending += chunk; split) 개행 없는
+    줄이 길어질수록 CPU가 제곱으로 늘었다(8MB에 9초, 데이터가 계속 와 read timeout도
+    걸리지 않음, translate-8). 작은 조각으로 상한까지 흘려도 금방 끝나야 한다."""
+
+    class Trickle:
+        headers: dict = {}
+
+        def iter_content(self, chunk_size=None):
+            yield b"data: "
+            piece = b"x" * 256
+            while True:
+                yield piece
+
+    c = OpenAICompatClient(_cfg(api_mode="chat", max_response_mb=4))
+    t0 = time.process_time()
+    with pytest.raises(TranslateAPIError, match="상한"):
+        c._read_sse(Trickle(), {}, threading.Event())
+    assert time.process_time() - t0 < 1.0   # 제곱 시간이면 4MB/256B 조각에 수 초가 걸린다
+
+
+def test_SSE_줄_분할은_조각_경계와_CRLF에_무관하다():
+    events =(_chunk("가나") + _chunk("다", "stop")).replace(b"\n", b"\r\n") + b"data: [DONE]\r\n\r\n"
+
+    class Pieces:
+        headers: dict = {}
+
+        def __init__(self, size):
+            self.size = size
+
+        def iter_content(self, chunk_size=None):
+            for i in range(0, len(events), self.size):
+                yield events[i:i + self.size]
+
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    for size in (1, 2, 3, 7, len(events)):
+        body = c._read_sse(Pieces(size), {}, threading.Event())
+        assert body["choices"][0]["message"]["content"] == "가나다"
+        assert body["choices"][0]["finish_reason"] == "stop"
+
+
 def test_스트리밍을_거부하는_서버는_비스트리밍으로_래치한다():
     seen = []
 

@@ -67,6 +67,12 @@ _WAIT_NOTE_LOADING = "모델 로딩 대기 중… (최초 기동은 다운로드
 _WAIT_NOTE_RETRY = "모델 로드 재시도 대기 중… (일시적 로드 실패 — sidecar가 자동으로 다시 시도)"
 _WAIT_NOTE_RESTART = "sidecar 재시작 대기 중… (추론 엔진 복구 — 모델 재로드 뒤 이어서 진행)"
 
+# 잡 도중 장애에서 복귀한 경위 — 잡 **참고(notices)**다. 내용은 정상 처리됐으므로 경고로
+# 올리면 잡이 'degraded'로 보인다(engine/base.py::drain_notices 계약). 복귀하지 못한 페이지는
+# runner가 텍스트 레이어 복구·플레이스홀더 경고로 따로 남긴다.
+_RECOVERED_NOTICE = "sidecar 재시작/모델 재로드로 끊긴 페이지 요청을 복귀 뒤 다시 보내 처리했습니다"
+_RESUMED_NOTICE = "sidecar 재시작/모델 재로드가 끝나기를 기다린 뒤 이어서 진행했습니다"
+
 
 class SidecarNotReadyError(EngineError):
     """sidecar는 응답하지만 모델이 아직 로드 중 — 일시적(대기하면 준비됨).
@@ -258,6 +264,7 @@ class SidecarEngine(OCREngine):
         self._last_probe_ts = 0.0
         self._warn_lock = threading.Lock()
         self._warnings: list[str] = []
+        self._notices: list[str] = []  # 정보성 메모(복귀 경위) — _warn_lock 보호
         self._degraded_noted = False   # status 이상 신고를 이번 잡에 이미 경고로 올렸는지
         self._degraded_refreshed = False  # 성공한 parse 뒤 이상 신고 캐시를 다시 확인했는지
         self._job_key: Path | None = None  # 잡 단위 상태(신고 1회·장애 대기)의 기준 잡
@@ -424,14 +431,19 @@ class SidecarEngine(OCREngine):
             cancel, time.monotonic() + self._settings.sidecar_model_wait_s, on_wait
         )
 
-    def _await_recovery(self, cancel) -> None:
+    def _await_recovery(self, cancel) -> bool:
         """잡 도중 관측한 장애에서 복귀를 기다린다 — 대기 예산은 엔진 인스턴스가 공유.
 
         예전에는 청크 시작의 load()가 대기 없이 health를 한 번만 보고 실패해서, 재기동
         중인 sidecar의 남은 페이지가 수 ms 만에 전부 플레이스홀더가 됐다. 반대로
         페이지마다 sidecar_model_wait_s씩 기다리면 긴 장애에서 페이지 수만큼 곱해진다.
         첫 대기 시작부터 한 번의 예산만 쓰고, 다 쓴 뒤로는 페이지마다 한 번만 확인한다.
+
+        반환: 준비되지 않은 상태를 실제로 보고 기다렸는가. 대기 중 상태 문구(로딩·로드
+        재시도·재시작)는 잡에 쌓지 않는다 — 예전에는 경고로 쌓여 정상 복구된 잡도
+        'degraded'가 됐다. 경위는 호출자가 참고(notice) 한 줄로 남긴다.
         """
+        waited: list[str] = []
         now = time.monotonic()
         with self._health_lock:
             if self._outage_deadline is None:
@@ -440,9 +452,10 @@ class SidecarEngine(OCREngine):
         if now >= deadline:
             self._check_ready(force=True)  # 여전히 내려가 있으면 예외 — 대기 없이 실패
         else:
-            self._wait_ready(cancel, deadline, self._note)
+            self._wait_ready(cancel, deadline, waited.append)
         with self._health_lock:
             self._outage_deadline = None
+        return bool(waited)
 
     def _wait_ready(self, cancel, deadline: float, on_wait=None) -> None:
         last = ""
@@ -495,15 +508,30 @@ class SidecarEngine(OCREngine):
 
         **중복은 적재 시점에 접는다.** drain_warnings가 어차피 중복을 1건으로
         접으므로 손실은 없고, 접지 않으면 반복 호출되는 경고 하나가 40칸 예산을
-        통째로 먹는다 — 503 복귀 대기의 on_wait=self._note는 3초마다 같은 문구를
-        넣어 2분이면 버퍼를 채우고, 그 뒤 같은 청크의 손실 고지(정화로 버려진 표
-        등)가 전부 조용히 버려진다.
+        통째로 먹는다 — 예전 503 복귀 대기는 3초마다 같은 문구를 넣어 2분이면 버퍼를
+        채웠고, 그 뒤 같은 청크의 손실 고지(정화로 버려진 표 등)가 전부 조용히 버려졌다.
+        여기에는 **실제 품질 저하**만 넣는다 — 처리 경위는 _notice.
         """
         with self._warn_lock:
             if message in self._warnings:
                 return
             if len(self._warnings) < _MAX_JOB_WARNINGS:
                 self._warnings.append(message)
+
+    def _notice(self, message: str) -> None:
+        """정보성 메모 적재 — 내용·품질에는 문제가 없는 처리 경위(장애 복귀 등).
+
+        잡 notices로 간다(quality.state에 영향 없음). 경고와 같이 적재 시점에 중복을 접는다."""
+        with self._warn_lock:
+            if message in self._notices:
+                return
+            if len(self._notices) < _MAX_JOB_WARNINGS:
+                self._notices.append(message)
+
+    def drain_notices(self) -> list[str]:
+        with self._warn_lock:
+            drained, self._notices = self._notices, []
+        return drained
 
     def drain_warnings(self) -> list[str]:
         with self._warn_lock:
@@ -565,7 +593,6 @@ class SidecarEngine(OCREngine):
             # 기다렸다가 이 페이지만 1회 재시도한다. 기다리지 않으면 재기동+모델 로드
             # 시간 동안의 페이지가 전부 플레이스홀더로 확정된다. 대기 예산은 공유한다.
             self._invalidate_health(str(e))
-            self._note("sidecar 재시작/모델 재로드 대기 중… (해당 페이지는 복귀 후 재시도)")
             self._await_recovery(cancel)
             resp = self._client.parse_page(
                 image_path,
@@ -574,6 +601,8 @@ class SidecarEngine(OCREngine):
                 options={},
                 cancel=cancel,
             )
+            # 내용은 정상 처리됐다 — 경위는 참고로만 남긴다(경고면 잡이 degraded가 된다)
+            self._notice(_RECOVERED_NOTICE)
         self._refresh_degraded_health()
         return sanitize_page(resp.page)
 
@@ -674,7 +703,8 @@ class SidecarEngine(OCREngine):
         if self.loaded:
             self._check_ready()  # 캐시 히트 — 이상 신고만 이 잡에 올린다
             return
-        self._await_recovery(cancel)
+        if self._await_recovery(cancel):
+            self._notice(_RESUMED_NOTICE)
 
     def _run_pages(
         self,

@@ -1232,8 +1232,8 @@ auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은
 | `TRANSLATE_TEMPERATURE` | `0` | `none`이면 temperature 파라미터 자체 생략 |
 | `TRANSLATE_MAX_TOKENS_PARAM` | `max_tokens` | `max_tokens`\|`max_completion_tokens`\|`none` — `none`은 잘림 2배 재시도를 끄고 경고를 남긴다(mlx_lm은 `max_tokens`가 없으면 512토큰에서 자른다) |
 | `TRANSLATE_STREAM` | `auto` | `auto`\|`1`\|`0` — auto는 chat 모드에서 SSE 스트리밍. 서버가 첫 스트리밍 요청을 400/415/422로 거부하면 비스트리밍으로 바꿔 고정한다. 스트리밍 중 취소는 소켓을 끊어 서버 생성까지 멈춘다 |
-| `TRANSLATE_MAX_RESPONSE_MB` | `32` | 번역 응답 본문 상한(MB, 1–1024) — 선언된 Content-Length와 실제로 읽은 바이트(비스트리밍 본문·SSE 스트림 모두)를 센다 |
-| `TRANSLATE_REASONING_STYLE` | `auto` | `TRANSLATE_REASONING`을 보낼 필드: `auto`\|`openrouter`\|`chat_template_kwargs`\|`reasoning_effort`\|`none`. auto는 base URL로 고른다 — 루프백·사설망·`host.docker.internal`·`*.local`·단일 라벨 호스트 → `chat_template_kwargs`(`enable_thinking`), `openrouter.ai` → `openrouter`(`reasoning.enabled/effort`), `api.openai.com` → `reasoning_effort`(off=`none`), 그 밖 공개 호스트 → `openrouter`(종전) (§13) |
+| `TRANSLATE_MAX_RESPONSE_MB` | `32` | 번역 응답 본문 상한(MB, 1–1024) — 선언된 Content-Length와 실제로 읽은 바이트(비스트리밍 본문·SSE 스트림 모두)를 센다. 64KB 조각마다 점진 적용(압축은 풀린 크기); 잘림 뒤 2배 재시도의 상한 초과는 잡 오류가 아니라 유닛 단위 잘림 |
+| `TRANSLATE_REASONING_STYLE` | `auto` | `TRANSLATE_REASONING`을 보낼 필드: `auto`\|`openrouter`\|`chat_template_kwargs`\|`reasoning_effort`\|`none`. auto는 base URL로 고른다 — 루프백·사설 IP·단일 라벨·`localhost`·`*.localhost`·`*.local`·`*.lan`·`*.home.arpa`·`*.internal`(`host.docker.internal`·`host.containers.internal` 포함) → `chat_template_kwargs`(`enable_thinking`), `openrouter.ai` → `openrouter`(`reasoning.enabled/effort`), `api.openai.com`·`*.api.openai.com` → `reasoning_effort`(off=`none`), 그 밖 공개 호스트 → `openrouter`(종전) (§13) |
 | `TRANSLATE_EXTRA_BODY` | (빈 값) | 모든 번역 요청 본문에 병합할 JSON 객체(4,096자 이하, 객체 값은 한 단계 병합). `model`·`messages`·`input`·`instructions`·`stream`·`stream_options`·`n`·`max_tokens`·`max_completion_tokens`·`max_output_tokens`·`store`는 덮어쓸 수 없다 |
 | `OCR_CUDA_GRAPHS` | (CUDA on) | 디코드 스텝 CUDA Graph 캡처·리플레이 — 커널 launch 갭 제거. `0`으로 비활성. 실측(8p): 191s→57s, sm 33%→98% |
 | `TRANSLATE_REASONING` | (미전송) | reasoning 모델 제어: `off`\|`low`\|`medium`\|`high`\|`xhigh`(`max` 없음 — Q&A의 `LLM_REASONING_EFFORT`와 다르다). 전달 필드는 `TRANSLATE_REASONING_STYLE`. reasoning 모델은 `off` 권장 — 실측 유닛당 37s→1.7s, 출력 토큰 ~1/40. effort별 요청 max_tokens: 8192/10240/20480/40960/81920 (미설정=8192) |
@@ -1636,6 +1636,9 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
   `OPENAI_BASE_URL=…/v1?fault=echo` 형태로 쓴다 — `client._endpoint_url()`이 base의
   query를 보존하므로 실제로 도달한다. 하네스는 `drop_placeholder`를 **쿼리 경로로**
   주입해 두 방식이 모두 살아 있음을 매 실행 증명한다(문서만의 주장이 되지 않게).
+  쿼리 전용 노브 `?transfer=chunked`는 vLLM·llama.cpp·LM Studio처럼 HTTP/1.1 keep-alive
+  `Transfer-Encoding: chunked` SSE로 답한다(기본은 mlx_lm.server처럼 길이 없는
+  `Connection: close`). `/__stats`의 `connections`가 POST를 보낸 서로 다른 TCP 연결 수를 센다(연결 재사용 확인).
   ⚠ 목의 플레이스홀더 정규식 접두 집합은 `masking.py`와 반드시 같아야 한다
   (`[mkgucft]`). 예전에는 `<m…>`(수식)만 봐서 수식이 없는 문서에서
   `drop_placeholder`가 완전 no-op이었다(실측: 논문 6페이지 = c 23·f 5·u 4·m 0).
@@ -1753,7 +1756,9 @@ OCR로 얻은 **데이터 레이어**(`result.md` + `layout.json`)를 OpenAI 호
          (`TRANSLATE_GLOBAL_CONCURRENCY`로 1–8 조정)
        - 같은 cache key는 single-flight로 결과·오류를 공유해 중복 과금/재시도를 차단
        - auto 모드의 Responses→Chat capability probe도 동시 최초 호출끼리는 single-flight.
-         초기 협상이 일시 오류로 실패하면 후속 순차 호출은 재협상 가능
+         초기 협상이 일시 오류로 실패하면 후속 순차 호출은 재협상 가능. owner 유닛 고유의
+         거부(400·413·422·빈 출력·잘림·시간 초과)는 대기자에게 복제하지 않고, 대기자는 각자
+         자기 요청으로 협상한다(연결·인증·5xx 같은 전역 원인만 공유)
        - `title` 유닛은 의미·정보량을 유지하고 UI 라벨식 축약을 금지한다
        - 출력 측 검증 게이트(_accepted)를 통과한 유닛만 채택·캐시된다 (§13.4)
     3. 플레이스홀더 복원 → **유닛 단위 정렬**: layout 블록 번역으로 완전히 덮이는 md 유닛은
@@ -1927,6 +1932,9 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   ∥ 원문 전체 ∥ 블록 종류 ∥ 직전 문맥 ∥ temperature ∥ reasoning [∥ request_variant])`.
   `request_variant`(reasoning 전달 방식·`TRANSLATE_EXTRA_BODY`)는 요청 모양이 종전과 다를 때만
   넣는다 — 종전과 같은 요청이면 키가 그대로라 기존 `units.json`이 계속 적중한다.
+  `TRANSLATE_EXTRA_BODY`는 원문 JSON이 아니라 정규화한 값의 다이제스트
+  `extra_body=sha256:<앞 16자리>`로만 싣는다 — `request_variant`는 인증 없는
+  `/translate/state`가 내주는 state.json에 남기 때문이다.
   모델·프롬프트 버전·해당 유닛 용어집·원문·제목/본문 정책·샘플링 설정이 바뀌면
   영향받는 유닛만 자동 재번역된다. 짧은 placeholder 미리보기 충돌도 원문 전체로 분리하고,
   같은 문장도 직전 문맥이 다르면 별도 번역한다. `TRANSLATE_REASONING`을 off→high로
@@ -1943,7 +1951,12 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   값 초과)·`TRANSLATE_MAX_TOKENS_PARAM=none`(경고 로그)은 2배 재시도를 하지 않는다. 빈 출력은
   `TranslateEmptyOutput`, 읽기 타임아웃(1회 재시도 뒤)은 `TranslateTimeout` — 셋 다
   `TranslateUnitRejected` 하위라 유닛 단위로 분할 래더를 타고, 끝내 실패하면 `truncated`·
-  `empty-output`·`timeout` 사유로 원문을 두며 **캐시하지 않는다**. 첫 성공 전에 잘린 유닛이
+  `empty-output`·`timeout` 사유로 원문을 두며 **캐시하지 않는다**. 단 마지막 API 성공 이후 최초
+  패스가 시간 초과로 끝난 유닛이 max(2, `TRANSLATE_CONCURRENCY`)개에 닿으면 엔드포인트가 멈춘
+  것으로 보고 `번역 API가 응답하지 않습니다` 오류로 잡을 실패시킨다(API 성공 한 번이면 집계가
+  0으로 돌아간다). 유닛 하나가 반쪽까지 멈추는 것은 그 유닛만 timeout 사유로 원문 유지한다.
+  2배 재시도의 응답이 `TRANSLATE_MAX_RESPONSE_MB`를 넘으면 잡 오류가 아니라 그 유닛의 잘림이다
+  (첫 시도의 상한 초과는 여전히 잡 오류 — 게이트웨이 보호). 첫 성공 전에 잘린 유닛이
   나오면(콜드 실행) 잡은 thinking을 끄라는 안내와 함께 실패한다(로컬 서버면 `--chat-template-args`
   ·모델별 설정까지 안내). repair(태그만 바로잡기) 패스는 태그가 빠지거나 겹쳤고 출력이 루프도
   과다 길이도 아닐 때만 돈다.
@@ -1954,6 +1967,17 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   그 클라이언트에서 고정한다. 응답 본문은 `TRANSLATE_MAX_RESPONSE_MB`로 묶는다(선언 길이와 실제
   바이트 모두 — 끝나지 않는 SSE 한 줄도). 헤더는 대소문자를 가리지 않는다(mlx_lm은
   `Content-type`을 보낸다).
+  - 본문은 비스트리밍·SSE 모두 64KB 고정 조각으로 읽고 SSE도 선언된 Content-Length를 먼저 본다
+    — 길이 없는 HTTP/1.0 스트림(mlx_lm.server)·거대 청크·gzip 응답에도 상한이 점진적으로
+    걸린다. SSE 줄 분할은 받은 바이트에 선형이다.
+  - `[DONE]` 뒤 길이가 정해진 keep-alive 응답(chunked·Content-Length, `Connection: close` 아님)은
+    종료 표시를 1초·64KB 안에서 읽어 연결을 풀에 돌려준다(못 읽으면 종전처럼 닫는다).
+  - 스트림 중간 `{"error": …}` 이벤트와 `finish_reason: "error"`는 상태코드 정책을 따른다 —
+    5xx·408·429·코드 없음은 5xx처럼 백오프 재시도, 400·413·422 또는 invalid_request·
+    context_length 유형은 유닛 거부, 401·403은 인증 오류. 부분 출력은 번역문으로 쓰지 않는다.
+  - 연결 실패 문구는 원인 요약만 담고(`번역 API 연결 실패(연결 거부) — OPENAI_BASE_URL과 …`)
+    URL·호스트·쿼리는 쿼리를 가린 서버 로그에만 남긴다. 엔진이 쓰는 state.json `error`는
+    500자 상한이다.
 - **Responses `store:false`**: 번역의 Responses 요청도 `store:false`를 싣는다. 서버가 `store`를
   이유로 400/422를 내면 한 번 빼고 다시 보내 그 클라이언트에서 고정하고 경고를 남긴다.
 - **think 정리**: 마지막 `</think>` 뒤만 남긴다(여는 태그가 없어도). 닫히지 않은 선행
@@ -2140,7 +2164,10 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
   쓰지 않고, 남아 있는 옛 파일은 사용 가능 판정에서 무시된다.
 - **번역 캐시**: `PROMPT_V`는 그대로라 전량 재번역은 없다. 캐시 키에 `request_variant`가 들어가는
   것은 reasoning 전달 방식이나 `TRANSLATE_EXTRA_BODY`가 종전과 다를 때뿐이다(로컬 서버에
-  reasoning을 설정한 잡은 의도대로 다시 번역된다). 마스킹 규칙·용어집 첫 등장 계산이 바뀐 일부
+  reasoning을 설정한 잡은 의도대로 다시 번역된다). `TRANSLATE_EXTRA_BODY`를 쓴 잡은 키 재료가
+  원문에서 다이제스트로 바뀌어 한 번 다시 번역되고, `*.api.openai.com`이나 `*.localhost`·
+  `*.lan`·`*.home.arpa`·`*.internal` 호스트 뒤에서 `TRANSLATE_REASONING`을 설정한 잡도 auto
+  전달 방식 판정이 바뀌어 한 번 다시 번역된다. 마스킹 규칙·용어집 첫 등장 계산이 바뀐 일부
   유닛과, 예전 코드가 캐시했지만 지금 게이트를 통과하지 못하는 출력(`cache_rejected`)은 다시
   번역된다. `result.ko.md`는 부분만 덮이던 유닛이 이제 자기 번역을 써서 내용이 달라질 수 있다.
 - **디바이스 기본값**: 로컬(uv) 실행의 `OCR_DEVICE` 기본이 `auto`다 — Apple Silicon은 MLX(없으면
@@ -2211,7 +2238,7 @@ httpx만 사용하는 자립 모듈(app.* 임포트 없음, lazy import 원칙�
 | `openai-responses` | `{LLM_OPENAI_BASE_URL}/responses` | thinking이고 effort≠`default`일 때만 중첩 `reasoning {effort, summary}` |
 | `openai-chat` | `{LLM_OPENAI_BASE_URL}/chat/completions` | 최상위 `reasoning_effort` + system 프롬프트는 role `developer` (중첩 reasoning 객체 금지) |
 | `ollama` | `{OLLAMA_BASE_URL}/api/chat` | `think` 매핑: thinking=False→`false`, effort∈{low,medium,high}→effort, 그 외 `true` |
-| `local-openai` | `{LLM_LOCAL_OPENAI_BASE_URL}/chat/completions` | `chat_template_kwargs.enable_thinking`(+ thinking이면 `reasoning_effort`), role `system`, `max_tokens` 8192. think 태그·reasoning 필드는 버린다 |
+| `local-openai` | `{LLM_LOCAL_OPENAI_BASE_URL}/chat/completions` | `chat_template_kwargs.enable_thinking`(+ thinking이면 `reasoning_effort`), role `system`, `max_tokens` 8192. think 태그·reasoning 필드는 버린다. `finish_reason=length`면 잘린 답·원시 사고를 돌려주지 않고 503(`answer was cut off at max_tokens` — thinking 끄기 안내) |
 
 `local-openai`(`LocalOpenAIClient`)는 oMLX·LM Studio·mlx_lm.server 같은 **로컬** OpenAI 호환
 서버용이다. `LLM_LOCAL_OPENAI_BASE_URL`을 설정해야 구성되고(그때 `LLM_LOCAL_OPENAI_MODEL` 필수),
@@ -2221,7 +2248,7 @@ httpx만 사용하는 자립 모듈(app.* 임포트 없음, lazy import 원칙�
 `LlmRouter.configured(provider)`를 따르고, `GenerationResult.remote`는 공급자 집합으로 정한다.
 프런트는 공급자를 늘 명시해 보내므로 `POST /qa`가 `local-openai`를 받는다. 서버가 꺼져 있으면
 UI가 서버(oMLX·LM Studio·mlx_lm.server)를 켜고 `LLM_LOCAL_OPENAI_BASE_URL`·
-`LLM_LOCAL_OPENAI_MODEL`을 확인하라고 안내한다.
+`LLM_LOCAL_OPENAI_MODEL`을 확인하라고 안내한다 — 오류 문구는 URL이 아니라 설정 이름을 적는다.
 
 ### 17.2 REST 계약 (Q&A)
 

@@ -201,6 +201,23 @@ class PdfWorkerCrashed(PdfWorkerError):
         return (type(self), (self.exitcode,))
 
 
+class PdfWorkerUnavailable(PdfWorkerError):
+    """빈 작업(자체 점검)조차 워커가 끝내지 못한다 — 입력 PDF가 아니라 서버 환경 문제다.
+
+    예: x86_64 이미지를 에뮬레이션(Rosetta)으로 돌리며 PDF_WORKER_MEM_LIMIT_MB를 건 경우 —
+    RLIMIT_AS가 에뮬레이터의 큰 가상 메모리 예약까지 세어 워커가 기동 직후 죽었다(P4 재현).
+    그때 업로드 검증이 모든 PDF를 '손상된 PDF'(400)로 돌려보내 원인을 사용자 파일에 돌렸다."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "PDF 처리 프로세스를 시작할 수 없습니다 — 서버 설정 문제입니다"
+            "(PDF_WORKER_MEM_LIMIT_MB·컨테이너 메모리·에뮬레이션 등). 관리자에게 문의하세요"
+        )
+
+    def __reduce__(self):
+        return (type(self), ())
+
+
 class PdfWorkerCanceled(PdfWorkerError):
     """취소 콜백이 참이 되어 진행 중이던 작업의 워커를 종료했다."""
 
@@ -1140,6 +1157,44 @@ def run(
     return get_pool(pool or current_pool()).run(
         target, args, kwargs, timeout=timeout, cancel=cancel, wait=wait,
     )
+
+
+def _selftest_task() -> bool:
+    """(워커) 자체 점검 — PyMuPDF를 올리고 빈 문서를 하나 만들어 본다(입력 파일 없음)."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    try:
+        doc.new_page()
+        return bool(doc.tobytes())
+    finally:
+        doc.close()
+
+
+# 자체 점검 한 번의 상한 — 워커 기동(spawn·임포트) 몇 초면 끝난다
+_SELFTEST_TIMEOUT_S = 60.0
+_SELFTEST_WAIT_S = 5.0
+
+
+def workers_can_start(pool: str) -> bool:
+    """이 풀의 워커가 빈 작업을 끝낼 수 있는가 — 작업 중 워커가 죽었을 때 원인을 가른다.
+
+    자체 점검까지 비정상 종료하면 입력이 아니라 환경(메모리 상한·에뮬레이션·누락 라이브러리)
+    탓이다. 바쁨·시간 초과 등 다른 실패는 판단할 수 없으므로 환경을 탓하지 않는다(True)."""
+    try:
+        return bool(run(
+            "app.pipeline.pdf_worker:_selftest_task", pool=pool,
+            timeout=_SELFTEST_TIMEOUT_S, wait=_SELFTEST_WAIT_S,
+        ))
+    except PdfWorkerCrashed:
+        logger.error(
+            "PDF 워커(%s 풀)가 자체 점검 작업에서도 비정상 종료했습니다 — PDF 탓이 아니라 서버 "
+            "환경 문제입니다(PDF_WORKER_MEM_LIMIT_MB를 x86_64 에뮬레이션에서 걸었는지, 컨테이너 "
+            "메모리·라이브러리를 확인하세요)", pool,
+        )
+        return False
+    except Exception:  # noqa: BLE001 — 바쁨·시간 초과는 환경 문제의 증거가 아니다
+        return True
 
 
 # ── 페이지 격리 메모 ───────────────────────────────────────────────────────

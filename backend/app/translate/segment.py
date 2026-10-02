@@ -120,6 +120,19 @@ def _sanitize_unit(text: str) -> str:
     return "\n".join(lines)
 
 
+def _trailing_blank_lines(lines: list[str], start: int, end: int) -> int:
+    """[start, end) 줄 범위 끝에 붙은 빈 줄 수 — 번역문으로 바꿀 때 그대로 되살린다.
+
+    markdown-it은 목록(bullet·ordered) 토큰의 줄 범위에 뒤따르는 빈 줄까지 넣는다. 번역문은
+    _sanitize_unit이 앞뒤 빈 줄을 걷어내므로, 범위를 통째로 바꾸면 목록과 다음 블록을 가르는
+    빈 줄이 사라져 다음 문단이 마지막 목록 항목(lazy continuation)으로 흡수됐다(fresh-user-1).
+    유닛 src·캐시 키는 그대로 두고 조립에서만 원문의 빈 줄을 보존한다."""
+    count = 0
+    while end - count > start + 1 and not lines[end - count - 1].strip():
+        count += 1
+    return count
+
+
 def assemble_markdown(md_text: str, page_separator: str, translations: dict[str, str]) -> str:
     """원문에서 유닛 줄 범위만 번역문으로 교체(페이지별 뒤→앞), 나머지 보존.
 
@@ -138,7 +151,9 @@ def assemble_markdown(md_text: str, page_separator: str, translations: dict[str,
             new_text = _sanitize_unit(translations[uid])
             if page_separator and page_separator in new_text:
                 continue  # 유닛 단위 선방어 — 구분자 유발 유닛은 원문 유지
-            lines[b["s"]:b["e"]] = new_text.split("\n")
+            lines[b["s"]:b["e"]] = new_text.split("\n") + [""] * _trailing_blank_lines(
+                lines, b["s"], b["e"],
+            )
         out_pages.append("\n".join(lines))
     result = page_separator.join(out_pages)
     if len(result.split(page_separator)) != len(pages):

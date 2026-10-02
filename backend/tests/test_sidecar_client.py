@@ -1,6 +1,7 @@
 """SidecarClient 테스트 — 실제 sidecar 없이 stub HTTP 서버로 검증."""
 
 import json
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -51,10 +52,38 @@ def _parse_body(**over) -> dict:
     return body
 
 
+class _StubServer(ThreadingHTTPServer):
+    """요청 처리 스레드를 기억해 close()가 기다릴 수 있게 하고, 클라이언트가 먼저 끊은 연결의
+    쓰기 실패는 조용히 넘긴다. 예전에는 시간 초과·취소 테스트의 느린 처리 스레드가 테스트가 끝난
+    뒤에도 잠들어 있다가, 이미 닫힌 소켓에 쓰며 socketserver가 'Exception occurred during
+    processing of request' 배너와 traceback을 pytest 캡처 밖(다른 테스트 출력 사이)에 찍었다
+    (P4 macOS 스위트 6회 중 2회)."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.handler_threads: list[threading.Thread] = []
+
+    def process_request(self, request, client_address):
+        thread = threading.Thread(
+            target=self.process_request_thread, args=(request, client_address), daemon=True,
+        )
+        self.handler_threads.append(thread)
+        thread.start()
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return  # 클라이언트가 먼저 끊었다(시간 초과·취소 시나리오) — 정상
+        super().handle_error(request, client_address)
+
+
 class StubSidecar:
-    """시나리오 주입형 stub — behavior 콜러블이 (status, bytes) 또는 지연을 결정."""
+    """시나리오 주입형 stub — behavior 콜러블이 (status, bytes) 또는 지연을 결정.
+
+    느린 시나리오는 time.sleep 대신 closing.wait(초)로 기다린다 — close()가 깨워 처리 스레드가
+    테스트 안에서 끝난다."""
 
     def __init__(self):
+        self.closing = threading.Event()
         self.health_response = _health_body()
         self.parse_behavior = lambda: (200, json.dumps(_parse_body()).encode())
         self.requests_seen = []
@@ -89,14 +118,17 @@ class StubSidecar:
                 except BrokenPipeError:  # 취소 테스트에서 클라이언트가 먼저 끊음
                     pass
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = _StubServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
 
     def close(self):
+        self.closing.set()  # 느린 시나리오를 깨운다
         self.server.shutdown()
         self.server.server_close()
+        for thread in self.server.handler_threads:
+            thread.join(timeout=5)
 
 
 @pytest.fixture
@@ -185,7 +217,7 @@ def test_parse_oversized_response(stub, image_path):
 
 def test_parse_read_timeout(stub, image_path):
     def slow():
-        time.sleep(3.0)
+        stub.closing.wait(3.0)
         return (200, json.dumps(_parse_body()).encode())
 
     stub.parse_behavior = slow
@@ -202,7 +234,7 @@ def test_parse_connection_refused_retries_then_unavailable(image_path):
 
 def test_cancel_mid_request_closes_connection(stub, image_path):
     def very_slow():
-        time.sleep(10.0)
+        stub.closing.wait(10.0)
         return (200, json.dumps(_parse_body()).encode())
 
     stub.parse_behavior = very_slow
@@ -305,3 +337,24 @@ def test_read_timeout_is_marked_no_same_page_retry():
 
     assert SidecarTimeoutError("x").retry_same_page is False
     assert getattr(SidecarUnavailableError("x"), "retry_same_page", True) is True
+
+
+def test_stub_close_leaves_no_handler_thread_or_stray_traceback(image_path, capfd):
+    """시간 초과로 클라이언트가 떠난 느린 처리 스레드도 close() 안에서 끝나고, 닫힌 소켓에 쓰는
+    실패가 socketserver 배너로 새지 않는다 — 다음 테스트 출력에 섞이던 소음의 회귀 방지."""
+    stub = StubSidecar()
+    try:
+        def slow():
+            stub.closing.wait(3.0)
+            return (200, json.dumps(_parse_body()).encode())
+
+        stub.parse_behavior = slow
+        with pytest.raises(SidecarUnavailableError, match="응답 시간 초과"):
+            _client(stub.url, read_timeout_s=0.3).parse_page(image_path, 0, "r", {}, None)
+    finally:
+        started = time.monotonic()
+        stub.close()
+    assert time.monotonic() - started < 2.0                 # 3초를 다 기다리지 않는다
+    assert stub.server.handler_threads
+    assert not any(thread.is_alive() for thread in stub.server.handler_threads)
+    assert "Exception occurred during processing of request" not in capfd.readouterr().err

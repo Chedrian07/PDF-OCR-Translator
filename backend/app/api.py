@@ -2370,9 +2370,16 @@ async def job_qa(request: Request, job_id: str, body: AskRequest) -> dict:
         raise HTTPException(_llm_error_status(str(e)), str(e)) from e
     finally:
         guard.release()
-    # Localight /ask 응답 형태 그대로
+    # 답변은 마크다운·TeX로 온다(로컬 모델: '**TURBOQUANT**'·'$$D_{\mathrm{mse}}(Q) := …$$') —
+    # 질문 탭이 글자 그대로 보여 줬다. /html·/render-preview와 같은 안전 렌더러(텍스트 이스케이프,
+    # 이미지는 잡 파일만)로 만든 조각을 함께 준다. answer(원문)는 그대로다.
+    answer_html = await anyio.to_thread.run_sync(
+        render_markdown_html, str(result.content or ""), f"/api/jobs/{job_id}/files",
+    )
+    # Localight /ask 응답 형태 그대로(+ answer_html)
     return {
         "answer": result.content,
+        "answer_html": answer_html,
         "provider": result.provider,
         "model": result.model,
         "page": page,

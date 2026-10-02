@@ -277,6 +277,8 @@ class SecurityHeadersMiddleware:
     """응답 헤더 정책 — 순수 ASGI라 SSE·파일 스트리밍을 버퍼링하지 않는다.
 
     - HTML 응답: Content-Security-Policy(위 설명) + Referrer-Policy.
+    - 모든 응답: X-Content-Type-Options: nosniff — 브라우저가 명시한 Content-Type 밖으로
+      내용을 추측해 해석하지 않게 한다(스크립트·스타일은 맞는 MIME일 때만 실행·적용).
     - 정적 프런트엔드(/api 밖): Cache-Control: no-cache. 예전에는 Cache-Control 없이
       Last-Modified만 나가 브라우저가 휴리스틱 신선도로 ES 모듈을 파일마다 다른 시점에
       재검증 없이 재사용했다 — 업그레이드 뒤 새 reader.js가 옛 viewer.js에서 새 export를
@@ -308,6 +310,8 @@ class SecurityHeadersMiddleware:
                         headers["Referrer-Policy"] = _REFERRER_POLICY
                 if not is_api and "cache-control" not in headers:
                     headers["Cache-Control"] = "no-cache"
+                if "x-content-type-options" not in headers:
+                    headers["X-Content-Type-Options"] = "nosniff"
             await send(message)
 
         await self.app(scope, receive, send_with_headers)

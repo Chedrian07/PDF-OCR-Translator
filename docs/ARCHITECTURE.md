@@ -1890,6 +1890,12 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   래더 왕복 비용만 태우고 있다는 신호다(임계값 회귀 감시 지표).
 - `cache_prior > 0`인데 `cache_reused == 0`이면 `PROMPT_V`·모델·샘플링 변경으로 캐시가
   전량 무효화돼 유료 API 전량 재호출이 일어난 것이다 — 같은 내용이 `warnings`에도 남는다(§15.1).
+- `reference_rule`(`{md_only, layout_only, sample_units}`)은 같은 원문 줄이 result.{lang}.md와
+  PDF 중 **한쪽에서만** 참고문헌으로 원문 유지되는 블록 수다. 실제 판정으로 센다 — md 쪽은
+  유닛의 실제 건너뜀 사유(heading 스윕 또는 `should_skip` 내용 판정)와, layout 줄에 전부 덮여
+  layout 번역·보존을 그대로 받는 md 유닛(deferred)은 갈라질 수 없으므로 빼고 센다. 예전에는
+  heading 표시만 봐서 제목 표기(#) 없는 Unlimited-OCR result.md마다 두 산출물이 같아도
+  "참고문헌 규칙 불일치" 경고가 났다(실측 25쪽 논문: layout만 유지 66건, 실제 차이 0).
 
 ### 13.3 REST / SSE 계약 (번역)
 

@@ -333,9 +333,59 @@ def test_tall_narrow_scan_stamp_is_kept_as_vertical_text(tmp_path):
     result = build_translated_pdf(job_dir, "ko")
     assert result.kept_reasons.get("vertical") == 1, result.report()
     assert result.raster_blocks_erased == 1, result.report()   # 본문 블록만 덮었다
+    # 모양으로만 추정한 세로쓰기라 번역이 빠진 이유를 리포트에 남긴다.
+    assert any("세로쓰기" in warning for warning in result.warnings), result.warnings
     with fitz.open(job_dir / "source.pdf") as source:
         left, before = _ink_beyond_translation(source[0], result.path, stamp_rect)
     assert before > 100 and left >= before * 0.9, (left, before)   # 스탬프 픽셀은 그대로
+
+
+@pytest.mark.parametrize("joiner", ["\n", " "])
+def test_narrow_multi_line_scan_column_is_not_taken_for_vertical_text(tmp_path, joiner):
+    """좁고 긴 가로쓰기 단(신문 단)은 세로쓰기가 아니다 — 덮고 번역한다.
+
+    예전에는 종횡비(6 이상)만 봐서 74×574pt 단의 57줄 본문을 세로쓰기로 보존해 번역이
+    경고 없이 통째로 빠졌다(감사 pdf-4). OCR이 단을 한 문단(줄바꿈 없음)으로 내도 글자
+    수가 세로 한 줄에 들어갈 양의 수십 배라 세로쓰기가 아니다.
+    """
+    job_dir = tmp_path / f"scan-narrow-{joiner == ' '}"
+    job_dir.mkdir()
+    scale = SCAN_DPI / 72
+    font = _font(8 * scale)
+    words = (
+        "City council approved the new budget on Monday after a long debate about "
+        "public transit, school funding and road repairs. "
+    ).split() * 8
+    lines: list[str] = []
+    for word in words:                       # 단 폭(70pt)에 맞춰 실제 글꼴 폭으로 줄바꿈
+        candidate = f"{lines[-1]} {word}" if lines else word
+        if lines and font.getlength(candidate) <= 70 * scale:
+            lines[-1] = candidate
+        else:
+            lines.append(word)
+    image = Image.new("RGB", (int(PAGE_W * scale), int(PAGE_H * scale)), PAPER)
+    draw = ImageDraw.Draw(image)
+    for index, line in enumerate(lines):
+        draw.text((40 * scale, (60 + index * 10) * scale), line, fill=INK, font=font)
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    page.insert_image(page.rect, stream=buffer.getvalue())
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+    column = fitz.Rect(38, 58, 112, 60 + len(lines) * 10 + 2)
+    assert column.height / column.width >= 6          # 종횡비만으로는 세로쓰기 후보다
+    _write_layout(job_dir, [
+        {"type": "text", "bbox": _bbox(column), "content": joiner.join(lines)},
+    ], {0: "시의회는 대중교통, 학교 재정, 도로 보수를 둘러싼 긴 논쟁 끝에 월요일 새 예산을 승인했다. " * 6})
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    assert "vertical" not in result.kept_reasons, result.report()
+    assert result.replaced == 1, result.report()
+    assert result.raster_blocks_erased == 1, result.report()
+    assert not any("세로쓰기" in warning for warning in result.warnings), result.warnings
 
 
 # ── 스캔 표: 픽셀로 찾은 실제 열·행 경계 ─────────────────────────────────────

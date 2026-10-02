@@ -499,7 +499,7 @@ class Settings:
     native_text_threshold: int = 120        # auto 추출이 텍스트 레이어를 신뢰할 최소 영숫자 수 (0 이상)
     ollama_base_url: str = "http://127.0.0.1:11434"  # local_url 검증 — 온디바이스 allowlist 전용
     ollama_model: str = "qwen3:8b"          # 기본 로컬 Ollama 모델
-    llm_provider: str = "openai-responses"  # openai-responses | openai-chat | ollama
+    llm_provider: str = "openai-responses"  # openai-responses | openai-chat | ollama | local-openai
     llm_reasoning_effort: str = "low"       # default|none|minimal|low|medium|high|xhigh|max
     llm_openai_base_url: str = "https://api.openai.com/v1"  # openai_url 검증 — 공식 호스트 고정
     llm_openai_responses_models: tuple[str, ...] = ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol")

@@ -78,8 +78,10 @@ _APP_ENV_KEYS = frozenset("""
 """.split())
 # docker compose가 같은 .env에서 읽는 배포 키 (sidecar 이미지 설정·메모리 상한·바인딩).
 # 오버레이(compose.ollama.yaml)의 ${…}도 포함한다 — 그 주석이 '.env로 올릴 것'이라 안내한다.
+# HF_HUB_CACHE·HF_HUB_OFFLINE은 .env.example이 로컬 실행용으로 안내하는 허브 캐시 키다(앱이 아니라
+# huggingface_hub가 읽는다 — HF_TOKEN과 같은 처지).
 _DEPLOY_ENV_KEYS = frozenset("""
-    BIND_HOST GPU_DEVICE HF_TOKEN CUDA_LAUNCH_BLOCKING
+    BIND_HOST GPU_DEVICE HF_TOKEN HF_HUB_CACHE HF_HUB_OFFLINE CUDA_LAUNCH_BLOCKING
     OCR_CPU_MEM_LIMIT OCR_CUDA_MEM_LIMIT OCR_WEB_MEM_LIMIT OVIS_MEM_LIMIT PADDLE_MEM_LIMIT
     OLLAMA_MEM_LIMIT
     OVIS_MODEL_ID OVIS_MODEL_REVISION OVIS_DTYPE OVIS_GPU_MEMORY_UTILIZATION OVIS_MAX_MODEL_LEN

@@ -538,8 +538,12 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
             owner_lock.release()
             _skip_native_teardown_if_inferring(shutdown.signum, worker, preload)
 
+    # 자동 API 문서(/docs·/redoc)는 끈다 — 두 페이지는 CDN(cdn.jsdelivr.net) 스크립트와 인라인
+    # 초기화 스크립트로 그려지는데 HTML CSP(script-src 'self')가 막아 빈 페이지만 떴다. CDN 스크립트를
+    # 앱 출처에서 돌리도록 정책을 풀지 않는다(인증 없는 자체 호스팅 앱). 스키마는 /openapi.json에 남는다.
     app = FastAPI(
         title="Unlimited-OCR — PDF → Markdown", version=__version__, lifespan=lifespan,
+        docs_url=None, redoc_url=None,
     )
     frontend = settings.resolve_frontend_dir()
     # HTML 응답 CSP·Referrer-Policy와 정적 파일 재검증 정책 — 가장 안쪽 미들웨어.

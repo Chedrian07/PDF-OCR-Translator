@@ -216,10 +216,14 @@ def test_잡_예외에도_워커가_살아남아_다음_잡을_처리한다(tmp_
         assert good.status == "done"  # 워커가 살아남아 다음 잡을 처리했다
         assert worker.is_alive()
         assert bad.status == "error"  # 실패한 잡은 터미널로 마감(running 고착 없음)
-        assert cancel_events == {}  # finally에서 모든 경로의 Event가 정리된다
     finally:
         worker.stop()
         worker.join(timeout=5.0)
+    # finally에서 모든 경로의 Event가 정리된다 — 워커가 끝난 뒤에 본다. 잡 상태가 done이 된
+    # 순간과 워커 finally의 정리 사이에 틈이 있어, 바로 보면 느린 러너(x86_64 에뮬레이션 +
+    # 커버리지)에서 간헐 실패했다(P4 Linux 재현).
+    assert not worker.is_alive()
+    assert cancel_events == {}
 
 
 def test_queued_cancellation_publishes_terminal_sse_event(tmp_path):

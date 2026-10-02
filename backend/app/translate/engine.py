@@ -172,6 +172,9 @@ def _source_signature(src: str) -> str:
 # 않고 다시 판정한다(성공하면 지운다). 내용은 실패 사유(문서 원문은 담지 않는다).
 GLOSSARY_RETRY_MARK = "glossary.incomplete"
 
+# state.json error 문구 상한(자) — api.py _record_translate_failure와 같은 값.
+_STATE_ERROR_MAX = 500
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -315,7 +318,8 @@ class _TranslationRun:
                 "status": status,
                 "current": current,
                 "total": total_,
-                "error": error,
+                # 무인증 /translate/state로 그대로 나간다 — api.py 실패 기록과 같은 상한
+                "error": error[:_STATE_ERROR_MAX] if error else error,
                 "model": cfg.model,
                 "api_mode": mode,
                 "prompt_v": PROMPT_V,

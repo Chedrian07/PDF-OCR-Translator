@@ -76,6 +76,10 @@ _LATEX_COMMANDS = {
     "equiv": "≡", "ll": "≪", "gg": "≫", "cong": "≅", "simeq": "≃",
     "angle": "∠", "perp": "⊥", "bot": "⊥", "therefore": "∴", "because": "∵",
     "triangle": "△", "colon": ":", "ast": "*",
+    # 내적·쌍 괄호(`\langle y, x \rangle`). 예전에는 'langle y, xrangle'처럼 이름이 그대로
+    # 샜다(실서버 25쪽 논문: 번역 블록 44개). ⟨⟩가 없는 macOS 명조·고딕은 조판 직전에
+    # KS X 1001의 〈〉로 낮춘다(_PORTABLE_SYMBOL_FALLBACKS).
+    "langle": "⟨", "rangle": "⟩",
     # 전치 기호 `W^\top`은 'W^T'가 논문 독자에게 가장 익숙한 평문이다.
     "top": "T", "intercal": "T",
     # 크기·스타일 지정은 평문에서 의미가 없다.
@@ -120,6 +124,9 @@ _PORTABLE_SYMBOL_FALLBACKS = {
     # \uc774 \uae00\ub9ac\ud504\uac00 \uc5c6\uc5b4 `\( \sim \) 8M\uac1c\uc758 \ud1a0\ud070`\uc774 \uc2e4\uc81c \uc0b0\ucd9c\ubb3c\uc5d0\uc11c tofu\ub85c \ub098\uc654\ub2e4
     # (\uc2e4\uce21: j_afea33c8b77a p4). ASCII \ubb3c\uacb0\ud45c\uac00 \ub73b\ub3c4 \ud1b5\ud558\uace0 \uac80\uc0c9\ub3c4 \ub41c\ub2e4.
     "\u223c": "~",  # TILDE OPERATOR
+    # `\langle`\u00b7`\rangle`\uc758 \uce58\ud658 \uacb0\uacfc. AppleMyungjo\u00b7AppleSDGothicNeo\uc5d0 \uc5c6\ub2e4(\uc2e4\uce21).
+    "\u27e8": "\u3008",  # MATHEMATICAL LEFT ANGLE BRACKET \u2192 \u3008
+    "\u27e9": "\u3009",  # MATHEMATICAL RIGHT ANGLE BRACKET \u2192 \u3009
 }
 _LITERAL_LBRACE = "\uf000"
 _LITERAL_RBRACE = "\uf001"

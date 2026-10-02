@@ -397,6 +397,44 @@ def test_untranslated_reason이_규칙별_사유를_돌려준다():
     assert looks_untranslated(src, ok, {}) is False
 
 
+_ECHO_SRC = (
+    r"By pigeonhole principle there exist an index \( j \in [d] \) such that "
+    r"\( \mathbb{E}\left[\left|\langle \boldsymbol{e}_j, \boldsymbol{x} \rangle\right|^2\right] "
+    r"\geq \frac{1}{d} \cdot \frac{1}{4^b} \), which completes the proof."
+)
+
+
+def test_한국어_메타_문장으로_감싼_원문_echo는_거부된다():
+    """실서버(로컬 MLX 0.8B) 실측 — 원문을 통째로 품고 앞뒤만 한국어인 출력이 번역 PDF에 실렸다.
+
+    한글 비율(0.15 이상)·길이비(2배 남짓)를 모두 통과해 게이트가 놓쳤다. 진짜 번역은 원문
+    문장을 통째로 옮겨 적지 않는다(실번역 쌍의 최장 연속 원문 단어열은 8단어 이상 원문에서 최대 39%).
+    """
+    from app.translate.masking import untranslated_reason
+
+    masked, mapping = mask(_ECHO_SRC)
+    meta = "이제부터는 모든 문맥을 고려하여 번역하지 않습니다."
+    out = f"{meta}\n\n문서:\n{_ECHO_SRC}\n\n번역:\n{meta}"
+    assert untranslated_reason(_ECHO_SRC, out, mapping) == "echo"
+    # 앞에 번역을 두고 원문을 덧붙인 이중 출력도 같은 echo다
+    both = "비둘기집 원리에 의해 다음을 만족하는 인덱스가 존재하며, 이로써 증명이 끝난다. " + _ECHO_SRC
+    assert untranslated_reason(_ECHO_SRC, both, mapping) == "echo"
+
+
+@pytest.mark.parametrize(("src", "out"), [
+    # 긴 고유명사 덩어리는 그대로 남는 것이 정상 — 원문의 57%
+    ("This work was supported by the National Science and Engineering Research "
+     "Council of Canada.",
+     "이 연구는 National Science and Engineering Research Council of Canada의 지원을 받았다."),
+    # 8단어 미만 원문은 이 규칙 밖(고유명사·짧은 라벨 echo 면제)
+    ("Simone A. Fried, TF Spring 2021", "Simone A. Fried, TF 2021년 봄"),
+])
+def test_원문_일부가_남는_정상_번역은_echo가_아니다(src, out):
+    from app.translate.masking import untranslated_reason
+
+    assert untranslated_reason(src, out, mask(src)[1]) == ""
+
+
 # ── 축퇴(반복 루프) 게이트 (probe:MLX-02, mlx-integration-4) ─────────────────
 
 _LOOP_SRC = (

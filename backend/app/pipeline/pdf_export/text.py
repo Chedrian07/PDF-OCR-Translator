@@ -134,6 +134,11 @@ _LITERAL_RBRACE = "\uf001"
 # 첨자 정규식보다 먼저 봉인하지 않으면 `snake\_case`가 첨자로 해석된다.
 _LITERAL_UNDERSCORE = "\uf002"
 _LITERAL_CARET = "\uf003"
+# 명령 경계 — `\langle\boldsymbol{y}`처럼 기호 명령 바로 뒤에 인자를 받는 명령(감싸개·분수 등)이
+# 붙으면, 그 명령을 먼저 평문으로 바꾼 결과(`\langley`)가 앞 명령 이름에 달라붙어 'langley'·
+# 'cdotx/y'·'alphaW'가 찍혔다(실서버 25쪽 논문). 바꾼 글자 앞에 이 문자를 끼워 이름을 끊고,
+# 마지막에 지운다.
+_COMMAND_BOUNDARY = "\uf004"
 _TITLE_PREFIX_RE = re.compile(r"^([A-Z]|\d+(?:\.\d+)*)(?=\s)")
 
 
@@ -287,9 +292,20 @@ def _latex_structures(text: str, depth: int = 0) -> str:
             out.append(match.group(0))
             index = match.end()
             continue
+        if _ends_with_command("".join(out[-1:])) and converted[:1].isascii() and converted[:1].isalpha():
+            converted = _COMMAND_BOUNDARY + converted
         out.append(converted)
         index = cursor
     return "".join(out)
+
+
+def _ends_with_command(text: str) -> bool:
+    """`text`가 아직 치환되지 않은 알파벳 명령(`\\cdot` 등)으로 끝나는가."""
+    end = len(text)
+    start = end
+    while start > 0 and text[start - 1].isascii() and text[start - 1].isalpha():
+        start -= 1
+    return start < end and start > 0 and text[start - 1] == "\\"
 
 
 # 번역 단계가 흘리는 마크다운 표기. 레이아웃 경로에는 마크다운 렌더러가 없어
@@ -421,7 +437,15 @@ def _plain_text(content: str) -> str:
     text = _latex_structures(text)
     # wrapper가 중첩되지 않은 일반 inline 표현을 여러 번 벗긴다.
     for _ in range(3):
-        updated = _LATEX_WRAPPER_RE.sub(lambda m: m.group(1), text)
+        updated = _LATEX_WRAPPER_RE.sub(
+            lambda m: (
+                _COMMAND_BOUNDARY
+                if _ends_with_command(m.string[max(0, m.start() - 32):m.start()])
+                and m.group(1)[:1].isascii() and m.group(1)[:1].isalpha()
+                else ""
+            ) + m.group(1),
+            text,
+        )
         if updated == text:
             break
         text = updated
@@ -437,6 +461,7 @@ def _plain_text(content: str) -> str:
     text = text.replace("{", "").replace("}", "")
     text = text.replace(_LITERAL_LBRACE, "{").replace(_LITERAL_RBRACE, "}")
     text = text.replace(_LITERAL_UNDERSCORE, "_").replace(_LITERAL_CARET, "^")
+    text = text.replace(_COMMAND_BOUNDARY, "")
     if tokens:
         text = _TOKEN_SLOT_RE.sub(lambda m: tokens[int(m.group(1))], text)
     lines = [_WS_RE.sub(" ", ln).strip() for ln in text.splitlines()]

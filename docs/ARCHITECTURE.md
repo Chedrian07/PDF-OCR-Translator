@@ -294,8 +294,11 @@ meta.json과 `GET /api/jobs`·`/api/jobs/{id}`의 메시지는 두 목록으로 
 - viewer-manifest의 `quality.state`는 warnings만으로 정한다(`degraded`/`ok`) — 예전에는 복구에
   성공한 잡과 sidecar 엔진의 모든 잡이 'degraded'였다. `quality.notice_count`가 따로 있다.
 - notices 이전의 옛 meta는 `jobs.LEGACY_NOTICE_MARKERS` 문구로 메모리에서만 갈라 읽고 다시
-  쓰지 않는다. runner의 해당 문구를 바꾸면 이 목록도 함께 고친다(`tests/test_job_notices.py`가
-  실제 runner 출력과 대조한다).
+  쓰지 않는다 — 다른 이식(`page_separator` 고정)으로 meta를 다시 써도 원래의 합쳐진 `warnings`를
+  그대로 두고 `notices` 키를 쓰지 않아(`Job.legacy_warnings`) 기동마다 지금 표식으로 다시 가른다.
+  0.1.0 sidecar 엔진이 복구에 성공한 재시작을 warnings로 남긴 문구('sidecar 재시작/모델 재로드
+  대기 중…'·'모델 로딩 대기 중… (최초 기동은…')도 참고로 가른다. runner의 해당 문구를 바꾸면 이
+  목록도 함께 고친다(`tests/test_job_notices.py`가 실제 runner 출력과 대조한다).
 - 잡 시각: `started_at`·`finished_at`(UTC ISO, 초 단위). `null`은 아직 아님·알 수 없음이다 —
   대기 중 취소된 잡은 `started_at`이, 서버 재시작으로 중단된 잡은 `finished_at`이 없고(멈춘
   시각을 모른다), 옛 meta에는 둘 다 없다.

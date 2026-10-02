@@ -10,9 +10,12 @@ sidecar 응답에는 파일 경로·이미지 바이너리가 없다. 이 모듈
   문법을 normalized block에서 **합성**한다. inline det 문법만 사용해
   (`<|det|>label [x1,y1,x2,y2]<|/det|>내용`) 문서 순서 == crop_index 순서를
   보장한다 — 저장에 성공한 image 블록만 문법에 넣는다(크롭 파일과 1:1).
-  텍스트 bbox를 주는 엔진(layout_capability="full")만 쓴다. figure_only 엔진이
-  쓰면 image 블록뿐인 layout.json이 생겨 잡이 has_layout으로 보이고, HTML·PDF
+  좌표는 텍스트 bbox를 주는 엔진(layout_capability="full")만 싣는다. figure_only
+  엔진이 실으면 image 블록뿐인 layout.json이 생겨 잡이 has_layout으로 보이고, HTML·PDF
   내보내기가 OCR·번역 텍스트 없이 원문 래스터만 낸다(write_raw=False).
+  write_raw=False여도 파일은 **페이지마다 빈 원출력 하나**로 남긴다 — merge는 원출력
+  개수로 모델 페이지 수를 확인한다(벤더 P14 계약). 파일을 빼면 동시성>1의 여러 쪽
+  청크마다 원본 대조 재배치가 돌고 거짓 '페이지 마커' 경고가 잡을 degraded로 만들었다.
 
 markdown의 `[[FIGURE:n]]` placeholder는 여기서만 `![](images/…)`로 치환된다.
 """
@@ -60,7 +63,8 @@ class ChunkMaterializer:
     def __init__(self, out_dir: Path, single: bool, write_raw: bool = True) -> None:
         self.out_dir = out_dir
         self.single = single
-        # raw_pages.json(좌표 layout의 원천) 기록 여부 — 텍스트 bbox가 없는 엔진은 끈다
+        # raw_pages.json에 좌표(좌표 layout의 원천)를 실을지 — 텍스트 bbox가 없는 엔진은
+        # 끈다(페이지마다 빈 원출력만 남긴다 — finalize 참조)
         self.write_raw = write_raw
         self.images_dir = out_dir / "images"
         self.images_dir.mkdir(parents=True, exist_ok=True)
@@ -177,12 +181,13 @@ class ChunkMaterializer:
     def finalize(self) -> None:
         """boxes.json·raw_pages.json 기록 (원자적 교체 — merge와 동일 패턴).
 
-        boxes.json(그림 상대 폭)은 엔진과 무관하게 남긴다. raw_pages.json은
-        write_raw일 때만 — 없으면 merge가 좌표 layout을 만들지 않는다."""
+        boxes.json(그림 상대 폭)은 엔진과 무관하게 남긴다. raw_pages.json의 좌표는
+        write_raw일 때만 싣고, 아니면 페이지 수만큼 빈 원출력을 쓴다 — 빈 원출력은 merge가
+        좌표 블록을 만들지 않으면서(layout.json 미생성) 페이지 수는 그대로 맞춰 본다."""
         if self.boxes:
             self._atomic_json(self.out_dir / "boxes.json", self.boxes)
-        if self.write_raw:
-            self._atomic_json(self.out_dir / "raw_pages.json", {"pages": self.raw_pages})
+        pages = self.raw_pages if self.write_raw else [""] * len(self.raw_pages)
+        self._atomic_json(self.out_dir / "raw_pages.json", {"pages": pages})
 
     @staticmethod
     def _atomic_json(path: Path, obj: object) -> None:

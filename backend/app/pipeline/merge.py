@@ -378,6 +378,17 @@ def _render_warnings(job_dir: Path) -> list[str]:
     return [str(m) for m in data[:_MAX_RENDER_WARNINGS]]
 
 
+@dataclass(frozen=True)
+class SlotAlignment:
+    """모델 페이지 k → 물리 슬롯(청크 내 0-based) — 원본 본문과 대조해 호출자가 이미 정한 배치.
+
+    matched는 그 근거, 즉 대조로 직접 매칭된 모델 페이지 수다(나머지는 assign_slots가 채웠다).
+    """
+
+    slots: tuple[int, ...]
+    matched: int
+
+
 @dataclass
 class ChunkResult:
     chunk_dir: Path
@@ -385,6 +396,30 @@ class ChunkResult:
     num_pages: int
     markdown: str
     single: bool = False
+    # 호출자가 정한 배치(잘린 청크의 앞부분 — completed_prefix). 주어지면 add_chunk가 다시
+    # 정합하지 않고 이 배치를 쓴다. None이면 add_chunk가 마커 수를 보고 스스로 정한다.
+    alignment: SlotAlignment | None = None
+
+
+@dataclass(frozen=True)
+class CompletedPrefix:
+    """MAX_LENGTH에서 잘린 multi 출력 중 그대로 살릴 앞부분 (runner의 잘림 복구).
+
+    pages: 끝까지 생성됐다고 볼 수 있는 앞 **물리** 페이지 수 — 그 뒤(잘린 페이지부터)는
+    페이지별로 다시 처리한다. 0이면 청크 전체를 다시 처리한다.
+    segments: 그 페이지들에 놓일 앞 모델 세그먼트(`<PAGE>` 구분 출력의 앞부분). 모델이
+    페이지를 쪼갰으면 pages보다 많을 수 있다.
+    alignment: 원본 본문과 대조해 정한 세그먼트 → 슬롯 배치. 위치 그대로(k번째 세그먼트 =
+    k번째 페이지)면 None.
+    """
+
+    pages: int = 0
+    segments: tuple[str, ...] = ()
+    alignment: SlotAlignment | None = None
+
+    @property
+    def markdown(self) -> str:
+        return "<PAGE>\n" + "\n<PAGE>\n".join(self.segments) if self.segments else ""
 
 
 @dataclass(frozen=True)
@@ -614,8 +649,8 @@ class IncrementalMerger:
         if not self.has_layout_data and layout_has_text_blocks(pages):
             self.has_layout_data = True
 
-    def _source_page_texts(self, chunk: "ChunkResult") -> list[str]:
-        """이 청크가 덮는 물리 페이지들의 원본 텍스트 (정합 대조용, 정규화됨).
+    def _source_page_texts(self, start_page: int, num_pages: int) -> list[str]:
+        """start_page부터 num_pages개 물리 페이지의 원본 텍스트 (정합 대조용, 정규화됨).
 
         텍스트 레이어가 없는 스캔 PDF면 빈 목록 — 호출자는 기존 위치 기반
         동작으로 안전하게 되돌아간다. 원문은 PDF 워커에서 페이지마다 읽는다(pdf.page_plain_texts
@@ -626,7 +661,7 @@ class IncrementalMerger:
         try:
             raws = page_plain_texts(
                 self.job_dir / "source.pdf",
-                [chunk.start_page - 1 + local for local in range(chunk.num_pages)],
+                [start_page - 1 + local for local in range(num_pages)],
             )
         except Exception:  # noqa: BLE001 — 정합은 선택적 개선이다
             return []
@@ -635,6 +670,27 @@ class IncrementalMerger:
         texts = [_align_norm(raw) for raw in raws]
         return texts if any(len(t) >= _ALIGN_MIN_PAGE_CHARS for t in texts) else []
 
+    def _match_source(
+        self, start_page: int, num_pages: int, model_pages: list[str]
+    ) -> tuple[list[int | None], list[str], list[str]] | None:
+        """모델 페이지들을 원본 물리 페이지와 대조한다 → (매칭, 정규화한 모델 본문, 원본 본문).
+
+        대조할 텍스트 레이어가 없으면(스캔 PDF·추출 실패) None."""
+        page_texts = self._source_page_texts(start_page, num_pages)
+        if not page_texts:
+            return None
+        model_texts = [_align_norm(p) for p in model_pages]
+        return align_model_pages(model_texts, page_texts), model_texts, page_texts
+
+    @staticmethod
+    def _well_matched(mapping: list[int | None], num_pages: int) -> bool:
+        """정합을 믿을 만큼 매칭됐는가(모델·물리 페이지 수 중 작은 쪽의 절반 이상).
+
+        대조가 (거의) 실패하면 근거가 약한 재배치는 위치 기반보다 나빠질 수 있다(매칭 안 된
+        페이지가 앞 페이지에 쌓이고 제자리가 빈다)."""
+        matched = sum(1 for m in mapping if m is not None)
+        return matched > 0 and matched >= min(len(mapping), num_pages) * _ALIGN_MIN_MATCHED_SHARE
+
     def _align_chunk_pages(
         self, chunk: "ChunkResult", model_pages: list[str]
     ) -> tuple[list[int], int] | None:
@@ -642,23 +698,67 @@ class IncrementalMerger:
         (호출자는 위치 기반 배치로 돌아간다)."""
         if chunk.single or chunk.num_pages <= 1 or len(model_pages) <= 1:
             return None
-        page_texts = self._source_page_texts(chunk)
-        if not page_texts:
+        found = self._match_source(chunk.start_page, chunk.num_pages, model_pages)
+        if found is None:
             return None
-        model_texts = [_align_norm(p) for p in model_pages]
-        mapping = align_model_pages(model_texts, page_texts)
-        matched = sum(1 for m in mapping if m is not None)
-        if matched == 0 or matched < min(len(model_pages), chunk.num_pages) * (
-            _ALIGN_MIN_MATCHED_SHARE
-        ):
-            # 대조가 (거의) 실패 — 근거가 약한 재배치는 위치 기반보다 나빠질 수 있다
-            # (매칭 안 된 페이지가 앞 페이지에 쌓이고 제자리가 빈다)
+        mapping, model_texts, page_texts = found
+        if not self._well_matched(mapping, chunk.num_pages):
             return None
         slots = assign_slots(
             mapping, chunk.num_pages,
             score=lambda k, slot: _probe_score(model_texts[k], page_texts[slot]),
         )
-        return slots, matched
+        return slots, sum(1 for m in mapping if m is not None)
+
+    def completed_prefix(
+        self, start_page: int, num_pages: int, segments: list[str], *, verify: bool = True
+    ) -> CompletedPrefix:
+        """잘린 multi 출력(segments — 마지막이 잘린 페이지)에서 그대로 살릴 앞부분을 정한다.
+
+        세그먼트 수만 믿으면 안 된다. 잘리기 전에 모델이 한 페이지를 둘로 쪼갰거나 건너뛰었으면
+        '마지막을 뺀 k개 = 앞 k쪽'이 틀린다 — 잘린 페이지 직전 물리 페이지의 본문이 통째로
+        버려지고 남긴 페이지는 한 칸씩 밀린다(layout까지 밀려 번역 PDF가 엉뚱한 원문을 지운다).
+        앞부분을 '세그먼트 k개 = k쪽'으로 병합하면 개수가 늘 맞아 add_chunk의 마커 수 정합도
+        걸리지 않는다. 그래서 텍스트 레이어가 있으면 **잘린 세그먼트까지** 원본과 대조한다:
+
+        - 잘린 세그먼트가 놓이는 물리 페이지부터 다시 처리한다(그 페이지는 끝까지 생성되지
+          않았다). 그보다 앞에 아무 세그먼트도 놓이지 않은 페이지(모델이 건너뜀)가 있으면
+          거기부터 다시 처리한다.
+        - 남기는 세그먼트는 대조한 배치(alignment)대로 병합한다 — 쪼개진 페이지는 한 쪽에 합친다.
+        - 대조 근거가 약한데 위치와 어긋나는 매칭이 있으면 아무것도 남기지 않는다(전부 재처리).
+
+        verify=False(페이지 단위 엔진 — 페이지마다 따로 생성해 세그먼트가 곧 페이지다)나
+        텍스트 레이어가 없는 스캔 PDF는 위치 그대로(마지막 세그먼트를 뺀 앞 k개 = 앞 k쪽)다.
+        """
+        total = len(segments)
+        positional = (
+            CompletedPrefix(total - 1, tuple(segments[: total - 1]))
+            if 0 < total - 1 < num_pages else CompletedPrefix()
+        )
+        if total < 2 or num_pages < 2 or not verify:
+            return positional
+        found = self._match_source(start_page, num_pages, segments)
+        if found is None:
+            return positional
+        mapping, model_texts, page_texts = found
+        if not self._well_matched(mapping, num_pages):
+            if any(m is not None and m != k for k, m in enumerate(mapping)):
+                return CompletedPrefix()
+            return positional
+        slots = assign_slots(
+            mapping, num_pages,
+            score=lambda k, slot: _probe_score(model_texts[k], page_texts[slot]),
+        )
+        covered = set(slots[:-1])
+        keep = next((p for p in range(slots[-1]) if p not in covered), slots[-1])
+        count = sum(1 for slot in slots[:-1] if slot < keep)  # 슬롯은 단조라 앞부분이다
+        if keep <= 0 or count <= 0:
+            return CompletedPrefix()
+        kept = tuple(slots[:count])
+        alignment = None
+        if count != keep or any(slot != k for k, slot in enumerate(kept)):
+            alignment = SlotAlignment(kept, sum(1 for m in mapping[:count] if m is not None))
+        return CompletedPrefix(keep, tuple(segments[:count]), alignment)
 
     def _ingest_layout(
         self,
@@ -848,7 +948,14 @@ class IncrementalMerger:
             # 개수가 어긋나면 **위치**부터 원본 PDF 본문과 대조해 정한다. 꼬리에서만
             # 보정하면 중간에서 쪼개지거나 건너뛴 경우 그 뒤가 전부 밀린다.
             aligned = None
-            if len(pages) != chunk.num_pages or len(raw_pages) != chunk.num_pages:
+            given = chunk.alignment
+            if given is not None and len(given.slots) == len(pages) and all(
+                0 <= slot < chunk.num_pages for slot in given.slots
+            ):
+                # 호출자가 이미 원본과 대조해 정한 배치(잘린 청크의 앞부분) — 다시 정합하면
+                # 앞부분만으로 대조해 다른 답을 낼 수 있다
+                aligned = (list(given.slots), given.matched)
+            elif len(pages) != chunk.num_pages or len(raw_pages) != chunk.num_pages:
                 aligned = self._align_chunk_pages(chunk, pages)
             if aligned is not None:
                 slots, placed = aligned

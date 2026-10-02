@@ -54,11 +54,16 @@ test:             ## 핵심 로컬 3종 — backend pytest · ruff · frontend (
 test-mps:         ## Apple Silicon torch MPS 계약 테스트 — torch·macOS 업그레이드 전후에 돌린다
 	cd backend && OCR_MPS_TESTS=1 .venv/bin/python -m pytest -rs tests/test_mps_contract.py tests/test_objc_pool.py
 
-# 고정 스냅샷(MODEL_ID@MODEL_REVISION)을 로컬 HF 캐시(HF_HOME, 기본 ~/.cache/huggingface)에서만
-# 읽는다(local_files_only) — 캐시가 없으면 건너뛴다. make dev를 한 번 띄우면(기본 프리로드)
-# 받아진다. make setup-mlx 필요(torch CPU 로짓과 비교), 수 GB·수십 초.
+# 코드 기본 고정 스냅샷(baidu/Unlimited-OCR@기본 MODEL_REVISION — .env의 MODEL_ID·MODEL_REVISION은
+# 보지 않는다)을 로컬 HF 캐시에서만 읽는다(local_files_only). make dev를 한 번 띄우면(기본
+# 프리로드) 받아진다. 테스트는 .env를 읽지 않으므로(conftest가 DISABLE_DOTENV=1) 앞단의
+# scripts/require_hf_snapshot.py가 make dev와 같은 .env에서 HF 캐시 위치 키(HF_HOME·HF_HUB_CACHE
+# 등 — 셸 값이 이긴다)만 넘기고, 그 캐시에 가중치가 없으면 pytest를 돌리지 않고 사유를 보인 뒤
+# 종료코드 2로 멈춘다(예전에는 실가중치 2건이 LocalEntryNotFoundError로 실패해 회귀처럼 보였다).
+# make setup-mlx 필요(torch CPU 로짓과 비교), 수 GB·수십 초.
 test-mlx-real:    ## MLX 실가중치 패리티 테스트 — mlx 업그레이드·MLX 포팅 수정·스냅샷 갱신 전후에 돌린다
-	cd backend && OCR_MLX_REAL_TESTS=1 .venv/bin/python -m pytest -rs tests/test_mlx_model_parity.py
+	cd backend && OCR_MLX_REAL_TESTS=1 .venv/bin/python ../scripts/require_hf_snapshot.py -- \
+		.venv/bin/python -m pytest -rs tests/test_mlx_model_parity.py
 
 coverage:         ## backend 커버리지 (pytest-cov는 --with로 임시 설치 — uv.lock 무변경)
 	cd backend && uv run --locked --with pytest-cov pytest --cov --cov-report=term

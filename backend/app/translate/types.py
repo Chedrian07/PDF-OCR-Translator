@@ -69,9 +69,11 @@ REASONING_MAX_TOKENS = {
 #   reasoning_effort     OpenAI 공식 — chat은 최상위 reasoning_effort, responses는
 #                        reasoning.effort. off는 "none"으로 보낸다.
 #   none                 어떤 reasoning 필드도 보내지 않는다(엄격한 게이트웨이용).
-#   auto                 base URL로 고른다 — 루프백·사설·도커 내부 → chat_template_kwargs,
-#                        openrouter.ai → openrouter, api.openai.com → reasoning_effort,
-#                        그 외 공개 호스트 → openrouter(종전 동작 유지).
+#   auto                 base URL로 고른다 — 루프백·사설 IP·단일 라벨·사설 이름(localhost·
+#                        *.localhost·*.local·*.lan·*.home.arpa·*.internal — host.docker.internal·
+#                        host.containers.internal 포함) → chat_template_kwargs, openrouter.ai →
+#                        openrouter, api.openai.com·*.api.openai.com(데이터 레지던시) →
+#                        reasoning_effort, 그 외 공개 호스트 → openrouter(종전 동작 유지).
 REASONING_STYLES = ("auto", "openrouter", "chat_template_kwargs", "reasoning_effort", "none")
 
 # TRANSLATE_EXTRA_BODY가 덮어쓸 수 없는 키 — 클라이언트가 구조를 책임지는 필드다
@@ -83,11 +85,19 @@ EXTRA_BODY_RESERVED = frozenset({
 _EXTRA_BODY_MAX_CHARS = 4096
 
 
+# 공개 DNS에 없는 사설·로컬 이름의 접미사 — mDNS(.local), RFC 6761 localhost 하위 이름,
+# 공유기 관행(.lan), RFC 8375 가정망(.home.arpa), ICANN 사설 예약(.internal — Docker의
+# host.docker.internal·gateway.docker.internal, Podman의 host.containers.internal 포함).
+# 종전에는 host.docker.internal·*.local만 알아 Podman·LAN 호스트명으로 띄운 로컬 서버에
+# TRANSLATE_REASONING=off가 전달되지 않았다(translate-9).
+_LOCAL_NAME_SUFFIXES = (".local", ".localhost", ".lan", ".home.arpa", ".internal")
+
+
 def _host_is_local(host: str) -> bool:
-    """루프백·사설망·도커 내부·mDNS·단일 라벨(도커 서비스명) 호스트인가."""
+    """루프백·사설망·사설 이름(도커·Podman 내부, mDNS, LAN)·단일 라벨(서비스명) 호스트인가."""
     if not host:
         return False
-    if host in ("localhost", "host.docker.internal") or host.endswith(".local"):
+    if host == "localhost" or host.endswith(_LOCAL_NAME_SUFFIXES):
         return True
     try:
         ip = ipaddress.ip_address(host)
@@ -103,7 +113,9 @@ def resolve_reasoning_style(style: str, base_url: str) -> str:
     host = (urlsplit(base_url.strip()).hostname or "").lower().rstrip(".")
     if host == "openrouter.ai" or host.endswith(".openrouter.ai"):
         return "openrouter"
-    if host == "api.openai.com":
+    if host == "api.openai.com" or host.endswith(".api.openai.com"):
+        # eu./us.api.openai.com 같은 데이터 레지던시 엔드포인트도 OpenAI 공식 API다 —
+        # reasoning:{enabled:false}를 보내면 모르는 파라미터로 400이 났다(translate-9).
         return "reasoning_effort"
     if _host_is_local(host):
         return "chat_template_kwargs"

@@ -110,10 +110,13 @@ def parse_page(raw: str) -> dict:
     같은 순서로 image 블록(figure_index=n, bbox [0,999])이 생성된다.
     heading/본문/HTML 표/LaTeX/코드/목록은 그대로 보존된다.
 
-    유효 태그 **사이의 본문 조각마다** 비정상 img 태그를 지운 뒤 리터럴 `[[FIGURE:`를
-    이스케이프한다. 치환을 마친 전체 문자열에서 img 태그를 지우면 `[<img …>[FIGURE:0]]`
-    처럼 지운 자리 양쪽이 이어져 placeholder가 새로 생기고, 바깥 잔여물(`<img alt="`)이
-    뒤따르는 진짜 placeholder까지 삼켰다 — 조각 단위로 처리하면 둘 다 일어나지 않는다.
+    **채택된** figure 태그 사이의 본문 조각마다 비정상 img 태그를 지운 뒤 리터럴
+    `[[FIGURE:`를 이스케이프한다. 치환을 마친 전체 문자열에서 img 태그를 지우면
+    `[<img …>[FIGURE:0]]`처럼 지운 자리 양쪽이 이어져 placeholder가 새로 생기고, 바깥
+    잔여물(`<img alt="`)이 뒤따르는 진짜 placeholder까지 삼켰다 — 조각 단위로 처리하면 둘 다
+    일어나지 않는다. 검증에서 거부된 figure 태그(좌표 이상·퇴화·중복·개수 상한 초과)는
+    분할점이 아니라 **조각 안에서** 지운다 — 조각 경계에서 빈 문자열로 지우면 이스케이프가
+    이미 끝난 양쪽 조각이 이어져 같은 위조가 생겼다(감사 sidecar-4).
     """
     warnings: list[str] = []
     if len(raw) > MAX_RAW_CHARS:
@@ -124,22 +127,24 @@ def parse_page(raw: str) -> dict:
     seen_boxes: set[tuple[int, int, int, int]] = set()
     counter = {"n": 0}
 
-    def _replace(m: re.Match) -> str:
+    def _accept(m: re.Match) -> str | None:
+        """유효 figure 태그 → placeholder(image 블록 생성). 거부하면 None — 태그는 본문
+        조각에 남아 _text가 지운다."""
         try:
             left, top, right, bottom = (int(g) for g in m.groups())
         except ValueError:  # pragma: no cover — \d 정규식상 불가, 방어적
             warnings.append("figure 태그 좌표 파싱 실패 — 제거")
-            return ""
+            return None
         bbox = _validate_bbox(left, top, right, bottom)
         if bbox is None:
             warnings.append(f"figure bbox 좌표 이상({left},{top},{right},{bottom}) — 제거")
-            return ""
+            return None
         if bbox in seen_boxes:
             warnings.append(f"중복 figure bbox{bbox} — 제거")
-            return ""
+            return None
         if counter["n"] >= MAX_FIGURES:
             warnings.append(f"figure 수 상한({MAX_FIGURES}) 초과 — 이후 태그 제거")
-            return ""
+            return None
         seen_boxes.add(bbox)
         n = counter["n"]
         counter["n"] += 1
@@ -156,6 +161,9 @@ def parse_page(raw: str) -> dict:
     removed = {"tags": 0, "unclosed": 0}
 
     def _text(segment: str) -> str:
+        # 거부된 figure 태그(경고는 _accept가 남겼다)를 먼저 지운다 — 공백이 길어 아래
+        # 일반 img 정규식의 길이 상한을 넘는 태그도 통째로 지워진다
+        segment = FIGURE_TAG_RE.sub("", segment)
         # 유효 figure 외의 img 태그는 전부 제거 — 어떤 경로/URL도 통과시키지 않는다
         segment, n_tags = _ANY_IMG_TAG_RE.subn("", segment)
         segment, n_unclosed = _UNCLOSED_IMG_RE.subn("", segment)
@@ -164,11 +172,15 @@ def parse_page(raw: str) -> dict:
         # 제거로 이어 붙은 자리까지 본 뒤에 이스케이프한다
         return escape_literal_placeholders(segment)
 
+    # 채택된 태그만 분할점이다 — 그 사이(거부된 태그 포함)는 한 조각으로 정리·이스케이프한다
     parts: list[str] = []
     pos = 0
     for m in FIGURE_TAG_RE.finditer(raw):
+        placeholder = _accept(m)
+        if placeholder is None:
+            continue
         parts.append(_text(raw[pos:m.start()]))
-        parts.append(_replace(m))
+        parts.append(placeholder)
         pos = m.end()
     parts.append(_text(raw[pos:]))
     markdown = "".join(parts)

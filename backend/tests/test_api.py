@@ -1605,6 +1605,36 @@ def test_event_stream_routes_do_not_take_head():
     assert methods["/api/jobs/{job_id}/pdf"] == {"GET", "HEAD"}
 
 
+def test_api_paths_answer_405_for_other_methods_instead_of_the_static_404(settings, sample_pdf):
+    """라우트가 있는 /api 경로에 다른 메서드를 보내면 405 + Allow다. 예전에는 프런트엔드 정적
+    마운트("/")가 FULL 매칭으로 가로채 404 'Not Found'를 줘, 있는 이벤트 스트림(HEAD …/events)
+    이나 POST 전용 경로가 없는 자원처럼 보였다(delta-api-frontend-infra-4). 없는 API 경로는 404 JSON.
+    SSE는 여전히 GET만 받는다 — HEAD 짝을 달지 않는다(본문을 버려도 연결을 붙잡는다)."""
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    settings.frontend_dir = Path(__file__).resolve().parents[2] / "frontend"
+    with TestClient(create_app(settings)) as client:
+        jid = _upload(client, sample_pdf).json()["job_id"]
+        assert wait_done(client, jid)["status"] == "done"
+        for method, path, allow in (
+            ("HEAD", f"/api/jobs/{jid}/events", {"GET"}),
+            ("HEAD", f"/api/jobs/{jid}/translate/events?lang=ko", {"GET"}),
+            ("GET", f"/api/jobs/{jid}/cancel", {"POST"}),
+            ("PUT", f"/api/jobs/{jid}", {"GET", "HEAD", "DELETE"}),
+        ):
+            r = client.request(method, path)
+            assert r.status_code == 405, (method, path, r.status_code)
+            assert set(r.headers["allow"].replace(" ", "").split(",")) == allow, (path, r.headers)
+            if method != "HEAD":
+                assert r.headers["content-type"].startswith("application/json")
+        unknown = client.get("/api/no-such-route")
+        assert unknown.status_code == 404 and unknown.json() == {"detail": "Not Found"}
+        assert client.get("/").status_code == 200                # SPA는 그대로
+        assert client.head(f"/api/jobs/{jid}/pdf?lang=zz").status_code == 400  # 라우트가 답한다
+
+
 def test_head_twins_stay_out_of_the_openapi_schema(client):
     """HEAD 짝 라우트는 스키마에 없다 — GET 라우트에 HEAD를 더하면 같은 operationId의 head
     연산이 20개 생겨 'Duplicate Operation ID' 경고가 나고 클라이언트 생성기가 깨졌다."""

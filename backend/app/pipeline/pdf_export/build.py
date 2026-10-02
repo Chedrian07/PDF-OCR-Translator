@@ -997,25 +997,54 @@ def _estimated_fs_cqw(ctx: _PageContext, block_type: str, ob: dict) -> float | N
 
     번역문으로 추정하면 블록마다 번역 길이 비가 달라 한 쪽의 본문이 8.8–13.3pt로 들쭉날쭉했다
     (실측 스캔 쪽; 같은 쪽의 텍스트 레이어 PDF는 11.2pt 하나). 원문 글자는 원본에 실제로 그
-    블록 크기로 찍혀 있던 것이다. 본문(text)은 그 쪽 본문 블록 추정의 중앙값을 넘지 않게 해
+    블록 크기로 찍혀 있던 것이다. 본문(text)은 그 쪽 본문 크기(_page_body_fs_cqw)를 넘지 않게 해
     한 단락만 커 보이지 않게 한다 — 더 작은 블록(각주 등)은 그대로 작다."""
     own = estimate_font_size_cqw(ob.get("bbox"), str(ob.get("content") or ""), ctx.aspect)
     if own is None or block_type != "text":
         return own
-    body = ctx.analysis.get("body_fs_cqw")
-    if body is None:
-        estimates = sorted(
-            fs for fs in (
-                estimate_font_size_cqw(b.get("bbox"), str(b.get("content") or ""), ctx.aspect)
-                for b in ctx.oblocks
-                if isinstance(b, dict) and str(b.get("type") or "") == "text"
-                and not b.get("fs") and "image" not in b
-            )
-            if fs is not None
-        )
-        body = estimates[len(estimates) // 2] if estimates else 0.0
-        ctx.analysis["body_fs_cqw"] = body
+    body = _page_body_fs_cqw(ctx)
     return min(own, body) if body else own
+
+
+def _page_body_fs_cqw(ctx: _PageContext) -> float:
+    """그 쪽 본문 글자 크기 — 글자 크기 없는 여러 줄 text 블록 추정의 면적 가중 중앙값(없으면 0).
+
+    한 줄 블록은 얕은 상자 상한(h/1.25)에 걸린 값이라, 그림 위 글자(차트 눈금·범례 — 교체하지 않는다)는
+    본문이 아니라서 뺀다. 넣으면 7pt 눈금 셋이 11pt 문단 하나를 5.6pt로 끌어내렸다(리뷰). 면적으로
+    가중해 작은 조각 여럿이 큰 문단을 이기지 않게 한다."""
+    cached = ctx.analysis.get("body_fs_cqw")
+    if cached is not None:
+        return cached
+    samples: list[tuple[float, float]] = []
+    for index, block in enumerate(ctx.oblocks):
+        if (
+            not isinstance(block, dict) or str(block.get("type") or "") != "text"
+            or block.get("fs") or "image" in block
+        ):
+            continue
+        rect = ctx.block_rects[index] if index < len(ctx.block_rects) else None
+        bbox = block.get("bbox")
+        if rect is None or rect.is_empty or not bbox or len(bbox) != 4:
+            continue
+        area = rect.width * rect.height
+        if any(_rect_overlap_area(rect, region) / area >= 0.30 for region in ctx.image_regions):
+            continue
+        fs = estimate_font_size_cqw(bbox, str(block.get("content") or ""), ctx.aspect)
+        height_cqw = (bbox[3] - bbox[1]) / 999 * 100 * ctx.aspect
+        if fs is None or fs >= height_cqw / 1.25 - 1e-6:
+            continue  # 한 줄 상자 상한에 걸렸다 — 본문 크기를 대표하지 못한다
+        samples.append((fs, area))
+    body = 0.0
+    if samples:
+        samples.sort()
+        half, seen = sum(area for _fs, area in samples) / 2, 0.0
+        for fs, area in samples:
+            seen += area
+            if seen >= half:
+                body = fs
+                break
+    ctx.analysis["body_fs_cqw"] = body
+    return body
 
 
 def _plan_text_block(

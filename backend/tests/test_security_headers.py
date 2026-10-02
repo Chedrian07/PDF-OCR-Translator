@@ -231,3 +231,19 @@ def test_api_html_responses_carry_csp_and_keep_route_headers(client, sample_pdf)
     assert manifest.headers["cache-control"] == "private, no-cache"
     assert "content-security-policy" not in manifest.headers
     assert "cache-control" not in client.get("/api/health").headers
+
+
+def test_no_html_page_depends_on_a_cdn_script_blocked_by_the_csp(spa_client):
+    """FastAPI 자동 문서(/docs Swagger UI·/redoc ReDoc)는 cdn.jsdelivr.net 스크립트와 인라인 초기화
+    스크립트로 그려져 HTML CSP(script-src 'self')에 막혀 빈 페이지만 떴다(P4 Docker 재현). 문서
+    페이지는 끄고 기계용 스키마(/openapi.json)는 남긴다."""
+    for path in ("/docs", "/redoc", "/docs/oauth2-redirect"):
+        response = spa_client.get(path)
+        assert response.status_code == 404, path
+        assert "cdn.jsdelivr.net" not in response.text, path
+    schema = spa_client.get("/openapi.json")
+    assert schema.status_code == 200
+    assert schema.json()["paths"]
+    # SPA 문서 자체는 외부 출처 스크립트가 없다(위 테스트) — 정책이 막는 HTML이 남지 않았다
+    index = spa_client.get("/")
+    assert "cdn.jsdelivr.net" not in index.text

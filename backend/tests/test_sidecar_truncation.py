@@ -149,6 +149,57 @@ def test_truncated_scanned_page_keeps_its_output(tmp_path, stub):
     assert keep and warnings.index(SIDECAR_WARNING) < keep[0], warnings  # 잘림 → 처리 순서
 
 
+@pytest.mark.parametrize("failure,reason", [
+    ("timeout", "분석 시간 상한 초과 — 판정 생략; 상한은 PDF_PAGE_TIMEOUT_S"),
+    ("crash", "분석 중 처리 프로세스가 비정상 종료 — 판정 생략"),
+    ("broken_pdf", "원본 PDF 열기 실패"),
+])
+def test_unjudged_truncated_page_names_the_real_reason(tmp_path, stub, monkeypatch,
+                                                       failure, reason):
+    """대조를 못 한 것(분석 시간 상한·처리 프로세스 사망·원본 열기 실패)은 '텍스트 레이어가
+    없다'가 아니다 — 텍스트 레이어가 멀쩡한 페이지의 경고가 엉뚱한 원인을 적으면 운영자가
+    진짜 원인(PDF_PAGE_TIMEOUT_S 등)을 놓친다. 잘린 출력은 그대로 쓴다."""
+    from app.pipeline import pdf_worker
+
+    (path,) = _job(tmp_path, b"%PDF-1.7 broken" if failure == "broken_pdf" else _text_pdf())
+    errors = {"timeout": pdf_worker.PdfWorkerTimeout(30.0),
+              "crash": pdf_worker.PdfWorkerCrashed(-9)}
+    if failure in errors:
+        def _fail(*a, **k):
+            raise errors[failure]
+
+        monkeypatch.setattr(pdf_worker, "run_page", _fail)
+    stub.parse_behavior = lambda: (200, _body(HEAD_ONLY))
+    eng = _engine(tmp_path, stub)
+    md = eng.run_single(path, tmp_path / "single", NullSink(), threading.Event())
+
+    assert HEAD_ONLY in md
+    warnings = eng.drain_warnings()
+    expected = f"출력 토큰 상한에서 잘린 페이지 — 텍스트 레이어로 판정할 수 없어({reason}) 잘린 출력을 그대로 씁니다"
+    assert expected in warnings, warnings
+    assert not any("텍스트 레이어가 없어" in w for w in warnings), warnings
+
+
+def test_truncation_judgment_error_is_not_reported_as_a_missing_text_layer(
+    tmp_path, stub, monkeypatch
+):
+    (path,) = _job(tmp_path, _text_pdf())
+
+    def _boom(*a, **k):
+        raise RuntimeError("판정 중 예기치 못한 오류")
+
+    monkeypatch.setattr("app.engine.sidecar._truncated_page_fidelity", _boom)
+    stub.parse_behavior = lambda: (200, _body(HEAD_ONLY))
+    eng = _engine(tmp_path, stub)
+    md = eng.run_single(path, tmp_path / "single", NullSink(), threading.Event())
+
+    assert HEAD_ONLY in md
+    warnings = eng.drain_warnings()
+    assert any("텍스트 레이어 대조가 실패해(RuntimeError) 잘린 출력을 그대로" in w
+               for w in warnings), warnings
+    assert not any("텍스트 레이어가 없어" in w for w in warnings), warnings
+
+
 def test_slightly_truncated_page_keeps_its_structured_output(tmp_path, stub):
     """끝부분만 조금 잘린 페이지를 평문 텍스트 레이어로 바꾸면 표·수식·그림 구조를 잃는다."""
     (path,) = _job(tmp_path, _text_pdf())

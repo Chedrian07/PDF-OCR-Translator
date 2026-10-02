@@ -791,6 +791,49 @@ def test_연결오류_계속_실패면_TranslateAPIError_래핑():
     assert len(calls) == 2                                             # 최초 1 + 재시도 1
 
 
+def test_연결_실패_문구는_URL과_쿼리를_담지_않는다(caplog):
+    """requests 예외 문구에는 요청 URL(쿼리 포함)·호스트·포트가 그대로 들어 있어, 무인증
+    /translate/state·SSE로 base URL의 쿼리 자격증명과 내부 주소가 노출됐다(security-2)."""
+    import logging
+    import socket
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()                                           # 닫힌 포트 — 연결 거부
+    c = OpenAICompatClient(_cfg(base_url=f"http://127.0.0.1:{port}/v1?api-key=sk-SECRET-IN-QUERY",
+                                api_mode="chat", max_retries=0))
+    with caplog.at_level(logging.WARNING, logger="app.translate.client"):
+        with pytest.raises(TranslateAPIError, match="연결 실패") as exc:
+            c.complete("s", "u", max_tokens=10)
+    msg = str(exc.value)
+    assert "연결 거부" in msg                             # 원인은 남긴다
+    for leak in ("sk-SECRET", "api-key", "127.0.0.1", str(port), "/v1"):
+        assert leak not in msg
+    ours = [r.getMessage() for r in caplog.records if r.name == "app.translate.client"]
+    assert ours and not any("sk-SECRET" in m for m in ours)   # 로그도 쿼리 값은 가린다
+
+
+def test_연결_실패_원인은_고정_문구로만_요약한다():
+    import socket
+
+    import requests as _requests
+
+    err = _requests.exceptions.ConnectionError(
+        "HTTPSConnectionPool(host='llm.internal.corp', port=8443): Max retries exceeded "
+        "with url: /v1/chat/completions?api-key=sk-x")
+    err.__cause__ = socket.gaierror(8, "nodename nor servname provided, or not known")
+
+    def post(path, payload):
+        raise err
+
+    c = OpenAICompatClient(_cfg(api_mode="chat", max_retries=0))
+    c._post = post
+    with pytest.raises(TranslateAPIError, match="호스트 이름") as exc:
+        c.complete("s", "u", max_tokens=10)
+    assert "llm.internal.corp" not in str(exc.value) and "sk-x" not in str(exc.value)
+
+
 def test_reasoning_effort별_max_tokens_예산():
     """effort별 요청 max_tokens 테이블 (사용자 확정값) + xhigh 모드 지원."""
     from app.translate.types import REASONING_MAX_TOKENS, TranslateConfig

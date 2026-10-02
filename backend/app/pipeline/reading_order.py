@@ -18,6 +18,9 @@ references'가 온다). 한 단 문서에서도 여백의 arXiv 세로 스탬프
    (25% 이하) 다단으로 본다. 가로지르는 블록(제목·저자·전폭 그림 캡션·쪽 번호)은
    단 흐름의 **경계**다 — 그 위·아래 띠(band)마다 왼쪽 단 → 오른쪽 단 순으로 읽는다.
    단 안은 내용 순서를 지키고, 3단 이상은 같은 방법을 재귀로 적용한다.
+   단, 띠의 좌·우 블록이 **행 단위로 마주 보는 짧은 블록**(줄바꿈 셀로 된 표, 그림 격자의
+   부캡션)이면 단이 아니다(`_is_row_grid`) — 그 띠는 내용 순서를 그대로 쓴다. 단으로 읽으면
+   '키 전부 → 값 전부'가 되어 표의 키-값 대응이 깨진다.
 3. 조각 병합(`merge_fragments`): MuPDF 1.28은 가운데 정렬 제목·디스플레이 수식을
    더 잘게 쪼갠다(2504.19874v1.pdf: 블록 700 → 974). 한 문장이 블록 둘로 갈리면
    번역 유닛도 둘로 갈려 번역 품질이 떨어지므로, 읽기 순서상 이웃한 블록이
@@ -39,6 +42,11 @@ _MIN_SIDE_SHARE = 0.20       # 거터 양쪽 블록 높이 합이 각각 전체�
 _MAX_CROSS_SHARE = 0.25      # 거터를 가로지르는 블록 높이 합은 전체의 25% 이하
 _MIN_GUTTER_PT = 3.0         # 거터 양쪽 블록 사이의 최소 빈 폭
 _MAX_DEPTH = 3               # 재귀 상한(3단 이상 조판)
+# 표·그림 격자 판정 — 거터 양쪽이 단이 아니라 행으로 마주 보는가
+_ROW_OVERLAP = 0.6           # 같은 행: 세로 겹침 / 낮은 쪽 높이
+_ROW_HEIGHT_RATIO = 0.5      # 같은 행: 낮은 쪽 높이 / 높은 쪽 높이
+_ROW_PARTNER_SHARE = 0.6     # 양쪽 블록 각각 이 비율 이상이 맞은편에 같은 행 짝을 둔다
+_CELL_MAX_LINES = 3.5        # 셀로 볼 블록의 줄 수 상한(본문 문단은 더 길다)
 # 조각 병합 임계값 (글꼴 크기·줄 높이 대비 비율)
 _SAME_LINE_OVERLAP = 0.4     # 같은 줄: 세로 겹침 / 낮은 쪽 높이 (근호·첨자는 줄 위로 솟는다)
 _SAME_LINE_GAP = 0.6         # 같은 줄: 가로 간격 상한 = 글꼴 크기 × 0.6
@@ -145,6 +153,46 @@ def _find_gutter(blocks: list[TextBlock]) -> float | None:
     return best_x
 
 
+def _row_partners(side: list[TextBlock], other: list[TextBlock]) -> list[TextBlock]:
+    """side 중 맞은편(other)에 같은 행의 짝(세로로 크게 겹치고 높이가 비슷한 블록)이 있는 것."""
+    ordered = sorted(other, key=lambda b: b.y0)
+    starts = [b.y0 for b in ordered]
+    tallest = max((b.height for b in ordered), default=0.0)
+    found: list[TextBlock] = []
+    for a in side:
+        lo = bisect.bisect_left(starts, a.y0 - tallest)
+        hi = bisect.bisect_right(starts, a.y1)
+        for b in ordered[lo:hi]:
+            low, high = sorted((a.height, b.height))
+            overlap = min(a.y1, b.y1) - max(a.y0, b.y0)
+            if low >= high * _ROW_HEIGHT_RATIO and overlap >= low * _ROW_OVERLAP:
+                found.append(a)
+                break
+    return found
+
+
+def _is_row_grid(left: list[TextBlock], right: list[TextBlock]) -> bool:
+    """거터 양쪽이 단이 아니라 행으로 마주 보는 표·그림 격자인가.
+
+    셀이 줄바꿈되는 표는 MuPDF가 셀마다 블록을 만들어 가운데에 빈 세로 띠가 생기므로 2단처럼
+    보인다. 단으로 읽으면 '키 전부 → 값 전부'가 되어 키-값 대응이 깨지고(번역 유닛·Q&A 문맥),
+    2×3 그림 격자는 (a)(c)(e) 뒤에 (b)(d)(f)가 온다(감사 pipeline-3). 양쪽 블록 대부분이
+    맞은편에 같은 행 짝을 두고 그 블록들이 짧으면(셀·부캡션) 격자로 본다 — 행이 우연히 맞는
+    2단 본문 문단은 줄 수가 많아 걸리지 않는다."""
+    if min(len(left), len(right)) < 2:
+        return False
+    paired_left = _row_partners(left, right)
+    paired_right = _row_partners(right, left)
+    if (
+        len(paired_left) < len(left) * _ROW_PARTNER_SHARE
+        or len(paired_right) < len(right) * _ROW_PARTNER_SHARE
+    ):
+        return False
+    paired = paired_left + paired_right
+    short = sum(1 for b in paired if b.height / max(b.line_height, 1.0) <= _CELL_MAX_LINES)
+    return short >= len(paired) * _ROW_PARTNER_SHARE
+
+
 def order_blocks(blocks: list[TextBlock], _depth: int = 0) -> list[TextBlock]:
     """내용 순서를 기본으로, 다단이면 띠별로 왼쪽 단 → 오른쪽 단 순서로 재배열.
 
@@ -176,8 +224,12 @@ def order_blocks(blocks: list[TextBlock], _depth: int = 0) -> list[TextBlock]:
         (bands_left if b.x1 <= gutter else bands_right)[band].append(b)
     out: list[TextBlock] = []
     for k in range(len(spanning) + 1):
-        out.extend(order_blocks(bands_left[k], _depth + 1))
-        out.extend(order_blocks(bands_right[k], _depth + 1))
+        if _is_row_grid(bands_left[k], bands_right[k]):
+            # 표·그림 격자 — 단으로 나누지 않고 내용 순서(대개 행 순서)를 지킨다
+            out.extend(sorted(bands_left[k] + bands_right[k], key=lambda b: b.order))
+        else:
+            out.extend(order_blocks(bands_left[k], _depth + 1))
+            out.extend(order_blocks(bands_right[k], _depth + 1))
         if k < len(spanning):
             out.append(spanning[k])
     return out + rotated

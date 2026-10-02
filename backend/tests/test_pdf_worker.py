@@ -502,9 +502,29 @@ def test_workers_do_not_see_credentials(pdf_worker_processes, monkeypatch):
     assert {"PDF_PAGE_TIMEOUT_S", "PATH"} <= names  # 실행 환경과 노브는 그대로
 
 
+def test_workers_do_not_see_credentials_carried_in_values(pdf_worker_processes, monkeypatch):
+    """이름은 자격 증명이 아니어도 값에 키가 실리는 변수 — base URL 쿼리·userinfo, 프록시
+    user:pass, 번역 요청 본문 덧붙임 — 도 워커에서 지운다. PDF 작업은 네트워크를 쓰지 않는다."""
+    carried = {
+        "OPENAI_BASE_URL": "https://gw.invalid/v1?api-key=sk-test-not-for-workers",
+        "LLM_LOCAL_OPENAI_BASE_URL": "http://user:pw@127.0.0.1:19999/v1",
+        "OLLAMA_BASE_URL": "http://127.0.0.1:11434",
+        "HTTPS_PROXY": "http://user:pw@proxy.invalid:3128",
+        "http_proxy": "http://user:pw@proxy.invalid:3128",
+        "TRANSLATE_EXTRA_BODY": '{"provider": {"order": ["x"]}}',
+    }
+    for name, value in carried.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("PDF_PAGE_TIMEOUT_S", "45")
+    names = set(pdf_worker.run("pdf_worker_tasks:env_names", timeout=30))
+    assert not set(carried) & names
+    assert {"PDF_PAGE_TIMEOUT_S", "PATH"} <= names  # 실행 환경과 노브는 그대로
+
+
 def test_worker_children_do_not_inherit_credentials(pdf_worker_processes, monkeypatch):
-    """지우는 범위는 파이썬 os.environ과 워커가 띄우는 손자 프로세스다(tesseract 등) — 커널의
-    초기 환경 블록(/proc/self/environ)에는 남는다는 것이 문서화된 한계다(감사 security-3)."""
+    """지우는 범위는 파이썬 os.environ과 워커가 띄우는 자식 프로세스다(Tesseract는 워커가 아니라
+    서버가 띄운다) — 커널의 초기 환경 블록(/proc/self/environ)에는 남는다는 것이 문서화된
+    한계다(감사 security-3)."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-for-workers")
     monkeypatch.setenv("HF_TOKEN", "hf_test")
     script = "import os; print(' '.join(sorted(os.environ)))"

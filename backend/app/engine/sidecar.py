@@ -14,6 +14,12 @@ provider 실패는 명확한 오류로 표면화되고 전환은 사용자가 pr
 기존 복구(텍스트 레이어 폴백)를 태우고, 아니면(스캔 문서·대조 불가·충실도 충분) 잘린
 출력을 경고와 함께 그대로 쓴다 — 텍스트 레이어가 없는 페이지를 플레이스홀더로 만들지
 않기 위해서다(`_truncation_verdict`).
+
+잡 도중 sidecar가 내려가면(HTTP 503·연결 끊김 — 재시작/모델 재로드) 복귀를 기다렸다가 그
+페이지만 한 번 다시 보낸다. 다시 보낸 요청에서도 내려가면 그 페이지가 추론 엔진을 죽였을
+가능성이 크므로 `SidecarRestartLoopError`(retry_same_page=False)로 runner의 페이지 격리에
+넘기고, 페이지별 복구가 그 페이지를 한 번 더 보낼 때는 또 내려가도 다시 기다려 보내지 않는다
+— 페이지 하나가 컨테이너 재시작을 되풀이시키지 않게(`_parse_one`).
 """
 
 from __future__ import annotations
@@ -99,6 +105,26 @@ class SidecarOutputTruncated(OutputLimitError):
     retry_same_page = False
     # runner 경고 문구용 상한 이름 (MAX_LENGTH가 아니라 sidecar의 페이지당 출력 상한이다)
     limit_label = "sidecar 출력 토큰 상한"
+
+
+class SidecarRestartLoopError(SidecarUnavailableError):
+    """복귀를 기다려 다시 보낸 페이지 요청에서도 sidecar가 내려갔다 — 같은 페이지 재요청 금지.
+
+    추론 엔진 사망(vLLM EngineCore OOM·CUDA illegal memory access 등)은 같은 이미지·같은
+    설정이면 결정적으로 재발한다. 엔진의 복귀 후 1회 재요청 위에 runner의 1회 재시도가
+    겹치면(이 오류가 retry_same_page=True인 SidecarUnavailableError 그대로였다) 그 페이지
+    하나가 컨테이너 재시작·모델 재로드를 3회(동시성 1)~5회(동시성 4) 일으킨 뒤에야 텍스트
+    레이어로 넘어갔다. runner는 이 오류를 곧바로 페이지 격리(텍스트 레이어 → 플레이스홀더)로
+    넘긴다."""
+
+    retry_same_page = False
+
+
+def _restart_loop(cause: SidecarUnavailableError) -> SidecarRestartLoopError:
+    return SidecarRestartLoopError(
+        "sidecar 복귀 뒤 다시 보낸 이 페이지 요청에서도 sidecar가 중단됨 — 같은 페이지를 "
+        f"다시 보내지 않습니다 ({cause})"
+    )
 
 
 class _AnyCancel:
@@ -275,6 +301,13 @@ class SidecarEngine(OCREngine):
         # 그 페이지를 run_single로 다시 부르는데, 같은 요청은 같은 곳에서 다시 잘리므로
         # sidecar에 보내지 않고 같은 예외로 답한다(1회용 — 다음 run_multi·잡 전환에서 비움).
         self._truncated_replay: dict[Path, str] = {}
+        # 복귀 뒤 다시 보낸 요청까지 실패한(SidecarRestartLoopError) 페이지. runner의 페이지별
+        # 복구가 그 페이지를 run_single로 한 번 더 보낼 때, 또 503·연결 끊김이면 기다려 다시
+        # 보내지 않고 곧바로 같은 예외를 낸다(1회용 — 그 페이지의 다음 요청·다음 run_multi·
+        # 잡 전환에서 비움). GPU에 아예 안 보내지는 않는다: 동시 요청에서는 형제 페이지도 같은
+        # 재시작에 휘말려 실패하므로, 범인이 아닌 페이지는 그 한 번으로 정상 처리된다.
+        # _parse_one이 페이지 스레드에서 읽고 쓰므로 _health_lock 보호.
+        self._recovery_spent: set[Path] = set()
 
     # ── 상태/메타 ──────────────────────────────────────────────
 
@@ -576,6 +609,9 @@ class SidecarEngine(OCREngine):
         복구 경로로 넘기는 페이지(잘림)나 앞 페이지 실패로 버려지는 형제 결과의 경고가
         잡 경고에 남지 않게."""
         request_id = f"{uuid.uuid4().hex[:12]}-p{local_page}"
+        with self._health_lock:
+            spent = image_path in self._recovery_spent
+            self._recovery_spent.discard(image_path)  # 1회용 — 이 요청이 표식을 쓴다
         try:
             resp = self._client.parse_page(
                 image_path,
@@ -593,14 +629,29 @@ class SidecarEngine(OCREngine):
             # 기다렸다가 이 페이지만 1회 재시도한다. 기다리지 않으면 재기동+모델 로드
             # 시간 동안의 페이지가 전부 플레이스홀더로 확정된다. 대기 예산은 공유한다.
             self._invalidate_health(str(e))
+            if spent:
+                # 이 페이지는 직전 시도에서 복귀 뒤 재요청까지 실패했고 이번에도 내려갔다 —
+                # 또 기다려 보내면 같은 페이지가 재시작을 한 번 더 일으킬 뿐이다
+                raise _restart_loop(e) from e
             self._await_recovery(cancel)
-            resp = self._client.parse_page(
-                image_path,
-                page_index=local_page,
-                request_id=f"{request_id}r",
-                options={},
-                cancel=cancel,
-            )
+            try:
+                resp = self._client.parse_page(
+                    image_path,
+                    page_index=local_page,
+                    request_id=f"{request_id}r",
+                    options={},
+                    cancel=cancel,
+                )
+            except SidecarTimeoutError:
+                raise
+            except SidecarUnavailableError as retry_error:
+                # 복귀 뒤 다시 보낸 요청에서도 내려갔다 — 이 페이지가 엔진을 죽였을 가능성이
+                # 크다. 캐시를 다시 무효화하고(복귀 대기가 남긴 loaded=True를 믿고 다음 청크가
+                # 재시작 중인 sidecar로 곧장 보내지 않게), runner의 재시도는 막는다.
+                self._invalidate_health(str(retry_error))
+                with self._health_lock:
+                    self._recovery_spent.add(image_path)
+                raise _restart_loop(retry_error) from retry_error
             # 내용은 정상 처리됐다 — 경위는 참고로만 남긴다(경고면 잡이 degraded가 된다)
             self._notice(_RECOVERED_NOTICE)
         self._refresh_degraded_health()
@@ -679,6 +730,7 @@ class SidecarEngine(OCREngine):
             self._degraded_refreshed = False
             self._outage_deadline = None
             self._truncated_replay.clear()
+            self._recovery_spent.clear()
 
     def _refresh_degraded_health(self) -> None:
         """parse가 성공했는데 캐시가 이상 신고를 들고 있으면 잡당 한 번 다시 확인한다.
@@ -722,7 +774,10 @@ class SidecarEngine(OCREngine):
                 # 같은 요청은 같은 곳에서 다시 잘린다. GPU에 다시 보내지 않고 같은 판정을 낸다.
                 raise SidecarOutputTruncated(replay)
         else:
-            self._truncated_replay.clear()  # 새 청크 — 이전 청크의 1회용 표식은 무효
+            # 새 청크 — 이전 청크의 1회용 표식은 무효
+            self._truncated_replay.clear()
+            with self._health_lock:
+                self._recovery_spent.clear()
         self._ensure_ready(cancel)
         out_dir.mkdir(parents=True, exist_ok=True)
         # 텍스트 bbox가 없는 엔진(figure_only)은 raw_pages.json에 좌표를 싣지 않는다 — 실으면

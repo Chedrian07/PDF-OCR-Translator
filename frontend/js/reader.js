@@ -1,7 +1,7 @@
 import {
   ICON, READER_ALIGNMENT_COOLDOWN_MS, READER_DEFAULT_RATIO, READER_FOCUS_RATIO,
   READER_HYDRATE_RADIUS, READER_KEEP_RADIUS, READER_SYNC_KEY, READER_SYNC_QUIET_MS,
-  READER_ZOOM_KEY, READER_ZOOM_MAX, READER_ZOOM_MIN, katexOptions, readerNotesKey, readerPosKey,
+  READER_ZOOM_KEY, READER_ZOOM_MAX, READER_ZOOM_MIN, readerNotesKey, readerPosKey,
 } from './constants.js';
 import {
   PDF_REPORT_MAX_WARNINGS, PDF_RETRY_MAX, addReaderNote, alignmentBatchPlan,
@@ -15,8 +15,8 @@ import {
 } from './core.js';
 import { el, state } from './state.js';
 import {
-  copyTextToClipboard, downloadTextFile, h, localGet, localSet, nowMs, setDownload, setTrustedHtml,
-  showToast, typesetMath,
+  copyTextToClipboard, downloadTextFile, h, localGet, localSet, nowMs, renderMath, setDownload,
+  setTrustedHtml, showToast, typesetMath,
 } from './ui.js';
 import { POLL_TIMEOUT_MS, apiGet, fetchTextWithBusyRetry } from './api.js';
 import { loadReaderNotes, saveReaderNotes } from './notes.js';
@@ -778,7 +778,8 @@ export function buildReaderRailStack() {
 }
 
 // 텍스트에 섞인 `\( … \)` / `\[ … \]`를 KaTeX로 조판한 노드 배열로 바꾼다.
-// KaTeX가 없거나 조판 실패면 원문 표기 그대로 남는다(그레이스풀 폴백).
+// KaTeX가 없거나 조판 실패면 원문 표기 그대로 남는다(그레이스풀 폴백). 조판은 ui.renderMath가
+// 맡는다 — 음수·거대 크기를 묶어 카드 하나가 수만 px로 늘어나지 않게(frontend-4).
 export function mathTextNodes(text) {
   const nodes = [];
   for (const part of splitInlineMath(text)) {
@@ -789,11 +790,7 @@ export function mathTextNodes(text) {
     const span = document.createElement('span');
     span.className = part.display ? 'math-display' : 'math-inline';
     span.textContent = part.value;
-    if (window.katex) {
-      try {
-        window.katex.render(part.value, span, katexOptions(part.display));
-      } catch (_) { span.textContent = part.value; }
-    }
+    renderMath(span, part.value, part.display);
     nodes.push(span);
   }
   return nodes;

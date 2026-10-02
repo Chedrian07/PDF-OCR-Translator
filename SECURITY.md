@@ -103,7 +103,10 @@ Uploaded PDFs, and the text an OCR model produces from them, are treated as host
   nested forms expand to 10^12 draw calls and a 1 GB flate bomb are both rejected in
   milliseconds. Names are decoded the way MuPDF reads them, and a `Do` whose target cannot
   be confirmed is charged the most expensive form in its resource dictionary, so escaped
-  or non-ASCII names cannot hide a bomb. At most 4 uploads are measured at once; excess
+  or non-ASCII names cannot hide a bomb. Strings and comments are followed with MuPDF's
+  lexer rules, so the word "Do" in page text is not taken for an operator; after an
+  inline image, or where a content stream ends inside a string or comment, every `Do`
+  is still counted. At most 4 uploads are measured at once; excess
   uploads get `503` with `Retry-After: 5` instead of holding server threads. Costs the
   gate does not count (huge images, shadings, repeated Type3 glyphs) are bounded by the
   per-page time limit.

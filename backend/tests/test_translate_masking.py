@@ -268,6 +268,24 @@ def test_cached_translation_drops_tails_after_restored_math():
         r"표기법 \( x_{i:j} \) 를 쓰고 이를 \( M_{i} \) 로 지칭한다.")
 
 
+def test_sanitize_strips_heading_marks_the_source_does_not_have():
+    """제목 블록 '2 Preliminaries'가 '## 2 예비 연구'로 옮겨져 리더 개요·document.html에 '## '가
+    찍혔다(실앱 4B). 원문에 제목 표시가 없을 때만 지운다."""
+    masked, mapping = mask("2 Preliminaries")
+    assert sanitize_translation("## 2 예비 연구", masked, mapping) == ("2 예비 연구", 1)
+    two, two_map = mask("Setup\nWe fix the notation first.")
+    assert sanitize_translation("# 설정\n## 먼저 표기를 정한다.", two, two_map) == (
+        "설정\n먼저 표기를 정한다.", 2)
+    # md 제목 유닛은 원문에 표시가 있다 — 그대로 둔다
+    heading, heading_map = mask("## Results")
+    assert sanitize_translation("## 결과", heading, heading_map) == ("## 결과", 0)
+    # 제목 표시가 아닌 '#'(공백 없음·문장 중간)는 건드리지 않는다
+    tag, tag_map = mask("Issue 12 is fixed.")
+    assert sanitize_translation("#12 문제를 고쳤다. 다음 # 기호도", tag, tag_map)[1] == 0
+    from app.translate.masking import tidy_cached_translation
+    assert tidy_cached_translation("## 2 예비 연구", mapping, "2 Preliminaries") == "2 예비 연구"
+
+
 def test_should_skip_수식뿐():
     assert should_skip("$E = mc^2$") == "non-linguistic"
     assert should_skip("[1, 2, 3]") == "non-linguistic"

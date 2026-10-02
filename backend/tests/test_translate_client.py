@@ -1499,6 +1499,36 @@ def test_길이가_정해진_SSE는_DONE_뒤_본문_끝을_읽어_연결을_재�
     assert len(conns) == 1
 
 
+def test_DONE_뒤_소진의_짧은_타임아웃은_재사용된_연결에_남지_않는다():
+    """소진은 소켓 타임아웃을 1초로 줄인다 — 재사용된 연결의 다음 요청은 다시 TRANSLATE_TIMEOUT_S
+    로 기다려야 한다(첫 토큰까지 1초가 넘는 생성이 시간 초과로 오인되면 안 된다)."""
+    conns: set = set()
+    seen = []
+    parts = (_chunk("안녕"), _chunk("하세요", "stop"), b"data: [DONE]\n\n")
+
+    class SlowSecond(_Quiet):
+        def do_POST(self):  # noqa: N802
+            self._body()
+            conns.add(self.client_address)
+            seen.append(1)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            if len(seen) == 2:
+                time.sleep(1.6)                     # prefill이 긴 두 번째 요청
+            for part in parts:
+                self.wfile.write(_http_chunk(part))
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+
+    with _serve(SlowSecond) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat",
+                                    timeout_s=10, max_retries=0))
+        assert [c.complete("s", "u", max_tokens=10) for _ in range(2)] == ["안녕하세요"] * 2
+    assert len(conns) == 1
+
+
 def test_DONE_뒤_스트림을_닫지_않는_서버에도_오래_막히지_않는다():
     conns: set = set()
     with _serve(_keepalive_sse_server(conns, stall_after_done=5.0)) as base:

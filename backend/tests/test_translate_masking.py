@@ -110,6 +110,28 @@ def test_sanitize_플레이스홀더_v속성_치환돼도_복원_무해():
     assert not missing and not dup
 
 
+def test_sanitize_strips_dollar_signs_invented_around_math_placeholders():
+    """소형 모델이 수식 플레이스홀더를 `$…$`로 다시 감싸 번역 PDF에 '$〈 y, x̃ 〉$를'이 찍혔다
+    (P4 실앱). 원문 `$x$`는 달러까지 한 플레이스홀더라 양옆 달러는 언제나 지어낸 것이다."""
+    masked, mapping = mask("We define \\( \\langle y, x \\rangle \\) as the product.")
+    raw = masked.replace("We define ", "우리는 $").replace(" as the product.", "$를 내적으로 정의한다.")
+    clean, n = sanitize_translation(raw)
+    assert n == 1
+    restored, missing, dup = unmask(clean, mapping)
+    assert restored == "우리는 \\( \\langle y, x \\rangle \\)를 내적으로 정의한다."
+    assert not missing and not dup
+    assert sanitize_translation("값은 $ <m2/> $이다") == ("값은 <m2/>이다", 1)
+
+
+def test_sanitize_keeps_currency_and_one_sided_dollars_next_to_placeholders():
+    for text in (
+        "가격은 $5 <m1/> $10이다",          # 통화 — 달러 바로 뒤가 플레이스홀더가 아니다
+        "<m1/>$만 남았다",                   # 한쪽만
+        "$<c1/>$ 코드 플레이스홀더는 그대로",  # 수식(m)이 아닌 플레이스홀더
+    ):
+        assert sanitize_translation(text) == (text, 0), text
+
+
 def test_should_skip_수식뿐():
     assert should_skip("$E = mc^2$") == "non-linguistic"
     assert should_skip("[1, 2, 3]") == "non-linguistic"

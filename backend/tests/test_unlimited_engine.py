@@ -510,3 +510,45 @@ def test_metal_engine_warns_when_torch_was_loaded_without_the_fallback(preset, d
     assert out["seen"] == [preset]
     assert bool(out["warned"]) is warns
     assert out["env"] == final
+
+
+# ── 고정 스냅샷은 캐시에서 먼저 (P4 Docker: 로드마다 huggingface.co 조회) ──
+
+
+def test_load_reads_the_pinned_snapshot_from_the_cache_without_the_hub(monkeypatch):
+    """캐시가 완전해도 로드마다 Hub에 묻던(선택 파일 HEAD 6회·API 1회) 경로를 막는다 — 고정 커밋
+    리비전이면 토크나이저·모델 모두 local_files_only로 먼저 읽는다(app.engine.hf_snapshot)."""
+    import transformers
+
+    from app.vendor.unlimited_ocr import UnlimitedOCRForCausalLM
+
+    calls: list[tuple[str, tuple, dict]] = []
+
+    class _FakeModel:
+        def eval(self):
+            return self
+
+        def to(self, device):
+            return self
+
+    def _model(*args, **kwargs):
+        calls.append(("model", args, kwargs))
+        return _FakeModel()
+
+    def _tokenizer(*args, **kwargs):
+        calls.append(("tokenizer", args, kwargs))
+        return _Tokenizer()
+
+    monkeypatch.setattr(UnlimitedOCRForCausalLM, "from_pretrained", _model)
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", _tokenizer)
+    settings = Settings(engine="unlimited", device="cpu", preload_model=False)
+    engine = UnlimitedEngine(settings)
+    engine._load_locked()
+
+    assert [name for name, _args, _kwargs in calls] == ["tokenizer", "model"]
+    for _name, args, kwargs in calls:
+        assert args == (settings.model_id,)
+        assert kwargs["revision"] == settings.model_revision
+        assert kwargs["local_files_only"] is True
+    assert calls[1][2]["attn_implementation"] == "eager"
+    assert engine.loaded

@@ -123,3 +123,7 @@ class _SourceSpan:
     # 화면에 실제로 칠해지는 글자인가. 스캔에 얹힌 OCR 텍스트 레이어(렌더 모드 3,
     # 투명)는 False — 그런 span만 가진 블록의 원문은 텍스트가 아니라 래스터 픽셀이다.
     visible: bool = True
+    # 폰트의 **원래** (ascender, descender) — em 단위. PyMuPDF는 둘의 차가 1em 미만이면
+    # span bbox를 1em 높이로 늘려 보고하지만, MuPDF 리댁션은 원래 값으로 글리프 상자를
+    # 잡는다. 모르면 None.
+    metrics: tuple[float, float] | None = None

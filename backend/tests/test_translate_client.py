@@ -279,6 +279,59 @@ def test_auto_첫_probe_실패도_동시_대기자에게_single_flight():
     assert client.api_mode_used == ""
 
 
+@pytest.mark.parametrize("failure", ["timeout", "http400", "empty"])
+def test_auto_협상_owner의_유닛_단위_오류는_대기자에게_복제하지_않는다(failure):
+    """owner 유닛 하나의 시간 초과·400·빈 출력을 요청을 보내지도 않은 대기 유닛들에 복제해,
+    재개 run에서 최대 7개 유닛이 같은 사유로 원문 유지됐다(translate-7). 전역 원인(5xx·
+    연결)만 복제하고, 유닛 단위 거부면 대기자는 각자 자기 요청으로 협상한다."""
+    import concurrent.futures as cf
+    import threading
+    import time
+
+    import requests as _requests
+
+    from app.translate.types import TranslateUnitRejected
+
+    workers = 4
+    start = threading.Barrier(workers)
+    lock = threading.Lock()
+    sent = []
+
+    def post(path, payload):
+        user = payload.get("input") or payload["messages"][-1]["content"]
+        with lock:
+            sent.append(user)
+        if user == "HUGE":
+            time.sleep(0.3)
+            if failure == "timeout":
+                raise _requests.exceptions.ReadTimeout("Read timed out")
+            if failure == "http400":
+                return (400, {"error": {"message": "context length exceeded"}}, {})
+            return (200, {"output_text": "", "status": "completed"}, {})
+        return (200, {"output_text": f"{user} 번역", "status": "completed"}, {})
+
+    client = OpenAICompatClient(_cfg(api_mode="auto"))
+    client._backoff = lambda headers, attempt: 0.0
+    client._post = post
+
+    def call(unit):
+        start.wait()
+        if unit != "HUGE":
+            time.sleep(0.05)  # owner가 먼저 협상을 잡게 한다
+        try:
+            return unit, client.complete("s", unit, max_tokens=10)
+        except TranslateUnitRejected as e:
+            return unit, type(e).__name__
+
+    with cf.ThreadPoolExecutor(max_workers=workers) as executor:
+        results = dict(executor.map(call, ["HUGE", "a", "b", "c"]))
+
+    assert {u: results[u] for u in "abc"} == {u: f"{u} 번역" for u in "abc"}
+    assert results["HUGE"] in ("TranslateTimeout", "TranslateUnitRejected", "TranslateEmptyOutput")
+    assert {"a", "b", "c"} <= set(sent)            # 대기자도 자기 요청을 실제로 보냈다
+    assert client.api_mode_used == "responses"
+
+
 def test_auto_실패_flight는_후속_순차호출의_회복을_막지_않음():
     calls = []
 

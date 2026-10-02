@@ -27,6 +27,7 @@ from .base import (
     RepetitiveOutputError,
     StreamSink,
 )
+from .hf_snapshot import pretrained_local_first
 from .objc_pool import autorelease_pool
 from .repetition import SemanticRepetitionDetector
 
@@ -251,11 +252,15 @@ class UnlimitedEngine(OCREngine):
         self.dtype_name = str(dtype).replace("torch.", "")
         logger.info("모델 로딩 시작: %s@%s (device=%s/%s dtype=%s)",
                     s.model_id, s.model_revision[:8], self.device, self.torch_device, self.dtype_name)
-        tokenizer = AutoTokenizer.from_pretrained(s.model_id, revision=s.model_revision)
+        # 고정 커밋 스냅샷은 캐시에서 먼저 읽는다 — 로드마다 Hub에 묻지 않는다(hf_snapshot)
+        tokenizer = pretrained_local_first(
+            AutoTokenizer.from_pretrained, s.model_id, s.model_revision,
+        )
         # 이 아키텍처는 mha_eager(SlidingWindowLlamaAttention)만 구현 → eager 필수
-        model = UnlimitedOCRForCausalLM.from_pretrained(
+        model = pretrained_local_first(
+            UnlimitedOCRForCausalLM.from_pretrained,
             s.model_id,
-            revision=s.model_revision,
+            s.model_revision,
             dtype=dtype,
             use_safetensors=True,
             attn_implementation="eager",

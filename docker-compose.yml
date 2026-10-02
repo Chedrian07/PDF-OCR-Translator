@@ -14,7 +14,7 @@
 #
 # ⚠ backend는 한 번에 하나만: 네 backend(ocr-cpu·ocr-cuda·ocr-ovis·ocr-paddle)가 같은
 #   ocr-data(잡 저장소)를 쓰므로, 두 번째 backend는 실행 중인 잡을 지키려고 기동을
-#   거부하고(잡 저장소 단일 소유자 락 — docs/ARCHITECTURE.md §2) restart 정책으로
+#   거부하고(잡 저장소 단일 소유자 락 — docs/ARCHITECTURE.md §4) restart 정책으로
 #   재시작을 반복한다. 스택을 바꾸기 전에 떠 있는 backend를 먼저 멈춘다:
 #          docker compose stop ocr-cpu
 #

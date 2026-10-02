@@ -2398,25 +2398,39 @@ def delete_job(request: Request, job_id: str) -> Response:
 
 
 def _answer_head_on_get_routes(api_router: APIRouter) -> int:
-    """GET 라우트가 HEAD에도 답하게 한다 — 이벤트 스트림(SSE) 라우트는 뺀다. 더한 개수를 돌려준다.
+    """GET 라우트마다 HEAD 짝 라우트를 단다 — 이벤트 스트림(SSE) 라우트는 뺀다. 단 개수를 돌려준다.
 
     FastAPI GET 라우트는 HEAD를 받지 않아, 프런트엔드 정적 마운트("/")가 HEAD /api/…를 가로채
-    404를 줬다(다운로드 관리자·프로브가 있는 문서를 없다고 봤다). HEAD는 GET과 같은 처리로 같은
-    헤더(Content-Type·Content-Length)를 내고 본문은 서버(uvicorn)가 보내지 않는다 — FileResponse는
-    파일도 읽지 않는다. 끝나지 않는 이벤트 스트림은 본문을 버려도 연결을 붙잡으므로 제외한다."""
+    404를 줬다(다운로드 관리자·프로브가 있는 문서를 없다고 봤다). 짝 라우트는 같은 엔드포인트·
+    응답 클래스·상태 코드로 GET과 같은 헤더(Content-Type·Content-Length)를 내고, 본문은 서버
+    (uvicorn)가 보내지 않는다 — FileResponse는 파일도 읽지 않는다. GET 라우트의 메서드 집합에
+    HEAD를 더하지 않는 이유: OpenAPI 스키마에 같은 operationId의 head 연산이 생겨(중복 경고·
+    클라이언트 생성기 오류) 스키마에서는 뺀다. 끝나지 않는 이벤트 스트림은 본문을 버려도 연결을
+    붙잡으므로 짝을 달지 않는다. 메서드 이름은 HTTPMethod로 쓴다 — env 키 계약 스캐너
+    (test_ci_ops_contracts)가 이 파일의 따옴표 친 대문자 4자 이상 문자열을 env 키로 센다."""
+    get_routes = [
+        route for route in api_router.routes
+        if isinstance(route, APIRoute) and route.methods == {HTTPMethod.GET.value}
+    ]
     added = 0
-    for route in api_router.routes:
-        # 메서드 이름은 HTTPMethod로 쓴다 — env 키 계약 스캐너(test_ci_ops_contracts)가 이 파일의
-        # 따옴표 친 대문자 4자 이상 문자열을 env 키로 센다.
-        if not isinstance(route, APIRoute) or route.methods != {HTTPMethod.GET.value}:
-            continue
+    for route in get_routes:
         try:
             returns = typing.get_type_hints(route.endpoint).get("return")
         except Exception:  # noqa: BLE001 — 해석할 수 없는 주석은 스트리밍으로 보지 않는다
             returns = None
         if isinstance(returns, type) and issubclass(returns, StreamingResponse):
             continue
-        route.methods.add(HTTPMethod.HEAD.value)
+        api_router.add_api_route(
+            route.path.removeprefix(api_router.prefix),
+            route.endpoint,
+            methods=[HTTPMethod.HEAD.value],
+            include_in_schema=False,
+            name=f"{route.name}_head",
+            response_class=route.response_class,
+            status_code=route.status_code,
+            response_model=route.response_model,
+            dependencies=route.dependencies,
+        )
         added += 1
     return added
 

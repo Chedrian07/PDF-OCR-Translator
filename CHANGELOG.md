@@ -42,6 +42,7 @@ Performance figures below were measured on an Apple M4 Max during this work, par
 - `TRANSLATE_REASONING_STYLE=auto` recognises regional OpenAI hosts (`eu.api.openai.com`) and Podman, LAN and `.internal` host names.
 - Connection errors no longer show the base URL or its query string, and `TRANSLATE_EXTRA_BODY` values are no longer written to `state.json`.
 - The last translation's warnings appear under the result as "번역 참고 사항".
+- The "참고문헌 규칙 불일치" warning only appears when the translated Markdown and the PDF really treat a reference line differently; Unlimited-OCR papers no longer get it on every translation.
 - README guide for local MLX translation servers (oMLX, LM Studio, mlx_lm.server) with a sample `.env`.
 
 ### Page Q&A

@@ -271,8 +271,9 @@ jobs:
   # 실 PDF 전 구간 하네스 (= make verify-e2e). 이 리포의 주요 안전망인데도 지금까지
   # 어떤 자동 트리거에도 걸려 있지 않았다 — 사람이 로컬에서 기억해야만 돌았다.
   # 외부 API·GPU·모델 다운로드 불필요(OCR_ENGINE=textlayer + scripts/mock_llm.py).
-  # 앞 6페이지만 써서 러너 시간을 억제한다(로컬 실측 ≈120초 · 단언 82개 —
-  # 그중 61초는 429 Retry-After 상한을 실제로 재는 백오프 대기다).
+  # 앞 6페이지만 써서 러너 시간을 억제한다(로컬 실측 ≈2분 — 그중 61초는 429 Retry-After
+  # 상한을 실제로 재는 백오프 대기다). 단언 수는 페이지 수와 무관하다. 개수는 여기 적지
+  # 않는다 — 하네스가 자라면 낡는다(현재 값: docs/ARCHITECTURE.md §11.1·README).
   verify-e2e:
     runs-on: ubuntu-latest
     defaults:

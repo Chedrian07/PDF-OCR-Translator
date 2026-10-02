@@ -69,12 +69,15 @@ def test_rate_limit_key_trusts_proxy_only_when_opted_in(monkeypatch):
     """리버스 프록시 뒤에서는 client.host가 프록시 IP라 전원이 한 버킷으로 붕괴한다.
     그렇다고 X-Forwarded-For를 무조건 믿으면 헤더 위조로 우회된다 — 신뢰 홉 수를
     명시한 배포에서만 헤더를 읽고, 기본값(미설정)은 현행대로 헤더를 무시한다."""
+    from starlette.datastructures import Headers
+
     import app.api as api_mod
 
+    # 실제 요청처럼 starlette Headers — X-Forwarded-For 필드 줄을 모두 읽는다(getlist)
     request = SimpleNamespace(
         client=SimpleNamespace(host="10.0.0.9"),
         # client(203.0.113.7) → 프록시A → 프록시B → 앱: 각 홉이 한 항목씩 덧붙인다
-        headers={"x-forwarded-for": "203.0.113.7, 10.0.0.9"},
+        headers=Headers({"x-forwarded-for": "203.0.113.7, 10.0.0.9"}),
     )
     monkeypatch.delenv("TRUSTED_PROXY_HOPS", raising=False)
     assert api_mod._client_key(request) == "10.0.0.9"        # 기본: 헤더 무시
@@ -94,12 +97,12 @@ def test_rate_limit_key_trusts_proxy_only_when_opted_in(monkeypatch):
 
     # 헤더가 없거나 비어 있어도 직접 주소로 폴백한다
     monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
-    bare = SimpleNamespace(client=SimpleNamespace(host="10.0.0.9"), headers={})
+    bare = SimpleNamespace(client=SimpleNamespace(host="10.0.0.9"), headers=Headers())
     assert api_mod._client_key(bare) == "10.0.0.9"
     # 키가 무한히 길어지지 않는다 (레이트리밋 dict 메모리 방어)
     long_header = SimpleNamespace(
         client=SimpleNamespace(host="10.0.0.9"),
-        headers={"x-forwarded-for": "9" * 500},
+        headers=Headers({"x-forwarded-for": "9" * 500}),
     )
     assert len(api_mod._client_key(long_header)) == api_mod._XFF_KEY_MAX
 

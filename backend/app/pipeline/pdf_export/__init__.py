@@ -27,6 +27,7 @@ from . import (
     geometry,
     spans,
     tables,
+    raster_tables,
     fitting,
     subset,
     build,
@@ -290,8 +291,8 @@ __all__ = [
 ]
 
 _SUBMODULES = (
-    constants, report, models, text, fonts, geometry, spans, tables, fitting,
-    subset, build,
+    constants, report, models, text, fonts, geometry, spans, tables, raster_tables,
+    fitting, subset, build,
 )
 
 

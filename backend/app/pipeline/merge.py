@@ -955,16 +955,23 @@ class IncrementalMerger:
                 # 호출자가 이미 원본과 대조해 정한 배치(잘린 청크의 앞부분) — 다시 정합하면
                 # 앞부분만으로 대조해 다른 답을 낼 수 있다
                 aligned = (list(given.slots), given.matched)
-            elif len(pages) != chunk.num_pages or len(raw_pages) != chunk.num_pages:
+            elif len(pages) != chunk.num_pages or (
+                # 원출력을 남기지 않는 엔진(figure_only sidecar — raw_pages.json 없음)은 마커
+                # 수만 본다. 빈 원출력을 '개수 불일치'로 세면 마커가 정확한 청크마다 정합(PDF
+                # 워커 호출 N회)이 돌고 거짓 품질 경고가 붙었다(감사 pipeline-7).
+                raw_pages and len(raw_pages) != chunk.num_pages
+            ):
                 aligned = self._align_chunk_pages(chunk, pages)
             if aligned is not None:
                 slots, placed = aligned
                 moved = [slot != k for k, slot in enumerate(slots)]
-                notes.append(
-                    f"{chunk.start_page}페이지 청크: 페이지 마커 {len(slots)}개 "
-                    f"(기대 {chunk.num_pages}) — 원본 본문과 대조해 "
-                    f"{placed}개 페이지를 제자리에 배치"
-                )
+                if len(slots) != chunk.num_pages or any(moved):
+                    # 대조 결과가 위치 그대로(마커 수도 맞음)면 고친 것이 없다 — 경고하지 않는다
+                    notes.append(
+                        f"{chunk.start_page}페이지 청크: 페이지 마커 {len(slots)}개 "
+                        f"(기대 {chunk.num_pages}) — 원본 본문과 대조해 "
+                        f"{placed}개 페이지를 제자리에 배치"
+                    )
             else:
                 # 위치 기반: 초과분은 마지막 페이지에 합치고 모자란 끝은 빈 페이지로
                 last = chunk.num_pages - 1

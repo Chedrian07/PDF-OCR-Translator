@@ -1079,6 +1079,13 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   라우트가 멈추지 않는다. 백필 스레드는 빈 워커를 상한 없이 기다려 빌드 뒤에 끝낸다. `/page/{n}`은
   기다리지 않는다. 이미 최신이면 다시 쓰지도 예열하지도 않고, 기다리는 사이 파일이 바뀌었거나
   종료 중이면 저장하지 않는다.
+- 번역 PDF를 만드는 경로(`/pdf`, 번역 facsimile — `/layout?lang`·`document.html?lang`·
+  `/page/{n}?lang`)는 캐시가 최신이 아니면 빌드 지문을 뜨기 **전에** 두 입력(layout.json·
+  layout.{lang}.json)의 백필을 시작(또는 진행 중인 것에 합류)해 내보내기 대기 상한
+  (`PDF_EXPORT_QUEUE_TIMEOUT_S`) 안에서 끝을 기다린다 — 낡은 레이아웃으로 빌드한 뒤 리더의 백필이
+  layout을 바꾸면 표식이 어긋나 같은 PDF를 다시 만들었다(업그레이드 직후 옛 잡마다 첫 내보내기가
+  두 번, 동시 첫 요청 6초 → 12초). 백필이 끝나 띄우는 예열도 두 입력이 **모두** 최신일 때만
+  하고, 원본 layout 백필이 끝날 때도 번역된 언어마다 예열한다.
 
 ### GET /api/jobs/{id}/pdf/report?lang=ko
 - 마지막 번역 PDF 빌드의 생성 리포트(`export.{lang}.report.json`)를

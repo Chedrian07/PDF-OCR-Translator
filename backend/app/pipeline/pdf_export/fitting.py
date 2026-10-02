@@ -9,7 +9,7 @@ import contextlib
 import contextvars
 import re
 import math
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import replace
 from html import escape
 from pathlib import Path
@@ -47,6 +47,12 @@ _TEXT_ORIGIN_RE = re.compile(
 _TRIAL_PAGES: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "pdf_export_trial_pages", default=None,
 )
+# 열어 두는 시험 문서 수(최근에 쓴 기하 순) — 넘으면 가장 오래 안 쓴 것을 닫는다. 쪽은 차례로
+# 조판하므로 기하가 바뀌면 이전 시험 문서는 거의 다시 쓰이지 않는다. 쪽 크기가 제각각인 문서
+# (폰 스캔 자동 자르기·여러 출처를 합친 PDF)는 기하마다 문서를 열어 빌드 끝까지 쥐어, 100쪽에
+# 시험 문서 82개·빌드 최대 메모리 379MB → 718MB(300쪽 1.9GB)로 늘고 속도 이득도 없었다
+# (감사 delta-pdf-translate-3). 몇 개를 남기는 것은 두 크기가 번갈아 나오는 문서를 위해서다.
+_TRIAL_CACHE_MAX = 4
 # Shape(insert_textbox)가 읽는 페이지 기하 — 시험 페이지가 이것을 모두 같게 복제할 때만 쓴다
 _SHAPE_GEOMETRY = (
     "mediabox", "cropbox", "mediabox_size", "cropbox_position", "transformation_matrix",
@@ -56,17 +62,23 @@ _SHAPE_GEOMETRY = (
 
 @contextlib.contextmanager
 def trial_pages():
-    """빌드 한 번 동안 조판 시험용 빈 페이지를 기하별로 재사용하고 끝나면 닫는다."""
-    cache: dict = {}
+    """빌드 한 번 동안 조판 시험용 빈 페이지를 기하별로 재사용하고 끝나면 닫는다.
+
+    최근에 쓴 기하 _TRIAL_CACHE_MAX개만 열어 두고, 밀려난 시험 문서는 바로 닫는다."""
+    cache: OrderedDict = OrderedDict()
     token = _TRIAL_PAGES.set(cache)
     try:
         yield
     finally:
         _TRIAL_PAGES.reset(token)
         for doc, _page in cache.values():
-            if doc is not None:
-                with contextlib.suppress(Exception):
-                    doc.close()
+            _close_trial_doc(doc)
+
+
+def _close_trial_doc(doc) -> None:
+    if doc is not None:
+        with contextlib.suppress(Exception):
+            doc.close()
 
 
 def _new_trial_page(page):
@@ -106,6 +118,11 @@ def _trial_page(page):
     entry = cache.get(key)
     if entry is None:
         entry = cache[key] = _new_trial_page(page)
+        while len(cache) > _TRIAL_CACHE_MAX:
+            # 쪽은 차례로 조판한다 — 지금 쪽이 쓰는 시험 페이지는 방금 넣은 것이라 닫지 않는다
+            _close_trial_doc(cache.popitem(last=False)[1][0])
+    else:
+        cache.move_to_end(key)
     return entry[1] if entry[1] is not None else page
 
 

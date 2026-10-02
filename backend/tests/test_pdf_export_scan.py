@@ -798,3 +798,42 @@ def test_large_image_with_visible_text_over_it_is_still_a_figure(tmp_path):
 
     assert result.replaced == 0, result.report()
     assert result.kept_reasons.get("figure_text") == 1, result.report()
+
+
+def _hangul_span_sizes(path, clip: fitz.Rect) -> list[float]:
+    with fitz.open(path) as doc:
+        return [
+            round(span["size"], 2)
+            for block in doc[0].get_text("dict", clip=clip)["blocks"]
+            for line in block.get("lines", ())
+            for span in line["spans"]
+            if any("가" <= ch <= "힣" for ch in span["text"])
+        ]
+
+
+def test_scan_paragraphs_of_one_size_get_one_translated_size(tmp_path):
+    """글자 크기를 모르는 스캔 블록의 크기를 번역문 길이로 추정해, 같은 크기로 찍힌 두 문단이
+    번역 길이에 따라 다른 크기로 나왔다(실측 스캔 쪽 본문 8.8–13.3pt). 원문 글자로 추정한다."""
+    second = fitz.Rect(70, 248, 350, 292)
+    job_dir = tmp_path / "two-paragraphs"
+    job_dir.mkdir()
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    page.insert_image(page.rect, stream=_scan_png(
+        extra=[(72, 260 + index * 15, line) for index, line in enumerate(LINES)],
+    ))
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+    content = "\n".join(LINES)
+    _write_layout(job_dir, [
+        {"type": "text", "bbox": _bbox(BLOCK), "content": content},
+        {"type": "text", "bbox": _bbox(second), "content": content},
+    ], {0: "스캔 논문은 OCR 제품의 핵심 입력이다.", 1: KO})
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    assert result.replaced == 2, result.report()
+    short = _hangul_span_sizes(result.path, fitz.Rect(60, 100, 540, 240))
+    long_ = _hangul_span_sizes(result.path, fitz.Rect(60, 240, 540, 400))
+    assert short and long_, (short, long_)
+    assert max(short) == pytest.approx(max(long_), abs=0.3), (short, long_)

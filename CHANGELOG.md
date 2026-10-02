@@ -68,9 +68,10 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 - Inline math rules (fraction bars, root overlines) inside a translated paragraph are removed with its text and no longer block its space, so translations are not shrunk below readable size and no stray bars remain (a 25-page paper went from seven shrink/no-fit warnings to one).
 - Inner-product brackets (`\langle`, `\rangle`) are drawn as ⟨ ⟩ (〈 〉 on fonts without them) instead of the words `langle`/`rangle`, and a symbol command right before `\boldsymbol{…}` or `\frac{…}{…}` no longer fuses with it (`langley`, `cdotx`).
 - Every piece of a large TeX delimiter (stacked `|`/`‖` bars) is removed with its paragraph, so no stray bars overlap the translation. Export format version 15 rebuilds cached PDFs.
-- A short symbol that sticks out of its line and only grazes the OCR box (a radical `√`, a tall bracket, an accent) is removed with the paragraph it touches when that paragraph is translated, instead of staying on top of the translation. Export format version 16 rebuilds cached PDFs.
+- A short symbol that sticks out of its line and only grazes the OCR box (a radical `√`, a tall bracket, an accent) is removed with the paragraph it touches when that paragraph is translated, instead of staying on top of the translation.
+- The translated PDF no longer carries the upload's active content: open-actions and other automatic actions, document JavaScript, XFA forms, attachments, and links that run scripts, launch programs, submit forms or open other files are removed. Internal links, URI links and the outline stay. Export format version 17 rebuilds cached PDFs.
 - Scan covers leave overlapping figures and kept blocks intact; tiled and margined scans and searchable scans with the text layer under the image are recognised; narrow multi-line scan columns are no longer kept as vertical text; lines set in fonts with degenerate metrics are removed.
-- `PDF_EXPORT_FORMAT_VERSION` is now 16 and `ENRICH_VERSION` 6.
+- `PDF_EXPORT_FORMAT_VERSION` is now 17 and `ENRICH_VERSION` 6.
 
 ### API and UI
 

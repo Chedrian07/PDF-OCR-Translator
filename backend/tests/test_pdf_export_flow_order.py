@@ -272,6 +272,20 @@ def test_listing_rows_that_cannot_be_aligned_are_reported_as_kept(tmp_path):
     assert sum(result.kept_reasons.values()) == result.kept, result.report()
 
 
+def test_report_counts_kept_blocks_on_the_page_that_kept_them(tmp_path):
+    """보존 블록 수가 페이지별로도 남는다 — 경고 표본(50건)과 무관하게 '이 쪽에서 원문을 남긴
+    블록'을 리포트로 확인할 수 있어야 하네스가 사유 있는 유실과 무성 유실을 가른다."""
+    job_dir, original, translated = _listing_job(tmp_path, "pages", single_span_second_row=True)
+    translated[0]["blocks"][1]["content"] = "알파\n베타\n감마\n델타"
+    _write(job_dir, original, translated)
+
+    report = build_translated_pdf(job_dir, "ko").report()
+    assert report["kept_reasons"].get("listing_line_unaligned") == 2, report
+    assert [page for page, _count in report["kept_pages"]] == [1], report
+    assert sum(count for _page, count in report["kept_pages"]) == report["kept"], report
+    assert 1 in report["warning_pages"], report
+
+
 def test_plan_falls_back_to_a_conservative_pass_when_it_cannot_converge(tmp_path, monkeypatch):
     """패스 상한에서 불일치 계획을 그대로 쓰지 않고, 아무것도 지워진다고 가정하지 않고 다시 계획한다."""
     from app.pipeline.pdf_export import build as build_mod

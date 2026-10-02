@@ -364,9 +364,11 @@ cp .env.example .env   # 키 설정 후 docker compose up -d 로 재기동
   취소하면 연결을 끊어 서버의 생성까지 멈춥니다. 서버가 스트리밍을 거부하면(400/415/422)
   자동으로 비스트리밍으로 바꾸고, `TRANSLATE_STREAM=0`이면 예전 방식입니다.
 - **reasoning 제어**: `TRANSLATE_REASONING`(`off`|`low`|`medium`|`high`|`xhigh`)을 어떤 필드로
-  보낼지는 `TRANSLATE_REASONING_STYLE`(기본 `auto`)이 base URL로 고릅니다 — 루프백·사설망·
-  `host.docker.internal` → `chat_template_kwargs`(`enable_thinking`), `openrouter.ai` →
-  `reasoning`, `api.openai.com` → `reasoning_effort`. 서버 전용 파라미터는
+  보낼지는 `TRANSLATE_REASONING_STYLE`(기본 `auto`)이 base URL로 고릅니다 — 루프백·사설 IP·
+  단일 라벨·`localhost`·`*.localhost`·`*.local`·`*.lan`·`*.home.arpa`·`*.internal`
+  (`host.docker.internal`·Podman `host.containers.internal` 포함) → `chat_template_kwargs`
+  (`enable_thinking`), `openrouter.ai` → `reasoning`, `api.openai.com`·`*.api.openai.com`
+  (eu./us. 데이터 레지던시) → `reasoning_effort`. 서버 전용 파라미터는
   `TRANSLATE_EXTRA_BODY`(JSON 객체)로 덧붙입니다.
 - **잘린 출력은 쓰지 않습니다**: 응답이 출력 상한에서 잘리거나 비었거나 시간 초과면 그 문단은
   분할 재시도를 거쳐 끝내 원문으로 남고(캐시하지 않음), 사유가 `report.json`에 남습니다.
@@ -386,7 +388,9 @@ Apple Silicon에서는 번역 모델도 로컬로 돌릴 수 있습니다. 세 �
 - Docker 컨테이너의 backend에서 호스트 서버로 갈 때는 `127.0.0.1` 대신 `host.docker.internal`.
 - 모델 id가 틀리면 서버가 404를 내고, 오류 문구가 모델 id를 확인하라고 알려 줍니다.
 - **thinking 끄기**: `TRANSLATE_REASONING=off` — `TRANSLATE_REASONING_STYLE=auto`(기본)가 루프백·
-  사설망·`host.docker.internal` 주소를 보고 `chat_template_kwargs: {"enable_thinking": false}`로
+  사설 IP·단일 라벨·`localhost`·`*.localhost`·`*.local`·`*.lan`·`*.home.arpa`·`*.internal`
+  (`host.docker.internal`·Podman `host.containers.internal` 포함) 주소를 보고
+  `chat_template_kwargs: {"enable_thinking": false}`로
   전달합니다(공개 호스트 이름으로 띄웠다면 `TRANSLATE_REASONING_STYLE=chat_template_kwargs`로
   고정). 실측(mlx_lm.server + Qwen3.5-0.8B): 유닛당 0.18초·reasoning 0자 — 예전 방식은
   5.8초 동안 4,075자를 생각하다 잘렸습니다. 서버가 이 인자를 무시하면
@@ -418,7 +422,8 @@ OPENAI_MODEL=default_model
 TRANSLATE_API_MODE=chat
 # thinking 끄기 — 루프백 주소면 chat_template_kwargs enable_thinking=false로 전달된다
 TRANSLATE_REASONING=off
-# reasoning 전달 방식 — auto는 루프백·사설망·host.docker.internal이면 chat_template_kwargs
+# reasoning 전달 방식 — auto는 루프백·사설 IP·단일 라벨·localhost·*.localhost·*.local·*.lan·
+# *.home.arpa·*.internal(host.docker.internal·host.containers.internal 포함)이면 chat_template_kwargs
 TRANSLATE_REASONING_STYLE=auto
 # max_tokens를 꼭 보낸다 (none이면 mlx_lm이 512토큰에서 자른다)
 TRANSLATE_MAX_TOKENS_PARAM=max_tokens
@@ -461,6 +466,10 @@ LLM_PROVIDER=local-openai
   목록에서 페이지로 이동·삭제·Markdown 복사/내보내기(`<파일명>.notes.md`)를 할 수 있습니다.
   잡을 삭제하면 함께 지워집니다. 잡당 200개, 브라우저당 50개 잡까지 보관합니다(오래 손대지
   않은 잡부터 정리). 수식을 가로지른 하이라이트는 새로고침 뒤 목록에만 남을 수 있습니다.
+  같은 논문을 여러 탭에서 열어도 서로의 메모를 덮어쓰지 않고 다른 탭의 변경이 바로 목록에
+  반영됩니다. 저장 공간이 차면 가장 오래 손대지 않은 다른 문서의 메모부터 지우고 저장 안내에
+  알립니다.
+- **지원 브라우저**: 최신 Chrome·Edge·Firefox, Safari 16 이상.
 - 'AI 질문'과 선택 설명은 기존 질문 탭으로 현재 페이지·문장을 그대로 전달
 
 ## 결과 화면 — 품질 경고와 참고
@@ -479,7 +488,7 @@ LLM_PROVIDER=local-openai
   삭제되었습니다.'를 알립니다. 대기 중인 잡을 취소하면 즉시 '취소됨'으로 마감됩니다.
 - **상태 배지**: health를 30초마다(로딩·실패 중에는 10초, 숨긴 탭에서는 멈춤) 확인해 디바이스
   (`MLX · M4 Max`처럼 칩 이름 포함)·'모델 로드 실패'(사유는 툴팁)·'작업 처리기 중지됨'을
-  표시합니다.
+  표시합니다. 바뀐 배지만 갱신하므로 스크린리더가 같은 배지를 폴링마다 다시 읽지 않습니다.
 
 ## 내보내기
 
@@ -511,9 +520,10 @@ Noto Sans CJK를 임베드합니다. macOS의 Apple 계열 폰트는 네이티�
 텍스트 리댁션은 이미지·벡터 그래픽을 건드리지 않고 글자 줄마다 기준선 띠만 지워 이웃 줄을
 보존하며, 원본 PDF 텍스트 레이어의 실측 폰트 크기를 자동으로 사용합니다. 스캔·이미지
 페이지는 원문 픽셀 위에 한국어를 겹쳐 찍지 않고, 블록 영역을 그 페이지의 바탕색으로 덮은 뒤
-번역을 넣습니다(이미지 자체는 다시 인코딩하지 않는다). 회전된 페이지도 화면 방향 그대로
-조판합니다. 공간이 부족하면 이웃 블록 전의 빈 영역까지만 확장하고, 다운로드 뒤 번역·표 셀·
-재배치·원문 보존·스캔 원문 지움 개수를 토스트로 알려주며, 결과 화면 아래 흐린 접이식
+번역을 넣습니다(이미지 자체는 다시 인코딩하지 않는다). 스캔 표는 픽셀에서 열·행 경계를 찾아
+바뀐 셀의 글자만 덮고, 경계를 확정하지 못하면 원문 표를 보존합니다. 회전된 페이지도 화면
+방향 그대로 조판합니다. 공간이 부족하면 이웃 블록 전의 빈 영역까지만 확장하고, 다운로드 뒤
+번역·표 셀·재배치·원문 보존·스캔 원문 지움 개수를 토스트로 알려주며, 결과 화면 아래 흐린 접이식
 'PDF 생성 리포트 · 주의 N건' 목록에 원문 보존 사유(예: '원문 줄 위치 정렬 실패(그 줄만
 원문)')와 'N페이지: …' 주의 문장을 보여 줍니다(`GET /api/jobs/{id}/pdf/report`).
 참고문헌은 저자·학술지·URL의 서지 형식과 원문 조판을 그대로 보존합니다.
@@ -627,7 +637,8 @@ uv run python ../scripts/benchmark_ocr_engines.py \
 
 `smoke_e2e.sh`는 업로드→OCR→마크다운/zip에서 끝납니다. 그 뒤의 번역 · 레이아웃 보존
 PDF 내보내기 · 뷰어 계약 · Q&A 키 분리 · 워커 복원력까지 한 번에 점검하려면
-(`make setup` 이후):
+(`make setup` 이후 — Apple Silicon은 `make setup-mlx`. 하네스는 textlayer 엔진만 쓰지만
+`make setup`은 mlx와 C++ 모듈을 지운다):
 
 ```bash
 make verify-e2e                          # 기본 sample/2504.19874v1.pdf 전체
@@ -668,7 +679,9 @@ npm test --prefix frontend
 기기 의존 테스트는 기본 스위트에서 건너뛰고, 명시적으로 켭니다: `make test-mps`
 (`OCR_MPS_TESTS=1` — torch MPS 계약, torch·macOS 업그레이드 전후)와 `make test-mlx-real`
 (`OCR_MLX_REAL_TESTS=1` — MLX 실가중치 패리티, 고정 스냅샷이 로컬 HF 캐시에 있어야 하며
-`make dev`를 한 번 띄우면 받아진다). 둘 다 건너뛴 테스트의 사유를 보여 줍니다(`-rs`).
+`make dev`를 한 번 띄우면 받아진다. `.env`의 `HF_HOME`·`HF_HUB_CACHE`도 `make dev`처럼 반영하고,
+가중치가 없으면 pytest 전에 사유를 보이고 종료코드 2로 멈춘다 — `scripts/require_hf_snapshot.py`).
+둘 다 건너뛴 테스트의 사유를 보여 줍니다(`-rs`).
 
 환경변수 전체 목록: [docs/ARCHITECTURE.md §7](docs/ARCHITECTURE.md) —
 `OCR_DEVICE`(auto/mlx/metal/cpu/cuda), `OCR_DTYPE`, `OCR_MLX_QUANT_BITS`,
@@ -690,7 +703,7 @@ npm test --prefix frontend
 | `make dev-textlayer` | `OCR_ENGINE=textlayer`로 개발 서버 (모델 불필요) |
 | `make test` | 핵심 로컬 검사 — backend pytest · ruff · frontend 테스트 |
 | `make test-mps` | Apple Silicon torch MPS 계약 테스트 (`OCR_MPS_TESTS=1`) — torch·macOS 업그레이드 전후 |
-| `make test-mlx-real` | MLX 실가중치 패리티 테스트 (`OCR_MLX_REAL_TESTS=1`) — mlx 업그레이드·MLX 포팅 수정·스냅샷 갱신 전후 |
+| `make test-mlx-real` | MLX 실가중치 패리티 테스트 (`OCR_MLX_REAL_TESTS=1`) — mlx 업그레이드·MLX 포팅 수정·스냅샷 갱신 전후, 스냅샷이 없으면 종료코드 2 |
 | `make coverage` | backend 커버리지 (`pytest-cov`를 `--with`로 임시 설치 — `uv.lock` 무변경) |
 | `make audit` | 의존성 취약점 감사 — CI `dependency-audit` 잡과 같은 pip-audit·수용 목록 (네트워크 필요) |
 | `make e2e` | `./scripts/smoke_e2e.sh` (기동된 백엔드 필요) |
@@ -727,7 +740,9 @@ PDF 업로드 → 업로드 검증(페이지 수·크기·작업량 게이트 �
 - **실패 격리**: 청크가 실패하면(출력 상한 `MAX_LENGTH` 도달 포함) 끝까지 생성된 앞 페이지는
   지키고 나머지만 페이지별로 다시 처리하며, 그래도 안 되면 PDF 텍스트 레이어 → 실패
   플레이스홀더 순으로 메웁니다. 기본 설정(`MAX_LENGTH` 32,768 < 8쪽 최악 길이)에서는 기동 시
-  안내가 INFO로 한 번 남습니다 — 잘린 청크도 내용은 빠지지 않습니다.
+  안내가 INFO로 한 번 남습니다 — 잘린 청크는 끝까지 생성된 앞 페이지(텍스트 레이어가 있으면
+  원본 본문과 대조해 확인한 페이지)만 지키고 잘린 페이지부터 페이지별로 다시 처리합니다.
+  대조할 텍스트 레이어가 없는 스캔은 모델의 페이지 마커를 그대로 믿습니다.
 - **PyMuPDF 격리**: PDF 렌더·분석·내보내기는 서버 밖 워커 프로세스(ocr 1개 · export
   `PDF_EXPORT_MAX_CONCURRENT`개 · 업로드 검증 2개)에서 돕니다. MuPDF는 GIL을 쥔 채 돌기
   때문에 서버 안에서 돌리면 번역 PDF 빌드 동안 OCR 디코드가 멎었습니다(M4 Max 실측 MLX

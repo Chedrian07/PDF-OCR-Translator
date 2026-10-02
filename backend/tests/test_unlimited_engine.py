@@ -419,8 +419,12 @@ def test_metal_bf16_probe_failure_warns_with_macos_version(monkeypatch, caplog):
 # 막고, torch는 가짜 모듈(CUDA 없음·MPS 있음)로 바꿔 **첫 임포트 시점**의 env를 기록한다.
 # torch는 PYTORCH_ENABLE_MPS_FALLBACK을 라이브러리 로드 때 한 번만 읽으므로 그 시점 값이
 # 실제 폴백 여부다(실측: 임포트 뒤에 설정하면 linalg.eig(mps)가 NotImplementedError).
+# urllib.request는 플랫폼을 바꾸기 **전에** 올린다 — 임포트 시점에 sys.platform이 darwin이면
+# macOS 전용 _scproxy를 가져오는데(CPython urllib/request.py), app.config → httpx 경로가 그
+# 모듈을 처음 올리므로 Linux CI에서는 하위 프로세스가 ModuleNotFoundError로 죽었다.
 _ISOLATED_PRELUDE = '''
 import importlib.abc, importlib.machinery, json, logging, os, sys, types
+import urllib.request  # noqa: F401 — 실제 플랫폼으로 먼저 임포트(_scproxy는 macOS 전용)
 sys.platform = "darwin"
 seen, warned = [], []
 

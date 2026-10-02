@@ -336,3 +336,193 @@ def test_tall_narrow_scan_stamp_is_kept_as_vertical_text(tmp_path):
     with fitz.open(job_dir / "source.pdf") as source:
         left, before = _ink_beyond_translation(source[0], result.path, stamp_rect)
     assert before > 100 and left >= before * 0.9, (left, before)   # 스탬프 픽셀은 그대로
+
+
+# ── 스캔 표: 픽셀로 찾은 실제 열·행 경계 ─────────────────────────────────────
+# 열 폭이 50/90/340pt로 다른 표(감사 pdf-1 재현). 균등 격자(160pt씩)로 덮으면 바뀌지
+# 않은 'DOI' 머리글과 괘선이 지워지고 '제목'이 엉뚱한 열(x≈382)에 찍혔다.
+TABLE_COLUMNS = (60, 110, 200, 540)
+TABLE_ROWS = (100, 118, 136)
+TABLE_RULES = (100, 118, 154)
+TABLE_RECT = fitz.Rect(60, 100, 540, 154)
+TABLE_HEADER = ("Year", "DOI", "Title")
+TABLE_DATA = ("2021", "10.1145/3442", "Learning to translate scanned tables")
+
+
+def _table_html(rows) -> str:
+    return "<table>" + "".join(
+        "<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in rows
+    ) + "</table>"
+
+
+def _rotated_copy(doc, rotation: int):
+    """화면에 보이는 모습은 그대로 두고 /Rotate만 건 사본 — 회전 스캔 페이지."""
+    if not rotation:
+        return doc
+    rotated = fitz.open()
+    page = rotated.new_page(width=PAGE_H, height=PAGE_W)
+    page.show_pdf_page(page.rect, doc, 0, rotate=rotation)
+    page.set_rotation(rotation)
+    return rotated
+
+
+def _uneven_table_job(tmp_path: Path, rotation: int = 0) -> Path:
+    job_dir = tmp_path / f"scan-table-{rotation}"
+    job_dir.mkdir()
+    scale = SCAN_DPI / 72
+    image = Image.new("RGB", (int(PAGE_W * scale), int(PAGE_H * scale)), PAPER)
+    draw = ImageDraw.Draw(image)
+    font = _font(10 * scale)
+    for row, values in zip(TABLE_ROWS, (TABLE_HEADER, TABLE_DATA)):
+        for x, text in zip(TABLE_COLUMNS, values):
+            draw.text(((x + 4) * scale, (row + 3) * scale), text, fill=INK, font=font)
+    for y in TABLE_RULES:
+        draw.line(
+            [(TABLE_COLUMNS[0] * scale, y * scale), (TABLE_COLUMNS[-1] * scale, y * scale)],
+            fill=(0, 0, 0), width=2,
+        )
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    page.insert_image(page.rect, stream=buffer.getvalue())
+    _rotated_copy(doc, rotation).save(job_dir / "source.pdf")
+    original = _table_html([TABLE_HEADER, TABLE_DATA])
+    translated = _table_html([
+        ("연도", "DOI", "제목"), ("2021", "10.1145/3442", "스캔한 표를 번역하는 법 배우기"),
+    ])
+    _write_layout(job_dir, [{"type": "table", "bbox": _bbox(TABLE_RECT), "content": original}],
+                  {0: translated})
+    return job_dir
+
+
+def _korean_line_rects(page) -> dict[str, fitz.Rect]:
+    """한글 span의 화면(표시 공간) 사각형 — 회전 페이지에서도 화면 기준으로 비교한다."""
+    out: dict[str, fitz.Rect] = {}
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            for span in line["spans"]:
+                text = span["text"].replace("\xa0", " ").strip()
+                if any("가" <= ch <= "힣" for ch in text):
+                    shown = fitz.Rect(span["bbox"]) * page.rotation_matrix
+                    shown.normalize()
+                    out[text] = shown
+    return out
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_scan_table_with_uneven_columns_covers_only_the_changed_cells(tmp_path, rotation):
+    """바뀌지 않은 셀 글자와 괘선은 그대로, 바뀐 셀의 영어만 지우고 제 열에 번역을 넣는다."""
+    job_dir = _uneven_table_job(tmp_path, rotation)
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    assert result.table_cells_replaced == 3, result.report()
+    assert result.raster_blocks_erased == 1, result.report()
+    assert not result.warnings, result.warnings
+    doi_column = fitz.Rect(110, 101, 198, 135)        # 'DOI'·'10.1145/3442' — 바뀌지 않는다
+    rules = [fitz.Rect(60, y - 1.5, 540, y + 1.5) for y in TABLE_RULES]
+    with fitz.open(job_dir / "source.pdf") as source, fitz.open(result.path) as exported:
+        for region in [doi_column, *rules]:
+            before = len(_dark_pixels(source[0], region))
+            after = len(_dark_pixels(exported[0], region))
+            assert before > 20, (region, before)
+            assert abs(after - before) <= before * 0.03, (region, before, after)
+        placed = _korean_line_rects(exported[0])
+        year_left, year_before = _ink_beyond_translation(
+            source[0], result.path, fitz.Rect(60, 101, 105, 117),
+        )
+        title_left, title_before = _ink_beyond_translation(
+            source[0], result.path, fitz.Rect(200, 119, 540, 153),
+        )
+    assert year_left <= year_before * 0.02, (year_left, year_before)
+    assert title_left <= title_before * 0.02, (title_left, title_before)
+    # 번역은 원문이 있던 열에 앉는다(균등 격자면 '제목'이 x≈382에 찍혔다).
+    assert 196 <= placed["제목"].x0 <= 215, placed
+    assert 56 <= placed["연도"].x0 <= 75, placed
+
+
+def test_scan_table_whose_columns_cannot_be_told_from_word_gaps_is_kept(tmp_path):
+    """열 사이 빈 띠가 단어 사이 간격과 구분되지 않으면 덮지 않고 원문 표를 보존한다."""
+    job_dir = tmp_path / "scan-table-ambiguous"
+    job_dir.mkdir()
+    scale = SCAN_DPI / 72
+    image = Image.new("RGB", (int(PAGE_W * scale), int(PAGE_H * scale)), PAPER)
+    draw = ImageDraw.Draw(image)
+    font = _font(10 * scale)
+    left = "Alpha beta"
+    # 둘째 열을 첫 열 끝에서 정확히 공백 한 칸 뒤에 둔다 — 픽셀만으로는 어느 빈 띠가 열
+    # 경계인지('Alpha'|'beta' vs 'beta'|'Gamma') 알 수 없다.
+    second_x = 64 * scale + font.getlength(left + " ")
+    draw.text((64 * scale, 103 * scale), left, fill=INK, font=font)
+    draw.text((second_x, 103 * scale), "Gamma", fill=INK, font=font)
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    page.insert_image(page.rect, stream=buffer.getvalue())
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+    table = fitz.Rect(60, 100, 200, 118)
+    _write_layout(job_dir, [{
+        "type": "table", "bbox": _bbox(table), "content": _table_html([(left, "Gamma")]),
+    }], {0: _table_html([("알파 베타", "감마")])})
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    assert result.table_cells_replaced == 0, result.report()
+    assert result.raster_blocks_erased == 0, result.report()
+    assert result.kept_reasons.get("table_grid_untrusted") == 1, result.report()
+    assert any("스캔 표" in warning for warning in result.warnings), result.warnings
+    with fitz.open(job_dir / "source.pdf") as source, fitz.open(result.path) as exported:
+        assert not [d for d in exported[0].get_drawings() if d.get("fill") is not None]
+        before = len(_dark_pixels(source[0], table))
+        after = len(_dark_pixels(exported[0], table))
+    assert before > 50 and after == before, (before, after)
+
+
+def test_scan_table_vertical_rules_survive_the_cell_covers(tmp_path):
+    """세로 괘선이 있는 격자 표 — 덮개는 셀 글자만 지우고 세로·가로 괘선은 남긴다."""
+    job_dir = tmp_path / "scan-table-boxed"
+    job_dir.mkdir()
+    scale = SCAN_DPI / 72
+    xs, ys = (60, 200, 300, 420), (100, 122, 144)
+    image = Image.new("RGB", (int(PAGE_W * scale), int(PAGE_H * scale)), PAPER)
+    draw = ImageDraw.Draw(image)
+    font = _font(10 * scale)
+    for x in xs:
+        draw.line([(x * scale, ys[0] * scale), (x * scale, ys[-1] * scale)], fill=(0, 0, 0), width=2)
+    for y in ys:
+        draw.line([(xs[0] * scale, y * scale), (xs[-1] * scale, y * scale)], fill=(0, 0, 0), width=2)
+    rows = (("Dataset", "Size", "Language"), ("WMT14", "4.5M", "English-German"))
+    for row, values in zip(ys, rows):
+        for x, text in zip(xs, values):
+            draw.text(((x + 6) * scale, (row + 5) * scale), text, fill=INK, font=font)
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    page.insert_image(page.rect, stream=buffer.getvalue())
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+    table = fitz.Rect(60, 100, 420, 144)
+    _write_layout(job_dir, [{
+        "type": "table", "bbox": _bbox(table), "content": _table_html(rows),
+    }], {0: _table_html((("데이터셋", "크기", "언어"), ("WMT14", "4.5M", "영어-독일어")))})
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    assert result.table_cells_replaced == 4, result.report()
+    assert not result.warnings, result.warnings
+    verticals = [fitz.Rect(x - 1.5, ys[0] + 2, x + 1.5, ys[-1] - 2) for x in xs]
+    horizontals = [fitz.Rect(xs[0] + 2, y - 1.5, xs[-1] - 2, y + 1.5) for y in ys]
+    with fitz.open(job_dir / "source.pdf") as source, fitz.open(result.path) as exported:
+        for region in verticals + horizontals:
+            before = len(_dark_pixels(source[0], region))
+            after = len(_dark_pixels(exported[0], region))
+            assert before > 20 and abs(after - before) <= before * 0.03, (region, before, after)
+        # 'English-German' 셀 안쪽(괘선 제외) — 영어 픽셀은 번역 글자 말고 남지 않는다.
+        left, before = _ink_beyond_translation(
+            source[0], result.path, fitz.Rect(302, 124, 418, 142),
+        )
+    assert before > 20 and left <= before * 0.02, (left, before)

@@ -224,6 +224,36 @@ def test_mock_stream_and_plain_responses_carry_the_same_output(fault):
         srv.server_close()
 
 
+def test_mock_chunked_stream_matches_and_reuses_one_connection():
+    """transfer=chunked — 실서버 대부분(vLLM·llama.cpp·LM Studio)의 keep-alive 청크 SSE.
+    종전 목은 Connection: close만 보내 이 경로가 하네스·E2E에서 한 번도 돌지 않았다
+    (translate-1·translate-4). 같은 출력이 나오고 연결 하나를 재사용해야 한다."""
+    from app.translate.client import OpenAICompatClient
+    from app.translate.types import TranslateConfig
+
+    srv = _serve_mock()
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+        prompt = '[번역할 원문]\nThe model <m1 v="E=mc^2"/> is fast and the results are good.'
+        outs = {}
+        for transfer in ("close", "chunked"):
+            with mock_llm._LOCK:
+                mock_llm._PEERS.clear()
+                mock_llm.STATS["connections"] = 0
+            cfg = TranslateConfig(base_url=f"{base}?transfer={transfer}", api_key="k",
+                                  model="m", api_mode="chat", stream="on", max_retries=0)
+            client = OpenAICompatClient(cfg)
+            outs[transfer] = [client.complete("s", prompt, max_tokens=100) for _ in range(3)]
+            if transfer == "chunked":
+                assert mock_llm.STATS["connections"] == 1
+            else:
+                assert mock_llm.STATS["connections"] == 3     # 종료로 끝을 알리는 형식
+        assert outs["close"] == outs["chunked"] and len(set(outs["chunked"])) == 1
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
 def test_mock_stream_ends_with_done_and_usage():
     import json as _json
     import urllib.request

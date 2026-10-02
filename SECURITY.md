@@ -86,9 +86,14 @@ Uploaded PDFs, and the text an OCR model produces from them, are treated as host
   workers set `oom_score_adj=1000` so the kernel kills a worker before the server, and
   `PDF_WORKER_MEM_LIMIT_MB` (off by default) adds an address-space limit.
 - Workers remove credential-like environment variables (names containing `KEY`,
-  `TOKEN`, `SECRET`, `PASSWORD` or `CREDENTIAL`) when they start. A worker is a fault and
-  resource boundary, **not a privilege sandbox**: it runs as the same user with the same
-  files, and the server trusts the results it sends back.
+  `TOKEN`, `SECRET`, `PASSWORD` or `CREDENTIAL`) when they start. This only cleans the
+  Python environment and processes the worker starts; the kernel keeps the original
+  environment block (`/proc/self/environ`) and the server's own environment is readable by
+  the same user, so treat API keys as exposed if a worker is ever compromised and rotate
+  them. Each worker gets a private scratch directory (mode `0700`, unpredictable name)
+  created by the server. A worker is a fault and resource boundary, **not a privilege
+  sandbox**: it runs as the same user with the same files, and the server trusts the
+  results it sends back.
 - **Upload complexity gate.** Before a job is queued, each page is measured without
   rendering: the decompressed size of every stream it draws (content, form XObjects,
   annotation appearances, tiling patterns, Type3 glyphs) and the number of draw calls
@@ -96,8 +101,12 @@ Uploaded PDFs, and the text an OCR model produces from them, are treated as host
   `PDF_MAX_PAGE_XOBJECT_CALLS` (2,000,000), or with forms nested more than 64 levels
   deep, are rejected with `400` and a message naming the setting. A 3 KB file whose
   nested forms expand to 10^12 draw calls and a 1 GB flate bomb are both rejected in
-  milliseconds. Costs the gate does not count (huge images, shadings, repeated Type3
-  glyphs) are bounded by the per-page time limit.
+  milliseconds. Names are decoded the way MuPDF reads them, and a `Do` whose target cannot
+  be confirmed is charged the most expensive form in its resource dictionary, so escaped
+  or non-ASCII names cannot hide a bomb. At most 4 uploads are measured at once; excess
+  uploads get `503` with `Retry-After: 5` instead of holding server threads. Costs the
+  gate does not count (huge images, shadings, repeated Type3 glyphs) are bounded by the
+  per-page time limit.
 - Corrupt PDFs are rejected with a fixed message that contains no server paths. Pillow's
   decompression-bomb limit is lowered to 5% above the largest page render the app
   produces (52.5 million pixels).

@@ -15,6 +15,7 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 ### OCR pipeline
 
 - `OCR_DEVICE=auto` picks MLX, then CUDA, then torch MPS, then CPU, and logs the choice; Compose services keep their pinned devices.
+- Loading the pinned model no longer contacts huggingface.co when the snapshot is already in the cache (the torch path used to probe missing optional files and the MLX path the revision API on every load), so offline and air-gapped hosts start without network timeouts. Branch or tag revisions still check the Hub.
 - A chunk that hits `MAX_LENGTH` keeps its completed leading pages and reprocesses only from the truncated page. With a text layer, the kept pages are first checked against the source, so a page the model split or skipped before the cut is not lost; scans still trust the model's page markers. Failed multi-page chunks are recovered page by page (single page, then PDF text layer, then placeholder) instead of becoming placeholders, after the failed attempt's memory is released.
 - Cancelling during page-by-page recovery or a fidelity retry stops cleanly; a partially generated page is merged with a warning instead of looking complete.
 - Job messages are split into `warnings` (real quality loss) and `notices` (informational). The viewer reports a degraded result only for warnings. Jobs record `started_at` and `finished_at`.

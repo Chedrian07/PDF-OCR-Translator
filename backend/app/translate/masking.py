@@ -317,10 +317,13 @@ def _strip_invented_heading_marks(out: str, masked: str) -> tuple[str, int]:
 # 끝나 속성이 덜 닫힌 것처럼 보이자 '">'·'>'·'"'로 한 번 더 닫았다(실앱 4B: 번역 PDF·리더에
 # 'x(i:j) >'·'\\( \\tilde{x} \\)"'·'[5, 18, 7, 52] "의'). unmask는 '<m1'·'</m1>' 잔여만 보므로
 # 그대로 통과했다. 원문(마스킹본)의 같은 플레이스홀더 바로 뒤에 같은 글자가 없을 때만 지우고,
-# 따옴표는 출력의 따옴표가 원문보다 많을 때 그만큼만, 앞에 여는 따옴표가 붙은 태그는 빼고 지운다.
+# '>'·'"'는 출력에 원문보다 많은 만큼만 지운다. 따옴표는 꼬리 모양일 때만이다 — 앞에 짝 없는 여는
+# 따옴표가 있으면 닫는 따옴표('"벡터 <m1/>"라')이고, 뒤가 조사+공백·문장부호가 아니면 인용을 여는
+# 따옴표('<c1/> "어텐션 메커니즘"을')라 둔다.
 _TAG_TAIL_RE = re.compile(r"(<\s*([mkgucft]\d+)\b" + _PH_ATTRS + r"\s*/?\s*>)(\"?/?>)")
 _TAG_QUOTE_RE = re.compile(
     r"(?<!\")(<\s*([mkgucft]\d+)\b" + _PH_ATTRS + r"\s*/?\s*>)([ \t]?)\""
+    r"(?=(?:으로|에서|[의이가을를은는와과로에도만])?(?:[\s,.;:!?)]|$))"
 )
 
 
@@ -354,11 +357,18 @@ def _strip_tag_tails(out: str, masked: str) -> tuple[str, int]:
     if extra <= 0:
         return out, count
 
+    removed = 0
+
     def _quote(match: re.Match) -> str:
-        nonlocal count, extra
-        if extra <= 0 or _source_after_tag(masked, match.group(2)).lstrip(" \t").startswith('"'):
+        nonlocal count, extra, removed
+        opened = _outside_placeholder_tags(out[:match.start()]).count('"') - removed
+        if (
+            extra <= 0 or opened % 2 == 1
+            or _source_after_tag(masked, match.group(2)).lstrip(" \t").startswith('"')
+        ):
             return match.group(0)
         extra -= 1
+        removed += 1
         count += 1
         return match.group(1) + match.group(3)
 
@@ -368,13 +378,23 @@ def _strip_tag_tails(out: str, masked: str) -> tuple[str, int]:
 # 원문 산문에 '$'가 없는데 모델이 변수·짧은 식을 '$…$'로 감싼 것('$x$'·'$d=200$'·'$b$-비트') —
 # 소형 모델의 LaTeX 습관이다(실앱 4B: 25쪽 번역 PDF 6쪽에 '$' 39자, 원문 0자). 원문의 수식은
 # 달러까지 통째로 플레이스홀더라, 원문 산문(태그 밖)에 '$'가 없으면 출력의 태그 밖 '$'는 지어낸
-# 것이다. 원문 산문에 '$'(통화 '$5')가 있으면 이 규칙을 쓰지 않고, 숫자 앞의 '$'는 '10 dollars'를
-# 옮긴 통화일 수 있어 남긴다.
+# 것이다(원문 산문에 통화 '$5'가 있으면 이 규칙을 쓰지 않는다). 짝을 이룬 '$…$'는 통째로 본다 —
+# 평범한 글자('x'·'0.5'·'d=200')는 원문처럼 맨글자로 풀고, TeX 표기('x_{i}'·'\\alpha')는 이 앱의
+# 인라인 수식 표기 '\\( … \\)'로 바꿔 리더·한국어 미리보기·PDF가 모두 수식으로 그린다(풀면
+# '\\alpha'가 글자로 남는다). 짝 없이 남은 '$'는 지우되 숫자 앞의 것은 '10 dollars'를 옮긴 통화일 수
+# 있어 남긴다.
+_INVENTED_PAIR_RE = re.compile(r"\$(?=[^\s$])([^$\n<>]{0,160}?[^\s$\\])\$")
 _INVENTED_DOLLAR_RE = re.compile(r"\$(?!\d)")
+_TEX_SYNTAX_RE = re.compile(r"\\[A-Za-z]+|[_^{}]")
 
 
 def _outside_placeholder_tags(text: str) -> str:
     return _ANY_PLACEHOLDER_RE.sub(" ", text)
+
+
+def _unwrap_invented_pair(match: re.Match) -> str:
+    content = match.group(1).strip()
+    return f"\\( {content} \\)" if _TEX_SYNTAX_RE.search(content) else content
 
 
 def _strip_invented_dollars(out: str, masked: str) -> tuple[str, int]:
@@ -385,8 +405,9 @@ def _strip_invented_dollars(out: str, masked: str) -> tuple[str, int]:
     last = 0
     for tag in [*_ANY_PLACEHOLDER_RE.finditer(out), None]:
         segment = out[last:tag.start() if tag else len(out)]
-        segment, n = _INVENTED_DOLLAR_RE.subn("", segment)
-        count += n
+        segment, pairs = _INVENTED_PAIR_RE.subn(_unwrap_invented_pair, segment)
+        segment, singles = _INVENTED_DOLLAR_RE.subn("", segment)
+        count += 2 * pairs + singles
         pieces.append(segment)
         if tag is not None:
             pieces.append(tag.group(0))
@@ -461,18 +482,24 @@ def _strip_retyped_math(out: str, mapping: dict, *, open_runs: bool = True) -> t
     return out, count
 
 
-def tidy_cached_translation(text: str, mapping: dict, src: str) -> str:
+def tidy_cached_translation(text: str, mapping: dict, src: str, masked: str | None = None) -> str:
     """이전 실행이 캐시한 복원문에 원출력 단계 정리를 다시 적용한다.
 
     정리 규칙(지어낸 '$'·다시 친 수식 등)이 생기기 전에 캐시된 번역은 재번역해도 캐시 적중으로
-    그대로 쓰였다. 복원문의 수식·인용 원문을 그 플레이스홀더로 되돌려(긴 것부터) 같은
+    그대로 쓰였다. 복원문의 수식·인용 원문을 그 플레이스홀더로 되돌려(긴 것부터, 같은 원문이 여러
+    플레이스홀더면 나온 순서대로 하나씩 — 같은 글자로 복원되니 어느 쪽이든 같다) 같은
     sanitize_translation을 돌리고 다시 복원한다. 되돌린 결과가 플레이스홀더 정합(누락·중복 없음)을
-    통과하지 못하면 손대지 않는다."""
+    통과하지 못하면 손대지 않는다. masked는 호출자가 이미 가진 마스킹본(없으면 다시 마스킹)."""
     text = strip_math_dollars(text, mapping, src)
-    masked = mask(src)[0]
+    if masked is None:
+        masked = mask(src)[0]
+    by_original: dict[str, list[str]] = {}
+    for pid, original in mapping.items():
+        by_original.setdefault(str(original), []).append(pid)
     pseudo = text
-    for pid, original in sorted(mapping.items(), key=lambda item: len(str(item[1])), reverse=True):
-        pseudo = pseudo.replace(str(original), f"<{pid}/>")
+    for original in sorted(by_original, key=len, reverse=True):
+        for pid in by_original[original]:
+            pseudo = pseudo.replace(original, f"<{pid}/>", 1)
     clean, changed = sanitize_translation(pseudo, masked, mapping)
     if not changed:
         return text

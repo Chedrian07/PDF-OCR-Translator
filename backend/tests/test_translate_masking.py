@@ -169,6 +169,64 @@ def test_cached_translation_drops_dollars_around_restored_math():
     )
 
 
+def test_sanitize_strips_dollars_the_source_prose_does_not_have():
+    """원문 산문에 '$'가 없는데 모델이 변수를 '$x$'로 감쌌다(실앱 4B: 25쪽 번역 PDF 6쪽에 '$' 39자,
+    원문 0자). 원문 수식은 달러까지 플레이스홀더라 태그 밖 '$'는 지어낸 것이다."""
+    masked, mapping = mask(r"We use letters such as x and y, the slice \( x_{i:j} \) and d = 200.")
+    tag = re.search(r"<m\d+[^>]*>", masked).group(0)
+    raw = f"$x$ 와 $y$ 같은 글자와 슬라이스 {tag}, $d=200$ 및 $b$-비트를 쓴다."
+    clean, n = sanitize_translation(raw, masked, mapping)
+    restored, missing, dup = unmask(clean, mapping, masked)
+    assert restored == r"x 와 y 같은 글자와 슬라이스 \( x_{i:j} \), d=200 및 b-비트를 쓴다."
+    assert not missing and not dup and n == 8
+    # 원문의 '$…$' 수식은 플레이스홀더라 그대로 복원된다
+    loss, loss_map = mask("The loss $L$ is small for every x.")
+    loss_tag = re.search(r"<m\d+[^>]*>", loss).group(0)
+    clean, _ = sanitize_translation(f"손실 {loss_tag}는 모든 $x$에 대해 작다.", loss, loss_map)
+    assert unmask(clean, loss_map, loss)[0] == "손실 $L$는 모든 x에 대해 작다."
+    # 원문 산문에 '$'(통화)가 있으면 이 규칙을 쓰지 않는다
+    priced, priced_map = mask("The case costs $5 and the device is x.")
+    assert sanitize_translation("케이스는 $5이고 장치는 $x$다.", priced, priced_map) == (
+        "케이스는 $5이고 장치는 $x$다.", 0)
+    # 숫자 앞 '$'는 통화로 옮긴 것일 수 있다('10 dollars' → '$10')
+    plain, plain_map = mask("It costs 10 dollars for x.")
+    assert sanitize_translation("$x$에 $10이 든다.", plain, plain_map) == ("x에 $10이 든다.", 2)
+
+
+def test_sanitize_folds_a_formula_retyped_next_to_its_placeholder():
+    """모델이 수식 플레이스홀더 옆에 같은 식(또는 그 식을 품은 원문 구절)을 TeX로 다시 쳐
+    번역 PDF에 'B = b · d · 를 어떤 b ≥ 0 b ≥ 0'이 찍혔다(실앱 4B 3쪽)."""
+    src = r"If we set B = b \( \cdot \) d for some \( b \geq 0 \), it maps into \( R^{d} \)."
+    masked, mapping = mask(src)
+    tags = re.findall(r"<m\d+[^>]*>", masked)
+    raw = (f"만약 $B = b \\cdot d$ {tags[0]} 를 어떤 $b \\geq 0$ {tags[1]} 에 대해 설정하면 "
+           f"{tags[2]} $R^{{d}}$ 로 보낸다.")
+    clean, n = sanitize_translation(raw, masked, mapping)
+    restored, missing, dup = unmask(clean, mapping, masked)
+    assert restored == (
+        r"만약 B = b \( \cdot \) d 를 어떤 \( b \geq 0 \) 에 대해 설정하면 \( R^{d} \) 로 보낸다."
+    )
+    assert not missing and not dup and n == 3
+    # 다른 식을 다시 친 것은 번역의 일부일 수 있다 — 플레이스홀더는 그대로, 지어낸 '$'만 지운다
+    other, _ = sanitize_translation(f"어떤 $c \\leq 1$ {tags[1]} 에 대해", masked, mapping)
+    assert unmask(other, mapping, masked)[0] == r"어떤 c \leq 1\( b \geq 0 \) 에 대해"
+
+
+def test_cached_translation_drops_invented_dollars_and_retyped_math():
+    """정리 규칙 전에 캐시된 번역(한쪽 달러 규칙이 닫는 '$'를 이미 지운 꼴 포함)도 재사용할 때
+    같은 정리를 받는다 — 재번역해도 캐시 적중으로 '$b \\geq 0\\( b \\geq 0 \\)'가 그대로 쓰였다."""
+    from app.translate.masking import tidy_cached_translation
+
+    src = r"If we set B = b \( \cdot \) d for some \( b \geq 0 \) and letters such as x."
+    _masked, mapping = mask(src)
+    cached = r"만약 $B = b \cdot d\( \cdot \) 를 어떤 $b \geq 0\( b \geq 0 \) 에 대해 $x$ 같은 글자를 쓴다."
+    assert tidy_cached_translation(cached, mapping, src) == (
+        r"만약 B = b \( \cdot \) d 를 어떤 \( b \geq 0 \) 에 대해 x 같은 글자를 쓴다."
+    )
+    clean = r"만약 B = b \( \cdot \) d 를 어떤 \( b \geq 0 \) 에 대해 x 같은 글자를 쓴다."
+    assert tidy_cached_translation(clean, mapping, src) == clean          # 이미 깨끗하면 그대로
+
+
 def test_should_skip_수식뿐():
     assert should_skip("$E = mc^2$") == "non-linguistic"
     assert should_skip("[1, 2, 3]") == "non-linguistic"

@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import re
 
+import ast
 import base64
 import functools
 import logging
+import math
 import sys
 from pathlib import Path
 
@@ -52,13 +54,10 @@ _MAX_COORD_DIGITS = 6
 
 
 def _quads(payload: str) -> list[tuple[int, int, int, int] | None]:
-    """det 페이로드 → 4개씩 묶은 좌표. 쓸 수 없는 박스는 자리만 남긴 None.
+    """(image가 아닌 블록) det 페이로드 → 4개씩 묶은 좌표. 쓸 수 없는 박스는 자리만 남긴 None.
 
-    None 자리를 지우지 않는 이유: image 라벨의 crop_index는 벤더가 저장한 크롭
-    순서와 같아야 한다. 벤더는 literal_eval에 성공한 페이로드의 박스마다 크롭
-    번호를 하나씩 쓰므로(좌표가 이상해도), 우리도 번호는 세고 블록만 건너뛴다.
-    반대로 벤더 literal_eval이 실패하는 페이로드(int 변환 상한 초과)는 크롭을 하나도
-    만들지 않으므로 박스 0개로 돌려준다.
+    크롭 번호와는 무관하다 — image 블록은 벤더 번호 규칙을 그대로 따르는 `_image_slots`를
+    쓴다. 정수 변환 상한(4300자리)을 넘는 숫자가 있으면 박스 0개로 돌려준다.
     """
     tokens = re.findall(r"\d+", payload)
     limit = sys.get_int_max_str_digits()
@@ -74,19 +73,75 @@ def _quads(payload: str) -> list[tuple[int, int, int, int] | None]:
     return quads
 
 
+def _image_slots(payload: str) -> list[tuple[int, int, int, int] | None]:
+    """image det 페이로드 → 벤더 크롭 번호 자리. 자리마다 번호 1개, 크롭 파일이 없는 자리는 None.
+
+    벤더 P22(torch modeling_unlimitedocr·MLX postprocess의 draw_bounding_boxes)와 같은 규칙:
+    페이로드를 ast.literal_eval로 읽어 비어 있지 않은 list/tuple만 상자 목록으로 보고(중첩되지
+    않은 목록은 상자 하나), 상자마다 번호 하나를 쓴다. 읽지 못한 페이로드(literal_eval 실패 —
+    쉼표 누락·이름·정수 자릿수 상한 — 또는 문자열·빈 목록·None·숫자)도 번호 하나를 쓴다.
+    예전처럼 숫자를 4개씩 묶어 세면 이런 페이로드 뒤 그림의 crop_index가 벤더 파일 번호와
+    어긋나 레이아웃 뷰와 이동 페이지 재크롭이 엉뚱한 파일을 가리켰다(감사 mlx-2·torch-2).
+    """
+    try:
+        cor_list = ast.literal_eval(payload)
+    except Exception:  # noqa: BLE001 — 벤더도 모든 해석 실패를 같은 한 자리로 본다
+        return [None]
+    if not isinstance(cor_list, (list, tuple)) or not cor_list:
+        return [None]
+    if not isinstance(cor_list[0], (list, tuple)):
+        cor_list = [cor_list]
+    return [_image_box(points) for points in cor_list]
+
+
+def _image_box(points) -> tuple[int, int, int, int] | None:
+    """벤더 `_clamp_box`를 0–999 좌표계에서 — 크롭이 저장되는 상자만 좌표를 돌려준다.
+
+    4개로 풀리고, 모두 숫자(bool 제외)이며 유한해야 한다. 0–999로 clamp한 뒤 폭·높이가
+    1 이상이어야 한다(페이지 이미지가 999px 이상이면 벤더도 퇴화로 보지 않는 조건). 음수는
+    0으로 자른다 — 숫자만 골라 묶던 예전 방식은 부호를 버려 -50을 50으로 읽었다.
+    """
+    try:
+        x1, y1, x2, y2 = points
+    except (TypeError, ValueError):
+        return None
+    coords = []
+    for value in (x1, y1, x2, y2):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        try:
+            number = float(value)
+        except OverflowError:
+            return None
+        if not math.isfinite(number):
+            return None
+        coords.append(min(max(number, 0.0), 999.0))
+    left, top, right, bottom = coords
+    if right - left < 1 or bottom - top < 1:
+        return None
+    return int(left), int(top), int(right), int(bottom)
+
+
+def _boxes(label: str, payload: str) -> list[tuple[int, int, int, int] | None]:
+    """매치 하나의 상자 자리 — image는 벤더 번호 규칙(_image_slots), 나머지는 숫자 묶음."""
+    return _image_slots(payload) if label == "image" else _quads(payload)
+
+
 def parse_page_blocks(raw: str) -> list[dict]:
     """한 페이지 raw 출력 → 문서 순서의 블록 리스트.
 
     image 블록의 `crop_index`는 벤더 저장 순서와 동일해야 크롭 파일과 매핑된다:
     re_match는 ref류 매치 전체를 먼저, inline det류를 나중에 모으고
     draw_bounding_boxes가 그 순서로 image 크롭 인덱스를 증가시킨다 —
-    (ref류 이미지의 박스 각각이 크롭 1개씩) 그 순서를 그대로 재현한다.
+    image 매치마다 `_image_slots`의 자리 수만큼(상자마다 1개, 읽지 못한 페이로드는 1개)
+    그 순서를 그대로 재현한다. 크롭 파일이 없는 자리는 번호만 세고 블록을 만들지 않는다.
     """
     ref_events = []
     for m in _REF_BLOCK.finditer(raw):
+        label = m.group(1).strip()
         ref_events.append({
             "start": m.start(), "end": m.end(),
-            "label": m.group(1).strip(), "boxes": _quads(m.group(2)), "kind": "ref",
+            "label": label, "boxes": _boxes(label, m.group(2)), "kind": "ref",
         })
     ref_spans = [(e["start"], e["end"]) for e in ref_events]
 
@@ -95,12 +150,13 @@ def parse_page_blocks(raw: str) -> list[dict]:
         # ref 블록 내부의 det 태그는 중복 매치 — 제외
         if any(s <= m.start() < e for s, e in ref_spans):
             continue
+        label = m.group(1).strip()
         det_events.append({
             "start": m.start(), "end": m.end(),
-            "label": m.group(1).strip(), "boxes": _quads(f"[{m.group(2)}]"), "kind": "det",
+            "label": label, "boxes": _boxes(label, f"[{m.group(2)}]"), "kind": "det",
         })
 
-    # 크롭 인덱스: 벤더 순서 (ref류 전체 → det류), image 라벨의 박스당 1개
+    # 크롭 인덱스: 벤더 순서 (ref류 전체 → det류), image 매치의 자리당 1개
     crop_index = 0
     for e in ref_events + det_events:
         if e["label"] == "image":
@@ -114,7 +170,7 @@ def parse_page_blocks(raw: str) -> list[dict]:
         content = _SPECIAL.sub("", raw[e["end"]:content_end]).strip()
         for bi, box in enumerate(e["boxes"]):
             if box is None:
-                continue  # 좌표가 퇴화한 박스 — crop 번호만 소비하고 블록은 만들지 않는다
+                continue  # 쓸 수 없는 박스 — crop 번호만 소비하고 블록은 만들지 않는다
             block: dict = {"type": e["label"].lower(), "bbox": list(box), "content": content}
             if "crop_indices" in e:
                 block["crop_index"] = e["crop_indices"][bi]

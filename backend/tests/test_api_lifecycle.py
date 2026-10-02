@@ -241,6 +241,115 @@ def test_shutdown_hooks_do_nothing_off_the_main_thread():
     assert result["installed"] == {}
 
 
+# ── P4 docker stop: OCR 추론 중 종료 신호가 프로세스를 abort로 끝내지 않는다 ─────────
+def test_signal_shutdown_skips_native_teardown_only_while_inferring(monkeypatch):
+    import signal
+    import threading
+    from types import SimpleNamespace
+
+    import app.main as main_mod
+
+    registered: list[tuple] = []
+    monkeypatch.setattr(main_mod.atexit, "register", lambda *a: registered.append(a))
+    idle = SimpleNamespace(current_job_id=None)
+    busy = SimpleNamespace(current_job_id="j_000000000001")
+    loading = threading.Thread(target=threading.Event().wait, args=(5,), daemon=True)
+
+    # 신호 없는 종료(TestClient·예외)는 진행 중인 잡이 있어도 건드리지 않는다
+    assert main_mod._skip_native_teardown_if_inferring(None, busy, None) is False
+    # 신호로 끝나도 추론이 없으면(유휴) 평소대로 끝난다
+    assert main_mod._skip_native_teardown_if_inferring(signal.SIGTERM, idle, None) is False
+    assert registered == []
+    assert main_mod._skip_native_teardown_if_inferring(signal.SIGTERM, busy, None) is True
+    loading.start()
+    assert main_mod._skip_native_teardown_if_inferring(signal.SIGINT, idle, loading) is True
+    assert registered == [
+        (main_mod._exit_without_native_teardown, 0),
+        (main_mod._exit_without_native_teardown, 128 + signal.SIGINT),
+    ]
+
+
+_SIGTERM_DURING_INFERENCE = r'''
+import os, signal, sys, threading, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)  # 컨테이너 PID 1처럼 — 다시 올린 SIGTERM이 무시된다
+from pathlib import Path
+
+import httpx
+import pymupdf
+import torch
+import uvicorn
+
+from app.config import Settings
+from app.engine.fake import FakeEngine
+from app.main import create_app
+
+inferring = threading.Event()
+
+
+def _busy_inference(self, *args, **kwargs):
+    inferring.set()
+    a = torch.randn(1024, 1024)
+    while True:  # 취소도 보지 않는 토치 커널 — 긴 프리필의 대역
+        a = (a @ a).tanh()
+
+
+FakeEngine.run_multi = _busy_inference
+FakeEngine.run_single = _busy_inference
+data_dir, port = Path(sys.argv[1]), int(sys.argv[2])
+app = create_app(Settings(
+    engine="fake", device="cpu", data_dir=data_dir, preload_model=False, fake_delay=0.0,
+    frontend_dir=data_dir / "no-frontend",
+))
+server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+
+
+def _drive():
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 80), "Shutdown during OCR", fontsize=18)
+    pdf = doc.tobytes()
+    doc.close()
+    while not server.started:
+        time.sleep(0.05)
+    with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=30) as client:
+        r = client.post("/api/jobs", files={"file": ("x.pdf", pdf, "application/pdf")})
+        assert r.status_code == 202, r.text
+    assert inferring.wait(60), "엔진에 들어가지 못했다"
+    time.sleep(0.5)
+    os.kill(os.getpid(), signal.SIGTERM)  # docker stop
+
+
+threading.Thread(target=_drive, daemon=True).start()
+server.run()
+print("server returned", flush=True)
+'''
+
+
+def test_sigterm_during_inference_exits_cleanly_like_a_container_stop(tmp_path):
+    """토치 커널을 도는 데몬 스레드가 남은 채 인터프리터가 끝나면 C++ 정적 소멸자가 그 밑에서
+    부서져 std::terminate → abort였다(컨테이너 PID 1에서 OCR 중 docker stop이 exit 133, Linux
+    아닌 PID에서는 SIGABRT). 앱 정리를 마친 뒤 그 단계만 건너뛰어 종료 코드 0으로 끝난다."""
+    import os
+    import socket
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pytest.importorskip("torch")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    env = {**os.environ, "DISABLE_DOTENV": "1", "PDF_WORKER_MODE": "inline"}
+    proc = subprocess.run(
+        [sys.executable, "-c", _SIGTERM_DURING_INFERENCE, str(tmp_path / "data"), str(port)],
+        cwd=Path(__file__).resolve().parents[1], env=env,
+        capture_output=True, text=True, timeout=180,
+    )
+    assert "server returned" in proc.stdout, proc.stderr[-3000:]
+    assert "네이티브 정리를 건너뜁니다" in proc.stderr, proc.stderr[-3000:]
+    assert "terminate called" not in proc.stderr
+    assert proc.returncode == 0, (proc.returncode, proc.stderr[-3000:])
+
+
 def _drive_until_end(app, make_response, *, after: int, action) -> tuple[list[str], float]:
     """SSE body_iterator를 직접 돌린다(TestClient는 스트림 전체를 버퍼링한다).
     after개 청크를 받은 뒤 action()을 부르고, 스트림이 스스로 끝날 때까지 잰다."""

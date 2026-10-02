@@ -1039,6 +1039,13 @@ def execute_job(
             except JobCanceled:
                 raise
             except Exception as chunk_error:  # noqa: BLE001 — 청크 단위 격리
+                # 복구(페이지별 single·텍스트 레이어) 전에 실패 시도의 프레임을 놓고 캐시를
+                # 반환한다 — 예외를 쥔 채 단독 재처리를 돌리면 traceback이 붙잡은 8쪽 시도의
+                # KV·활성화가 살아 있어 '1쪽씩이면 통과'해야 할 OOM이 그대로 재발한다.
+                # (_detach는 클래스·메시지·partial_output·limit_label을 그대로 둔다)
+                _detach(chunk_error)
+                gc.collect()
+                _empty_device_cache()
                 if job.mode == "per_page" or (
                     len(chunk) == 1 and not isinstance(chunk_error, RepetitiveOutputError)
                 ):

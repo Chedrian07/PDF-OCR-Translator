@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import threading
@@ -185,25 +186,36 @@ def _heavy_export_job(root: Path, pages: int = 6, paths: int = 10_000) -> Path:
     return job_dir
 
 
-def _loop_rate(seconds: float) -> float:
-    """순수 파이썬 CPU 루프의 초당 반복 수 — GIL을 얻지 못하면 떨어진다."""
+# GIL을 놓는 스텝 하나의 입력 — hashlib은 2KiB를 넘는 입력을 해시하는 동안 GIL을 놓는다.
+_GIL_STEP_BLOCK = b"x" * 65536
+# 빌드 중 스텝 속도의 하한(빌드 전 대비). 실측(M4 Max): 워커 프로세스 빌드 0.96~0.97배, 같은
+# 프로세스(inline) 빌드 0.003배. 다른 프로세스와 CPU 하나를 나눠 쓰는 러너(2 vCPU·SMT·x86_64
+# 에뮬레이션에서 torch를 올린 부모와 자식이 한 vCPU에 묶인 경우 — P4 Linux CI 재현)는 ~0.5배다.
+_MIN_STEP_RATIO = 0.3
+
+
+def _gil_step_rate(seconds: float) -> float:
+    """GIL을 놓았다 다시 잡는 스텝의 초당 횟수 — OCR 디코드(토치 커널마다 GIL을 놓고 다시
+    잡는다)의 대역. 같은 프로세스에서 MuPDF가 GIL을 쥐면 스텝마다 GIL을 다시 얻으려 줄을 서서
+    수백 분의 1로 떨어진다. 예전의 순수 파이썬 루프는 GIL 전환 주기마다 반을 얻어 같은 프로세스
+    빌드에서도 ~0.55배라, CPU를 나눠 쓰는 러너(~0.5배)와 구분하지 못했다."""
     count = 0
     end = time.perf_counter() + seconds
     while time.perf_counter() < end:
-        for _ in range(1000):
-            count += 1
+        hashlib.sha256(_GIL_STEP_BLOCK).digest()
+        count += 1
     return count / seconds
 
 
 def test_parent_keeps_its_cpu_while_an_export_build_runs(pdf_worker_processes, tmp_path):
-    """빌드가 export 워커 프로세스에서 도는 동안 서버 프로세스의 파이썬 루프(OCR 디코드·이벤트
-    루프의 대역)가 제 속도를 낸다. 같은 프로세스의 스레드였을 때는 MuPDF가 GIL을 쥐어 디코드가
-    31.7→1.0 tok/s로 굶었다(감사 gap1-metal-real-e2e-2)."""
+    """빌드가 export 워커 프로세스에서 도는 동안 서버 프로세스의 디코드 대역 스텝이 굶지 않는다.
+    같은 프로세스의 스레드였을 때는 MuPDF가 GIL을 쥐어 디코드가 31.7→1.0 tok/s로 굶었다(감사
+    gap1-metal-real-e2e-2)."""
     from app.pipeline.pdf_export import build_translated_pdf
 
     job_dir = _heavy_export_job(tmp_path)
     build_translated_pdf(job_dir, "ko")  # 워커 기동·폰트 탐색 비용을 측정 밖으로
-    baseline = _loop_rate(0.6)
+    baseline = _gil_step_rate(0.6)
 
     stop = threading.Event()
     builds: list[int] = []
@@ -220,12 +232,12 @@ def test_parent_keeps_its_cpu_while_an_export_build_runs(pdf_worker_processes, t
     builder = threading.Thread(target=_keep_building)
     builder.start()
     time.sleep(0.2)
-    during = _loop_rate(1.5)
+    during = _gil_step_rate(1.5)
     stop.set()
     builder.join(120)
     assert not errors, errors
     assert builds and builds[0] == 6  # 측정 구간 내내 실제 빌드가 돌았다(페이지 6개 교체)
-    assert during >= baseline * 0.7, (during, baseline)
+    assert during >= baseline * _MIN_STEP_RATIO, (during, baseline)
 
 
 def test_export_build_time_limit_is_a_409_and_leaves_no_temp_files(

@@ -41,6 +41,7 @@ from .base import (
     RepetitiveOutputError,
     StreamSink,
 )
+from .hf_snapshot import complete_local_snapshot
 from .repetition import SemanticRepetitionDetector
 from .unlimited import (
     MULTI_NGRAM_WINDOW,
@@ -253,6 +254,8 @@ class UnlimitedMLXEngine(OCREngine):
             s.model_revision,
             dtype=self._mlx_dtype,
             quantize_bits=self._quant_bits or None,
+            # 고정 커밋 스냅샷이 캐시에 완전하면 Hub 조회 없이 그 디렉터리를 쓴다(hf_snapshot)
+            model_path=complete_local_snapshot(s.model_id, s.model_revision),
         )
         logger.info(
             "MLX 모델 로딩 완료: 파라미터 %.2f GB, %.1f s (%s)",

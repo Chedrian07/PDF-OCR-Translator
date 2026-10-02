@@ -817,18 +817,21 @@ def _plan_text_block(
     """일반 텍스트 블록의 flow 후보. 줄 단위로 확정되면 targets에 직접 넣는다."""
     source_raw = str(ob.get("content") or "")
     old = _plain_text(source_raw)
-    # 번역문의 마크다운 표기를 걷어내고, 원문이 한 문단이면 문단 구조도 맞춘다 —
-    # 둘 다 지면에 그대로 찍히거나(마커) 높이를 부풀려 블록을 통째로 버리게 한다.
-    # 원문을 함께 넘겨 원문에 실제로 있던 목록·`>`·`*`/`__` 표기는 지우지 않는다.
-    new = _plain_text(
-        strip_markdown(
-            match_paragraph_shape(source_raw, str(tb.get("content") or "")),
-            source_raw,
+
+    def _as_inserted(content: str) -> str:
+        # 번역문의 마크다운 표기를 걷어내고, 원문이 한 문단이면 문단 구조도 맞춘다 —
+        # 둘 다 지면에 그대로 찍히거나(마커) 높이를 부풀려 블록을 통째로 버리게 한다.
+        # 원문을 함께 넘겨 원문에 실제로 있던 목록·`>`·`*`/`__` 표기는 지우지 않는다.
+        text = _plain_text(
+            strip_markdown(match_paragraph_shape(source_raw, content), source_raw)
         )
-    )
-    if block_type == "title":
-        new = _restore_title_prefix(old, new)
-    if not new or new == old:
+        return _restore_title_prefix(old, text) if block_type == "title" else text
+
+    new = _as_inserted(str(tb.get("content") or ""))
+    # '바뀌지 않음'은 같은 정규화를 거친 원문과도 비교한다. 정규화는 번역문 쪽에만
+    # 걸리므로(원문 '- ' 글머리표 → '• ') 번역에 실패해 원문 그대로인 목록 블록이
+    # `old`와 달라 보여, 원본 조판(인라인 수식)이 평문으로 다시 찍히고 분수선만 남았다.
+    if not new or new == old or new == _as_inserted(source_raw):
         result.keep("unchanged")
         return None
     rect = ctx.block_rects[block_index]

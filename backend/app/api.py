@@ -213,6 +213,10 @@ _TRUSTED_PROXY_HOPS_ENV = "TRUSTED_PROXY_HOPS"
 # (uvicorn forwarded_allow_ips와 같은 모델). TRUSTED_PROXY_IPS = 주소·CIDR 콤마 목록,
 # 비우면 루프백만(같은 호스트의 nginx/Caddy — 가장 흔한 배치). 컨테이너 앞 프록시는
 # 피어가 브리지 주소(예: 172.17.0.1)로 보이므로 그 주소를 넣어야 한다.
+# uvicorn은 기본(proxy_headers 켜짐, FORWARDED_ALLOW_IPS 기본 127.0.0.1)으로 그 목록의
+# 피어가 보낸 요청에서 client를 XFF의 오른쪽 첫 비신뢰 항목으로 **이미 바꿔** 넘긴다(헤더는
+# 그대로). 그 client를 직접 피어로 보면 루프백 프록시 홉을 두 번 센다 — 아래
+# _peer_rewritten_by_server가 그 요청을 알아보고 홉 수를 헤더 체인 전체에 적용한다.
 _TRUSTED_PROXY_IPS_ENV = "TRUSTED_PROXY_IPS"
 _DEFAULT_TRUSTED_PROXIES = ("127.0.0.0/8", "::1/128")
 _XFF_KEY_MAX = 64
@@ -261,13 +265,35 @@ def _trusted_proxy_hops() -> int:
         return 0
 
 
+def _forwarded_chain(request: Request) -> list[str]:
+    """X-Forwarded-For 항목(왼쪽이 가장 먼 홉). 필드 줄이 여럿이면 순서대로 잇는다(RFC 9110
+    §5.3 — uvicorn도 같다). 첫 줄만 읽으면 기존 헤더 뒤에 새 줄을 덧붙이는 프록시(HAProxy
+    option forwardfor) 뒤에서 클라이언트가 보낸 첫 줄이 체인 전부로 보였다."""
+    lines = request.headers.getlist("x-forwarded-for")
+    return [part for part in (item.strip() for line in lines for item in line.split(",")) if part]
+
+
+def _peer_rewritten_by_server(client, chain: list[str]) -> bool:
+    """ASGI 서버가 프록시 헤더로 client를 이미 바꿔 놓은 요청인가(감사 api-2).
+
+    uvicorn ProxyHeadersMiddleware는 자기 허용 목록(FORWARDED_ALLOW_IPS, 기본 127.0.0.1)에 든
+    피어의 요청에서 client를 XFF의 오른쪽 첫 비신뢰 항목으로 바꾸고, 항목에 포트가 없으면 포트를
+    0으로 둔다. 실제 TCP 피어의 포트는 0일 수 없으므로 포트 0 + XFF는 '서버가 이미 믿고 소비한
+    프록시 홉'이다. 그 client를 직접 피어로 보면 같은 호스트 nginx + HOPS=1이 실제 클라이언트를
+    '목록 밖 피어'로 경고했고, CDN + nginx(HOPS=2)는 모든 사용자를 CDN 엣지 하나로 묶었다.
+    서버의 판정 뒤에서 헤더 체인 전체(원래 피어가 붙인 항목 포함)에 홉 수를 다시 적용한다 —
+    서버가 이미 헤더 값을 client로 쓴 요청이라 믿는 범위는 넓어지지 않는다."""
+    return client is not None and getattr(client, "port", None) == 0 and bool(chain)
+
+
 def _client_key(request: Request) -> str:
     client = request.client
     direct = client.host if client is not None else "unknown"
     hops = _trusted_proxy_hops()
     if hops <= 0:
         return direct
-    if not _is_trusted_proxy(direct):
+    chain = _forwarded_chain(request)
+    if not (_peer_rewritten_by_server(client, chain) or _is_trusted_proxy(direct)):
         # 프록시를 거치지 않은 직접 연결 — 헤더는 클라이언트가 쓴 값이라 믿지 않는다.
         if "untrusted-peer" not in _trusted_proxy_warned:
             _trusted_proxy_warned.add("untrusted-peer")
@@ -279,8 +305,6 @@ def _client_key(request: Request) -> str:
                 _TRUSTED_PROXY_IPS_ENV,
             )
         return direct
-    chain = [p.strip() for p in (request.headers.get("x-forwarded-for") or "").split(",")]
-    chain = [p for p in chain if p]
     # 홉 수보다 짧은 체인 = 신뢰 프록시가 붙이지 않은 헤더(또는 위조 시도) — 무시한다.
     if len(chain) < hops:
         return direct

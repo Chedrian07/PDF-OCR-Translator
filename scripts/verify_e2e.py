@@ -376,6 +376,31 @@ def unit_placeholder_counts(jd: Path) -> dict[str, int]:
     return {u.id: len(mask(u.src)[1]) for u in units}
 
 
+def explained_loss_pages(report: dict) -> set[int]:
+    """export report가 '원문을 남긴 사유'를 기록한 페이지 — 사유 있는 유실과 무성 유실을 가른다.
+
+    보존 블록을 페이지별로 센 kept_pages(자르지 않은 집계)가 있으면 그것만 쓴다: 그 페이지에서
+    원문을 남긴 블록이 하나라도 기록됐어야 유실이 설명된다. 예전에는 상위 50건만 실리는
+    warnings 표본에서 페이지를 읽어, 51번째 이후 경고의 페이지(25쪽 실행에서 p13 이후)는
+    설명이 있어도 무성 유실로 보였고, 축소 배치 같은 무관한 경고 하나가 그 페이지의 유실을
+    모두 설명된 것으로 만들었다. kept_pages가 없는 옛 리포트만 warnings 표본으로 대신한다.
+    """
+    kept_pages = report.get("kept_pages")
+    if isinstance(kept_pages, list):
+        return {
+            int(page) for page, count in (
+                pair for pair in kept_pages if isinstance(pair, list) and len(pair) == 2
+            )
+            if isinstance(page, int) and isinstance(count, int) and count > 0
+        }
+    pages: set[int] = set()
+    for warn in report.get("warnings") or []:
+        m = re.match(r"p(\d+):", str(warn))
+        if m:
+            pages.add(int(m.group(1)))
+    return pages
+
+
 def kept_reason_summary(report: dict) -> dict[str, int]:
     """export.{lang}.report.json의 보존 사유별 집계.
 
@@ -822,11 +847,7 @@ def verify_pdf_reflects_translation(jd: Path, page_texts: list[str], lang: str) 
     rep_path = jd / f"export.{lang}.report.json"
     explained_pages: set[int] = set()
     if rep_path.is_file():
-        rep_json = json.loads(rep_path.read_text(encoding="utf-8"))
-        for warn in rep_json.get("warnings") or []:
-            m = re.match(r"p(\d+):", str(warn))
-            if m:
-                explained_pages.add(int(m.group(1)))
+        explained_pages = explained_loss_pages(json.loads(rep_path.read_text(encoding="utf-8")))
     silent = [d for d in dropped if d[0] not in explained_pages]
     if dropped and not silent:
         info(f"유실 {len(dropped)}페이지는 전부 export report에 사유가 남아 있다 "

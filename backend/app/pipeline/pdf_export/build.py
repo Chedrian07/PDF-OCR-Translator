@@ -1653,7 +1653,6 @@ def _hide_visible_link_borders(page) -> None:
 # 147개 중 134개). 못 찾거나 모호하면(번역된 '정리 1'의 '1'처럼) 원래 자리에 둔다 — 번역문은
 # 같은 블록 영역에 들어가므로 링크가 없어지는 것보다 낫다. 능동 콘텐츠 정리(strip_active_content)
 # 는 그 뒤 xref 전체를 훑으므로 되단 링크의 위험한 동작도 똑같이 지운다.
-_ANNOT_REF_RE = re.compile(r"(\d+)\s+(\d+)\s+R")
 _PDF_NUMBER_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)")
 # 링크 원문 끝의 구두점 — 'Section 4.1,'의 쉼표는 번역문에서 조사·다른 구두점으로 바뀐다
 _ANCHOR_TRAILING_PUNCT = ",.;:"
@@ -1672,17 +1671,35 @@ class _PageLink:
     prefix: str = ""  # 같은 줄에서 바로 앞 단어 — 번호만 링크인 참조('Section 4.1')용
 
 
-def _page_annot_refs(doc, page) -> list[tuple[int, int]]:
-    """페이지 /Annots의 (xref, 세대) 목록 — 배열이 간접 객체여도 따라간다."""
-    kind, value = doc.xref_get_key(page.xref, "Annots")
-    if kind == "xref":
-        try:
-            value = doc.xref_object(int(value.split()[0]), compressed=True)
-        except Exception:  # noqa: BLE001 — 깨진 참조는 annotation 없음으로 본다
-            return []
-    elif kind != "array":
+def _page_annots(fitz, doc, page, *, create: bool = False):
+    """페이지 /Annots 배열(MuPDF 객체 — 간접 참조여도 그대로 쓴다), 없으면 None(create면 새로 단다).
+
+    문자열로 풀어 다시 쓰지 않는다 — 배열 안의 직접(인라인) annotation 사전이 사라지고 그 사전의
+    /P 같은 참조가 annotation으로 끼어들었다(리뷰)."""
+    mu = fitz.mupdf
+    pdoc = mu.pdf_document_from_fz_document(doc.this)
+    page_obj = mu.pdf_load_object(pdoc, page.xref)
+    annots = mu.pdf_dict_gets(page_obj, "Annots")
+    if mu.pdf_is_array(annots):
+        return mu, pdoc, annots
+    if not create:
+        return mu, pdoc, None
+    annots = mu.pdf_new_array(pdoc, 4)
+    mu.pdf_dict_puts(page_obj, "Annots", annots)
+    return mu, pdoc, annots
+
+
+def _page_annot_refs(fitz, doc, page) -> list[tuple[int, int]]:
+    """페이지 /Annots의 간접 참조 (xref, 세대) 목록 — 직접 사전 항목은 건너뛴다."""
+    mu, _pdoc, annots = _page_annots(fitz, doc, page)
+    if annots is None:
         return []
-    return [(int(m.group(1)), int(m.group(2))) for m in _ANNOT_REF_RE.finditer(value)]
+    refs = []
+    for index in range(mu.pdf_array_len(annots)):
+        item = mu.pdf_array_get(annots, index)
+        if mu.pdf_is_indirect(item):
+            refs.append((mu.pdf_to_num(item), mu.pdf_to_gen(item)))
+    return refs
 
 
 def _link_annot_rect(fitz, doc, page, xref: int):
@@ -1774,7 +1791,7 @@ def _snapshot_page_links(fitz, page, targets) -> list[_PageLink]:
     원문은 이번에 지울 블록(targets의 리댁션 사각형)과 겹친 링크만 읽는다."""
     doc = page.parent
     links: list[_PageLink] = []
-    for xref, gen in _page_annot_refs(doc, page):
+    for xref, gen in _page_annot_refs(fitz, doc, page):
         rect = _link_annot_rect(fitz, doc, page, xref)
         if rect is not None:
             links.append(_PageLink(xref, gen, rect))
@@ -1833,9 +1850,11 @@ def _relocated_link_rects(fitz, page, lost: list[_PageLink], targets) -> dict[in
     """되달 링크 중 원문이 그 블록의 번역문에 같은 수만큼 다시 나오는 것의 새 자리 {xref: Rect}.
 
     링크마다 그 링크를 지운 교체 블록(리댁션 사각형이 겹친 블록)이 정확히 하나일 때만 옮긴다.
-    같은 블록·같은 원문의 링크가 여럿이면 원문과 번역문에서 같은 순서로 짝짓는다. 원문이 번역문에
-    더 많이 나오면 같은 줄의 바로 앞 단어까지 붙여('Section 4.1'·'[5') 다시 찾는다."""
-    groups: dict[tuple[int, str], list[_PageLink]] = {}
+    (블록, 원문, 같은 줄의 바로 앞 단어)로 묶어 먼저 앞 단어까지 붙여('Section 4.1'·'[5') 찾고,
+    못 찾으면 그 블록에서 그 원문의 링크가 모두 같은 앞 단어일 때만 원문만으로 다시 찾는다 — 앞
+    단어가 다른 링크('Figure 3'·'Section 3')를 순서로 짝지으면 번역이 순서를 바꿀 때 목적지가
+    뒤바뀐다(리뷰). 한 묶음 안에서는 원문과 번역문에서 같은 순서로 짝짓는다."""
+    groups: dict[tuple[int, str, str], list[_PageLink]] = {}
     for link in lost:
         if not link.anchor:
             continue
@@ -1844,17 +1863,19 @@ def _relocated_link_rects(fitz, page, lost: list[_PageLink], targets) -> dict[in
             if any(_rect_overlap_area(link.rect, rect) > 0 for rect in _target_redaction_rects(target))
         ]
         if len(owners) == 1:
-            groups.setdefault((owners[0], link.anchor), []).append(link)
+            groups.setdefault((owners[0], link.anchor, link.prefix), []).append(link)
     if not groups:
         return {}
+    prefix_groups: dict[tuple[int, str], int] = {}
+    for index, anchor, _prefix in groups:
+        prefix_groups[(index, anchor)] = prefix_groups.get((index, anchor), 0) + 1
     lines = _link_text_lines(fitz, page)
     moved: dict[int, object] = {}
-    for (index, anchor), group in groups.items():
+    for (index, anchor, prefix), group in groups.items():
         clip = targets[index].plan.rect
-        hits = _anchor_hits(fitz, lines, anchor, clip)
-        prefixes = {link.prefix for link in group}
-        if len(hits) != len(group) and len(prefixes) == 1 and "" not in prefixes:
-            hits = _anchor_hits(fitz, lines, anchor, clip, prefixes.pop())
+        hits = _anchor_hits(fitz, lines, anchor, clip, prefix) if prefix else []
+        if len(hits) != len(group) and prefix_groups[(index, anchor)] == 1:
+            hits = _anchor_hits(fitz, lines, anchor, clip)
         if len(hits) != len(group):
             continue
         for link, hit in zip(
@@ -1873,8 +1894,7 @@ def _restore_redacted_links(fitz, page, links: list[_PageLink], targets) -> int:
     if not links:
         return 0
     doc = page.parent
-    present = _page_annot_refs(doc, page)
-    attached = {xref for xref, _gen in present}
+    attached = {xref for xref, _gen in _page_annot_refs(fitz, doc, page)}
     lost = [
         link for link in links
         if link.xref not in attached and _link_annot_rect(fitz, doc, page, link.xref) is not None
@@ -1893,8 +1913,9 @@ def _restore_redacted_links(fitz, page, links: list[_PageLink], targets) -> int:
         # 옛 자리의 QuadPoints가 남으면 그것을 따르는 뷰어에서는 클릭 영역이 원래 자리다
         if doc.xref_get_key(link.xref, "QuadPoints")[0] != "null":
             doc.xref_set_key(link.xref, "QuadPoints", "null")
-    refs = [*present, *((link.xref, link.gen) for link in lost)]
-    doc.xref_set_key(page.xref, "Annots", "[" + " ".join(f"{x} {g} R" for x, g in refs) + "]")
+    mu, pdoc, annots = _page_annots(fitz, doc, page, create=True)
+    for link in lost:
+        mu.pdf_array_push(annots, mu.pdf_new_indirect(pdoc, link.xref, link.gen))
     return len(lost)
 
 

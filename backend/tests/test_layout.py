@@ -688,43 +688,48 @@ def test_standalone_exports_lock_out_external_origins_with_meta_csp(tmp_path):
             assert "script" in scan.order and "data:font/woff2;base64," in html, name
 
 
-def _js_katex_options() -> dict[str, str]:
-    """frontend/js/constants.js katexOptions의 반환 객체 → {키: JS 리터럴} (displayMode 제외)."""
-    src = (FRONTEND_DIR / "js" / "constants.js").read_text(encoding="utf-8")
-    consts = dict(re.findall(r"export const (KATEX_[A-Z_]+) = (\d+);", src))
-    body = re.search(r"export function katexOptions\([^)]*\) \{\s*return \{(.*?)\};", src, re.S)
-    assert body, "frontend/js/constants.js에서 katexOptions를 찾지 못했다"
-    out = {}
-    for key, value in re.findall(r"(\w+):\s*([^,\n]+),", body.group(1)):
-        if key != "displayMode":
-            out[key] = consts.get(value.strip(), value.strip())
-    return out
+def test_standalone_typesets_math_through_the_shared_size_guard(tmp_path):
+    """내려받기 파일의 수식도 앱과 같은 가드(frontend/katex-guard.js)를 거쳐 조판한다.
+
+    옵션(maxSize·maxExpand·trust·strict)·크기 인자 묶기·조판 결과 상한은 그 클래식 스크립트
+    하나에 있고 frontend/tests/katex-guard.test.mjs가 앱 구현(constants.katexOptions·
+    core.clampTexSizes·katexStyleOversized)과 대조한다. 예전 인라인 조판은 KaTeX를 직접 불러
+    \\raisebox{-4000em}{x} 하나로 문단이 7만 px가 됐다(감사 frontend-4 — Chromium 실측)."""
+    from app.pipeline.layout import _TYPESET_JS, render_document_standalone
+
+    assert "katex.render" not in _TYPESET_JS  # 가드를 건너뛰는 직접 호출 금지
+    assert "uocrKatexGuard.typesetMath(document)" in _TYPESET_JS
+    guard = (FRONTEND_DIR / "katex-guard.js").read_text(encoding="utf-8")
+    assert "root.uocrKatexGuard = {" in guard
+    if not (FRONTEND_DIR / "vendor" / "katex" / "katex.min.js").is_file():
+        return
+    pages = [{"page": 1, "width": 1000, "height": 1400, "blocks": [
+        {"type": "text", "bbox": [0, 0, 900, 80], "content": "\\( x \\)"},
+    ]}]
+    katex_js = (FRONTEND_DIR / "vendor" / "katex" / "katex.min.js").read_text(encoding="utf-8")
+    for html in (
+        render_layout_standalone(pages, tmp_path, "t", FRONTEND_DIR),
+        render_document_standalone("<p>x</p>", tmp_path, "t", FRONTEND_DIR),
+    ):
+        katex_at = html.index(f"<script>{katex_js}</script>")
+        guard_at = html.index(f"<script>{guard}</script>")
+        typeset_at = html.index(_TYPESET_JS)
+        assert katex_at < guard_at < typeset_at  # KaTeX 번들 → 가드 → DOMContentLoaded 조판
+        assert "katex.render(" not in html[typeset_at:]  # 가드 뒤에 직접 조판하는 스크립트가 없다
 
 
-def _typeset_katex_options(script: str) -> dict[str, str]:
-    m = re.search(r"katex\.render\(e\.textContent,e,\{(.*?)\}\);", script)
-    assert m, script
-    pairs = dict(part.split(":", 1) for part in m.group(1).split(","))
-    assert pairs.pop("displayMode") == "e.classList.contains('math-display')"
-    return pairs
+def test_standalone_without_the_guard_leaves_math_as_tex(tmp_path):
+    """가드 파일이 없으면 상한 없는 조판 대신 KaTeX를 아예 싣지 않는다 — 수식은 원문 LaTeX."""
+    import shutil
 
+    from app.pipeline.layout import _katex_inline_bundle
 
-def test_standalone_katex_options_match_the_app(tmp_path):
-    """내려받기 파일의 KaTeX도 앱(frontend/js/constants.js katexOptions)과 같은 상한·trust·
-    strict로 조판한다 — 예전에는 throwOnError만 줘서 OCR 수식의 \\rule{2000em}{2000em}이
-    수만 px 박스가 되고, 기본값에 기대는 trust가 GHSA-238p-pmpm-9mq7 경로에 열려 있었다.
-    값을 한쪽만 바꾸면 이 대조가 깨진다(Chromium 실측: 옵션 없는 사본만 2000em 박스)."""
-    from app.pipeline.layout import _TYPESET_JS
-
-    app_options = _js_katex_options()
-    assert app_options == {
-        "throwOnError": "false", "maxSize": "10", "maxExpand": "1000",
-        "strict": "'ignore'", "trust": "false",
-    }
-    assert _typeset_katex_options(_TYPESET_JS) == app_options
-    if (FRONTEND_DIR / "vendor" / "katex" / "katex.min.js").is_file():
-        pages = [{"page": 1, "width": 1000, "height": 1400, "blocks": [
-            {"type": "text", "bbox": [0, 0, 900, 80], "content": "\\( x \\)"},
-        ]}]
-        html = render_layout_standalone(pages, tmp_path, "t", FRONTEND_DIR)
-        assert _TYPESET_JS in html
+    if not (FRONTEND_DIR / "vendor" / "katex" / "katex.min.js").is_file():
+        return
+    partial = tmp_path / "frontend"
+    shutil.copytree(FRONTEND_DIR / "vendor", partial / "vendor")
+    assert _katex_inline_bundle(str(partial)) == ""
+    shutil.copy(FRONTEND_DIR / "katex-guard.js", partial / "katex-guard.js")
+    _katex_inline_bundle.cache_clear()
+    assert "uocrKatexGuard" in _katex_inline_bundle(str(partial))
+    _katex_inline_bundle.cache_clear()

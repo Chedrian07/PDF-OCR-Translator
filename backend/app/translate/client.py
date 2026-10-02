@@ -589,14 +589,17 @@ class OpenAICompatClient:
                     raise TranslateAPIError(str(e)) from e
                 # requests 예외 문구에는 요청 URL(쿼리 포함)·호스트·포트가 그대로 있다 — 이
                 # 문구는 state.json·SSE로 무인증 노출되므로 원인만 고정 문구로 요약하고,
-                # 상세는 쿼리를 가린 채 서버 로그에만 남긴다(security-2).
+                # 상세는 쿼리를 가린 채 서버 로그에만 남긴다(security-2). 원인 사슬은 끊는다
+                # (from None): 호출자의 logger.exception이 traceback에 requests·urllib3 예외를
+                # 쿼리째 찍어 OPENAI_BASE_URL의 쿼리 자격증명이 로그에 평문으로 남았다
+                # (security-1). 원인 요약(_transport_reason)은 여기서 이미 계산했다.
                 logger.warning(
                     "번역 API 연결 실패 — 재시도 소진: %s", _redact_query(str(e)),
                 )
                 raise TranslateAPIError(
                     f"번역 API 연결 실패({_transport_reason(e)}) — "
                     "OPENAI_BASE_URL과 서버 실행·네트워크 상태를 확인하세요"
-                ) from e
+                ) from None
 
             if status == 200:
                 result = self._parse(mode, body)

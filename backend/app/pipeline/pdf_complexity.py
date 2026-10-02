@@ -26,7 +26,13 @@ gap3-mupdf-analysis-amplification-2). 페이지 수·한 변 길이만 보던 �
 한다. 콘텐츠를 MuPDF와 다르게 토큰화하면 그 차이가 곧 우회로다(감사 isolation-1: `/Fm#E9`처럼
 비ASCII 바이트를 이스케이프한 이름을 못 찾아 10^4 체인을 0회로 셌다). 그래서:
 
-- `Do` 후보는 뒤가 토큰 경계인 모든 `Do`다 — 문자열·주석·인라인 이미지 안까지 센다.
+- `Do` 후보는 뒤가 토큰 경계인 모든 `Do`다. 단 스트림을 MuPDF 콘텐츠 렉서와 같은 규칙으로
+  처음부터 따라 읽을 수 있는 구간에서는 리터럴 문자열(중첩 괄호·백슬래시 이스케이프)·16진
+  문자열·주석 안의 `Do`는 연산자가 아니므로 세지 않는다 — 본문 문자열의 'Do' 단어 하나가
+  리소스의 가장 비싼 Form을 부르는 것으로 세여 정상 논문이 거부됐다(delta-core-2). 렉서가
+  따라갈 수 없는 곳은 예전처럼 전부 센다: 인라인 이미지(BI·ID — MuPDF가 원시 바이트를 읽는다)
+  뒤, 앞 콘텐츠 스트림이 문자열·주석·16진 문자열 안에서 끝난 다음 스트림, 렉서 사건 상한을
+  넘은 스트림.
 - 이름은 MuPDF 렉서와 같은 규칙으로 푼다(`#xx` 이스케이프 — `#00`은 그대로, 콘텐츠 이름 버퍼
   255바이트에서 자름, PyMuPDF가 사전 키를 돌려주는 UTF-8·surrogateescape 문자열). 리소스는
   사전 키를 순회해 찾는다(비ASCII 키를 C 문자열 조회에 넘기지 않는다).
@@ -45,6 +51,7 @@ Type3 글리프 반복·거대 이미지·셰이딩처럼 여기서 세지 않�
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from collections import deque
 from dataclasses import dataclass
 
@@ -59,6 +66,17 @@ _DO_PAIR = re.compile(
     rb"/(" + _REGULAR + rb"+)[\x00\t\n\x0c\r ]*Do(?!" + _REGULAR + rb")"
 )
 _TRAILING_RUN = re.compile(_REGULAR + rb"+\Z")
+# 최상위에서 렉서 상태를 바꾸는 바이트: 리터럴 문자열 '(', 주석 '%', 16진 문자열·사전 '<', 그리고
+# 인라인 이미지 연산자 BI·ID(키워드 — 앞이 정규 문자면 다른 키워드·이름의 일부다. 숫자 뒤는
+# MuPDF가 숫자 토큰을 끊으므로 키워드가 될 수 있다 — 넓게 잡을수록 보수적이다).
+_LEX_EVENT = re.compile(
+    rb"[(%<]|(?<![^\x00\t\n\x0c\r ()<>\[\]{}/%0-9.+\-])(?:BI|ID)(?!" + _REGULAR + rb")"
+)
+_STRING_EVENT = re.compile(rb"[()\\]")
+_EOL_BYTE = re.compile(rb"[\r\n]")
+# 렉서 사건(위 바이트·문자열 안의 괄호·백슬래시) 상한 — 문서 하나에서 이만큼 따라 읽은 뒤의
+# 스트림은 렉싱하지 않고 예전처럼 전부 센다(분석 시간을 묶는다, 과대 추정 쪽).
+_MAX_LEX_EVENTS = 2_000_000
 _NAME_ESCAPE = re.compile(rb"#([0-9A-Fa-f]{2})")
 # 이름과 그 앞 연산자 사이에 올 수 있는 것 — 공백과 숫자 피연산자(이름 피연산자를 바꾸지 않는다)
 _WS_OR_NUMBER = _WS + b"0123456789.+-"
@@ -97,6 +115,93 @@ class _Scan:
     size: int                 # 압축 해제 길이
     named: dict[str, int]     # 피연산자가 확실한 Do: MuPDF가 찾을 리소스 이름 → 횟수
     uncertain: int            # 피연산자를 확정하지 못한 Do 후보 수(가장 비싼 XObject로 센다)
+    ends_top: bool = False    # 렉서로 끝까지 따라 읽었고 최상위(문자열·주석 밖)에서 끝났다
+
+
+@dataclass(frozen=True)
+class _Lexed:
+    """MuPDF 콘텐츠 렉서로 따라 읽은 결과 — [starts[i], stops[i])는 문자열·16진 문자열·주석."""
+
+    starts: list[int]
+    stops: list[int]
+    stop_at: int      # 여기부터는 따라 읽지 못했다(인라인 이미지·사건 상한) — len(data)면 끝까지
+    ends_top: bool    # 끝까지 읽었고 최상위에서 끝났다
+    events: int
+
+    def inside(self, pos: int) -> bool:
+        """pos가 문자열·16진 문자열·주석 안인가 — 따라 읽은 구간(stop_at 앞)만 판정한다."""
+        i = bisect_right(self.starts, pos) - 1
+        return i >= 0 and pos < self.stops[i]
+
+
+def _lex(data: bytes, max_events: int) -> _Lexed:
+    """MuPDF 콘텐츠 렉서(pdf_lex)처럼 최상위에서 문자열·16진 문자열·주석 구간을 찾는다.
+
+    - `(`: 리터럴 문자열 — 괄호 중첩을 세고, 백슬래시 뒤 바이트는 무엇이든 글자다(`\\)`는
+      닫지 않는다). 짝이 없으면 스트림 끝까지.
+    - `%`: 주석 — 다음 `\r`·`\n`까지(없으면 끝까지 — 다음 스트림으로 이어질 수 있다).
+    - `<<`는 사전, 그 밖의 `<`는 16진 문자열 — 다음 `>`까지(사이의 어떤 바이트도 끝내지 않는다).
+    - BI·ID 키워드: 인라인 이미지 — MuPDF가 렉서 밖에서 원시 바이트를 읽으므로 여기서 멈춘다.
+    이름·숫자·키워드는 `(`·`%`·`<`를 담을 수 없으므로(구분자) 최상위 사건만 보면 된다."""
+    starts: list[int] = []
+    stops: list[int] = []
+    n = len(data)
+    pos = 0
+    events = 0
+
+    def done(stop_at: int, ends_top: bool) -> _Lexed:
+        return _Lexed(starts, stops, stop_at, ends_top, events)
+
+    while True:
+        found = _LEX_EVENT.search(data, pos)
+        if found is None:
+            return done(n, True)
+        start = found.start()
+        events += 1
+        if events > max_events:
+            return done(start, False)
+        byte = data[start]
+        if byte == 0x28:  # (
+            depth, i = 1, start + 1
+            while depth:
+                inner = _STRING_EVENT.search(data, i)
+                if inner is None:
+                    starts.append(start)
+                    stops.append(n)
+                    return done(n, False)  # 닫히지 않은 문자열 — 다음 스트림으로 이어진다
+                events += 1
+                if events > max_events:
+                    return done(start, False)
+                at = inner.start()
+                if data[at] == 0x5C:  # 백슬래시 — 다음 바이트는 이스케이프된 글자
+                    i = at + 2
+                    continue
+                depth += 1 if data[at] == 0x28 else -1
+                i = at + 1
+            starts.append(start)
+            stops.append(i)
+            pos = i
+        elif byte == 0x25:  # %
+            eol = _EOL_BYTE.search(data, start + 1)
+            starts.append(start)
+            if eol is None:
+                stops.append(n)
+                return done(n, False)  # 주석이 다음 스트림으로 이어질 수 있다
+            stops.append(eol.start())
+            pos = eol.start()
+        elif byte == 0x3C:  # <
+            if data[start + 1:start + 2] == b"<":
+                pos = start + 2  # 사전 — 안의 토큰은 최상위와 같은 규칙
+                continue
+            close = data.find(b">", start + 1)
+            starts.append(start)
+            if close < 0:
+                stops.append(n)
+                return done(n, False)
+            stops.append(close + 1)
+            pos = close + 1
+        else:  # BI·ID — 인라인 이미지의 원시 바이트는 렉서가 따라갈 수 없다
+            return done(start, False)
 
 
 def _decode_name(raw: bytes) -> str:
@@ -122,29 +227,64 @@ def _first_eol(data: bytes, start: int, end: int) -> int:
     return min(hits) if hits else -1
 
 
-def scan_calls(data: bytes, *, fresh: bool = True, max_candidates: int = 0) -> tuple[dict, int]:
+def scan_calls(
+    data: bytes, *, fresh: bool = True, max_candidates: int = 0, lexed: bool | None = None,
+) -> tuple[dict, int]:
     """콘텐츠 바이트의 Do를 (확실한 이름별 횟수, 확실하지 않은 Do 수)로 나눈다 — 순수 함수.
 
     fresh=False는 실행 중간에 이어지는 스트림(페이지의 두 번째 이후 콘텐츠 스트림)이다 — 앞
     스트림의 피연산자·주석이 이어질 수 있어 스트림 처음은 '실행 시작'이 아니고, 첫 줄은 주석
-    안일 수 있다. max_candidates를 넘는 Do 후보는 쌍을 따지지 않고 전부 확실하지 않은 것으로
-    센다(정상 문서는 그만큼 Do를 쓰지 않는다 — 분석 시간을 묶는다).
+    안일 수 있다. lexed(기본: fresh)는 스트림 처음의 렉서 상태가 최상위라고 아는가다 — 알면
+    문자열·주석 안의 Do를 빼고, 모르면 예전처럼 전부 후보로 센다. max_candidates를 넘는 Do
+    후보는 쌍을 따지지 않고 전부 확실하지 않은 것으로 센다(정상 문서는 그만큼 Do를 쓰지 않는다
+    — 분석 시간을 묶는다).
     """
+    named, uncertain, _lexed = _scan_calls(
+        data, fresh=fresh, max_candidates=max_candidates,
+        lexed=fresh if lexed is None else lexed, max_events=_MAX_LEX_EVENTS,
+    )
+    return named, uncertain
+
+
+def _scan_calls(
+    data: bytes, *, fresh: bool, max_candidates: int, lexed: bool, max_events: int,
+    want_end: bool = False,
+) -> tuple[dict, int, _Lexed | None]:
+    """scan_calls 본체 — 렉싱 결과(다음 스트림의 시작 상태·쓴 사건 수)도 돌려준다.
+
+    Do 후보가 없으면 렉싱하지 않는다 — want_end(다음 콘텐츠 스트림이 이 스트림의 끝 상태를
+    알아야 한다)일 때만 끝까지 읽는다."""
     total = _DO_KEYWORD.subn(b"", data)[1]
-    if not total:
-        return {}, 0
     if max_candidates and total > max_candidates:
-        return {}, total
+        return {}, total, None
+    lex = _lex(data, max_events) if lexed and max_events > 0 and (total or want_end) else None
+    if lex is not None and lex.starts and total:
+        # 따라 읽은 구간의 문자열·16진 문자열·주석 안 'Do'는 연산자가 아니다(본문의 'Do' 단어)
+        total -= sum(
+            1 for found in _DO_KEYWORD.finditer(data)
+            if found.start() < lex.stop_at and lex.inside(found.start())
+        )
+    if not total:
+        return {}, 0, lex
     named: dict[str, int] = {}
     certain = 0
-    has_comment = (b"%" in data) or not fresh
-    scanned = 0
-    last_pct = -1 if fresh else -2   # 이어지는 스트림은 처음 앞에 주석이 열려 있을 수 있다
+    # 주석 휴리스틱('%' 역탐색)은 렉서가 따라가지 못한 구간(lex.stop_at부터)에서만 쓴다 — 따라
+    # 읽은 구간은 주석 구간을 정확히 안다. stop_at은 최상위라 그 자리에 열린 주석은 없다.
+    exact_until = lex.stop_at if lex is not None else 0
+    has_comment = data.find(b"%", exact_until) >= 0 or (not fresh and lex is None)
+    scanned = exact_until
+    last_pct = -1 if fresh or lex is not None else -2   # 이어지는 스트림은 처음 앞에 주석이 열려 있을 수 있다
     eol_after_pct = -1
-    eol_scanned = 0
+    eol_scanned = exact_until
     for match in _DO_PAIR.finditer(data):
         start = match.start()
-        if has_comment:
+        exact = start < exact_until
+        if exact:
+            if lex.inside(match.end() - 2):
+                continue  # 문자열·주석 안의 'Do' — 후보가 아니다(위에서 뺐다)
+            if lex.inside(start):
+                continue  # 이름이 문자열·주석 안 — 피연산자를 확정할 수 없다
+        elif has_comment:
             pct = data.rfind(b"%", scanned, start)
             if pct >= 0:
                 last_pct, eol_after_pct, eol_scanned = pct, -1, pct + 1
@@ -165,7 +305,10 @@ def scan_calls(data: bytes, *, fresh: bool = True, max_candidates: int = 0) -> t
             if run.start() and head[run.start() - 1:run.start()] == b"/":
                 continue  # 연산자가 아니라 이름이다
             run_start = lo + run.start()
-        if has_comment and last_pct != -1:
+        if exact:
+            if lex.inside(run_start):
+                continue  # 연산자처럼 보이는 글자가 문자열·주석 안이다
+        elif has_comment and last_pct != -1:
             # 연산자 줄(또는 그 앞)에서 열린 주석이 연산자·이름을 숨겼을 수 있다
             if eol_after_pct < 0 and eol_scanned < run_start:
                 eol_after_pct = _first_eol(data, max(0, eol_scanned), run_start)
@@ -175,7 +318,7 @@ def scan_calls(data: bytes, *, fresh: bool = True, max_candidates: int = 0) -> t
         name = _decode_name(match.group(1))
         named[name] = named.get(name, 0) + 1
         certain += 1
-    return named, max(0, total - certain)
+    return named, max(0, total - certain), lex
 
 
 class _TooTangled(Exception):
@@ -197,8 +340,10 @@ class ComplexityScanner:
         self.max_calls = max(0, int(max_xobject_calls))
         self._call_cap = self.max_calls + 1 if self.max_calls else _UNBOUNDED_CALLS
         self._decode_cap = self.max_bytes or _DECODE_CAP_WHEN_UNLIMITED
-        # (스트림 번호, fresh) → 콘텐츠 해석 결과
-        self._streams: dict[tuple[int, bool], _Scan] = {}
+        # (스트림 번호, fresh, 렉서 시작 상태를 아는가, 끝 상태가 필요한가) → 콘텐츠 해석 결과
+        self._streams: dict[tuple[int, bool, bool, bool], _Scan] = {}
+        # 문서 전체의 렉서 사건 예산 — 다 쓰면 이후 스트림은 렉싱 없이 예전처럼 전부 센다
+        self._lex_budget = _MAX_LEX_EVENTS
         # (스트림 번호, 리소스 키) → 한 번 실행 시 펼친 호출 수(호출 맥락과 무관한 것만)
         self._calls: dict[tuple, int] = {}
         # 리소스 키 → {XObject 이름: 객체}, 그중 가장 비싼 호출(맥락과 무관하게 셀 수 있을 때만)
@@ -264,8 +409,14 @@ class ComplexityScanner:
 
     # ── 스트림 해석 ─────────────────────────────────────────────────────
 
-    def _stream(self, num: int, fresh: bool = True) -> _Scan:
-        cached = self._streams.get((num, fresh))
+    def _stream(
+        self, num: int, fresh: bool = True, lexed: bool = True, want_end: bool = False,
+    ) -> _Scan:
+        """스트림 하나의 해석 — fresh=False는 페이지의 이어지는 콘텐츠 스트림, lexed는 그 스트림
+        처음의 렉서 상태가 최상위라고 아는가(Form·외형·패턴·글리프와 첫 콘텐츠 스트림은 늘 안다),
+        want_end는 다음 콘텐츠 스트림을 위해 끝 상태(ends_top)가 필요한가다."""
+        key = (num, fresh, lexed, want_end)
+        cached = self._streams.get(key)
         if cached is not None:
             return cached
         try:
@@ -275,17 +426,23 @@ class ComplexityScanner:
             size = 0
         named: dict[str, int] = {}
         uncertain = 0
+        # 빈(또는 읽지 못한) 스트림은 렉서 상태를 바꾸지 않는다
+        ends_top = lexed and size == 0
         if 0 < size <= self._decode_cap and (not self.max_bytes or size <= self.max_bytes):
             try:
                 data = self.doc.xref_stream(num) or b""
             except Exception:  # noqa: BLE001
                 data = b""
-            named, uncertain = scan_calls(
+            named, uncertain, lex = _scan_calls(
                 data[: self._decode_cap], fresh=fresh,
-                max_candidates=self.max_calls,
+                max_candidates=self.max_calls, lexed=lexed, max_events=self._lex_budget,
+                want_end=want_end,
             )
-        scan = _Scan(size, named, uncertain)
-        self._streams[(num, fresh)] = scan
+            if lex is not None:
+                self._lex_budget = max(0, self._lex_budget - lex.events)
+                ends_top = lex.ends_top
+        scan = _Scan(size, named, uncertain, ends_top)
+        self._streams[key] = scan
         return scan
 
     def _form_info(self, target) -> tuple[int, bool, tuple | None]:
@@ -434,10 +591,19 @@ class ComplexityScanner:
                     appearances.append((ap, *self._own_resources(ap, resources, res_key)))
 
         # 페이지 콘텐츠 스트림들은 MuPDF가 이어서 한 번 실행한다 — 앞 스트림의 피연산자·주석이
-        # 다음 스트림으로 이어지므로 두 번째부터는 '실행 시작'이 아니다(fresh=False).
+        # 다음 스트림으로 이어지므로 두 번째부터는 '실행 시작'이 아니다(fresh=False). 렉서 상태도
+        # 이어진다(MuPDF는 공백 하나를 끼워 이어 붙인다) — 앞 스트림이 최상위에서 끝났을 때만
+        # 다음 스트림의 문자열·주석을 따라 읽는다.
         calls = 0
+        content_scans: list[_Scan] = []
+        lexed = True
         for position, stream in enumerate(contents):
-            scan = self._stream(mu.pdf_to_num(stream), fresh=position == 0)
+            scan = self._stream(
+                mu.pdf_to_num(stream), fresh=position == 0, lexed=lexed,
+                want_end=position + 1 < len(contents),
+            )
+            lexed = scan.ends_top
+            content_scans.append(scan)
             calls = self._add(calls, self._charge(scan, resources, res_key, 0)[0])
         for ap, ap_res, ap_key in appearances:
             calls = self._add(calls, 1 + self._expand(mu.pdf_to_num(ap), ap_res, ap_key, 1)[0])
@@ -448,27 +614,33 @@ class ComplexityScanner:
         seen_streams: set[int] = set()
         seen_resources: set[tuple] = set()
         queue = deque(
-            [(s, resources, res_key, position == 0) for position, s in enumerate(contents)]
-            + [(ap, ap_res, ap_key, True) for ap, ap_res, ap_key in appearances]
+            [(s, resources, res_key, scan) for s, scan in zip(contents, content_scans)]
+            + [(ap, ap_res, ap_key, None) for ap, ap_res, ap_key in appearances]
         )
         while queue:
-            obj, res, key, fresh = queue.popleft()
+            obj, res, key, scan = queue.popleft()
             if key not in seen_resources:
                 seen_resources.add(key)
                 for extra, extra_res, extra_key in self._extra_roots(res, key):
                     inner = self._expand(mu.pdf_to_num(extra), extra_res, extra_key, 1)[0]
                     calls = self._add(calls, 1 + inner)
-                    queue.append((extra, extra_res, extra_key, True))
+                    queue.append((extra, extra_res, extra_key, None))
             num = mu.pdf_to_num(obj)
             if num in seen_streams:
+                if scan is not None:
+                    # Contents에 다시 나온 같은 스트림(렉서 시작 상태가 다를 수 있다) — 바이트는
+                    # 한 번만 세되, 그 해석이 부를 수 있는 Form은 모두 따라간다
+                    for target in self._reachable_forms(scan, res, key):
+                        queue.append((target, *self._own_resources(target, res, key), None))
                 continue
             seen_streams.add(num)
-            scan = self._stream(num, fresh)
+            if scan is None:
+                scan = self._stream(num)
             content_bytes += scan.size
             if self.max_bytes and content_bytes > self.max_bytes:
                 break
             for target in self._reachable_forms(scan, res, key):
-                queue.append((target, *self._own_resources(target, res, key), True))
+                queue.append((target, *self._own_resources(target, res, key), None))
         return PageCost(index + 1, content_bytes, calls)
 
     def check(self, index: int) -> PageCost:

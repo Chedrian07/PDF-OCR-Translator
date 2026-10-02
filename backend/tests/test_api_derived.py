@@ -889,3 +889,35 @@ def test_pdf_report_route_serves_the_report_of_the_last_build(client, sample_pdf
 
     assert client.get(f"/api/jobs/{jid}/pdf/report?lang=zz").status_code == 400
     assert client.get("/api/jobs/j_000000000000/pdf/report?lang=ko").status_code == 404
+
+
+def test_pdf_report_route_never_serves_a_report_of_a_stale_build(client, sample_pdf, monkeypatch):
+    """업그레이드 직후 아직 PDF를 다시 받지 않은 잡의 /pdf/report가 0.1.0 빌드의 리포트(포맷
+    버전 없음 — 치환·보존 수와 주의 문장이 다음 /pdf와 다르다)를 그대로 냈다(migration-2).
+    리포트는 캐시가 최신일 때(포맷 버전·빌드 스탬프가 지금과 같을 때)만 나간다."""
+    from app.pipeline import artifacts
+
+    _export_env(monkeypatch)
+    jid, job_dir = _ko_layout_job(client, sample_pdf)
+    url = f"/api/jobs/{jid}/pdf/report?lang=ko"
+    assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200
+    report_path = artifacts.export_report(job_dir, "ko")
+    fresh = json.loads(report_path.read_text(encoding="utf-8"))
+    assert client.get(url).status_code == 200
+
+    legacy = {key: value for key, value in fresh.items() if key != "format_version"}
+    legacy.update(replaced=65, kept=10, warning_count=1, warnings=["0.1.0 빌드의 주의 문장"])
+    report_path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+    assert client.get(url).status_code == 404                   # 0.1.0 리포트(포맷 버전 없음)
+
+    report_path.write_text(json.dumps({**fresh, "format_version": fresh["format_version"] - 1}),
+                           encoding="utf-8")
+    assert client.get(url).status_code == 404                   # 이전 포맷
+
+    report_path.write_text(json.dumps(fresh), encoding="utf-8")
+    assert client.get(url).status_code == 200
+    layout = job_dir / "layout.ko.json"
+    layout.write_text(layout.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    assert client.get(url).status_code == 404                   # 입력이 바뀐 뒤의 옛 빌드
+    assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200   # 다시 빌드하면
+    assert client.get(url).json()["format_version"] == fresh["format_version"]

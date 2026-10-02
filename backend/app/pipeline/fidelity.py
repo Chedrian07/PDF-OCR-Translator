@@ -544,9 +544,15 @@ def evaluate_layout_pages(
     return out
 
 
-def evaluate_raw_page(pdf_path, raw_page: str, page_number: int) -> PageFidelity:
-    """단독 재실행 결과 한 장을 같은 잣대로 판정한다(채택 여부 판단용) — PDF 워커에서."""
+def evaluate_raw_page(
+    pdf_path, raw_page: str, page_number: int, should_cancel: CancelCheck = None,
+) -> PageFidelity:
+    """단독 재실행 결과 한 장을 같은 잣대로 판정한다(채택 여부 판단용) — PDF 워커에서.
+
+    should_cancel이 참이면 JobCanceled — 시작 전에 확인하고, 프로세스 모드에서는 판정 중에도
+    부모가 워커를 끝낸다. 취소된 잡의 재처리 판정이 페이지 시간 상한까지 취소를 무시하지 않게."""
+    _check_cancel(should_cancel)
     return _isolated_page(
         "app.pipeline.fidelity:evaluate_raw_page_local", pdf_path, page_number,
-        (raw_page,), None, task_polls_cancel=False,
+        (raw_page,), should_cancel, task_polls_cancel=False,
     )

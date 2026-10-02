@@ -1621,10 +1621,14 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
   `\rule[-3000em]`·`\kern-5000em`·`\\[-900em]` …)를 같은 단위의 ±10em으로 묶고
   (`core.clampTexSizes`), 그래도 조판 결과 style에 100em(`KATEX_MAX_BOX_EM`)을 넘는 길이가 있으면
   (매크로로 만든 크기·`\arraystretch` 등) 원문 TeX 글자로 보인다(`data-math-fallback="oversized"`).
+  크기 묶기 정규식은 공백·괄호 인자 반복을 64자로 묶어 입력 길이에 선형이다(상한 없는 `\s*`·
+  `[^\]]*`는 닫는 괄호 없는 `\\[` 반복에서 제곱 시간 — 45만 자 수식 스팬 하나가 23초 멈췄다).
+  1만 자(`KATEX_MAX_TEX_CHARS`)보다 긴 TeX는 조판하지 않고 원문 글자로 둔다
+  (`data-math-fallback="too-long"`) — KaTeX 조판 자체가 긴 입력에 초선형이다('x+' 20만 자 11초).
   내려받는 standalone HTML(document·layout)은 ES 모듈을 쓸 수 없어 같은 규칙을 옮긴 클래식
   스크립트 `katex-guard.js`를 KaTeX 번들 뒤에 인라인해 조판한다(`layout._katex_inline_bundle` —
   가드 파일이 없으면 KaTeX를 싣지 않아 원문 LaTeX로 둔다). `tests/katex-guard.test.mjs`가 두
-  구현의 크기 묶기·style 상한·옵션을 대조한다.
+  구현의 크기 묶기·style 상한·옵션·길이 상한과 20만 자 병적 입력의 선형 시간을 대조한다.
   `tests/katex-vendor.test.mjs`가 VERSION·번들 일치와 옵션 사용을 고정한다.
 - **리더 노트**(`notes.js`): 하이라이트·인용은 localStorage `uocr-reader-notes-<잡 id>`
   (`{v, updated, items}`, 읽을 때마다 검증)에 잡당 200개, 브라우저당 50개 잡(오래 손대지 않은 잡부터

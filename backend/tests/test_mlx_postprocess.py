@@ -171,6 +171,90 @@ def test_raw_pages_and_result_md_layout(tmp_path):
     assert (out / "images").is_dir()
 
 
+# ── [torch vendor patch P23] 페이지 분할 — 첫 <PAGE> 앞을 버리지 않는다 ──
+
+PAGE_COLORS = ((255, 0, 0), (0, 255, 0), (0, 0, 255))
+
+
+def _solid_pages(n: int, size=(300, 400)) -> list[Image.Image]:
+    """페이지마다 다른 단색 — 크롭이 어느 래스터에서 잘렸는지 픽셀로 드러난다."""
+    return [Image.new("RGB", size, PAGE_COLORS[i % 3]) for i in range(n)]
+
+
+def _crop_color(path: Path) -> tuple[int, int, int]:
+    with Image.open(path) as im:
+        rgb = im.convert("RGB")
+        return rgb.getpixel((rgb.size[0] // 2, rgb.size[1] // 2))
+
+
+def _near(color, expected, tol: int = 8) -> bool:  # JPEG 손실 허용
+    return max(abs(a - b) for a, b in zip(color, expected, strict=True)) <= tol
+
+
+@pytest.mark.parametrize(
+    "outputs,expected",
+    [
+        ("<PAGE>\na\n<PAGE>\nb", ["a", "b"]),  # 정상(선행 마커) — 업스트림과 동일
+        ("a\n<PAGE>\nb", ["a", "b"]),  # 선행 마커 생략 → 1쪽 보존
+        ("only page", ["only page"]),  # 마커 0개 → 전체가 1쪽
+        ("  \n<PAGE>\nx", ["x"]),  # 앞이 공백뿐이면 버림
+        ("", []),
+        ("<PAGE>", [""]),
+    ],
+)
+def test_p23_split_keeps_content_before_first_marker(outputs, expected):
+    assert [p.strip() for p in pp._split_multi_pages(outputs)] == expected
+
+
+def test_p23_split_matches_app_merge_rule():
+    """벤더 산출물(raw_pages·크롭 번호)과 병합(merge.split_pages)이 같은 페이지로 나눈다."""
+    import random
+
+    from app.pipeline.merge import split_pages
+
+    rng = random.Random(4)
+    pieces = ["<PAGE>", "\n", " ", "text", "표", "<|ref|>image<|/ref|>"]
+    for _ in range(500):
+        outputs = "".join(rng.choice(pieces) for _ in range(rng.randrange(0, 12)))
+        assert [p.strip() for p in pp._split_multi_pages(outputs)] == split_pages(outputs), outputs
+
+
+def test_p23_missing_leading_marker_keeps_page_one(tmp_path):
+    """모델이 첫 <PAGE>를 생략해도 1쪽이 남고, 크롭은 각자 자기 페이지 래스터에서 잘린다.
+
+    업스트림 분할(split[1:])은 1쪽을 버려 2쪽 내용·좌표가 1쪽 자리로 밀렸다 — page_0_0.jpg가
+    2쪽 좌표로 1쪽 래스터를 잘랐다(audit mlx-1)."""
+    out = tmp_path / "o"
+    page1 = "Page one text\n<|det|>image [100, 100, 500, 400]<|/det|>"
+    page2 = "Page two text\n<|det|>image [100, 100, 600, 600]<|/det|>"
+    md = pp.save_results_multi(f"{page1}\n<PAGE>{page2}", _solid_pages(2), str(out))
+
+    assert md == (
+        "<PAGE>\nPage one text\n![](images/page_0_0.jpg)\n\n"
+        "<PAGE>\nPage two text\n![](images/page_1_0.jpg)\n"
+    )
+    assert (out / "result.md").read_text(encoding="utf-8") == md
+    raw = json.loads((out / "raw_pages.json").read_text(encoding="utf-8"))
+    assert raw == {"pages": [page1, page2]}
+    assert _near(_crop_color(out / "images" / "page_0_0.jpg"), PAGE_COLORS[0])
+    assert _near(_crop_color(out / "images" / "page_1_0.jpg"), PAGE_COLORS[1])
+    boxes = json.loads((out / "boxes.json").read_text(encoding="utf-8"))
+    assert (boxes["page_0_0.jpg"]["x2"], boxes["page_1_0.jpg"]["x2"]) == (
+        int(500 / 999 * 300), int(600 / 999 * 300),
+    )
+    assert (out / "result_with_boxes_0.jpg").is_file() and (out / "result_with_boxes_1.jpg").is_file()
+
+
+def test_p23_output_without_any_marker_is_one_page(tmp_path):
+    """마지막 1쪽 청크에서 마커를 아예 안 내도 그 쪽이 통째로 1쪽이다 (예전: 빈 결과)."""
+    out = tmp_path / "o"
+    page = "Only page text\n<|det|>image [100, 100, 500, 400]<|/det|>"
+    md = pp.save_results_multi(page, _solid_pages(1), str(out))
+    assert md == "<PAGE>\nOnly page text\n![](images/page_0_0.jpg)\n"
+    assert json.loads((out / "raw_pages.json").read_text(encoding="utf-8")) == {"pages": [page]}
+    assert _near(_crop_color(out / "images" / "page_0_0.jpg"), PAGE_COLORS[0])
+
+
 # ── torch 벤더 흐름 패리티 ──
 
 
@@ -284,3 +368,39 @@ def test_re_match_and_coordinates_match_torch(torch_vendor):
             assert pp.extract_coordinates_and_label(ref, 640, 480) == tv.extract_coordinates_and_label(
                 ref, 640, 480
             )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # [P23] 선행 마커 생략 · 마커 0개 · 빈 출력 · 앞이 공백뿐 · 마커만 · 이미지보다 많은 쪽
+        "Page one\n<|det|>image [100, 100, 500, 400]<|/det|>\n<PAGE>" + PAGE_B,
+        "Only page\n<|det|>image [100, 100, 500, 400]<|/det|>\n",
+        "",
+        " \n<PAGE>" + PAGE_B,
+        "<PAGE>",
+        "lead\n<PAGE><PAGE>" + PAGE_B + "<PAGE>third page text",
+    ],
+    ids=["no-leading-marker", "no-marker", "empty", "blank-lead", "marker-only", "extra-pages"],
+)
+def test_page_split_edge_cases_match_torch_infer_multi(torch_vendor, tmp_path, text):
+    paths = _write_images(tmp_path, [(340, 440), (500, 260)])
+    tok = PieceTokenizer([text])
+    generated = tok.ids_for(True)
+    t_md, t_tokens = _run_torch_multi(torch_vendor, tok, paths, tmp_path / "torch", generated)
+    m_md, m_tokens = _run_mlx_multi(tok, paths, tmp_path / "mlx", generated)
+    assert m_md == t_md
+    assert m_tokens == t_tokens
+    assert _snapshot(tmp_path / "mlx") == _snapshot(tmp_path / "torch")
+
+
+def test_page_split_matches_torch_on_random_outputs(torch_vendor):
+    import random
+
+    from app.vendor.unlimited_ocr import modeling_unlimitedocr as tv
+
+    rng = random.Random(23)
+    pieces = ["<PAGE>", "<PAGE", "PAGE>", "\n", " ", "\t", "본문", "<|det|>image [1, 2, 3, 4]<|/det|>"]
+    for _ in range(1000):
+        outputs = "".join(rng.choice(pieces) for _ in range(rng.randrange(0, 14)))
+        assert pp._split_multi_pages(outputs) == tv._split_multi_pages(outputs), outputs

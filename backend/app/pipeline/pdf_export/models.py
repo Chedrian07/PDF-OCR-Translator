@@ -131,3 +131,7 @@ class _SourceSpan:
     # (최저, 최고) 높이 — `origin` 기준, 줄 위쪽 방향 pt. 아니면 None. 가운데 띠 하나로는
     # 가운데 조각만 지워지므로 리댁션 띠를 조각마다 이어 붙인다(spans._STACKED_ORIGIN_EM).
     stack: tuple[float, float] | None = None
+    # 줄 위·아래로 튀어나와 OCR bbox와 조금만 겹치는 기호(근호·큰 괄호·악센트)를 맞닿은 블록에
+    # 붙인 span이면 True — 그 블록을 교체하면 함께 지우지만 줄 구조 판단(시각 줄 수·리스팅
+    # 정렬·굵은 접두)에는 쓰지 않는다(spans._edge_symbol_owner).
+    edge: bool = False

@@ -1661,6 +1661,68 @@ def test_성공_이후_응답_정지는_유닛_단위로_강등돼_분할로_복
     assert _LONG_PARA in out2
 
 
+class _HangAfterClient(EchoClient):
+    """유닛 요청 ok번은 정상 번역, 그 뒤로는 slow(src)가 참인 요청만 응답 정지한다.
+
+    slow를 주지 않으면 이후 모든 요청이 멈춘다 — 연결은 받지만 응답하지 않는 서버(생성
+    스레드 교착·과부하)를 재현한다."""
+
+    def __init__(self, ok=2, slow=None):
+        super().__init__()
+        self.ok = ok
+        self.slow = slow or (lambda src: True)
+        self.unit_requests = 0
+
+    def complete(self, system, user, *, max_tokens):
+        import time
+
+        from app.translate.types import TranslateTimeout
+
+        src = _marker(user)
+        if src is None:
+            return ""
+        with self._count_lock:
+            self.unit_requests += 1
+            n = self.unit_requests
+        if n > self.ok and self.slow(src):
+            time.sleep(0.05)                     # 기다린 끝의 시간 초과 — 메인 스레드가 abort할 틈
+            raise TranslateTimeout("번역 API 응답 시간 초과 — 180초 동안 응답이 없었습니다")
+        return koreanize(src)
+
+
+def test_성공_뒤_응답을_멈춘_엔드포인트는_잡을_실패시킨다(tmp_path, cfg):
+    """첫 성공 뒤 응답이 멈춘 서버에서 유닛마다 시간 초과를 태운 뒤 영어 원문으로 done이
+    되던 경로(translate-2 — 기본값이면 유닛당 ~12분, 200유닛 문서는 ~5시간). 성공 없이
+    이어지는 시간 초과가 임계를 넘으면 잡 오류로 알린다."""
+    from app.translate.types import TranslateAPIError
+
+    paras = [
+        f"Paragraph number {i} explains the method in detail. It also describes the results."
+        for i in range(12)
+    ]
+    (tmp_path / "result.md").write_text("\n\n".join(paras) + "\n", encoding="utf-8")
+    client = _HangAfterClient(ok=2)
+    with pytest.raises(TranslateAPIError, match="응답하지 않습니다"):
+        run_translation(tmp_path, "ko", cfg, client=client)
+    state = _state(tmp_path)
+    assert state["status"] == "error" and "TRANSLATE_TIMEOUT_S" in state["error"]
+    # 종전에는 남은 유닛 10개가 최초 패스+분할 반쪽까지 모두 시간 초과를 태웠다(22회).
+    assert client.unit_requests < 10
+    assert not (tmp_path / "result.ko.md").exists()
+
+
+def test_성공이_끼어드는_간헐적_시간_초과는_잡을_실패시키지_않는다(tmp_path, cfg):
+    from dataclasses import replace
+
+    paras = [f"Paragraph number {i} describes one measured result." for i in range(6)]
+    slow = {paras[1], paras[3]}                        # 한 문장 — 분할 없이 바로 원문 유지
+    (tmp_path / "result.md").write_text("\n\n".join(paras) + "\n", encoding="utf-8")
+    client = _HangAfterClient(ok=0, slow=lambda src: src in slow)
+    res = run_translation(tmp_path, "ko", replace(cfg, concurrency=1), client=client)
+    assert res.status == "done" and sorted(res.kept_original) == ["md:0:1", "md:0:3"]
+    assert _report(tmp_path)["kept_reasons"] == {"timeout": 2}
+
+
 # ── 축퇴 스윕의 패스 간 기억 (Phase-0 replay: 2차 패스 짧은 지연 유닛 유출) ──────
 
 def test_1차에서_축퇴로_판정된_출력은_2차_패스에서도_축퇴다(tmp_path, cfg):

@@ -1,6 +1,7 @@
 """마스킹 — 토큰 왕복·관용 복원·검증·should_skip."""
 
 import json
+import re
 import pathlib
 
 import pytest
@@ -130,6 +131,42 @@ def test_sanitize_keeps_currency_and_one_sided_dollars_next_to_placeholders():
         "$<c1/>$ 코드 플레이스홀더는 그대로",  # 수식(m)이 아닌 플레이스홀더
     ):
         assert sanitize_translation(text) == (text, 0), text
+
+
+def test_sanitize_strips_one_sided_dollars_the_source_does_not_have():
+    """한쪽에만 붙은 '$<m…/>'·'<m…/>$'도 모델이 지어낸 것이다 — 원문(마스킹본)의 같은 자리에
+    '$'가 없을 때만 지운다. 마크다운 리더는 짝 없는 '$'를 뒤쪽의 다른 '$'와 묶어 산문을 수식으로
+    조판할 수 있다(delta-pdf-translate-5)."""
+    masked, mapping = mask("Then \\( \\tilde{x}_{mse} \\) is the estimate of \\( x \\).")
+    ids = [m.group(1) for m in re.finditer(r"<(m\d+)", masked)]
+    raw = f"그러면 $<{ids[0]}/>에 대한 <{ids[1]}/>$의 추정이다."
+    clean, n = sanitize_translation(raw, masked)
+    assert clean == f"그러면 <{ids[0]}/>에 대한 <{ids[1]}/>의 추정이다." and n == 2
+    # 원문에 원래 있던 한쪽 달러(산문 '$' 바로 옆의 수식)는 그대로 둔다
+    priced, _ = mask("It costs $\\( 5 \\) per unit.")
+    pid = re.search(r"<(m\d+)", priced).group(1)
+    assert sanitize_translation(f"단위당 $<{pid}/>이다.", priced) == (f"단위당 $<{pid}/>이다.", 0)
+    # 통화는 건드리지 않는다
+    assert sanitize_translation(f"<{ids[0]}/> $10이다", masked) == (f"<{ids[0]}/> $10이다", 0)
+
+
+def test_cached_translation_drops_dollars_around_restored_math():
+    """원출력 단계 정리가 생기기 전에 캐시된 번역은 복원된 수식 옆에 '$'가 남아 있다 — 재번역·
+    재빌드해도 '$〈y, x̃〉$를'이 찍혔다. 캐시 적중 때 복원문에서 같은 정리를 한다."""
+    from app.translate.masking import strip_math_dollars
+
+    src = r"We define \( \langle y, \tilde{x} \rangle \) and \( \tilde{x}_{\mathrm{mse}} \) here."
+    _masked, mapping = mask(src)
+    cached = (r"우리는 $\( \langle y, \tilde{x} \rangle \)$를 정의하고 "
+              r"$\( \tilde{x}_{\mathrm{mse}} \)에 대해 쓴다. 가격은 $5다.")
+    assert strip_math_dollars(cached, mapping, src) == (
+        r"우리는 \( \langle y, \tilde{x} \rangle \)를 정의하고 "
+        r"\( \tilde{x}_{\mathrm{mse}} \)에 대해 쓴다. 가격은 $5다."
+    )
+    priced = r"It costs $\( 5 \) per unit."
+    assert strip_math_dollars(r"단위당 $\( 5 \)이다.", mask(priced)[1], priced) == (
+        r"단위당 $\( 5 \)이다."                                   # 원문 표기는 그대로
+    )
 
 
 def test_should_skip_수식뿐():

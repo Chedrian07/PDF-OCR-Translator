@@ -174,7 +174,8 @@ CPU offload는 사용하지 않는다.
 ## Known limitations
 
 - **layout_capability = figure_only**: 텍스트 블록 bbox를 제공하지 않는다. 그래서
-  이 엔진의 잡은 `raw_pages.json`·`layout.json`을 만들지 않고 `has_layout=false`다 —
+  이 엔진의 청크는 좌표 없는 `raw_pages.json`(페이지마다 빈 원출력 — merge의 페이지 수 대조용)만
+  남기고 잡은 `layout.json`을 만들지 않아 `has_layout=false`다 —
   좌표 기능(`/layout`·`/alignment`·`/outline`·`/viewer/pages`)은 404, 번역 PDF(`/pdf`)는
   409이고, 읽기·내보내기는 텍스트 보기(`/html`)와 의미 기반 `document.html`을 쓴다.
   이전 버전에서 만든 OvisOCR2 잡(image 블록만 있는 `layout.json`)도 같은 규칙으로

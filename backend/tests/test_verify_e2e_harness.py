@@ -92,6 +92,28 @@ def test_dropped_translation_pages_accepts_faithful_export():
     assert verify_e2e.dropped_translation_pages(pages, [KO, KO + " Table 2"]) == []
 
 
+def test_explained_loss_pages_reads_the_untruncated_kept_pages():
+    """유실 설명은 페이지별 보존 블록 수(kept_pages)로 판정한다 — 경고 50건 표본으로 읽으면
+    51번째 이후 경고의 페이지는 무성 유실로 보였고, 축소 배치 같은 무관한 경고 하나가 그
+    페이지의 유실을 모두 설명된 것으로 만들었다(P4)."""
+    report = {
+        "kept_pages": [[5, 2], [13, 1], [14, 0]],
+        "warnings": ["p6: 블록 4 축소 배치(6.5pt) — 원문을 남기지 않으려 가독성 하한 아래로 조판"],
+    }
+    assert verify_e2e.explained_loss_pages(report) == {5, 13}
+    # kept_pages가 없는 옛 리포트만 경고 표본의 페이지로 대신한다
+    legacy = {"warnings": ["p5: 블록 6 교체 생략(공간 부족) — 원문 보존", "페이지 없는 경고"]}
+    assert verify_e2e.explained_loss_pages(legacy) == {5}
+    assert verify_e2e.explained_loss_pages({}) == set()
+
+
+def test_kept_pages_do_not_leak_into_the_reason_summary():
+    summary = verify_e2e.kept_reason_summary({
+        "kept_reasons": {"no_fit": 3}, "kept_pages": [[5, 3]], "warning_pages": [5],
+    })
+    assert summary == {"kept_reasons.no_fit": 3}
+
+
 def test_kept_reason_summary_groups_by_reason():
     report = {
         "replaced": 165,

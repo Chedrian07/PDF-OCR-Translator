@@ -2,7 +2,10 @@ import {
   QA_EFFORTS, QA_LS_EFFORT, QA_LS_PROVIDER, QA_LS_SUMMARY, QA_LS_THINKING, QA_SUMMARIES,
   qaModelKey,
 } from './constants.js';
-import { buildQaBody, clampQaPage, pickQaModels, qaProviderHint, rateLimitNotice } from './core.js';
+import {
+  buildQaBody, clampQaPage, pickQaModels, pickQaProvider, qaProviderHint, qaThinkingDefault,
+  rateLimitNotice,
+} from './core.js';
 import { el, state } from './state.js';
 import {
   applyRetryLock, h, localGet, localSet, lockRetry, retryLockRemaining, safeParse, showToast,
@@ -77,17 +80,15 @@ export async function loadQaCatalog() {
   }
   state.qaCatalog = catalog;
 
-  // 저장된 선택 복원 — 카탈로그에 없으면 서버 기본값 → 첫 공급자 순으로 폴백
-  const ids = catalog.providers.map((p) => p && p.id);
-  const savedProvider = localGet(QA_LS_PROVIDER);
-  state.qaProvider = ids.includes(savedProvider) ? savedProvider
-    : (ids.includes(catalog.default_provider) ? catalog.default_provider : (ids[0] || ''));
+  // 저장된 선택 복원 — 쓸 수 있는 공급자 우선(저장값 → 서버 기본 → 첫 가용 공급자)
+  state.qaProvider = pickQaProvider(catalog, localGet(QA_LS_PROVIDER));
   localSet(QA_LS_PROVIDER, state.qaProvider);
 
   const savedEffort = localGet(QA_LS_EFFORT);
   state.qaEffort = QA_EFFORTS.includes(savedEffort) ? savedEffort
     : (QA_EFFORTS.includes(catalog.default_reasoning_effort) ? catalog.default_reasoning_effort : 'default');
-  state.qaThinking = localGet(QA_LS_THINKING) !== 'false'; // 기본 켜짐
+  // 고른 적이 없으면 공급자에 따라(원격만 켜짐) — updateQaProviderControls가 공급자를 바꿀 때도 다시 정한다
+  state.qaThinking = qaThinkingDefault(catalog, state.qaProvider, localGet(QA_LS_THINKING));
   const savedSummary = localGet(QA_LS_SUMMARY);
   state.qaSummary = QA_SUMMARIES.includes(savedSummary) ? savedSummary : 'none';
   el.qaEffort.value = state.qaEffort;
@@ -108,6 +109,10 @@ export async function loadQaCatalog() {
 // (Localight updateProviderControls 이식 — 공급자별 저장 모델 복원 포함)
 export function updateQaProviderControls() {
   const picked = pickQaModels(state.qaCatalog, state.qaProvider);
+  // Thinking을 직접 고른 적이 없으면 공급자의 기본(원격만 켜짐)을 따른다
+  state.qaThinking = qaThinkingDefault(
+    state.qaCatalog, state.qaProvider, localGet(QA_LS_THINKING),
+  );
 
   el.qaModel.textContent = '';
   const names = picked.models.length ? picked.models : [''];

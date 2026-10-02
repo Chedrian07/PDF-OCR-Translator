@@ -902,3 +902,36 @@ def test_pipeline_keeps_the_completed_pages_of_a_truncated_chunk(mlx_app):
     assert job["warnings"] == []
     layout = json.loads((settings.jobs_dir / job["job_id"] / "layout.json").read_text(encoding="utf-8"))
     assert [p["page"] for p in layout] == [1, 2]
+
+
+@needs_mlx
+@pytest.mark.parametrize("pages", [2, 1], ids=["leading-marker-omitted", "no-marker-at-all"])
+def test_pipeline_keeps_page_one_when_the_model_omits_the_leading_marker(mlx_app, pages):
+    """[P23] 모델이 첫 <PAGE>를 생략해도(1쪽 청크면 마커 0개) 1쪽 내용·그림이 제자리에 남는다.
+
+    예전 MLX 후처리는 첫 마커 앞을 버려 1쪽이 사라지고 뒤 페이지가 한 칸씩 당겨진 채
+    (2쪽 청크는 '빈 페이지로 보정' 경고, 1쪽 청크는 경고 없이 빈 쪽) done으로 끝났다 —
+    뒤 페이지 그림은 앞 페이지 래스터에서 잘렸다(audit mlx-1)."""
+    from conftest import make_pdf_bytes
+
+    # 충실도 게이트는 끈다 — 대본 본문이 원본 PDF 텍스트와 달라 재처리로 결과를 덮는다
+    client, model, settings = mlx_app(ocr_fidelity_threshold=0.0)
+    model._multi = lambda n: "".join(page_text(i) for i in range(n)).removeprefix("<PAGE>")
+    with client:
+        job = _upload_and_wait(client, make_pdf_bytes(pages=pages))
+        md = client.get(f"/api/jobs/{job['job_id']}/markdown").text
+    assert job["status"] == "done", job
+    assert model.prompts == [("multi", pages)]  # 재처리 없이 multi 출력 그대로
+    assert job["warnings"] == []
+    parts = md.split("\n\n---\n\n")
+    assert len(parts) == pages
+    boxes = json.loads(
+        (settings.jobs_dir / job["job_id"] / "images" / "boxes.json").read_text(encoding="utf-8")
+    )
+    for i, part in enumerate(parts):
+        assert f"Heading {i + 1}" in part and f"Body {i + 1} 한글 中文 😀 text." in part
+        name = f"p{i + 1:04d}_0.jpg"
+        assert f"![](images/{name})" in part
+        # 그 쪽 대본의 image 상자(page_text(i))로 잘렸다 — 다른 쪽 좌표가 아니다
+        box = boxes[name]
+        assert box["x2"] == int((500 + 5 * i) / 999 * box["image_width"])

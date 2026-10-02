@@ -817,11 +817,16 @@ const TEX_EM_PER_UNIT = {
 };
 // 크기 인자를 받는 명령과 그 인자 머리: \kern류(괄호 없는 크기도 받는다), \hspace·\raisebox
 // {크기}, \rule[올림]{너비}{높이}, 줄바꿈 \\[크기].
+// 공백·괄호 인자 반복에는 모두 상한(64자)을 둔다 — 상한 없는 \s*·[^\]]*는 닫는 괄호 없는
+// '\\[' 반복이나 '\kern'+긴 공백에서 입력 길이의 제곱 시간이 걸렸다(머리 안의 긴 공백은
+// TEX_SIZE_LITERAL의 '[-+]?\s*'도 제곱으로 만든다). 적대적 PDF 한 쪽(수식 스팬 45만 자)이
+// 미리보기·리더·내려받은 HTML을 23초 멈췄다(delta-api-frontend-infra-1). 상한을 넘는 패딩의
+// 크기는 묶지 못하지만 조판 결과 상한(katexStyleOversized)이 원문 TeX로 되돌린다.
 const TEX_SIZE_HEADER = new RegExp([
-  String.raw`\\(?:kern|mkern|hskip|mskip)(?![a-zA-Z])\s*(?:\{[^{}]*\}|[-+]?\s*(?:\d+(?:\.\d*)?|\.\d+)\s*[a-z]{2})`,
-  String.raw`\\(?:hspace\*?|raisebox)(?![a-zA-Z])\s*\{[^{}]*\}`,
-  String.raw`\\rule(?![a-zA-Z])\s*(?:\[[^\]]*\]\s*)?(?:\{[^{}]*\}\s*){1,2}`,
-  String.raw`\\\\\s*\[[^\]]*\]`,
+  String.raw`\\(?:kern|mkern|hskip|mskip)(?![a-zA-Z])\s{0,64}(?:\{[^{}]{0,64}\}|(?:[-+]\s{0,64})?(?:\d+(?:\.\d*)?|\.\d+)\s{0,64}[a-z]{2})`,
+  String.raw`\\(?:hspace\*?|raisebox)(?![a-zA-Z])\s{0,64}\{[^{}]{0,64}\}`,
+  String.raw`\\rule(?![a-zA-Z])\s{0,64}(?:\[[^\]]{0,64}\]\s{0,64})?(?:\{[^{}]{0,64}\}\s{0,64}){1,2}`,
+  String.raw`\\\\\s{0,64}\[[^\]]{0,64}\]`,
 ].join('|'), 'g');
 const TEX_SIZE_LITERAL = /([-+]?)\s*(\d+(?:\.\d*)?|\.\d+)\s*([a-z]{2})/g;
 

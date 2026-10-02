@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import re
+from dataclasses import replace
 from statistics import median
 
 from ..pdf import quiet_fitz
@@ -92,6 +93,83 @@ def _span_is_visible(span: dict) -> bool:
     except (TypeError, ValueError):
         return True
     return True
+
+
+# 나중에 그린 이미지가 span을 이만큼 덮으면 그 span은 가려진 것이다.
+_OCCLUDED_COVER = 0.9
+# bboxlog의 이미지 상자와 get_image_info의 상자를 같은 것으로 보는 오차(pt).
+_IMAGE_BOX_TOLERANCE = 0.5
+
+
+def _box_overlap(a, b) -> float:
+    return max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(
+        0.0, min(a[3], b[3]) - max(a[1], b[1]),
+    )
+
+
+def _hide_occluded_spans(
+    fitz, page, records: list[_SourceSpan], image_infos: list[dict],
+) -> list[_SourceSpan]:
+    """나중에 그린 불투명 이미지 아래 깔린 span을 '보이지 않음'으로 고친다.
+
+    '이미지 아래 텍스트' 형식의 검색 가능 스캔은 보이는 렌더 모드로 쓴 OCR 텍스트 위에
+    전면 스캔 이미지를 덮는다. 칠하기 비트만 보면 그 span이 보여서 블록이 래스터 원문으로
+    잡히지 않았고, 한국어가 영어 스캔 픽셀 위에 그대로 겹쳐 찍혔다(감사 pdf-2). 그려진
+    순서(get_bboxlog)를 보고, span을 덮는 이미지가 그 span보다 나중에 그려졌고 그 뒤에 같은
+    자리에 다시 그린 텍스트가 없으면 가려진 것으로 본다. 소프트 마스크(투명도)가 있는
+    이미지는 아래 글자가 비칠 수 있어 가림으로 보지 않는다.
+
+    `image_infos`는 페이지에서 이미 읽은 `get_image_info()` 결과다. 보이는 span을 덮는
+    이미지가 하나도 없으면 그리기 기록(get_bboxlog — 페이지 내용을 한 번 더 해석한다)을
+    읽지 않고 그대로 돌려준다.
+    """
+    boxes = [tuple(info["bbox"]) for info in image_infos if info.get("bbox")]
+    if not any(
+        span.visible and _box_overlap(
+            (span.rect.x0, span.rect.y0, span.rect.x1, span.rect.y1), box,
+        ) >= max(0.01, span.rect.width * span.rect.height) * _OCCLUDED_COVER
+        for span in records
+        for box in boxes
+    ):
+        return records
+    try:
+        log = page.get_bboxlog()
+    except Exception:  # noqa: BLE001 — 순서를 모르면 예전처럼 칠하기 비트만 믿는다
+        return records
+    masked = [tuple(info["bbox"]) for info in image_infos if info.get("has-mask")]
+    texts: list[tuple[int, tuple]] = []
+    images: list[tuple[int, tuple]] = []
+    for index, (kind, bbox) in enumerate(log):
+        if kind in ("fill-text", "stroke-text"):
+            texts.append((index, tuple(bbox)))
+        elif kind == "fill-image" and not any(
+            all(abs(a - b) <= _IMAGE_BOX_TOLERANCE for a, b in zip(bbox, mask))
+            for mask in masked
+        ):
+            images.append((index, tuple(bbox)))
+    if not texts or not images:
+        return records
+    first_text = texts[0][0]
+    out = list(records)
+    for image_index, image_box in images:
+        if image_index < first_text:
+            continue                      # 텍스트보다 먼저 그린 배경 — 아무것도 가리지 않는다
+        later = [box for index, box in texts if index > image_index]
+        for position, span in enumerate(out):
+            if not span.visible:
+                continue
+            rect = (span.rect.x0, span.rect.y0, span.rect.x1, span.rect.y1)
+            area = max(0.01, (rect[2] - rect[0]) * (rect[3] - rect[1]))
+            if _box_overlap(rect, image_box) < area * _OCCLUDED_COVER:
+                continue
+            if any(
+                _box_overlap(rect, box)
+                > 0.5 * min(area, max(0.01, (box[2] - box[0]) * (box[3] - box[1])))
+                for box in later
+            ):
+                continue                  # 이미지 위에 다시 그린 글자 — 보인다
+            out[position] = replace(span, visible=False)
+    return out
 
 
 def _source_span_rects(fitz, page) -> list[object]:

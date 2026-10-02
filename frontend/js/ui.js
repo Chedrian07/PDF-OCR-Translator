@@ -1,5 +1,7 @@
 import { ICON, THEME_KEY, katexOptions } from './constants.js';
-import { RETRY_AFTER_FALLBACK_S, RETRY_AFTER_MAX_S, imageSrcAllowed } from './core.js';
+import {
+  RETRY_AFTER_FALLBACK_S, RETRY_AFTER_MAX_S, clampTexSizes, imageSrcAllowed, katexStyleOversized,
+} from './core.js';
 import { el, state } from './state.js';
 
 /* ============================ Utilities ============================ */
@@ -114,6 +116,34 @@ export function setupTheme() {
 }
 
 /* ── KaTeX 타이포셋 (로컬 벤더 — vendor/katex) ────────────────────────── */
+// 수식 하나를 조판한다 — 앱의 모든 KaTeX 조판(typesetMath·reader.mathTextNodes)이 이 함수를
+// 거친다. TeX는 업로드 PDF에서 온 신뢰할 수 없는 입력이다: KaTeX maxSize는 양수 크기만 묶어
+// \raisebox{-4000em}{x} 하나로 미리보기·리더가 수만 px로 늘어났다(frontend-4). 크기 인자를
+// 먼저 묶고(clampTexSizes), 매크로로 만든 크기처럼 그래도 거대한 결과는 원문 TeX 글자로 둔다.
+// 반환: true = 끝(조판했거나 원문으로 되돌림), false = KaTeX 없음·예외(원문 유지, 다시 시도 가능).
+export function renderMath(target, tex, display) {
+  if (!window.katex || !target) return false;
+  try {
+    window.katex.render(clampTexSizes(tex), target, katexOptions(display));
+  } catch (_) {
+    target.textContent = tex; // 렌더 불가 tex는 원문 유지
+    return false;
+  }
+  if (mathOversized(target)) {
+    target.textContent = tex;
+    target.dataset.mathFallback = 'oversized';
+    target.setAttribute('title', '수식이 표시 크기 한도를 넘어 원문 TeX로 보여 줍니다');
+  }
+  return true;
+}
+
+function mathOversized(root) {
+  for (const node of root.querySelectorAll('[style]')) {
+    if (katexStyleOversized(node.getAttribute('style'))) return true;
+  }
+  return false;
+}
+
 // 서버 렌더러(render.py)가 tex를 이스케이프해 .math-inline/.math-display로
 // 내보낸다. KaTeX 미로드(자산 누락 등) 시에는 raw LaTeX 텍스트가 그대로
 // 보이는 그레이스풀 폴백.
@@ -125,11 +155,9 @@ export function typesetMath(root) {
     : root.querySelectorAll('.math-inline, .math-display');
   targets.forEach((elm) => {
     if (elm.dataset.mathDone) return;
-    const tex = elm.textContent;
-    try {
-      window.katex.render(tex, elm, katexOptions(elm.classList.contains('math-display')));
+    if (renderMath(elm, elm.textContent, elm.classList.contains('math-display'))) {
       elm.dataset.mathDone = '1';
-    } catch (_) { /* 렌더 불가 tex는 원문 유지 */ }
+    }
   });
 }
 

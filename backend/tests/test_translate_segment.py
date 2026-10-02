@@ -388,3 +388,59 @@ def test_한_줄_원문의_여러_줄_번역은_줄_매핑에_쓰지_않는다()
     source = [{"page": 1, "blocks": [{"type": "text", "content": "One line."}]}]
     translated = [{"page": 1, "blocks": [{"type": "text", "content": "한\n줄"}]}]
     assert layout_line_map(source, translated) == {}
+
+
+# ── md 유닛 안의 여러 줄 블록 묶음 (실앱 4B: 1쪽 md 유닛 19줄 = 단일 줄 블록 7 + 3줄 저자 블록 4) ──
+_PAGE_ONE = [
+    "TurboQuant: Online Vector Quantization",
+    "Amir Zandieh",
+    "Google Research",
+    "zandieh@google.com",
+    "Abstract",
+    "Vector quantization aims to quantize high-dimensional vectors.",
+]
+
+
+def _page_one_pages(author_ko: str | None):
+    blocks = [
+        _PAGE_ONE[0], "\n".join(_PAGE_ONE[1:4]), _PAGE_ONE[4], _PAGE_ONE[5],
+    ]
+    translations = ["TurboQuant: 온라인 벡터 양자화", author_ko, "초록", "벡터 양자화는 고차원 벡터를 양자화한다."]
+    source = [{"page": 1, "blocks": [{"type": "text", "content": b} for b in blocks]}]
+    translated = [{"page": 1, "blocks": [
+        {"type": "text", "content": t if t is not None else b} for b, t in zip(blocks, translations)
+    ]}]
+    final = {f"lay:1:{i}" for i, t in enumerate(translations) if t is not None}
+    return source, translated, final
+
+
+def test_md_유닛의_연속_줄이_여러_줄_블록과_같으면_그_번역으로_덮는다():
+    from app.translate.segment import layout_covers_unit, layout_line_sources
+
+    src = "\n".join(_PAGE_ONE)
+    source, translated, final = _page_one_pages("아미르 잔디에\n구글 리서치\nzandieh@google.com")
+    assert layout_covers_unit(src, layout_line_sources(source, multiline=True))
+    mapped = map_unit_lines(src, layout_line_map(source, translated, final))
+    assert mapped == "\n".join([
+        "TurboQuant: 온라인 벡터 양자화", "아미르 잔디에", "구글 리서치", "zandieh@google.com",
+        "초록", "벡터 양자화는 고차원 벡터를 양자화한다.",
+    ])
+    # 번역 줄 수가 달라도 묶음 자리에 그대로 넣는다(문단 안 줄바꿈)
+    _s, merged, _f = _page_one_pages("아미르 잔디에 · 구글 리서치\nzandieh@google.com")
+    lines = map_unit_lines(src, layout_line_map(source, merged, final)).split("\n")
+    assert lines[1:3] == ["아미르 잔디에 · 구글 리서치", "zandieh@google.com"] and len(lines) == 5
+    # 묶음의 일부만 같으면(저자 블록의 두 줄) 덮지 않는다
+    assert not layout_covers_unit(
+        "\n".join(_PAGE_ONE[:3]), layout_line_sources(source, multiline=True))
+
+
+def test_partial이면_덮이는_줄만_옮기고_나머지는_원문으로_둔다():
+    """자기 번역이 실패한 md 유닛도 layout 번역이 덮는 줄은 쓴다 — 저자 블록이 실패하면 그 줄만 영어."""
+    src = "\n".join(_PAGE_ONE)
+    source, translated, final = _page_one_pages(None)           # 저자 블록 번역 실패(원문 유지)
+    mapping = layout_line_map(source, translated, final)
+    assert map_unit_lines(src, mapping) is None                 # 완전히 덮이지 않는다
+    assert map_unit_lines(src, mapping, partial=True) == "\n".join([
+        "TurboQuant: 온라인 벡터 양자화", *_PAGE_ONE[1:4], "초록", "벡터 양자화는 고차원 벡터를 양자화한다.",
+    ])
+    assert map_unit_lines("Nothing here maps.", mapping, partial=True) is None

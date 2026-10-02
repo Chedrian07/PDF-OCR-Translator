@@ -139,7 +139,8 @@ docker compose --profile paddle up -d --build paddleocr-vl ocr-paddle  # → htt
   파일 자체는 컨테이너에 없습니다. 그래서 `/api/health`의 `config_warnings`는 Docker에서 늘 빈
   목록이고, 이 앱이 읽지 않는 키(예: `REASONING_EFFORT`)는 경고 없이 버려집니다. `.env`를
   고쳤으면 아래 명령으로 키 이름을 점검하세요 — 떠 있는 backend의 판정 코드를 그대로 쓰고 값은
-  출력하지 않습니다(다른 스택이면 `ocr-cpu`를 그 서비스명으로 바꿉니다).
+  출력하지 않습니다(다른 스택이면 `ocr-cpu`를 떠 있는 backend 서비스명으로 바꿉니다 — sidecar
+  `ovisocr2`·`paddleocr-vl` 이미지에는 이 코드가 없습니다).
 
 ```bash
 docker compose exec -T ocr-cpu python -c '

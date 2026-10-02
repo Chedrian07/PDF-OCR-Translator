@@ -1883,7 +1883,7 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   `degenerate-output`)·
   `gate_reasons`(출력 측 검증 게이트가 거부한 규칙, §13.4 —
   `refusal`\|`scaffold`\|`repetition`\|`label-sentence`\|`number-mismatch`\|`hangul-ratio`\|
-  `length-ratio`)는
+  `echo`\|`length-ratio`)는
   **"왜 이 문단이 영어 그대로인가"**의 사유별 집계다.
   총합(`skipped`/`kept_original`)만으로는 원인을 구분할 수 없어서 추가됐다.
   `gate_reasons` 합이 `kept_reasons["gate-rejected"]`보다 **훨씬 크면** 게이트 오탐이
@@ -1948,7 +1948,9 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   오탐은 래더 왕복 비용만 늘리지만 미탐은 내용 손실이므로 보수적으로 잡혀 있다.
   추가 규칙: 프롬프트 스캐폴딩 echo(`scaffold`), 반복 루프(`repetition` — 짧은 원문 면제보다
   먼저 본다), 1–2단어 라벨이 합쇼체 문장으로 바뀜(`label-sentence`), 80자 이하 원문의 4자리 이상
-  숫자가 전부 사라짐(`number-mismatch`), 짧은 원문 면제에도 출력 길이 상한. 원문이 번역에 관한
+  숫자가 전부 사라짐(`number-mismatch`), 한국어 메타 문장으로 감싼 원문 echo — 8단어 이상
+  원문의 단어 80% 이상이 같은 순서로 연속해 남음(`echo`, 한글 비율 규칙 뒤에 본다 — 실번역 쌍은
+  최대 39%), 짧은 원문 면제에도 출력 길이 상한. 원문이 번역에 관한
   글이면 '번역…수 없' 같은 한국어 문장은 거부문으로 보지 않는다. 예전 코드가 캐시한 출력도
   지금 게이트로 다시 판정해 떨어지면 다시 번역한다(`cache_rejected`).
 - **퇴화 출력 소거**: 같은 정규화 출력이 서로 다른 원문 3개 이상에서 나오면(예: 소형 모델의

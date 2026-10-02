@@ -1,4 +1,4 @@
-import { ICON, THEME_KEY, katexOptions } from './constants.js';
+import { ICON, KATEX_MAX_TEX_CHARS, THEME_KEY, katexOptions } from './constants.js';
 import {
   RETRY_AFTER_FALLBACK_S, RETRY_AFTER_MAX_S, clampTexSizes, imageSrcAllowed, katexStyleOversized,
 } from './core.js';
@@ -121,8 +121,16 @@ export function setupTheme() {
 // \raisebox{-4000em}{x} 하나로 미리보기·리더가 수만 px로 늘어났다(frontend-4). 크기 인자를
 // 먼저 묶고(clampTexSizes), 매크로로 만든 크기처럼 그래도 거대한 결과는 원문 TeX 글자로 둔다.
 // 반환: true = 끝(조판했거나 원문으로 되돌림), false = KaTeX 없음·예외(원문 유지, 다시 시도 가능).
+// KATEX_MAX_TEX_CHARS보다 긴 TeX는 조판하지 않는다 — KaTeX 조판이 긴 입력에 초선형이라
+// 적대적 PDF의 거대 수식 스팬 하나가 화면을 수 초 멈췄다(delta-api-frontend-infra-1).
 export function renderMath(target, tex, display) {
   if (!window.katex || !target) return false;
+  if (String(tex == null ? '' : tex).length > KATEX_MAX_TEX_CHARS) {
+    target.textContent = tex;
+    target.dataset.mathFallback = 'too-long';
+    target.setAttribute('title', '수식이 너무 길어 원문 TeX로 보여 줍니다');
+    return true;
+  }
   try {
     window.katex.render(clampTexSizes(tex), target, katexOptions(display));
   } catch (_) {

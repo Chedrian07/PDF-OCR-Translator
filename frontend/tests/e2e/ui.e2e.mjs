@@ -1137,6 +1137,47 @@ if (VERIFY_MOCK_LLM) {
     await busyCtx.close();
   }
 
+  /* 한국어 레일에서 고른 문장은 원문 보기로 바꾸면(레일을 다시 그리면) 선택 문장 도구에서
+     사라진다 — 예전에는 옛 선택이 남아 [인용 저장]이 한국어 문장을 '원문' 인용으로 저장했다
+     (frontend-7). */
+  {
+    const langCtx = await freshContext();
+    const langPage = await langCtx.newPage();
+    const firstTarget = '#reader-content .reader-rail-page[data-page="1"] .reader-map-card .reader-map-target';
+    await langPage.goto(`${BASE}/${jobHash}`, { waitUntil: 'domcontentloaded' });
+    await langPage.waitForSelector('#lang-toggle:not([hidden])', { timeout: 20_000 });
+    await langPage.click('#lang-ko');
+    await langPage.waitForFunction((sel) => /[가-힣]/.test(document.querySelector(sel)?.textContent || ''),
+      firstTarget, { timeout: 20_000 });
+    const picked = await langPage.evaluate((sel) => {
+      const range = document.createRange();
+      range.selectNodeContents(document.querySelector(sel));
+      getSelection().removeAllRanges();
+      getSelection().addRange(range);
+      document.getElementById('reader-content').dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      return { cite: !document.getElementById('reader-cite').disabled,
+        text: document.getElementById('reader-selection').textContent };
+    }, firstTarget);
+    await langPage.click('#lang-orig');
+    await langPage.waitForFunction((sel) => {
+      const target = document.querySelector(sel);
+      return !!target && !/[가-힣]/.test(target.textContent);
+    }, firstTarget, { timeout: 20_000 }).catch(() => {});
+    const afterSwitch = await langPage.evaluate((id) => {
+      const tools = document.querySelector('.reader-tools-wrap');
+      if (tools) tools.open = true;
+      document.getElementById('reader-cite').click(); // 비활성 버튼이면 아무 일도 없다
+      return { cite: !document.getElementById('reader-cite').disabled,
+        text: document.getElementById('reader-selection').textContent,
+        stored: localStorage.getItem(`uocr-reader-notes-${id}`) };
+    }, jobId);
+    check('언어 전환: 한국어 레일의 선택이 원문 보기 도구에 남지 않고 원문 인용으로 저장되지 않는다',
+      picked.cite && /[가-힣]/.test(picked.text) && !afterSwitch.cite
+        && /문장을 선택하세요/.test(afterSwitch.text) && afterSwitch.stored === null,
+      JSON.stringify({ picked, afterSwitch }));
+    await langCtx.close();
+  }
+
   await page.click('#viewer-open');
   await page.waitForSelector('#production-viewer.is-open');
   await page.waitForFunction(() =>

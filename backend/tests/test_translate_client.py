@@ -812,6 +812,12 @@ def test_연결_실패_문구는_URL과_쿼리를_담지_않는다(caplog):
         assert leak not in msg
     ours = [r.getMessage() for r in caplog.records if r.name == "app.translate.client"]
     assert ours and not any("sk-SECRET" in m for m in ours)   # 로그도 쿼리 값은 가린다
+    # logger.exception이 찍는 traceback(원인 사슬 포함)에도 남지 않는다 — 예전에는 `from e`로
+    # 이어진 requests·urllib3 예외 문구가 쿼리째 서버 로그에 남았다(security-1)
+    import traceback
+
+    printed = "".join(traceback.format_exception(exc.value))
+    assert "sk-SECRET" not in printed and "api-key" not in printed, printed[-600:]
 
 
 def test_연결_실패_원인은_고정_문구로만_요약한다():

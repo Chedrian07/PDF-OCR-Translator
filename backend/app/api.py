@@ -1958,13 +1958,20 @@ def job_pdf_report(request: Request, job_id: str, lang: str = "ko") -> dict:
     /pdf 응답 헤더(X-UOCR-PDF-*)에는 숫자만 싣는다 — 원문 보존 사유(kept_reasons)·스캔
     픽셀 지움(raster_blocks_erased)·주의 문장(warnings, 앞 50건)은 이 JSON으로만 나간다
     (프런트 reader.js가 다운로드 뒤 상세 목록을 그린다). 리포트는 PdfExportResult.report()
-    그대로라 경로·본문이 없고, 번역 완료 무효화가 지우므로 낡은 빌드의 것은 나가지 않는다.
-    단일·대조 PDF는 같은 번역 PDF 빌드에서 나오므로 리포트도 하나다.
+    그대로라 경로·본문이 없다. 단일·대조 PDF는 같은 번역 PDF 빌드에서 나오므로 리포트도 하나다.
+
+    지금 /pdf가 내줄 빌드의 리포트만 낸다 — 캐시가 최신(포맷 버전·입력·폰트 스탬프가 지금과
+    같음)이 아니면 404다. 예전에는 파일만 읽어, 업그레이드 직후 아직 다시 받지 않은 잡에 0.1.0
+    빌드의 리포트(포맷 버전 없음 — 치환·보존 수와 주의 문장이 다음 /pdf와 다르다)를 냈다
+    (migration-2). 번역 완료 무효화는 리포트 파일도 지운다.
     """
+    st = _state(request)
     job = _get_job(request, job_id)
     _check_lang(lang)
-    report = derived._load_pdf_export_report(job, lang)
-    if not report:
+    current, _out, report = derived._translated_pdf_cache(
+        job, lang, derived._pdf_export_font_id(st.settings),
+    )
+    if not report or not current:
         raise HTTPException(404, "PDF 생성 리포트가 없습니다 — 번역 PDF를 먼저 내보내세요")
     return {"job_id": job_id, "lang": lang, **report}
 

@@ -127,3 +127,7 @@ class _SourceSpan:
     # span bbox를 1em 높이로 늘려 보고하지만, MuPDF 리댁션은 원래 값으로 글리프 상자를
     # 잡는다. 모르면 None.
     metrics: tuple[float, float] | None = None
+    # 기준선이 다른 글리프를 위아래로 쌓은 span(TeX 확장 괄호의 막대 조각 등)이면 글자 원점의
+    # (최저, 최고) 높이 — `origin` 기준, 줄 위쪽 방향 pt. 아니면 None. 가운데 띠 하나로는
+    # 가운데 조각만 지워지므로 리댁션 띠를 조각마다 이어 붙인다(spans._STACKED_ORIGIN_EM).
+    stack: tuple[float, float] | None = None

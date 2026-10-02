@@ -67,7 +67,10 @@ docker exec "$NAME" sh -c '
   [ "$(id -u)" != 0 ] || { echo "컨테이너가 root로 돈다"; exit 1; }
   [ "$(stat -c %U /srv/backend/app /srv/frontend | sort -u)" = root ] \
     || { echo "앱 코드가 root 소유가 아니다"; exit 1; }
-  echo "  uid=$(id -u) · 코드 소유자 root"'
+  for f in package.json package-lock.json tests; do
+    [ ! -e "/srv/frontend/$f" ] || { echo "개발 산출물이 정적 루트에 실렸다: $f"; exit 1; }
+  done
+  echo "  uid=$(id -u) · 코드 소유자 root · 정적 루트에 개발 산출물 없음"'
 
 echo "── 업로드→OCR→markdown/zip (scripts/smoke_e2e.sh)"
 OUT_DIR="$OUT_DIR" TIMEOUT_SECS="${TIMEOUT_SECS:-120}" \

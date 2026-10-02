@@ -1660,6 +1660,114 @@ def test_회전_페이지의_한_줄_번역도_원문_크기로_화면에_가로
     assert "Table 3 reports" not in extracted, extracted
 
 
+def _two_column_rotated_job(job_dir: Path, rotation: int):
+    """화면에서는 똑바른 2단 페이지를 /Rotate로 감싼다 — 왼쪽 단 문단이 더 긴 번역으로 바뀐다."""
+    import fitz
+
+    job_dir.mkdir()
+    source = fitz.open()
+    page = source.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    page.set_rotation(rotation)
+    display_width, display_height = page.rect.width, page.rect.height
+    left = (
+        "Rotated scans and landscape pages are common in real documents. "
+        "This left column paragraph will be translated into a longer Korean text "
+        "that needs more lines than the original paragraph had."
+    )
+    right = (
+        "The right column keeps its English text because the translation is "
+        "identical. It must not be overprinted by the translated left column."
+    )
+    columns = (fitz.Rect(56, 100, 286, 190), fitz.Rect(309, 100, 539, 190))
+    for shown, text in zip(columns, (left, right)):
+        page.insert_textbox(
+            shown * page.derotation_matrix, text, fontsize=10, fontname="tiro", rotate=rotation,
+        )
+    # 레이아웃 블록 = 그 단에 화면 중심이 드는 원문 줄들(회전 텍스트는 줄마다 블록이 갈린다).
+    lines = []
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            shown = fitz.Rect(line["bbox"]) * page.rotation_matrix
+            shown.normalize()
+            lines.append((shown, "".join(span["text"] for span in line["spans"])))
+    blocks = []
+    for column in columns:
+        mine = sorted(
+            (item for item in lines if column.contains((item[0].tl + item[0].br) / 2)),
+            key=lambda item: item[0].y0,
+        )
+        bbox = +mine[0][0]
+        for shown, _text in mine[1:]:
+            bbox.include_rect(shown)
+        blocks.append({
+            "type": "text",
+            "bbox": _layout_bbox(bbox, page_width=display_width, page_height=display_height),
+            "content": "\n".join(text for _shown, text in mine),
+        })
+    source.save(job_dir / "source.pdf")
+    source.close()
+    translations = [
+        "회전된 스캔과 가로 페이지는 실제 문서에서 흔하다. 이 왼쪽 단 문단은 원래 문단보다 "
+        "더 많은 줄이 필요한 더 긴 한국어 문장으로 번역된다. 번역문은 화면에서 아래로 자라야 "
+        "하고 옆 단을 침범하면 안 된다. 한 문장을 더 붙여 길이를 늘린다.",
+        blocks[1]["content"],
+    ]
+    _write_layout_pair(
+        job_dir, blocks, translations, page_width=display_width, page_height=display_height,
+    )
+
+
+def _korean_display_lines(path: Path) -> list[tuple[float, float, float, float, float]]:
+    """번역 PDF의 한글 줄 — 화면(표시 공간) 사각형과 글자 크기."""
+    import fitz
+
+    out = []
+    with fitz.open(path) as exported:
+        page = exported[0]
+        for block in page.get_text("dict")["blocks"]:
+            for line in block.get("lines", []):
+                text = "".join(span["text"] for span in line["spans"])
+                if not any("가" <= char <= "힣" for char in text):
+                    continue
+                shown = fitz.Rect(line["bbox"]) * page.rotation_matrix
+                shown.normalize()
+                out.append((shown.x0, shown.y0, shown.x1, shown.y1, line["spans"][0]["size"]))
+    return sorted(out, key=lambda item: item[1])
+
+
+@pytest.mark.parametrize("rotation", [90, 180, 270])
+def test_회전_페이지의_여러_줄_번역도_화면에서_아래로_자란다(
+    tmp_path: Path,
+    real_cjk_fontfile: str,
+    rotation: int,
+):
+    """/Rotate 페이지의 흐름 배치가 회전 없는 같은 페이지와 화면에서 같다.
+
+    flow 계획이 비회전 y축으로 자라서, 90도에서는 번역 문단이 왼쪽 여백(화면 x=5)으로,
+    270도에서는 옆 단(x=309) 바로 앞까지 밀리고 글자도 줄었다(감사 pdf-5). 180도에서는
+    화면 위쪽으로 자랐다.
+    """
+    expected_dir = tmp_path / "upright"
+    _two_column_rotated_job(expected_dir, 0)
+    expected = build_translated_pdf(expected_dir, "ko", fontfile=real_cjk_fontfile)
+    rotated_dir = tmp_path / f"rotated-{rotation}"
+    _two_column_rotated_job(rotated_dir, rotation)
+
+    result = build_translated_pdf(rotated_dir, "ko", fontfile=real_cjk_fontfile)
+
+    assert result.replaced == expected.replaced == 1, (result.report(), expected.report())
+    assert not result.warnings, result.warnings
+    upright = _korean_display_lines(expected.path)
+    turned = _korean_display_lines(result.path)
+    assert len(upright) >= 4, upright          # 원문(3줄)보다 길어 아래로 자란 문단
+    assert len(turned) == len(upright), (turned, upright)
+    for got, want in zip(turned, upright):
+        assert got == pytest.approx(want, abs=1.0), (got, want)
+    # 왼쪽 단 안에서 위에서 아래로 쌓인다 — 여백·옆 단으로 밀리지 않는다.
+    assert all(50 <= x0 and x1 <= 300 for x0, _y0, x1, _y1, _size in turned), turned
+    assert [line[1] for line in turned] == sorted(line[1] for line in turned)
+
+
 def _span(text: str, x0: float, baseline: float, size: float = 9.0):
     """`_reflow_flattened_text` 단위 테스트용 원문 span."""
     import fitz

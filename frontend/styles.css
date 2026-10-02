@@ -1875,6 +1875,19 @@ button.chip { appearance: none; font-family: inherit; cursor: pointer; }
   line-height: 1.48;
   white-space: pre-wrap;
 }
+/* 표 블록 카드 — OCR 표 HTML을 구조 태그만 읽어 다시 그린 표(reader.readerTableNode).
+   넓은 표는 카드 안에서 가로로 스크롤한다. */
+.reader-map-table { max-width: 100%; overflow-x: auto; }
+.reader-map-table table { border-collapse: collapse; font-size: 12.5px; line-height: 1.45; }
+.reader-map-table th, .reader-map-table td {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.reader-map-table th { background: var(--bg-sunken); font-weight: 600; }
+.reader-map-source .reader-map-table { color: var(--text-muted); }
+.reader-map-source .reader-map-table table { font-size: 10px; }
 .reader-tool-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -39,6 +39,7 @@ from .fitting import (
     _plan_shrink_to_fit,
     _plan_single_line,
     _preserved_reference_microfixes,
+    trial_pages,
 )
 from .fonts import (
     _SYSTEM_SANS_FONT_CANDIDATES,
@@ -2419,27 +2420,8 @@ def _build_translated_pdf(job_dir: Path, lang: str, *, fontfile: str) -> PdfExpo
         # 리댁션은 되돌릴 수 없으므로 한 페이지라도 건드리기 전에 알아야 한다.
         misregistered = _unregistered_layout_pages(doc, orig_pages)
         try:
-            for tpage in trans_pages:
-                pno = tpage.get("page")
-                opage = orig_pages.get(pno)
-                if (
-                    not isinstance(pno, int)
-                    or not (1 <= pno <= doc.page_count)
-                    or opage is None
-                ):
-                    continue
-                try:
-                    _process_page(
-                        fitz, doc[pno - 1], pno, tpage, opage, fonts, result,
-                        misregistered,
-                    )
-                except PdfExportError:
-                    raise
-                except Exception as error:  # noqa: BLE001 — 어느 페이지인지 문구에 남긴다
-                    logger.warning("번역 PDF %d페이지 조판 실패", pno, exc_info=True)
-                    raise PdfExportError(
-                        f"{pno}페이지를 번역 PDF로 조판하지 못했습니다 ({type(error).__name__})"
-                    ) from error
+            with trial_pages():  # 조판 시험은 기하가 같은 빈 페이지에서(fitting._trial_page)
+                _process_pages(fitz, doc, trans_pages, orig_pages, fonts, result, misregistered)
             tmp = job_dir / f".export.{lang}.{uuid.uuid4().hex}.tmp"
             try:
                 _restore_space_tounicode(doc, fonts)
@@ -2460,6 +2442,24 @@ def _build_translated_pdf(job_dir: Path, lang: str, *, fontfile: str) -> PdfExpo
             logger.warning("PDF 내보내기: %s", w)
     _write_export_report(job_dir, lang, result)
     return result
+
+
+def _process_pages(fitz, doc, trans_pages, orig_pages, fonts, result, misregistered) -> None:
+    """번역 레이아웃의 페이지를 차례로 조판한다 — 실패는 어느 페이지인지 문구에 남긴다."""
+    for tpage in trans_pages:
+        pno = tpage.get("page")
+        opage = orig_pages.get(pno)
+        if not isinstance(pno, int) or not (1 <= pno <= doc.page_count) or opage is None:
+            continue
+        try:
+            _process_page(fitz, doc[pno - 1], pno, tpage, opage, fonts, result, misregistered)
+        except PdfExportError:
+            raise
+        except Exception as error:  # noqa: BLE001 — 어느 페이지인지 문구에 남긴다
+            logger.warning("번역 PDF %d페이지 조판 실패", pno, exc_info=True)
+            raise PdfExportError(
+                f"{pno}페이지를 번역 PDF로 조판하지 못했습니다 ({type(error).__name__})"
+            ) from error
 
 
 def build_dual_pdf(source_pdf: Path, translated_pdf: Path, out: Path) -> Path:

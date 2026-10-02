@@ -488,7 +488,7 @@ def test_참고문헌_중복scheme_url은_미세교정으로_한번만_남는다
 
     `_microfix_plan` 경로는 원문 한 행 안의 더 짧은 치환만 허용하므로 서지
     항목의 다른 글리프는 그대로 남아야 한다. 겹친 링크 annotation의 URI도 같은
-    정상 주소로 맞춘다.
+    정상 주소로 맞춘다 — 교정 행 위의 링크도 리댁션 뒤 다시 달린다(링크 보존).
     """
     import fitz
 
@@ -501,8 +501,8 @@ def test_참고문헌_중복scheme_url은_미세교정으로_한번만_남는다
     # 중복 scheme만 별도 span이 되도록 다른 위치·폰트로 기록한다.
     page.insert_text((60, 114), doubled, fontsize=9, fontname="cour")
     for link_rect in (fitz.Rect(58, 104, 160, 118), fitz.Rect(58, 150, 160, 164)):
-        # 첫 annotation은 리댁션에서 사라지지만, 다음 행으로 이어진 같은 URI의
-        # 링크는 남는다 — 그 링크도 같은 정상 주소로 맞춰야 한다.
+        # 첫 annotation은 교정 행 위라 리댁션이 걷어냈다가 다시 달리고, 다음 행으로
+        # 이어진 같은 URI의 링크는 그대로 남는다 — 둘 다 같은 정상 주소로 맞춰야 한다.
         page.insert_link({
             "kind": fitz.LINK_URI,
             "from": link_rect,
@@ -533,7 +533,7 @@ def test_참고문헌_중복scheme_url은_미세교정으로_한번만_남는다
     assert result.replaced == 1, result.report()
     assert doubled not in text, text
     assert "https://" in text and "Paper Title" in text, text
-    assert uris == ["https://example.test/paper"], uris
+    assert uris == ["https://example.test/paper"] * 2, uris
 
 
 def test_참고문헌_Tulu_미세교정은_폰트에_없는_글리프를_찍지_않는다(tmp_path):

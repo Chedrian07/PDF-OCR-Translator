@@ -2,7 +2,12 @@
 
 계약 문서: docs/OCR_ENGINE_PROTOCOL.md. sidecar(services/*)에도 같은 모델의
 사본이 있다(독립 배포 단위라 임포트 공유 불가) — 스키마를 바꾸면 양쪽과 문서를
-함께 갱신하고 protocol_version을 올린다.
+함께 갱신한다. protocol_version은 **깨지는 변경**(필수 필드 추가·삭제, 기존 필드의
+의미 변경)에만 올린다. 응답·health의 추가 필드는 올리지 않는다 — 아래 모델은 모르는
+키를 무시하고(extra="ignore") 없는 필드는 기본값(= 예전 동작)으로 읽어 옛 sidecar·옛
+backend와 그대로 맞물린다(load_retry·restarting·truncated가 이렇게 들어왔다). backend는
+버전이 다르면 sidecar를 거부하므로(client._check_identity) 추가 필드에 버전을 올리면
+옛 이미지와 새 backend를 섞는 배포가 페이지 전부 실패한다.
 
 모델 출력은 공격자가 문서를 통해 조작할 수 있는 **비신뢰 입력**이다:
 - bbox는 [0,999] 정규화 정수만. 경미한 초과(_CLAMP_MARGIN)만 clamp하고

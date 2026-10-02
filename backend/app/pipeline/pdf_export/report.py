@@ -35,7 +35,9 @@ _WARNINGS_SAMPLE = 50
 # 15: 기호 명령 바로 뒤의 감싸개·분수가 명령 이름에 붙지 않음('langley'·'cdotx' → '⟨y'·'·x').
 # 16: 줄 위·아래로 튀어나와 OCR bbox와 조금만 겹치는 기호(근호 등)를 맞닿은 블록 하나에 붙여
 #     그 블록을 교체할 때 함께 지움 — 번역문 위에 '√'만 남지 않는다. 조판 결과가 달라진다.
-PDF_EXPORT_FORMAT_VERSION = 16
+# 17: 원본의 능동 콘텐츠(문서 열기 스크립트·/AA·문서 JavaScript·위험한 링크 동작·첨부 파일)를
+#     번역 PDF에 싣지 않음(security-3). 캐시된 PDF가 그것을 그대로 내보내지 않게 올린다.
+PDF_EXPORT_FORMAT_VERSION = 17
 
 
 class PdfExportError(RuntimeError):

@@ -1600,12 +1600,16 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
   - `make test-mlx-real` = `OCR_MLX_REAL_TESTS=1` `tests/test_mlx_model_parity.py` — 실가중치
     bf16 그리디 첫 64토큰 고정과 torch CPU fp32 로짓 비교. 고정 스냅샷이 로컬 HF 캐시
     (`HF_HOME`, 기본 `~/.cache/huggingface`)에 있어야 한다(`local_files_only` — `make dev`를 한
-    번 띄우면 받아진다). mlx 업그레이드·MLX 포팅 수정·스냅샷 갱신 전후에 돌린다.
+    번 띄우면 받아진다). 테스트는 `.env`를 읽지 않으므로(`DISABLE_DOTENV=1`) 앞단
+    `scripts/require_hf_snapshot.py`가 `make dev`와 같은 `.env`(cwd → 저장소 루트)에서 HF 캐시 위치
+    키(`HF_HOME`·`HF_HUB_CACHE`·`HUGGINGFACE_HUB_CACHE`·`XDG_CACHE_HOME`, 셸 값 우선)만 넘기고,
+    코드 기본 스냅샷의 가중치(`*.safetensors`)가 없으면 pytest를 돌리지 않고 종료코드 2로 멈춘다.
+    mlx 업그레이드·MLX 포팅 수정·스냅샷 갱신 전후에 돌린다.
   - 두 타깃은 `uv run` 대신 `backend/.venv/bin/python`을 직접 부른다(extra·C++ 모듈이 기본
     동기화 밖이라).
 - `services/{ovisocr2,paddleocr_vl}/tests/`: sidecar 파서·어댑터·수명주기(로드 재시도·엔진 사망
-  재시작) (stdlib만 — 모델·CUDA 불필요) + HTTP 계층(`test_api.py` — 웹 계층만 lock과 같은
-  버전으로 설치)
+  재시작) (stdlib만 — 모델·CUDA 불필요) + HTTP 계층(`test_api.py` — CI는 서비스
+  `requirements.lock`을 제약(`-c`)으로 걸어 웹 계층을 배포와 같은 버전·해시로 설치)
 - `native/tests/`: C++ ↔ 파이썬 레퍼런스 패리티
 - `frontend/tests/`: `node --test`(replay·reader-scroll·busy-retry·job-list·pdf-report·
   translate-warnings 등 — `helpers/fake-dom.mjs`로 jsdom 없이 런타임 검증) + `tests/e2e/`
@@ -1685,7 +1689,7 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
 | `dependency-audit` | backend `uv.lock`(배포 이미지와 같은 cpu extra)을 `uv export`로 풀어 `pip-audit==2.10.1 --strict`로 검사(torch `+cpu` 같은 로컬 버전 표기는 떼고 감사 — 안 떼면 조용히 빠진다). 수용 권고 9건(torch 2·transformers 7)은 이유 주석과 함께 `--ignore-vuln`, **2027-04-01**이 지나면 잡이 실패한다. 두 sidecar의 `requirements.lock`도 감사하고 `paddlepaddle==3.3.1`은 OSV로 본다. `make audit`(`scripts/dependency_audit.sh`)이 같은 검사를 로컬에서 돌린다(수용 목록·기한·pip-audit 버전이 같은지 계약 테스트가 본다) |
 | `frontend` | `node --test` 단위 테스트 |
 | `native` | C++ 빌드 + 패리티 pytest (`native/tests` — 모듈 자체의 의미론) |
-| `sidecar` | matrix(`ovisocr2`,`paddleocr_vl`) 파서/어댑터·수명주기 pytest + HTTP 계층(웹 계층만 lock과 같은 버전으로 설치 — 엔진 사망 503·폼 필드 상한) |
+| `sidecar` | matrix(`ovisocr2`,`paddleocr_vl`) 파서/어댑터·수명주기 pytest + HTTP 계층(서비스 `requirements.lock`을 제약(`-c`)으로 걸어 웹 계층을 배포와 같은 버전으로 설치 — fastapi만 고정하면 starlette가 PyPI 최신으로 풀린다. 엔진 사망 503·폼 필드 상한) |
 | `docker-image` | matrix(amd64·arm64) CPU 이미지 빌드(push 없음) → `scripts/smoke_image.sh`(compose와 같은 하드닝 아래 textlayer 전 구간). GHA 캐시는 main(push·nightly·수동)에서만 쓴다 — PR·태그 캐시는 다른 ref에서 복원되지 않아 쿼터만 먹는다 |
 | `verify-e2e` | §11.1 하네스를 `--pages 6`으로 실행 (업로드→OCR→번역→PDF→뷰어→보안→결함 주입→워커 복원력). 실패 시 `api.log`·내보낸 PDF 아티팩트 업로드 |
 | `e2e-mock` | mock OpenAI + FakeEngine 백엔드 hermetic 브라우저 E2E. 러너 시간이 커서 **PR에서는 돌지 않고** main push·nightly(`schedule: 0 18 * * *`)·`workflow_dispatch`에서 실행, 실패 시 스크린샷 아티팩트 업로드. 릴리스가 태그 커밋의 push CI 성공을 요구하므로 **사실상 릴리스 게이트**다 |

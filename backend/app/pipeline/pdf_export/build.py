@@ -581,6 +581,10 @@ def _raster_backed_blocks(block_rects, oblocks, source_records, visuals) -> froz
         block_type = str(block.get("type") or "")
         if block_type == "image" or block.get("image"):
             continue
+        # 내용이 빈 블록은 자식 블록을 감싼 컨테이너(빈 list 등)다 — 제 원문 픽셀이 없다.
+        # 래스터 원문으로 세면 '남는 래스터 블록'이 돼 자식 번역이 자랄 자리를 통째로 막았다.
+        if not str(block.get("content") or "").strip():
+            continue
         area = rect.width * rect.height
         if area <= 0:
             continue

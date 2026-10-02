@@ -227,6 +227,47 @@ def test_cached_translation_drops_invented_dollars_and_retyped_math():
     assert tidy_cached_translation(clean, mapping, src) == clean          # 이미 깨끗하면 그대로
 
 
+def test_sanitize_strips_tails_the_model_adds_after_a_placeholder():
+    """잘린 미리보기(v="\\( [50, 6, 1")·백슬래시로 끝난 미리보기를 본 모델이 태그를 '">'·'>'·'"'로
+    한 번 더 닫아 번역 PDF·리더에 'x(i:j) >'·'\\( … \\)"'·'"의'가 찍혔다(실앱 4B 2·4·6쪽)."""
+    src = (r"We write \( x_{i:j} \) for a slice and \( M_{i} \) for a row, as in "
+           r"\( [50, 6, 15] \), assuming \( \|x\|_{2}=1 \) holds.")
+    masked, mapping = mask(src)
+    t = re.findall(r"<m\d+[^>]*>", masked)
+    raw = (f"슬라이스는 {t[0]}> 로, 행은 {t[1]}\"> 로 쓰며 {t[2]}\". "
+           f"그리고 {t[3]} \"가 성립한다고 가정한다.")
+    clean, n = sanitize_translation(raw, masked, mapping)
+    restored, missing, dup = unmask(clean, mapping, masked)
+    assert restored == (r"슬라이스는 \( x_{i:j} \) 로, 행은 \( M_{i} \) 로 쓰며 \( [50, 6, 15] \). "
+                        r"그리고 \( \|x\|_{2}=1 \) 가 성립한다고 가정한다.")
+    assert not missing and not dup and n == 4
+
+
+def test_sanitize_keeps_quotes_and_brackets_the_source_has_after_a_placeholder():
+    compared, cmap = mask(r"If \( a \)>\( b \) then stop.")
+    ct = re.findall(r"<m\d+[^>]*>", compared)
+    raw = f"{ct[0]}>{ct[1]}이면 멈춘다."
+    assert unmask(sanitize_translation(raw, compared, cmap)[0], cmap, compared)[0] == (
+        r"\( a \)>\( b \)이면 멈춘다.")                         # 원문에 있던 부등호
+    quoted, qmap = mask(r'The term "\( x \)" is fixed.')
+    qt = re.search(r"<m\d+[^>]*>", quoted).group(0)
+    assert sanitize_translation(f'용어 "{qt}"는 고정이다.', quoted, qmap)[1] == 0
+    plain, pmap = mask(r"The term \( x \) is fixed.")
+    pt = re.search(r"<m\d+[^>]*>", plain).group(0)
+    # 모델이 원문에 없는 따옴표로 감싼 것은 짝이 맞으니 닫는 쪽만 지우지 않는다
+    assert sanitize_translation(f'용어 "{pt}"는 고정이다.', plain, pmap)[1] == 0
+
+
+def test_cached_translation_drops_tails_after_restored_math():
+    from app.translate.masking import tidy_cached_translation
+
+    src = r"We use the notation \( x_{i:j} \) and refer to it as \( M_{i} \)."
+    _masked, mapping = mask(src)
+    cached = r'표기법 \( x_{i:j} \)> 를 쓰고 이를 \( M_{i} \)"> 로 지칭한다.'
+    assert tidy_cached_translation(cached, mapping, src) == (
+        r"표기법 \( x_{i:j} \) 를 쓰고 이를 \( M_{i} \) 로 지칭한다.")
+
+
 def test_should_skip_수식뿐():
     assert should_skip("$E = mc^2$") == "non-linguistic"
     assert should_skip("[1, 2, 3]") == "non-linguistic"

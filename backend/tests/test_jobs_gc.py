@@ -391,8 +391,8 @@ def test_restart_sweeps_orphan_job_dirs_without_meta(tmp_path):
 
 def test_restart_keeps_submitted_queued_jobs_and_errors_the_rest(tmp_path):
     """시작도 안 한 대기 잡까지 '서버 재시작으로 중단' 오류가 돼 다시 올려야 했다.
-    업로드·검증을 마치고 제출된 잡만 대기 상태로 돌려주고(생성 순서), 업로드 도중 죽은
-    잡(제출 표식 없음)·원본이 사라진 잡·실행 중이던 잡은 예전처럼 오류로 마감한다."""
+    업로드·검증을 마치고 제출된 잡만 대기 상태로 돌려주고(원래 큐 = 제출 순서), 업로드 도중
+    죽은 잡(제출 표식 없음)·원본이 사라진 잡·실행 중이던 잡은 예전처럼 오류로 마감한다."""
     store = JobStore(tmp_path / "jobs")
     pdf = make_pdf_bytes(pages=1, with_image=False)
 
@@ -414,13 +414,70 @@ def test_restart_keeps_submitted_queued_jobs_and_errors_the_rest(tmp_path):
 
     revived = JobStore(store.jobs_dir)
     restored = revived.load_existing()
-    assert [job.id for job in restored] == [first.id, second.id]   # 생성 순서
+    # 큐 순서 = 제출 순서 — b.pdf가 생성은 늦어도(큰 파일을 먼저 올리기 시작한 경우 등) 먼저
+    # 제출됐다. 예전에는 생성 순서로 돌려 재시작 뒤 대기열 위치가 뒤바뀌었다.
+    assert [job.id for job in restored] == [second.id, first.id]
     for job in (first, second):
         restored_job = revived.get(job.id)
         assert restored_job.status == "queued" and restored_job.submitted
     for job in (uploading, vanished, running):
         assert revived.get(job.id).status == "error"
         assert revived.get(job.id).error == "서버 재시작으로 중단되었습니다"
+
+
+def test_restart_keeps_the_queue_order_of_jobs_uploaded_in_the_same_second(tmp_path):
+    """created_at은 초 단위라 같은 초에 올린 잡은 무작위 잡 ID로 순서가 갈렸다 — 재시작 전
+    대기열 위치 C=1·D=2가 재시작 뒤 D=1·C=2가 되고 D가 먼저 돌았다(P4 Docker 재현)."""
+    store = JobStore(tmp_path / "jobs")
+    pdf = make_pdf_bytes(pages=1, with_image=False)
+    jobs = [store.create(f"{n}.pdf", "multi", dpi=72) for n in range(4)]
+    for job in jobs:
+        job.created_at = "2026-10-02T05:34:48+00:00"
+        (job.dir / "source.pdf").write_bytes(pdf)
+    # 잡 ID 역순으로 제출한다 — (created_at, id) 정렬이면 정확히 거꾸로 복원된다
+    submitted = sorted(jobs, key=lambda job: job.id, reverse=True)
+    for job in submitted:
+        store.mark_submitted(job)
+    positions = [store.queue_position(job) for job in submitted]
+    assert positions == [1, 2, 3, 4]
+
+    revived = JobStore(store.jobs_dir)
+    restored = revived.load_existing()
+    assert [job.id for job in restored] == [job.id for job in submitted]
+
+    # 다시 제출해도(재시작 직후 앱 조립) 같은 순서가 다음 재시작까지 이어진다
+    for job in restored:
+        revived.mark_submitted(job)
+    assert [revived.queue_position(job) for job in restored] == [1, 2, 3, 4]
+    again = JobStore(store.jobs_dir).load_existing()
+    assert [job.id for job in again] == [job.id for job in submitted]
+
+
+def test_restart_orders_jobs_without_a_submit_order_by_creation_time(tmp_path):
+    """구버전 meta(submit_order 없음)는 예전처럼 created_at으로 복원한다 — 손상 값도 같다."""
+    import json
+
+    store = JobStore(tmp_path / "jobs")
+    pdf = make_pdf_bytes(pages=1, with_image=False)
+    later, earlier, broken = (store.create(f"{n}.pdf", "multi", dpi=72) for n in range(3))
+    for job, created in (
+        (later, "2026-10-01T00:00:09+00:00"),
+        (earlier, "2026-10-01T00:00:01+00:00"),
+        (broken, "2026-10-01T00:00:05+00:00"),
+    ):
+        job.created_at = created
+        (job.dir / "source.pdf").write_bytes(pdf)
+        store.mark_submitted(job)
+        meta_path = job.dir / "meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if job is broken:
+            meta["submit_order"] = "not-a-number"
+        else:
+            meta.pop("submit_order", None)
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    restored = JobStore(store.jobs_dir).load_existing()
+    assert [job.id for job in restored] == [earlier.id, broken.id, later.id]
 
 
 def test_submit_survives_a_failed_submitted_marker_write(tmp_path):

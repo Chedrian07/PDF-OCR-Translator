@@ -12,6 +12,8 @@
 //  · 같은 잡을 연 다른 탭과 저장소를 공유한다 — 저장·삭제는 최신 저장값 위에 적용하고(덮어쓰기
 //    없음), 다른 탭의 변경은 storage 이벤트로 목록·하이라이트에 맞춘다(frontend-1).
 //  · 목록은 메모 id 기반 증분 렌더다 — 지운 줄의 키보드 포커스는 이웃 줄로 옮긴다(frontend-6).
+//  · 저장 공간이 차면 가장 오래 손대지 않은 다른 잡의 메모부터 지우고 다시 저장하며, 그 사실을
+//    저장 안내에 알린다 — 예전에는 한 번 차면 모든 저장이 계속 실패했다(frontend-8).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,14 +25,14 @@ import {
   addReaderNote, normalizeReaderNotes, readerNotesMarkdown, readerNotesPruneKeys,
   removeReaderNote,
 } from '../js/core.js';
-import { forgetReaderNotes, loadReaderNotes, saveReaderNotes } from '../js/notes.js';
+import { forgetReaderNotes, loadReaderNotes, saveReaderNotes, storeReaderNotes } from '../js/notes.js';
 import { el, state } from '../js/state.js';
 import {
   copyReaderNotes, deleteReaderNote, onReaderNotesStorage, renderReaderDocument, renderReaderNotes,
   resetReaderForJob, saveReaderCitation,
 } from '../js/reader.js';
 import { deleteJob } from '../js/jobs.js';
-import { assertSameNode, installFakeStorage, mount } from './helpers/fake-dom.mjs';
+import { assertSameNode, createFakeStorage, installFakeStorage, mount } from './helpers/fake-dom.mjs';
 import { alignment, setupReader } from './helpers/reader-setup.mjs';
 
 const note = (over = {}) => ({
@@ -423,4 +425,69 @@ test('다른 탭의 변경으로 목록을 다시 맞춰도 남은 줄의 포커
   assertSameNode(assert, document.activeElement, page, '포커스가 있던 줄은 옮기지도 다시 만들지도 않는다');
   renderReaderNotes(); // 바뀐 것이 없으면 아무것도 건드리지 않는다
   assertSameNode(assert, document.activeElement, page);
+});
+
+/* ---------------- 저장 공간이 찼을 때 (frontend-8) ---------------- */
+
+// 메모 하나가 약 1.4천 자인 잡 저장값과 그 크기(키+값 — 가짜 저장소의 쿼터 단위).
+const bulky = (id, updated) => JSON.stringify({ v: 1, updated, items: [note({ id, text: '가'.repeat(1400) })] });
+const entrySize = (jobId, updated) => readerNotesKey(jobId).length + bulky('x1', updated).length;
+
+// 다른 잡 셋(old-a가 가장 오래됨)으로 거의 찬 저장소 — 새 잡 하나는 하나를 지워야 들어간다.
+function fullStorage(t) {
+  const quota = entrySize('old-a', 1000) * 3 + entrySize('job-new', Date.now()) / 2 + 40;
+  const storage = installFakeStorage(t, { quota });
+  storage.setItem(readerNotesKey('old-b'), bulky('b1', 2000));
+  storage.setItem(readerNotesKey('old-a'), bulky('a1', 1000));
+  storage.setItem(readerNotesKey('old-c'), bulky('c1', 3000));
+  storage.setItem('uocr-theme', 'dark');
+  return storage;
+}
+
+test('storeReaderNotes: 저장 공간이 차면 가장 오래 손대지 않은 다른 잡의 메모부터 지우고 다시 저장한다', (t) => {
+  const storage = fullStorage(t);
+  const result = storeReaderNotes('job-new', [note({ id: 'n1', text: '나'.repeat(1400) })]);
+  assert.deepEqual(result, { ok: true, evicted: 1 }, '예전에는 정리 없이 false — 이후 모든 저장이 실패했다');
+  const keys = storage.keys();
+  assert.ok(!keys.includes(readerNotesKey('old-a')), '가장 오래 손대지 않은 잡의 메모를 지운다');
+  for (const key of [readerNotesKey('old-b'), readerNotesKey('old-c'), readerNotesKey('job-new'), 'uocr-theme']) {
+    assert.ok(keys.includes(key), key);
+  }
+  assert.equal(loadReaderNotes('job-new').length, 1);
+  // 자리가 있으면 아무것도 지우지 않는다
+  assert.deepEqual(storeReaderNotes('job-new', [note({ id: 'n1', text: '짧은 메모' })]), { ok: true, evicted: 0 });
+});
+
+test('storeReaderNotes: 쿼터가 아닌 실패(저장소 차단)는 다른 잡의 메모를 지우지 않는다', (t) => {
+  const storage = createFakeStorage();
+  storage.setItem(readerNotesKey('old-a'), bulky('a1', 1000));
+  const setItem = storage.setItem;
+  storage.setItem = (key, value) => {
+    if (key === readerNotesKey('job-new')) {
+      const err = new Error('SecurityError');
+      err.name = 'SecurityError';
+      throw err;
+    }
+    return setItem(key, value);
+  };
+  const saved = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', { value: storage, configurable: true, writable: true });
+  t.after(() => {
+    if (saved) Object.defineProperty(globalThis, 'localStorage', saved);
+    else delete globalThis.localStorage;
+  });
+  assert.deepEqual(storeReaderNotes('job-new', [note()]), { ok: false, evicted: 0 });
+  assert.ok(storage.keys().includes(readerNotesKey('old-a')));
+  assert.equal(saveReaderNotes('job-new', [note()]), false);
+});
+
+test('인용 저장: 자리를 만들려고 다른 문서의 메모를 지웠으면 저장 안내에 알린다', (t) => {
+  setupNotes(t);
+  const storage = fullStorage(t);
+  state.readerSelection = '나'.repeat(1400);
+  state.readerSelectionPage = 1;
+  saveReaderCitation();
+  assert.ok(!storage.keys().includes(readerNotesKey('old-a')));
+  assert.equal(JSON.parse(storage.getItem(readerNotesKey('job-a'))).items.length, 1);
+  assert.match(el.toast.textContent, /인용을 저장했습니다.*문서 1개의 메모를 지웠습니다/);
 });

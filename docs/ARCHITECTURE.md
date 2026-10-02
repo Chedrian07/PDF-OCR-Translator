@@ -120,6 +120,7 @@ torch CPU와 로짓 상대오차 1e-5 수준으로 맞으므로, 엔진 간 회�
 │   │   │   ├── registry.py     # 디바이스·엔진 선택 (auto 해석 · unlimited/fake/textlayer/ovisocr2/paddleocr_vl)
 │   │   │   ├── unlimited.py    # 실모델 엔진 — torch (cpu/cuda/metal, 벤더링 코드 사용)
 │   │   │   ├── unlimited_mlx.py  # 실모델 엔진 — MLX (Apple Silicon, vendor/unlimited_ocr_mlx 사용)
+│   │   │   ├── hf_snapshot.py  # 커밋 고정 HF 스냅샷 로컬 우선 로딩 + 캐시 완전성 판정 (torch·MLX 공용)
 │   │   │   ├── fast_decode.py  # 커스텀 그리디 디코드 루프 (OCR_FAST_DECODE)
 │   │   │   ├── objc_pool.py    # ObjC 오토릴리스 풀 (Metal 메모리 누적 방지, darwin 외 no-op)
 │   │   │   ├── repetition.py   # 의미 반복·페이지 출력 폭주 감지 (StoppingCriteria)
@@ -148,6 +149,8 @@ torch CPU와 로짓 상대오차 1e-5 수준으로 맞으므로, 엔진 간 회�
 │   │   │       ├── build.py    # 페이지 순회·리댁션·삽입 오케스트레이션
 │   │   │       ├── fitting.py  # 조판 dry-run(행간→축소 사다리) · 확장 공간 탐색
 │   │   │       ├── spans.py · text.py · tables.py · raster_tables.py · geometry.py · fonts.py  # raster_tables = 스캔 표 픽셀 격자
+│   │   │       ├── subset.py   # 임베드 CJK 폰트 서브셋(쓰는 글리프만, has_glyph 동치 검증)
+│   │   │       ├── active_content.py  # 단일판 능동 콘텐츠 제거(JavaScript·/AA·첨부·위험 동작)
 │   │   │       └── models.py · constants.py · report.py  # report.py = PDF_EXPORT_FORMAT_VERSION
 │   │   ├── translate/          # 번역 코어 (OCR 엔진·torch 무관) — §13
 │   │   │   ├── engine.py       # run_translation (2단 패스·래더·캐시·state.json)
@@ -176,8 +179,8 @@ torch CPU와 로짓 상대오차 1e-5 수준으로 맞으므로, 엔진 간 회�
 │   └── tests/test_parity.py
 ├── frontend/                   # 정적 SPA (빌드스텝/외부 의존성 0)
 │   ├── index.html · styles.css · layout-fit.js · theme-init.js · katex-guard.js  # theme-init = CSP 아래 테마 부트스트랩, katex-guard = 내려받는 HTML의 KaTeX 크기 가드
-│   ├── app.js                  # **진입점만**(372줄) — 부트스트랩 + 모듈 배선. 로직 없음
-│   ├── js/                     # ES module 17개(약 8,080줄) — 실제 로직은 전부 여기 (§10)
+│   ├── app.js                  # **진입점만** — 부트스트랩 + 모듈 배선. 로직 없음
+│   ├── js/                     # ES module 17개 — 실제 로직은 전부 여기 (§10)
 │   │   ├── core.js · state.js · api.js · sse.js · ui.js · constants.js
 │   │   ├── upload.js · jobs.js · live.js · results.js · tabs.js · health.js
 │   │   └── translate.js · qa.js · viewer.js · reader.js · notes.js
@@ -190,6 +193,7 @@ torch CPU와 로짓 상대오차 1e-5 수준으로 맞으므로, 엔진 간 회�
     ├── verify_e2e.py           # 실 PDF 전 구간 검증 하네스 (= make verify-e2e, §11)
     ├── mock_llm.py             # OpenAI 호환 목 서버 (SSE 스트리밍 · 결함 주입 모드 포함)
     ├── dependency_audit.sh     # = make audit — CI dependency-audit 잡과 같은 pip-audit
+    ├── require_hf_snapshot.py  # make test-mlx-real 앞단 — .env의 HF 캐시 키로 고정 스냅샷 확인
     ├── benchmark_ocr_engines.py · _smoke_common.py · check_cuda_environment.py
     └── smoke_ovisocr2_5070ti.py · smoke_paddleocr_vl_5070ti.py
 ```
@@ -1588,8 +1592,8 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
 - **지원 브라우저**: 최신 Chromium·Firefox, Safari 16.0 이상 — 파싱 단계에서 깨지는 문법(정규식
   lookbehind 등)은 쓰지 않는다(`tests/browser-compat.test.mjs`가 막는다). lookbehind 하나로
   Safari 16.0–16.3에서 화면 전체가 비었다
-- ⚠ **`app.js`에는 로직이 없다**: 진입점(372줄 — 부트스트랩 `init()` + 테스트가 쓰는
-  공개 심볼 재노출)일 뿐이고, 실제 구현은 `frontend/js/` **17개 모듈(약 8,080줄)**에
+- ⚠ **`app.js`에는 로직이 없다**: 진입점(부트스트랩 `init()` + 테스트가 쓰는
+  공개 심볼 재노출)일 뿐이고, 실제 구현은 `frontend/js/` **17개 모듈**에
   있다. 브라우저 네이티브 ES 모듈이라 번들러가 없으므로 임포트 그래프가 곧 구조다.
   | 모듈 | 역할 |
   |---|---|

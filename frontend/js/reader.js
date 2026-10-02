@@ -11,7 +11,7 @@ import {
   pdfReportDetails, pdfReportMessage, pdfReportUrl, pdfRetryDelay, railAnchorFrom,
   railAnchorTarget, railPagesToRender, readerFocusAt,
   readerHydrationWindow, readerImageUrl, readerNoteLabel, readerNotesMarkdown, readerRailBandAt,
-  removeReaderNote, splitInlineMath, translatedHtmlExportState, withLangUrl,
+  removeReaderNote, splitHtmlTables, splitInlineMath, translatedHtmlExportState, withLangUrl,
 } from './core.js';
 import { el, state } from './state.js';
 import {
@@ -796,6 +796,40 @@ export function mathTextNodes(text) {
   return nodes;
 }
 
+// 표 블록 — OCR가 낸 표 HTML을 구조 태그만 읽어(core.splitHtmlTables) 새 노드로 다시 그린다.
+// innerHTML을 쓰지 않으므로 셀 안의 다른 태그는 글자로 남는다. 예전에는 카드가 텍스트 노드로만
+// 그려 읽기 탭·논문 뷰어 레일에 '<table><tr><td>…'가 그대로 보였다(fresh-user-2).
+function isTableBlock(block, text) {
+  return block.type === 'table' || /^\s*<table(?=[\s/>])/i.test(String(text || ''));
+}
+
+function readerTableNode(rows) {
+  const body = h('tbody', {});
+  for (const cells of rows) {
+    const tr = h('tr', {});
+    for (const cell of cells) {
+      const td = h(cell.header ? 'th' : 'td', {
+        colspan: cell.colspan > 1 ? String(cell.colspan) : null,
+        rowspan: cell.rowspan > 1 ? String(cell.rowspan) : null,
+      });
+      td.append(...mathTextNodes(cell.text.trim()));
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+  return h('div', { class: 'reader-map-table' }, h('table', {}, body));
+}
+
+function blockTextNodes(block, text) {
+  if (!isTableBlock(block, text)) return mathTextNodes(text);
+  const nodes = [];
+  for (const part of splitHtmlTables(text)) {
+    if (part.type === 'table') nodes.push(readerTableNode(part.rows));
+    else nodes.push(...mathTextNodes(part.value));
+  }
+  return nodes;
+}
+
 export function readerBlockCard(block, displayIndex, page) {
   const number = String(displayIndex + 1).padStart(2, '0');
   const ko = readerLangKey() === 'ko';
@@ -809,8 +843,9 @@ export function readerBlockCard(block, displayIndex, page) {
     title: '원문 위치 표시',
     text: '원문 보기',
   });
-  const target = h('p', { class: 'reader-map-target' });
-  target.append(...mathTextNodes(mainText));
+  // 표는 <p> 안에 둘 수 없다(HTML 내용 모델) — 표 카드는 div로 감싼다
+  const target = h(isTableBlock(block, mainText) ? 'div' : 'p', { class: 'reader-map-target' });
+  target.append(...blockTextNodes(block, mainText));
   const active = block.id === state.readerActiveBlock;
   const card = h('article', {
     class: `reader-map-card type-${block.type.replace(/[^a-z0-9_-]/gi, '')}${active ? ' is-active' : ''}`,
@@ -829,8 +864,8 @@ export function readerBlockCard(block, displayIndex, page) {
   ),
   target);
   if (ko && block.source && block.source !== mainText) {
-    const source = h('p', {});
-    source.append(...mathTextNodes(block.source));
+    const source = h(isTableBlock(block, block.source) ? 'div' : 'p', {});
+    source.append(...blockTextNodes(block, block.source));
     card.appendChild(h('div', { class: 'reader-map-source' },
       h('span', { text: 'ORIGINAL' }),
       source,

@@ -113,6 +113,7 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 - The per-job `MAX_LENGTH` budget warning is replaced by a single INFO note at startup.
 - A second backend on the same data directory refuses to start.
 - The PaddleOCR-VL sidecar image is built for linux/amd64 only.
+- The automatic API pages `/docs` and `/redoc` are turned off: they load scripts from a CDN that the Content Security Policy blocks, so they only showed a blank page. The schema stays at `/openapi.json`.
 
 ## 0.1.0 - 2026-09-30
 

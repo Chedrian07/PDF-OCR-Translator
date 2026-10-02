@@ -92,11 +92,20 @@ def re_match(text):
     mathes_image = []
     mathes_other = []
     for a_match in matches:
-        if a_match[1].strip() == 'image' or '<|ref|>image<|/ref|>' in a_match[0]:
+        if _is_image_ref(a_match):  # [vendor patch P22] 그림 번호 소비와 같은 판정
             mathes_image.append(a_match[0])
         else:
             mathes_other.append(a_match[0])
     return matches, mathes_image, mathes_other
+
+
+def _is_image_ref(a_match):
+    """[vendor patch P22] re_match가 마크다운 그림 ``images/{prefix}{idx}.jpg``로 치환하는 매치인가.
+
+    draw_bounding_boxes의 크롭·번호(img_idx) 소비도 이 판정을 쓴다 — 라벨 비교만 하던
+    업스트림은 ``<|ref|> image <|/ref|>``처럼 re_match만 그림으로 보는 매치에서 번호를
+    소비하지 않아 뒤 그림 참조가 한 칸씩 어긋났다."""
+    return a_match[1].strip() == 'image' or '<|ref|>image<|/ref|>' in a_match[0]
 
 
 def extract_coordinates_and_label(ref_text, image_width, image_height):
@@ -104,6 +113,11 @@ def extract_coordinates_and_label(ref_text, image_width, image_height):
     try:
         label_type = ref_text[1]
         cor_list = ast.literal_eval(ref_text[2])  # [vendor patch P9] never eval() model output
+        if not isinstance(cor_list, (list, tuple)) or not cor_list:
+            # [vendor patch P22] 상자 목록은 비어 있지 않은 list/tuple만 받는다 — 문자열은
+            # 글자마다, 빈 목록·None은 0개의 그림 번호를 소비해 마크다운 참조와 어긋났다.
+            # 해석 불가(None)로 돌려 호출자가 image ref 번호를 정확히 1개 소비하게 한다.
+            return None
         if cor_list and isinstance(cor_list[0], (int, float)):
             cor_list = [cor_list]
     except Exception as e:
@@ -161,8 +175,10 @@ def draw_bounding_boxes(image, refs, ouput_path, image_prefix=''):
 
     for i, ref in enumerate(refs):
         try:
+            # [vendor patch P22] 크롭·번호 판정은 마크다운 치환(re_match)과 같은 기준
+            is_image = _is_image_ref(ref)
             result = extract_coordinates_and_label(ref, image_width, image_height)
-            if not result and ref[1] == 'image':
+            if not result and is_image:
                 # [vendor patch P22] 좌표를 못 읽은 image ref도 마크다운에는
                 # ![](images/{prefix}{idx}.jpg) 한 자리를 차지한다 — 번호를 소비해 뒤 그림이
                 # 앞 그림 파일을 가리키는 어긋남을 막는다.
@@ -179,12 +195,12 @@ def draw_bounding_boxes(image, refs, ouput_path, image_prefix=''):
                     # 마크다운 참조·boxes.json과 정렬을 유지한다.
                     box = _clamp_box(points, image_width, image_height)
                     if box is None:
-                        if label_type == 'image':
+                        if is_image:
                             img_idx += 1
                         continue
                     x1, y1, x2, y2 = box
 
-                    if label_type == 'image':
+                    if is_image:
                         try:
                             cropped = image.crop((x1, y1, x2, y2))
                             cropped.save(f"{ouput_path}/images/{image_prefix}{img_idx}.jpg")

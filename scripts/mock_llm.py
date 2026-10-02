@@ -29,8 +29,12 @@ Chat 요청이 `"stream": true`면 실제 서버처럼 SSE(chat.completion.chunk
   chunk=N / MOCK_STREAM_CHUNK      SSE 조각당 글자 수(기본 16)
   finish=length / MOCK_FINISH      finish_reason=length(responses는 incomplete) — 잘림 재현
   reasoning=N / MOCK_REASONING_CHARS  본문 앞에 사고 N자를 reasoning_content로 싣는다
+  transfer=chunked (쿼리만)         SSE를 HTTP/1.1 keep-alive + Transfer-Encoding: chunked로
+                                   보낸다(vLLM·llama.cpp·LM Studio 형식). 기본은 길이 없는
+                                   Connection: close(mlx_lm.server처럼 종료로 끝을 알림).
 계측: GET /__stats의 stream_chunks(보낸 SSE 조각 수)·stream_aborted(클라이언트가 끊어
-쓰기가 실패한 스트림 수).
+쓰기가 실패한 스트림 수)·connections(POST를 보낸 서로 다른 TCP 연결 수 — keep-alive 재사용
+검증용).
 """
 from __future__ import annotations
 
@@ -44,8 +48,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 # 호출 계측 — D-1(이중 번역) 검증에 쓴다. stream_*은 SSE 경로 계측.
-STATS = {"calls": 0, "by_text": {}, "stream_chunks": 0, "stream_aborted": 0}
+STATS = {"calls": 0, "by_text": {}, "stream_chunks": 0, "stream_aborted": 0, "connections": 0}
 _LOCK = threading.Lock()
+_PEERS: set = set()  # POST를 보낸 (주소, 포트) — 서로 다른 TCP 연결 수 계측
 
 # ⚠ 접두 문자는 masking.py `_PLACEHOLDER_RE`와 **같은 집합**이어야 한다
 # (m=수식 k=코드 g=이미지 u=URL c=인용 f=참조 t=HTML태그). 예전에는 `<m…>`만 봐서
@@ -255,6 +260,8 @@ class Handler(BaseHTTPRequestHandler):
                 STATS["by_text"] = {}
                 STATS["stream_chunks"] = 0
                 STATS["stream_aborted"] = 0
+                STATS["connections"] = 0
+                _PEERS.clear()
             self._send(200, {"ok": True})
             return
         self._send(404, {"error": "not found"})
@@ -274,6 +281,8 @@ class Handler(BaseHTTPRequestHandler):
 
         src = _source_only(_payload_text(body))
         with _LOCK:
+            _PEERS.add(self.client_address)
+            STATS["connections"] = len(_PEERS)
             STATS["calls"] += 1
             # 중복 계측은 **번역 대상 본문** 기준 — 용어집·문맥 프리픽스는 유닛마다
             # 달라지므로 프롬프트 전체를 키로 쓰면 이중 번역을 놓친다.
@@ -325,14 +334,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def _stream_chat(self, body: dict, out: str, finish: str, reasoning: str, knobs: dict):
         """SSE 응답 — 실제 서버처럼 조각마다 flush하고, 클라이언트가 끊으면 즉시 멈춘다."""
+        chunked = knobs["transfer"] == "chunked"
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")  # 본문 길이 없음 — 종료로 끝을 알린다
+        if chunked:
+            # keep-alive 청크 전송 — 종료 청크까지 읽어야 클라이언트가 연결을 재사용한다.
+            self.send_header("Transfer-Encoding", "chunked")
+        else:
+            self.send_header("Connection", "close")  # 본문 길이 없음 — 종료로 끝을 알린다
+            self.close_connection = True
         self.end_headers()
-        self.close_connection = True
         model = body.get("model", "mock")
         step = max(1, knobs["chunk"])
+
+        def frame(data: bytes) -> bytes:
+            return b"%x\r\n%s\r\n" % (len(data), data) if chunked else data
 
         def event(delta: dict, finish_reason=None, **extra) -> bytes:
             obj = {"id": "chatcmpl_mock", "object": "chat.completion.chunk", "model": model,
@@ -351,15 +368,19 @@ class Handler(BaseHTTPRequestHandler):
         pieces.append(b"data: [DONE]\n\n")
         try:
             # prefill 중 keepalive 주석(mlx_lm 형태) — 클라이언트는 무시해야 한다
-            self.wfile.write(b": keepalive 1/1\n\n")
+            self.wfile.write(frame(b": keepalive 1/1\n\n"))
             for piece in pieces:
                 if knobs["delay"]:
                     time.sleep(knobs["delay"])
-                self.wfile.write(piece)
+                self.wfile.write(frame(piece))
                 self.wfile.flush()
                 with _LOCK:
                     STATS["stream_chunks"] += 1
+            if chunked:
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
             with _LOCK:
                 STATS["stream_aborted"] += 1
 
@@ -382,6 +403,7 @@ def _scenario(path: str) -> dict:
         "chunk": int(num(pick("chunk", "MOCK_STREAM_CHUNK", "16"), 16)),
         "finish": pick("finish", "MOCK_FINISH", ""),
         "reasoning": int(num(pick("reasoning", "MOCK_REASONING_CHARS", "0"), 0)),
+        "transfer": (query.get("transfer") or ["close"])[0],
     }
 
 

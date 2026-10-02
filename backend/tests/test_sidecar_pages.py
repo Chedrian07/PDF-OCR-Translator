@@ -10,6 +10,8 @@ stub은 업로드 파일명(runner 규약 page_NNNN.png)에서 전역 페이지 
 - 잡 도중 sidecar 재시작(엔진 사망 → 503 → 재기동 → 모델 재로드): 정상 복구된 잡이
   대기 문구 경고로 degraded가 되던 문제(감사 sidecar-3), 엔진을 결정적으로 죽이는 페이지
   하나가 컨테이너 재시작을 3~5회 일으키던 문제(감사 sidecar-2).
+- 여러 쪽 청크의 읽기 타임아웃: 페이지별 복구가 타임아웃 난 페이지를 곧바로 다시 보내고
+  이미 끝난 형제 페이지까지 다시 추론하던 문제(감사 pipeline-6).
 """
 
 import json
@@ -26,6 +28,7 @@ from app.engine.base import NullSink
 from app.engine.registry import build_engine
 from app.engine.sidecar import SidecarRestartLoopError
 from app.main import create_app
+from app.sidecar.client import SidecarTimeoutError
 
 from tests.conftest import wait_done
 from tests.test_sidecar_client import _health_body, _parse_body
@@ -371,3 +374,53 @@ def test_page_that_kills_the_engine_costs_few_sidecar_restarts(
     assert [m for n, m in enumerate(merged, 1) if n != bad] == [
         _page_text(n) for n in range(1, pages + 1) if n != bad
     ]
+
+
+# ── 여러 쪽 청크의 읽기 타임아웃 (감사 pipeline-6) ────────────────────────────────
+
+def _slow_page_1(page: int):
+    """1쪽만 읽기 타임아웃보다 오래 추론한다 — sidecar는 끊긴 요청도 끝까지 돈다."""
+    if page == 1:
+        time.sleep(1.0)
+    return None
+
+
+def test_page_recovery_resends_neither_the_timed_out_page_nor_finished_siblings(tmp_path, stub):
+    """동시성 2 청크에서 1쪽이 읽기 타임아웃이면 run_multi가 실패하고 runner는 청크의 모든 페이지를
+    run_single로 다시 부른다. 1쪽은 sidecar에 보내지 않고 같은 SidecarTimeoutError로(텍스트
+    레이어로 가게), 이미 끝난 2쪽은 받아 둔 결과로 답한다. 예전에는 1쪽을 곧바로 다시 보내 끊긴
+    추론 뒤에 줄 세우고(또 타임아웃), 끝난 2쪽까지 GPU에서 다시 추론했다."""
+    stub.behavior = _slow_page_1
+    eng = build_engine(_settings(tmp_path, stub, remote_page_concurrency=2,
+                                 sidecar_read_timeout_s=0.3, sidecar_retries=0))
+    eng.load()
+    p1, p2 = _job_pages(tmp_path, 2)
+    with pytest.raises(SidecarTimeoutError):
+        eng.run_multi([p1, p2], tmp_path / "chunk", NullSink(), threading.Event())
+    assert sorted(stub.seen) == [1, 2]
+
+    with pytest.raises(SidecarTimeoutError) as ei:
+        eng.run_single(p1, tmp_path / "f1", NullSink(), threading.Event())
+    assert ei.value.retry_same_page is False  # runner는 재시도 없이 텍스트 레이어로 간다
+    assert eng.run_single(p2, tmp_path / "f2", NullSink(), threading.Event()) == _page_text(2)
+    assert sorted(stub.seen) == [1, 2]  # 페이지별 복구는 sidecar에 아무것도 보내지 않았다
+
+    # 1회용 — 같은 페이지를 또 부르면(다른 경로의 재처리) 이번에는 실제로 보낸다
+    assert eng.run_single(p2, tmp_path / "f3", NullSink(), threading.Event()) == _page_text(2)
+    assert stub.seen.count(2) == 2
+
+
+def test_job_with_a_timed_out_page_sends_every_page_once(tmp_path, stub):
+    """잡 단위: 1쪽은 텍스트 레이어로 복구되고 2쪽은 OCR 그대로 — 페이지마다 요청은 한 번이다
+    (예전 {1: 2, 2: 2})."""
+    stub.behavior = _slow_page_1
+    body, quality, merged = _run_job(tmp_path, stub, 2, remote_page_concurrency=2,
+                                     sidecar_read_timeout_s=0.3, sidecar_retries=0)
+
+    assert body["status"] == "done", body
+    assert sorted(stub.seen) == [1, 2], stub.seen
+    assert len(body["warnings"]) == 1, body["warnings"]
+    assert body["warnings"][0].startswith("1페이지: ") and "텍스트 레이어로 복구" in body["warnings"][0]
+    assert "SidecarTimeoutError" in body["warnings"][0]
+    assert "PDF 내장 텍스트 레이어에서 복구" in merged[0] and "Chapter 1 discusses" in merged[0]
+    assert merged[1] == _page_text(2)

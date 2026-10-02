@@ -507,6 +507,42 @@ def test_run_single_writes_torch_named_artifacts(monkeypatch, tmp_path, tok):
     assert md == "![](images/0.jpg)\n\nSingle page body recovered alone."
 
 
+GARBLED_FIGURE_PAGE = (
+    "<PAGE><|det|>title [100, 50, 900, 90]<|/det|>Heading one\n"
+    "<|det|>image [100, 120 500, 420]<|/det|>\n"  # 쉼표 누락 — 좌표를 읽을 수 없다
+    "<|det|>text [90, 430, 910, 470]<|/det|>Caption A under the first figure.\n"
+    "<|det|>image [150, 500, 650, 900]<|/det|>\n"
+    "<|det|>text [90, 910, 910, 950]<|/det|>Caption B under the second figure.\n"
+)
+
+
+@needs_mlx
+def test_run_multi_keeps_figure_numbers_after_an_unreadable_image_box(monkeypatch, tmp_path, tok):
+    """[P22] 좌표를 못 읽은 image det도 크롭 번호를 소비한다(torch와 같은 규칙) — 둘째 그림이
+    마크다운 둘째 자리 번호로 저장된다. 예전 MLX 후처리는 번호를 건너뛰어 둘째 그림이 첫
+    자리(page_0_0.jpg)에 붙고 둘째 자리는 깨졌다(audit mlx-2·torch-1)."""
+    _assert_ngram_free(GARBLED_FIGURE_PAGE)
+    eng = _engine(monkeypatch, ScriptedModel(multi=lambda pages: GARBLED_FIGURE_PAGE), tok)
+    out = tmp_path / "chunk_00"
+    md = eng.run_multi(_page_images(tmp_path, 1), out, RecSink(), threading.Event())
+
+    assert md == (out / "result.md").read_text(encoding="utf-8")
+    slot0, slot1 = md.index("![](images/page_0_0.jpg)"), md.index("![](images/page_0_1.jpg)")
+    assert slot0 < md.index("Caption A") < slot1 < md.index("Caption B")
+    # 읽을 수 없는 첫 그림은 파일이 없고, 둘째 그림은 자기 자리 번호(page_0_1)로 저장된다
+    assert _files(out) == [
+        "boxes.json", "images/page_0_1.jpg", "raw_pages.json", "result.md", "result_with_boxes_0.jpg",
+    ]
+    w, h = 600, 800  # _page_images 크기
+    assert json.loads((out / "boxes.json").read_text(encoding="utf-8")) == {
+        "page_0_1.jpg": {
+            "x1": int(150 / 999 * w), "y1": int(500 / 999 * h),
+            "x2": int(650 / 999 * w), "y2": int(900 / 999 * h),
+            "image_width": w, "image_height": h,
+        }
+    }
+
+
 @needs_mlx
 def test_output_limit_raises_output_limit_error_for_page_recovery(monkeypatch, tmp_path, tok):
     model = ScriptedModel(multi=lambda pages: endless_text())

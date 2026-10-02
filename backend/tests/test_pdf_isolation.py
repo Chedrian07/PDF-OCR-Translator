@@ -285,3 +285,21 @@ def test_textlayer_engine_skips_a_page_that_exceeded_the_limit(
     md_warnings = " ".join(body["warnings"])
     assert "렌더 시간 상한" in md_warnings
     assert "텍스트 레이어 추출을 건너뛰었습니다" in md_warnings
+
+
+def test_upload_blames_the_server_not_the_pdf_when_no_worker_can_start(
+    pdf_worker_processes, client, monkeypatch, tmp_path,
+):
+    """워커가 빈 작업도 못 끝내는 환경(x86_64 에뮬레이션 + PDF_WORKER_MEM_LIMIT_MB — 워커가 기동
+    직후 죽었다)에서 업로드가 '손상되었거나 지원하지 않는 PDF'(400)로 사용자 파일을 탓했다
+    (P4 재현). 자체 점검까지 죽으면 서버 문제(500)로 알리고, 잡을 남기지 않는다."""
+    from test_pdf_worker import _break_worker_environment
+
+    _break_worker_environment(monkeypatch, tmp_path)
+    response = client.post(
+        "/api/jobs", files={"file": ("ok.pdf", make_pdf_bytes(pages=1), "application/pdf")},
+    )
+    assert response.status_code == 500, response.text
+    detail = response.json()["detail"]
+    assert "서버 설정 문제" in detail and "손상" not in detail
+    assert client.get("/api/jobs").json()["jobs"] == []

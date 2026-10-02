@@ -871,6 +871,10 @@ def _portable(monkeypatch, text: str, missing: str) -> str:
     # `샘플( ⊠ 8M개의 토큰)`). 폰트 서브셋 뒤에는 tofu 대신 빈칸이 돼 더 조용히
     # 사라지므로, 여기서 ASCII 물결표로 낮추는 것이 유일한 방어선이다.
     ("∼", "~"),
+    # `\langle`·`\rangle`의 치환 결과 — AppleMyungjo·AppleSDGothicNeo에 없다(실측).
+    # KS X 1001의 CJK 꺾쇠로 낮춘다.
+    ("⟨", "〈"),
+    ("⟩", "〉"),
 ])
 def test_폰트에_없는_수학기호는_대체문자로_낮춘다(monkeypatch, char, expected):
     """2단계(_PORTABLE_SYMBOL_FALLBACKS) 없이는 구제되지 않는 문자들이다.
@@ -884,11 +888,22 @@ def test_폰트에_없는_수학기호는_대체문자로_낮춘다(monkeypatch,
     assert _portable(monkeypatch, f"1 {char} 2", missing="") == f"1 {char} 2"
 
 
-def test_기호_폴백표는_수학기호_6종을_모두_덮는다():
+def test_기호_폴백표는_수학기호_8종을_모두_덮는다():
     """표 자체를 고정한다 — 항목이 사라지면 조판이 조용히 tofu로 회귀한다."""
     assert _PORTABLE_SYMBOL_FALLBACKS == {
         "−": "-", "‐": "-", "‑": "-", "×": "x", "⁄": "/", "∼": "~",
+        "⟨": "〈", "⟩": "〉",
     }
+
+
+def test_내적_괄호는_macOS_명조에서도_tofu_없이_그려진다():
+    """실제 폰트로 확인 — `\\langle y, x \\rangle`이 'langle y, xrangle'(예전)도 tofu도 아니다."""
+    myungjo = "/System/Library/Fonts/Supplemental/AppleMyungjo.ttf"
+    if not Path(myungjo).is_file():
+        pytest.skip("macOS AppleMyungjo가 없는 환경")
+    flattened = _plain_text(r"\( \langle y, x \rangle \)")
+    assert flattened == "⟨ y, x ⟩"
+    assert _portable_text_for_font(flattened, myungjo) == "〈 y, x 〉"
 
 
 def test_대체문자마저_없는_폰트에서는_원문자를_유지한다(monkeypatch):

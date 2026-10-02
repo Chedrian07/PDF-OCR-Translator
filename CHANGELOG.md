@@ -24,7 +24,7 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 - Figures after a malformed image box (a string, empty list, `None` or malformed flat list) or a padded image label point at the right crop file in both the torch and MLX engines, and the layout view numbers crops the same way.
 - On Macs without MLX, `OCR_DEVICE=auto` (torch MPS) keeps the `PYTORCH_ENABLE_MPS_FALLBACK` safety net: the default is set before torch is first imported, and the metal engine warns when that is too late.
 - The textlayer engine keeps wrapped-cell tables and figure grids in row order.
-- Queued jobs survive a restart, and each job keeps the page separator it was built with.
+- Queued jobs survive a restart in their original queue order (even when uploaded in the same second), and each job keeps the page separator it was built with.
 - Sidecars escape literal `[[FIGURE:` text, recover pages truncated at OvisOCR2's output limit from the text layer (or keep them with a warning), retry transient model-load failures with backoff, and restart their container when the inference engine dies. Health and job wait notes show load retries and restarts. A page that keeps killing the inference engine is re-sent at most once after the restart (no extra runner retry), restarts that recover are recorded as notices instead of warnings, OvisOCR2 jobs with `OCR_REMOTE_PAGE_CONCURRENCY` > 1 no longer get false page-marker warnings, rejected OvisOCR2 figure tags can no longer forge figure placeholders, and truncated pages that could not be checked name the real reason.
 - When a multi-page sidecar chunk fails, page-by-page recovery reuses the pages that already finished and does not resend a page that timed out.
 

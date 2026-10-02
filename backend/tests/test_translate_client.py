@@ -957,8 +957,18 @@ def test_request_variant는_종전과_같은_요청이면_비어_있다():
     assert _cfg(base_url="http://127.0.0.1:1235/v1").request_variant == ""  # reasoning 미설정
     local_off = _cfg(base_url="http://127.0.0.1:1235/v1", reasoning="off")
     assert local_off.request_variant == "reasoning_style=chat_template_kwargs"
-    extra = _cfg(extra_body='{"top_k":20}')
-    assert extra.request_variant == 'extra_body={"top_k":20}'
+
+
+def test_request_variant는_extra_body_원문_대신_해시만_싣는다():
+    """request_variant는 state.json에 기록돼 무인증 /translate/state로 나간다 — 원문 JSON을
+    실으면 게이트웨이 키·테넌트 토큰 같은 TRANSLATE_EXTRA_BODY 값이 노출됐다(translate-10).
+    캐시 키 재료로는 해시로 충분하다(값이 바뀌면 키도 바뀐다)."""
+    secret = _cfg(extra_body='{"metadata":{"tenant_token":"tt-SECRET"},"top_k":20}')
+    variant = secret.request_variant
+    assert variant.startswith("extra_body=sha256:")
+    assert "tt-SECRET" not in variant and "top_k" not in variant
+    assert variant == _cfg(extra_body=secret.extra_body).request_variant      # 결정적
+    assert variant != _cfg(extra_body='{"top_k":20}').request_variant         # 값마다 다르다
 
 
 def test_전부_잘림_오류는_서버측_thinking_끄기를_안내():

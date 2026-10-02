@@ -33,6 +33,7 @@ from .masking import (
     mask,
     sanitize_translation,
     should_skip,
+    strip_math_dollars,
     unmask,
     untranslated_reason,
 )
@@ -371,7 +372,7 @@ class _TranslationRun:
         self.progressed.set()
         with self.gate_lock:
             self.timeout_streak = 0  # 엔드포인트가 살아 있다 — 연속 시간 초과 집계를 되돌린다
-        clean, sc = sanitize_translation(raw)
+        clean, sc = sanitize_translation(raw, masked)
         restored, missing, dup = unmask(clean, mapping, masked)
         return restored, missing, dup, sc, clean
 
@@ -516,6 +517,9 @@ class _TranslationRun:
         hit, text = self.flights.read(key)
         if not hit or key not in self.flights.prior_keys:
             return hit, text
+        # 원출력 단계 정리('$…$' 감싸기·한쪽 달러)가 생기기 전에 캐시된 번역은 복원 수식 옆에
+        # '$'가 남아 있다 — 재번역해도 캐시 적중으로 그대로 쓰였다(delta-pdf-translate-5)
+        text = strip_math_dollars(text, mapping, u.src)
         reason = untranslated_reason(u.src, text, mapping) if text.strip() else "empty"
         if not reason:
             return True, text

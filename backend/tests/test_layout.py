@@ -3,6 +3,8 @@ import re
 from html.parser import HTMLParser
 from pathlib import Path
 
+import pytest
+
 from app.pipeline.layout import (
     estimate_font_size_cqw,
     parse_page_blocks,
@@ -452,11 +454,12 @@ def test_degenerate_huge_coordinates_do_not_fail_the_page():
 
 
 def test_absurd_image_box_keeps_vendor_crop_numbering():
-    """상한 안이지만 터무니없는 좌표의 image 박스는 블록으로 만들지 않되 crop 번호는 센다.
+    """쓸 수 없는 image 박스는 블록으로 만들지 않되 crop 번호는 센다.
 
-    벤더는 literal_eval에 성공한 페이로드의 박스마다 크롭 번호를 쓴다(좌표가 이상해도).
-    박스를 지우며 번호까지 당기면 뒤 그림이 엉뚱한 크롭 파일을 가리킨다. 반대로
-    literal_eval이 실패하는 페이로드는 벤더가 크롭을 하나도 만들지 않는다.
+    벤더는 literal_eval에 성공한 페이로드의 박스마다 크롭 번호를 쓴다(좌표가 이상해도 —
+    clamp 뒤 퇴화한 상자도). 박스를 지우며 번호까지 당기면 뒤 그림이 엉뚱한 크롭 파일을
+    가리킨다. literal_eval이 실패하는 페이로드는 크롭 파일은 없지만 벤더 P22가 번호 1개를
+    소비한다(마크다운 참조와 정렬).
     """
     raw = (
         "<|ref|>image<|/ref|><|det|>"
@@ -468,8 +471,107 @@ def test_absurd_image_box_keeps_vendor_crop_numbering():
     assert [(b["bbox"], b["crop_index"]) for b in blocks] == [
         ([1, 2, 3, 4], 0),
         ([10, 20, 30, 40], 2),
-        ([50, 50, 60, 60], 3),
+        ([50, 50, 60, 60], 4),
     ]
+
+
+_GOOD_IMAGE_DET = "<|det|>image [100, 450, 800, 900]<|/det|>"
+# 쓸 수 없는 image 매치 — 실제 모델의 inline 문법과 ref 문법 (tests/test_mlx_postprocess.py와 같은 표)
+_UNUSABLE_IMAGE_DETS = {
+    "missing-comma": "<|det|>image [100, 120 500, 420]<|/det|>",  # literal_eval 실패
+    "three-coords": "<|det|>image [100, 120, 500]<|/det|>",
+    "five-coords": "<|det|>image [100, 120, 500, 600, 700]<|/det|>",
+    "inf": "<|det|>image [1e400, 0, 500, 500]<|/det|>",
+    "float-overflow": "<|det|>image [" + "9" * 400 + ", 0, 500, 500]<|/det|>",
+    "int-digit-limit": "<|det|>image [" + "9" * 5000 + ", 0, 500, 500]<|/det|>",
+    "bool": "<|det|>image [True, 0, 500, 500]<|/det|>",  # bool은 좌표가 아니다
+    "inverted": "<|det|>image [500, 500, 100, 100]<|/det|>",
+    "flat-strings": "<|det|>image ['x', 0, 500, 500]<|/det|>",  # 기형 평평 목록 — 상자 하나
+    "ref-non-literal": "<|ref|>image<|/ref|><|det|>[[a, b, c, d]]<|/det|>",
+    "ref-three-coords": "<|ref|>image<|/ref|><|det|>[[0, 0, 999]]<|/det|>",
+    "ref-name-coord": "<|ref|>image<|/ref|><|det|>[[0, 0, abc, 1]]<|/det|>",
+    "ref-empty-list": "<|ref|>image<|/ref|><|det|>[]<|/det|>",  # 상자 목록이 아닌 값
+    "ref-string-literal": "<|ref|>image<|/ref|><|det|>'abcd'<|/det|>",
+    "ref-none": "<|ref|>image<|/ref|><|det|>None<|/det|>",
+    "ref-zero": "<|ref|>image<|/ref|><|det|>0<|/det|>",
+}
+
+
+@pytest.mark.parametrize("bad", list(_UNUSABLE_IMAGE_DETS.values()), ids=list(_UNUSABLE_IMAGE_DETS))
+def test_unusable_image_payload_takes_exactly_one_vendor_crop_number(bad):
+    """쓸 수 없는 image 매치 하나는 벤더 P22처럼 크롭 번호 정확히 1개 — 뒤 그림은 1번 파일.
+
+    예전 `_quads`는 숫자를 4개씩 묶어 세어, 좌표 3개·bool·비리터럴·빈 목록·문자열 뒤 그림을
+    0번(앞 그림 파일)으로, 쉼표 누락·좌표 5개·inf·뒤집힌 상자는 벤더가 저장하지 않은 크롭의
+    블록으로 냈다(감사 mlx-2·torch-2 — layout_vs_vendor 재현)."""
+    blocks = parse_page_blocks(f"{bad}\nfig A\n{_GOOD_IMAGE_DET}\nfig B")
+    assert [(b["bbox"], b["crop_index"]) for b in blocks if "crop_index" in b] == [
+        ([100, 450, 800, 900], 1),
+    ]
+
+
+def test_image_bbox_is_clamped_like_the_vendor_crop():
+    """음수·999 초과 좌표는 벤더 crop처럼 0–999로 자른다 — 예전에는 부호를 버려 -50이 50이 됐다."""
+    blocks = parse_page_blocks(
+        "<|det|>image [-50, 100, 500, 600]<|/det|>\n<|det|>image [0, 0, 1200, 999]<|/det|>"
+    )
+    assert [(b["bbox"], b["crop_index"]) for b in blocks] == [
+        ([0, 100, 500, 600], 0),
+        ([0, 0, 999, 999], 1),
+    ]
+
+
+def _random_vendor_page(rng) -> str:
+    """라벨·문법·좌표가 뒤섞인 한 페이지 원문 — 정상·경계 밖·퇴화·해석 불가가 섞인다."""
+    odd = ["-50", "1200", "1e400", "9" * 400, "9" * 5000, "True", "'x'", "a", "None", "2.5"]
+
+    def flat(k):
+        if k == 4 and rng.random() < 0.6:  # 정상 상자
+            x1, y1 = rng.randrange(0, 800), rng.randrange(0, 800)
+            atoms = [str(v) for v in (x1, y1, x1 + rng.randrange(1, 400), y1 + rng.randrange(1, 400))]
+        else:  # 이상 원소가 섞인 좌표
+            atoms = [rng.choice(odd) if rng.random() < 0.3 else str(rng.randrange(0, 1000)) for _ in range(k)]
+        sep = ", " if rng.random() < 0.9 else " "  # 가끔 쉼표 누락
+        return "[" + sep.join(atoms) + "]"
+
+    blocks = []
+    for _ in range(rng.randrange(1, 7)):
+        label = rng.choice(["image", "image", "image", "text", "title", "table"])
+        k = rng.choice([4, 4, 4, 3, 5, 0])
+        if rng.random() < 0.5:
+            blocks.append(f"<|det|>{label} {flat(k)}<|/det|>caption {rng.randrange(100)}")
+        else:
+            boxes = ", ".join(flat(rng.choice([4, 4, 3])) for _ in range(rng.randrange(0, 3)))
+            payload = rng.choice([f"[{boxes}]", flat(k), "[[a, b, c, d]]", "'abcd'", "", "None", "0"])
+            blocks.append(f"<|ref|>{label}<|/ref|><|det|>{payload}<|/det|>body {rng.randrange(100)}")
+    return "\n".join(blocks)
+
+
+def test_crop_indices_name_the_files_the_vendor_saves(tmp_path):
+    """무작위 페이지에서 parse_page_blocks의 crop_index가 벤더가 실제로 저장한 크롭 파일과 같다.
+
+    torch 없는 MLX 후처리(torch 벤더 P22와 바이트 동일 — tests/test_mlx_postprocess.py)의
+    draw_bounding_boxes로 대조한다. 정수 좌표만 있는 페이지는 집합이 같아야 하고, 소수 좌표가
+    섞이면 레이아웃이 픽셀 퇴화를 모르므로 '레이아웃 ⊆ 저장 파일'만 요구한다(없는 파일을
+    가리키지 않는다)."""
+    import random
+
+    from PIL import Image
+
+    from app.vendor.unlimited_ocr_mlx import postprocess as vendor
+
+    rng = random.Random(2222)
+    image = Image.new("RGB", (1000, 1000), (200, 210, 220))  # 999px 이상 — 정수 상자는 퇴화하지 않는다
+    for i in range(300):
+        text = _random_vendor_page(rng)
+        out = tmp_path / f"p{i}"
+        (out / "images").mkdir(parents=True)
+        vendor.draw_bounding_boxes(image, vendor.re_match(text)[0], str(out))
+        saved = sorted(int(f.stem) for f in (out / "images").glob("*.jpg"))
+        emitted = sorted(b["crop_index"] for b in parse_page_blocks(text) if "crop_index" in b)
+        assert set(emitted) <= set(saved), text
+        if "2.5" not in text:
+            assert emitted == saved, text
 
 
 # ── standalone 내려받기 파일의 CSP·KaTeX 옵션 ─────────────────────────────────

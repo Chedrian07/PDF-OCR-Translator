@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import socket
+import ssl
 import threading
 import time
 from collections.abc import Callable
@@ -573,7 +575,16 @@ class OpenAICompatClient:
                     continue
                 if stream_error:
                     raise TranslateAPIError(str(e)) from e
-                raise TranslateAPIError(f"번역 API 연결 실패: {e}") from e
+                # requests 예외 문구에는 요청 URL(쿼리 포함)·호스트·포트가 그대로 있다 — 이
+                # 문구는 state.json·SSE로 무인증 노출되므로 원인만 고정 문구로 요약하고,
+                # 상세는 쿼리를 가린 채 서버 로그에만 남긴다(security-2).
+                logger.warning(
+                    "번역 API 연결 실패 — 재시도 소진: %s", _redact_query(str(e)),
+                )
+                raise TranslateAPIError(
+                    f"번역 API 연결 실패({_transport_reason(e)}) — "
+                    "OPENAI_BASE_URL과 서버 실행·네트워크 상태를 확인하세요"
+                ) from e
 
             if status == 200:
                 result = self._parse(mode, body)
@@ -873,6 +884,62 @@ def _decode_body(raw: bytes) -> dict | str:
         return json.loads(text)
     except ValueError:
         return text
+
+
+_QUERY_RE = re.compile(r"\?[^\s'\"()<>]*")
+
+
+def _redact_query(text: str) -> str:
+    """URL 쿼리 문자열을 가린다 — base URL 쿼리에 자격증명을 싣는 게이트웨이 설정 대비."""
+    return _QUERY_RE.sub("?<redacted>", text)
+
+
+def _os_error_in(exc: BaseException) -> OSError | None:
+    """requests → urllib3(MaxRetryError.reason) → 소켓 오류로 이어지는 원인 사슬의 OS 오류."""
+    queue: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while queue and len(seen) < 16:
+        cur = queue.pop(0)
+        if id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, OSError) and not isinstance(cur, requests.RequestException):
+            return cur
+        reason = getattr(cur, "reason", None)
+        linked = [*cur.args, reason, cur.__cause__, cur.__context__]
+        queue.extend(x for x in linked if isinstance(x, BaseException))
+    return None
+
+
+def _transport_reason(exc: BaseException) -> str:
+    """연결 오류 원인의 사용자용 요약 — 주소·쿼리를 담지 않는 고정 문구만 쓴다."""
+    if isinstance(exc, requests.exceptions.SSLError):
+        return "TLS 오류"
+    if isinstance(exc, requests.exceptions.ProxyError):
+        return "프록시 오류"
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return "연결 시간 초과"
+    if isinstance(exc, requests.exceptions.ChunkedEncodingError):
+        return "응답 수신 중 연결 끊김"
+    if isinstance(exc, requests.exceptions.ContentDecodingError):
+        return "응답 압축 해제 실패"
+    if isinstance(exc, (requests.exceptions.InvalidURL, requests.exceptions.MissingSchema,
+                        requests.exceptions.InvalidSchema)):
+        return "잘못된 URL"
+    cause = _os_error_in(exc)
+    if isinstance(cause, socket.gaierror):
+        return "호스트 이름을 찾을 수 없음"
+    if isinstance(cause, ssl.SSLError):
+        return "TLS 오류"
+    if isinstance(cause, ConnectionRefusedError):
+        return "연결 거부"
+    if isinstance(cause, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+        return "연결 끊김"
+    if isinstance(cause, TimeoutError):
+        return "시간 초과"
+    if cause is not None and cause.errno:
+        return os.strerror(cause.errno)  # 'Network is unreachable' 등 — 주소를 담지 않는다
+    return type(exc).__name__
 
 
 def _is_read_timeout(exc: BaseException) -> bool:

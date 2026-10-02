@@ -20,6 +20,11 @@ provider 실패는 명확한 오류로 표면화되고 전환은 사용자가 pr
 가능성이 크므로 `SidecarRestartLoopError`(retry_same_page=False)로 runner의 페이지 격리에
 넘기고, 페이지별 복구가 그 페이지를 한 번 더 보낼 때는 또 내려가도 다시 기다려 보내지 않는다
 — 페이지 하나가 컨테이너 재시작을 되풀이시키지 않게(`_parse_one`).
+
+여러 쪽 청크(OCR_REMOTE_PAGE_CONCURRENCY>1)가 실패하면 runner는 청크의 모든 페이지를
+run_single로 다시 부른다. 그때 읽기 타임아웃이 난 페이지는 sidecar에 다시 보내지 않고 같은
+예외로 텍스트 레이어에 넘기고, 이미 끝난 형제 페이지는 받아 둔 결과를 쓴다
+(`_keep_for_page_recovery` — GPU 중복 추론 방지).
 """
 
 from __future__ import annotations
@@ -301,6 +306,15 @@ class SidecarEngine(OCREngine):
         # 그 페이지를 run_single로 다시 부르는데, 같은 요청은 같은 곳에서 다시 잘리므로
         # sidecar에 보내지 않고 같은 예외로 답한다(1회용 — 다음 run_multi·잡 전환에서 비움).
         self._truncated_replay: dict[Path, str] = {}
+        # run_multi에서 읽기 타임아웃(SidecarTimeoutError)이 난 페이지 → 사유. runner의 페이지별
+        # 복구가 그 페이지를 곧바로 run_single로 다시 부르면, sidecar는 끊긴 추론을 아직 하고
+        # 있어 재요청이 그 뒤에 줄을 서 또 타임아웃이 난다(GPU 중복 + 페이지당 2배 시간). 보내지
+        # 않고 같은 예외로 답해 텍스트 레이어로 넘긴다(감사 pipeline-6, 1회용 — 비우는 규칙은 위와 같다).
+        self._timeout_replay: dict[Path, str] = {}
+        # 실패로 끊긴 run_multi에서 이미 끝난 형제 페이지의 결과(정화된 페이지, 정화 경고).
+        # 페이지별 복구의 run_single은 그 페이지를 GPU에서 다시 추론하지 않고 이 결과를 쓴다
+        # (감사 pipeline-6, 1회용 — 비우는 규칙은 위와 같다).
+        self._sibling_results: dict[Path, tuple[PageResult, list[str]]] = {}
         # 복귀 뒤 다시 보낸 요청까지 실패한(SidecarRestartLoopError) 페이지. runner의 페이지별
         # 복구가 그 페이지를 run_single로 한 번 더 보낼 때, 또 503·연결 끊김이면 기다려 다시
         # 보내지 않고 곧바로 같은 예외를 낸다(1회용 — 그 페이지의 다음 요청·다음 run_multi·
@@ -730,6 +744,8 @@ class SidecarEngine(OCREngine):
             self._degraded_refreshed = False
             self._outage_deadline = None
             self._truncated_replay.clear()
+            self._timeout_replay.clear()
+            self._sibling_results.clear()
             self._recovery_spent.clear()
 
     def _refresh_degraded_health(self) -> None:
@@ -767,18 +783,29 @@ class SidecarEngine(OCREngine):
         single: bool,
     ) -> str:
         self._begin_job(image_paths)
+        cached = None
         if single:
             replay = self._truncated_replay.pop(image_paths[0], None)
             if replay is not None:
                 # 방금 run_multi가 잘림으로 넘긴 페이지를 runner가 페이지 단위로 다시 부른 것 —
                 # 같은 요청은 같은 곳에서 다시 잘린다. GPU에 다시 보내지 않고 같은 판정을 낸다.
                 raise SidecarOutputTruncated(replay)
+            timed_out = self._timeout_replay.pop(image_paths[0], None)
+            if timed_out is not None:
+                # 방금 run_multi에서 읽기 타임아웃이 난 페이지 — sidecar는 그 추론을 아직 하고
+                # 있을 수 있다. 다시 보내지 않고 같은 예외로 페이지 격리(텍스트 레이어)에 넘긴다.
+                raise SidecarTimeoutError(timed_out)
+            # 끊긴 run_multi에서 이미 끝난 형제 페이지 — 같은 요청의 결과를 다시 추론하지 않는다
+            cached = self._sibling_results.pop(image_paths[0], None)
         else:
             # 새 청크 — 이전 청크의 1회용 표식은 무효
             self._truncated_replay.clear()
+            self._timeout_replay.clear()
+            self._sibling_results.clear()
             with self._health_lock:
                 self._recovery_spent.clear()
-        self._ensure_ready(cancel)
+        if cached is None:
+            self._ensure_ready(cancel)
         out_dir.mkdir(parents=True, exist_ok=True)
         # 텍스트 bbox가 없는 엔진(figure_only)은 raw_pages.json에 좌표를 싣지 않는다 — 실으면
         # image 블록뿐인 layout.json이 생겨 HTML·PDF 내보내기가 OCR 텍스트를 잃는다.
@@ -790,7 +817,9 @@ class SidecarEngine(OCREngine):
         parts: list[str] = []
 
         concurrency = min(len(image_paths), max(1, self._settings.remote_page_concurrency))
-        if concurrency <= 1:
+        if cached is not None:
+            pages = self._iter_cached(cached)
+        elif concurrency <= 1:
             pages = self._iter_serial(image_paths, cancel)
         else:
             pages = self._iter_concurrent(image_paths, cancel, concurrency)
@@ -876,6 +905,11 @@ class SidecarEngine(OCREngine):
                 raise JobCanceled()
             yield local_page, self._parse_one(path, local_page, cancel)
 
+    @staticmethod
+    def _iter_cached(result: tuple[PageResult, list[str]]):
+        """끊긴 run_multi에서 이미 받아 둔 페이지 결과를 run_single의 한 페이지로 낸다."""
+        yield 0, result
+
     def _iter_concurrent(
         self, image_paths: list[Path], cancel: threading.Event, concurrency: int
     ):
@@ -892,6 +926,8 @@ class SidecarEngine(OCREngine):
         stop = threading.Event()
         signal = _AnyCancel(cancel, stop)
         executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="sidecar-page")
+        futures = []
+        finished = False
         try:
             futures = [
                 executor.submit(self._parse_one, path, i, signal)
@@ -901,9 +937,27 @@ class SidecarEngine(OCREngine):
                 if cancel.is_set():
                     raise JobCanceled()
                 yield i, fut.result()
+            finished = True
         finally:
             stop.set()  # 미완료 형제 요청의 연결을 끊는다 (다음 시도의 큐를 비움)
             executor.shutdown(wait=False, cancel_futures=True)
+            if not finished and not cancel.is_set():
+                self._keep_for_page_recovery(image_paths, futures)
+
+    def _keep_for_page_recovery(self, image_paths: list[Path], futures: list) -> None:
+        """끊긴 청크에서 이미 끝난 페이지를 runner의 페이지별 복구(run_single)에 넘겨 둔다.
+
+        청크가 실패하면 runner는 청크의 모든 페이지를 run_single로 다시 부른다. 그때 끝난 형제
+        페이지를 다시 추론하거나, 읽기 타임아웃이 난 페이지를 곧바로 다시 보내 sidecar의 끊긴
+        추론 뒤에 줄 세우지 않게 한다(감사 pipeline-6)."""
+        for path, fut in zip(image_paths, futures):
+            if not fut.done() or fut.cancelled() or path in self._truncated_replay:
+                continue  # 잘린 페이지는 _truncated_replay가 같은 판정으로 답한다
+            error = fut.exception()
+            if error is None:
+                self._sibling_results[path] = fut.result()
+            elif isinstance(error, SidecarTimeoutError):
+                self._timeout_replay[path] = str(error)
 
     def run_multi(
         self,

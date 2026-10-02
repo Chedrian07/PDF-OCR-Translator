@@ -208,7 +208,11 @@ make dev PORT=8010   # 8000을 다른 서버가 쓰고 있으면 포트만 바�
   Unlimited-OCR 모델 코드를 mlx 단독 의존으로 옮긴 것, MIT). mlx-vlm·torch에 의존하지 않고,
   torch 경로와 **같은 고정 스냅샷**(`ee63731b`)을 변환 없이 읽습니다(HF 캐시도 공유).
   멀티페이지 청크·토큰 스트리밍·레이아웃·figure·충실도 게이트 등 계약은 torch 엔진과 같습니다.
-- 첫 기동은 모델(~6.7GB)을 HF 캐시(`HF_HOME`, 기본 `~/.cache/huggingface`)에 받습니다.
+- 첫 기동은 모델(~6.7GB)을 HF 허브 캐시(`HF_HUB_CACHE`, 기본 `$HF_HOME/hub` =
+  `~/.cache/huggingface/hub`)의 `models--baidu--Unlimited-OCR`에 받습니다. 다른 곳에 받아 둔
+  캐시를 쓰려면 셸이나 `.env`에 `HF_HUB_CACHE=<models--…가 바로 아래 있는 디렉터리>`를 둡니다 —
+  `HF_HOME`만 바꾸면 `<HF_HOME>/hub`를 찾아 다시 받습니다. 다운로드를 막으려면
+  `HF_HUB_OFFLINE=1`(캐시에 없으면 모델 로드 실패로 알립니다).
   기동 로그의 `OCR_DEVICE=auto → mlx`와 헤더의 `MLX · <칩 이름>` 배지로 확인합니다.
 - **`OCR_DEVICE`** (비우면 `auto`): `auto` | `mlx` | `metal`(=`mps`, torch MPS) | `cpu` |
   `cuda`. `auto`는 unlimited 엔진에만 적용되며 mlx → cuda → metal → cpu 순으로 쓸 수 있는

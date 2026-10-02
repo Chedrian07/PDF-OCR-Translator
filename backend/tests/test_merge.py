@@ -720,3 +720,59 @@ def test_one_page_with_unparseable_grounding_does_not_break_the_chunk(tmp_path, 
     pages = {p["page"]: p for p in m.layout_pages}
     assert pages[1]["blocks"] == []
     assert sum("레이아웃 좌표를 해석하지 못해" in w for w in m.warnings) == 2
+
+
+def _two_text_pages(job: Path) -> list[str]:
+    _pdf_with_pages(job / "source.pdf", [
+        ["ALPHA " + line for line in _PROSE],
+        ["BRAVO " + line for line in _PROSE],
+    ])
+    return [" ".join(prefix + line for line in _PROSE) for prefix in ("ALPHA ", "BRAVO ")]
+
+
+def _count_source_reads(monkeypatch) -> list[int]:
+    import app.pipeline.pdf as pdf_mod
+
+    reads: list[int] = []
+    real = pdf_mod.page_plain_texts
+    monkeypatch.setattr(
+        pdf_mod, "page_plain_texts",
+        lambda path, indices: reads.append(len(indices)) or real(path, indices),
+    )
+    return reads
+
+
+def test_exact_markers_without_raw_pages_skip_alignment(tmp_path, monkeypatch):
+    """원출력을 남기지 않는 엔진(figure_only sidecar)의 여러 쪽 청크 — 마커 수가 정확하면 정합하지
+    않는다. 빈 원출력을 개수 불일치로 세서 청크마다 원본 텍스트를 읽고 '페이지 마커 2개 (기대 2)'
+    거짓 경고로 잡을 degraded로 만들었다(감사 pipeline-7)."""
+    job = tmp_path / "job"
+    job.mkdir()
+    bodies = _two_text_pages(job)
+    reads = _count_source_reads(monkeypatch)
+    m = IncrementalMerger(job, SEP)
+    c = _mk_multi_chunk(job, "chunk_00", 2)  # raw_pages.json 없음
+    m.add_chunk(ChunkResult(c, 1, 2, "<PAGE>\n" + "\n<PAGE>\n".join(bodies)))
+
+    assert reads == []
+    assert m.warnings == []
+    assert m.pages_md[0].startswith("ALPHA") and m.pages_md[1].startswith("BRAVO")
+
+
+def test_alignment_that_confirms_the_positions_leaves_no_warning(tmp_path, monkeypatch):
+    """원출력 수만 어긋나 정합했는데 결과가 위치 그대로면 고친 것이 없다 — 경고하지 않는다."""
+    job = tmp_path / "job"
+    job.mkdir()
+    bodies = _two_text_pages(job)
+    reads = _count_source_reads(monkeypatch)
+    m = IncrementalMerger(job, SEP)
+    c = _mk_multi_chunk(job, "chunk_00", 2)
+    (c / "raw_pages.json").write_text(  # 원출력이 한 쪽 모자라다
+        json.dumps({"pages": [f"<|det|>text [0,0,999,99]<|/det|>{bodies[0]}"]}),
+        encoding="utf-8",
+    )
+    m.add_chunk(ChunkResult(c, 1, 2, "<PAGE>\n" + "\n<PAGE>\n".join(bodies)))
+
+    assert reads == [2]  # 정합은 했다
+    assert m.warnings == []
+    assert m.pages_md[0].startswith("ALPHA") and m.pages_md[1].startswith("BRAVO")

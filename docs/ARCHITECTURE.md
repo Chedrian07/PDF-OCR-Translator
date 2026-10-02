@@ -2218,7 +2218,9 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
   `theme-init.js`, 파일이 바뀌면 해시를 다시 계산), API가 내보내는 HTML(`document.html` — 인라인
   KaTeX)은 `script-src 'self' 'unsafe-inline'`. 정적 프론트엔드(`/api` 밖)는
   `Cache-Control: no-cache` — 업그레이드 뒤 브라우저가 옛 ES 모듈과 새 모듈을 섞어 쓰지 않게
-  ETag로 재검증한다(라우트가 정한 헤더는 덮지 않는다).
+  ETag로 재검증한다. 모든 응답(JSON·정적 파일·SSE 포함)에 `X-Content-Type-Options: nosniff`를
+  붙여 브라우저가 명시한 Content-Type 밖으로 내용을 추측하지 않게 한다(정적 `.js`는
+  `text/javascript` — ES 모듈은 원래 MIME을 엄격히 본다). 라우트가 정한 헤더는 덮지 않는다.
 - **SPA meta CSP**: `index.html`의 `<meta http-equiv="Content-Security-Policy">`와
   `<meta name="referrer" content="same-origin">`는 meta가 표현할 수 있는 모든 지시어에서 헤더와
   **같다**(`connect-src 'self'`는 `default-src`와 같은 값) — 실효 정책은 헤더 정책 그대로이고

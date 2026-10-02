@@ -235,11 +235,17 @@ def test_queued_cancellation_publishes_terminal_sse_event(tmp_path):
     subscriber = broker.subscribe(job.id)
 
     # 시작 전에 큐와 취소를 준비해 타이밍에 의존하지 않고 dequeue 전 취소를 재현한다.
+    # (stop()을 start() 전에 부르지 않는다 — 종료 요청 뒤 워커는 남은 대기 잡을 맡지 않는다.)
     worker.submit(job)
     cancel_events[job.id].set()
-    worker.stop()
     worker.start()
-    worker.join(timeout=5.0)
+    try:
+        deadline = time.monotonic() + 5.0
+        while job.status != "canceled" and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        worker.stop()
+        worker.join(timeout=5.0)
     assert not worker.is_alive()
     assert job.status == "canceled"
     assert not engine.loaded

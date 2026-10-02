@@ -106,6 +106,14 @@ class _StreamErrorEvent(requests.exceptions.RequestException):
     """내부용 — 스트림 중간의 일시 장애 이벤트. 전송 오류와 같은 백오프로 재시도한다."""
 
 
+class _ResponseTooLarge(TranslateAPIError):
+    """내부용 — 응답 본문이 TRANSLATE_MAX_RESPONSE_MB를 넘었다(공개 계약은 TranslateAPIError).
+
+    최초 요청에서는 고장·악성 게이트웨이 신호라 잡 전체 오류로 두고, 잘림 뒤 2배 재시도
+    에서만 잘림(유닛 단위)으로 바꾼다 — complete() 참조.
+    """
+
+
 class _ModeFlight:
     """auto 최초 협상의 결과/오류를 동시 호출자에게 한 번만 공개한다."""
 
@@ -282,7 +290,7 @@ class OpenAICompatClient:
         return self.cfg.max_response_mb * 1024 * 1024
 
     def _too_large(self) -> TranslateAPIError:
-        return TranslateAPIError(
+        return _ResponseTooLarge(
             f"번역 API 응답이 상한({self.cfg.max_response_mb}MB)을 넘어 읽기를 중단했습니다 — "
             "게이트웨이 이상이 아니라면 TRANSLATE_MAX_RESPONSE_MB를 올리세요"
         )
@@ -370,6 +378,11 @@ class OpenAICompatClient:
             # 2배 예산이 서버 상한을 넘어 400 등 — 그 유닛의 원인은 여전히 잘림이다.
             # 연결 실패·5xx 같은 전역 오류는 그대로 전파한다(엔드포인트 문제).
             raise self._truncated(text, max_tokens, f"2배 재시도 거부: {e}") from e
+        except _ResponseTooLarge as e:
+            # 2배 예산의 thinking 스트림이 응답 상한을 넘었다(xhigh 163,840토큰 ≈ 53MB SSE >
+            # 기본 32MB) — 최초 응답이 이미 잘림을 보였으니 원인은 여전히 잘림이다. 종전에는
+            # 상한 오류가 잘림 처리를 우회해 잡 전체가 실패했다(translate-6).
+            raise self._truncated(text, max_tokens, "2배 재시도 응답이 응답 상한을 넘음") from e
         if not retry_truncated:
             return retry_text
         why = _hopeless_truncation(retry_text, user) or "2배 예산에서도 잘림"

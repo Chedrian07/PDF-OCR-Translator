@@ -101,22 +101,83 @@ def test_raw_pages_layout_roundtrip(tmp_path, page_image):
     assert "<table>" in blocks[3]["content"]
 
 
-def test_figure_only_engine_skips_raw_pages_but_keeps_boxes(tmp_path, page_image):
-    """write_raw=False(figure_only 엔진)면 raw_pages.json을 쓰지 않는다 — image
-    det뿐인 원출력이 layout.json이 되어 내보내기가 텍스트를 잃던 근본 원인. 그림
-    상대 폭(boxes.json)과 크롭·오버레이는 그대로 남긴다."""
+def test_figure_only_engine_writes_empty_raw_pages_but_keeps_boxes(tmp_path, page_image):
+    """write_raw=False(figure_only 엔진)면 raw_pages.json에 좌표를 싣지 않는다 — image
+    det뿐인 원출력이 layout.json이 되어 내보내기가 텍스트를 잃던 근본 원인. 파일은
+    페이지마다 빈 원출력 하나로 남긴다(merge가 원출력 개수로 페이지 수를 맞춰 본다).
+    그림 상대 폭(boxes.json)과 크롭·오버레이는 그대로 남긴다."""
     out = tmp_path / "chunk_00"
     mat = ChunkMaterializer(out, single=False, write_raw=False)
     md = mat.add_page(
         _page("본문\n\n[[FIGURE:0]]", [_figure(0, [100, 200, 800, 700], 0)]),
         page_image, local_page=0,
     )
+    mat.add_page(_page("둘째 쪽 본문", []), page_image, local_page=1)
     mat.finalize()
 
-    assert not (out / "raw_pages.json").exists()
+    raw = json.loads((out / "raw_pages.json").read_text(encoding="utf-8"))
+    assert raw == {"pages": ["", ""]}
     assert (out / "images" / "page_0_0.jpg").is_file()
     assert "page_0_0.jpg" in json.loads((out / "boxes.json").read_text(encoding="utf-8"))
     assert "![](images/page_0_0.jpg)" in md
+
+
+# 정합 대조에 걸리도록 페이지마다 서로 다른 긴 본문(텍스트 레이어 80자 이상)
+_PAGE_TEXTS = [
+    "Chapter one describes how the renderer rasterizes every page of the document "
+    "before the recognition model reads it and returns markdown.",
+    "Chapter two explains how figures are cropped from the page image with normalized "
+    "bounding boxes and stored next to the merged markdown file.",
+]
+
+
+def _text_pdf(texts: list[str]) -> bytes:
+    import pymupdf as fitz
+
+    doc = fitz.open()
+    for text in texts:
+        page = doc.new_page(width=595, height=842)
+        page.insert_textbox(fitz.Rect(56, 56, 540, 800), text, fontsize=11)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+@pytest.mark.parametrize("figure", [False, True])
+def test_figure_only_chunk_merges_without_a_false_page_marker_warning(
+    tmp_path, page_image, figure
+):
+    """figure_only 엔진의 여러 쪽 청크(OCR_REMOTE_PAGE_CONCURRENCY>1·잘림 뒤 앞 페이지 유지)는
+    원출력이 0개로 보이면 merge가 마커 불일치로 오인해 원본 대조 재배치를 돌리고 '페이지 마커
+    2개 (기대 2)' 경고로 잡을 degraded로 만들었다(감사 sidecar-1 — d4b667f 회귀).
+    빈 원출력은 좌표 블록을 만들지 않으므로 layout.json도 생기지 않는다."""
+    from app.pipeline.merge import ChunkResult, IncrementalMerger
+
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / "source.pdf").write_bytes(_text_pdf(_PAGE_TEXTS))
+    out = job / "work" / "chunk_00"
+    mat = ChunkMaterializer(out, single=False, write_raw=False)
+    mds = []
+    for k, text in enumerate(_PAGE_TEXTS):
+        if figure and k == 0:
+            page = _page(f"{text}\n\n[[FIGURE:0]]", [_figure(0, [100, 200, 800, 700], 0)])
+        else:
+            page = _page(text, [])
+        mds.append(mat.add_page(page, page_image, local_page=k))
+    mat.finalize()
+
+    merger = IncrementalMerger(job, "\n\n---\n\n")
+    merger.add_chunk(ChunkResult(out, 1, len(mds), "<PAGE>\n" + "\n<PAGE>\n".join(mds)))
+
+    assert merger.warnings == []
+    assert [p.startswith(f"Chapter {n}") for p, n in zip(merger.pages_md, ("one", "two"))] == [
+        True, True,
+    ]
+    assert merger.has_layout_data is False and not (job / "layout.json").exists()
+    if figure:
+        assert "![](images/p0001_0.jpg)" in merger.pages_md[0]
+        assert (job / "images" / "p0001_0.jpg").is_file()
 
 
 def test_placeholder_without_figure_removed(tmp_path, page_image):

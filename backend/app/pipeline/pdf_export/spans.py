@@ -249,6 +249,15 @@ def _source_span_matches_rect(span: _SourceSpan, rect) -> bool:
     return inside or overlap >= 0.35
 
 
+def _shown(rect, matrix):
+    """회전 전 좌표의 사각형 → 화면(표시 공간) 좌표(정규화). matrix가 없으면(회전 0) 그대로."""
+    if matrix is None:
+        return rect
+    shown = rect * matrix
+    shown.normalize()
+    return shown
+
+
 # 줄 위·아래로 튀어나온 기호의 소유 규칙(_edge_symbol_owner)
 _EDGE_SYMBOL_MAX_CHARS = 2
 _EDGE_SYMBOL_MIN_VERTICAL = 0.25
@@ -257,6 +266,7 @@ _EDGE_SYMBOL_MIN_HORIZONTAL = 0.8
 
 def _edge_symbol_owner(
     span: _SourceSpan, block_rects: list[object | None], block_texts: list[str],
+    matrix=None,
 ) -> int | None:
     """어느 블록에도 배정되지 않은 짧은 기호 span의 소유자 — 닿는 블록이 하나뿐일 때만.
 
@@ -265,22 +275,32 @@ def _edge_symbol_owner(
     기호만 남아 번역문 바로 위에 떴다(P4 실앱: 25쪽 논문 10쪽 CMSY8 '√' — 겹침 32.5%, 가운데가
     bbox 위 1.4pt). 가로로 쓴 줄의 1–2글자 span이 다른 블록과는 전혀 닿지 않고, 가로로는
     80% 이상 그 블록 안이며 세로로 25% 이상 겹칠 때만 붙인다 — 이웃 블록의 글자를 지울 여지를
-    남기지 않는다."""
-    if span.dir != (1.0, 0.0):
+    남기지 않는다.
+
+    '가로로 쓴 줄'과 위·아래는 화면(matrix = page.rotation_matrix)에서 본다 — span 좌표·방향은
+    회전 전 값이라, 내용을 돌려 그리고 /Rotate로 세운 쪽에서는 화면에서 가로인 줄의 방향이
+    (0,-1)로 보고돼 근호를 하나도 붙이지 못했다(감사 delta-pdf-translate-2)."""
+    direction = span.dir
+    if matrix is not None:
+        dx, dy = direction
+        direction = (
+            round(matrix.a * dx + matrix.c * dy, 6), round(matrix.b * dx + matrix.d * dy, 6),
+        )
+    if direction != (1.0, 0.0):
         return None
     text = span.text.strip(_BLANK_SPAN_CHARS)
     if not text or len(text) > _EDGE_SYMBOL_MAX_CHARS:
         return None
-    rect = span.rect
-    if rect.width <= 0 or rect.height <= 0:
+    if span.rect.width <= 0 or span.rect.height <= 0:
         return None
     touching = [
         index for index, block_rect in enumerate(block_rects)
-        if block_rect is not None and _rect_overlap_area(rect, block_rect) > 0
+        if block_rect is not None and _rect_overlap_area(span.rect, block_rect) > 0
     ]
     if len(touching) != 1 or not block_texts[touching[0]]:
         return None
-    block_rect = block_rects[touching[0]]
+    rect = _shown(span.rect, matrix)
+    block_rect = _shown(block_rects[touching[0]], matrix)
     horizontal = (min(rect.x1, block_rect.x1) - max(rect.x0, block_rect.x0)) / rect.width
     vertical = (min(rect.y1, block_rect.y1) - max(rect.y0, block_rect.y0)) / rect.height
     if horizontal < _EDGE_SYMBOL_MIN_HORIZONTAL or vertical < _EDGE_SYMBOL_MIN_VERTICAL:
@@ -374,7 +394,9 @@ def _assign_source_spans(
                 index,
             ))
         if not choices:
-            edge_owner = _edge_symbol_owner(span, block_rects, block_texts)
+            edge_owner = _edge_symbol_owner(
+                span, block_rects, block_texts, page.rotation_matrix if page.rotation else None,
+            )
             if edge_owner is None:
                 unowned.append(span)
             else:

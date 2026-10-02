@@ -1494,6 +1494,9 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
 ## 10. 프론트엔드 (frontend/, 정적 SPA)
 
 - **외부 네트워크 리소스 0** (CDN/폰트/트래커 금지), 빌드 스텝 없음, 바닐라 JS(ES modules)
+- **지원 브라우저**: 최신 Chromium·Firefox, Safari 16.0 이상 — 파싱 단계에서 깨지는 문법(정규식
+  lookbehind 등)은 쓰지 않는다(`tests/browser-compat.test.mjs`가 막는다). lookbehind 하나로
+  Safari 16.0–16.3에서 화면 전체가 비었다
 - ⚠ **`app.js`에는 로직이 없다**: 진입점(372줄 — 부트스트랩 `init()` + 테스트가 쓰는
   공개 심볼 재노출)일 뿐이고, 실제 구현은 `frontend/js/` **17개 모듈(약 8,080줄)**에
   있다. 브라우저 네이티브 ES 모듈이라 번들러가 없으므로 임포트 그래프가 곧 구조다.
@@ -1513,7 +1516,9 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
   - 헤더: "PDF OCR Translator — PDF → HTML · 한국어", `/api/health` 기반 디바이스/엔진 배지
     (`MLX · M4 Max`처럼 칩 이름 포함). health는 정상이면 30초, 로딩·실패·sidecar 오류·워커
     중지·조회 실패면 10초마다 다시 묻고 숨긴 탭에서는 멈춘다(보이면 즉시). `model_load_error`는
-    '모델 로드 실패'(사유는 툴팁), `worker_alive=false`는 '작업 처리기 중지됨' 배지다.
+    '모델 로드 실패'(사유는 툴팁), `worker_alive=false`는 '작업 처리기 중지됨' 배지다. 배지는
+    자리(slot)마다 바뀐 곳만 갱신한다 — 같은 응답의 재폴링은 aria-live 배지 영역과 업로드 안내
+    (role=alert)를 다시 쓰지 않아 스크린리더가 폴링마다 다시 읽지 않고, 상태가 바뀌면 한 번 알린다.
   - 좌측: PDF 드롭존(+파일선택, 확장자/크기 검증) · 옵션(mode, dpi) · 잡 목록. 목록은 최신 50건을
     5초마다 갱신하고(직렬화 — 진행 중이면 건너뜀), 서버가 `has_more`를 주면 '더 보기 (50/132)'로
     `?before=<마지막 id>` 50건씩 이어 받는다. 넓힌 창은 5초 폴에서도 유지된다(500건 넘게는 커서로
@@ -1534,7 +1539,8 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
       다운로드 [원본 HTML] [한국어 HTML] [원문·한국어 PDF] [Markdown] [전체 ZIP] · 삭제
     - 헤더의 '주의 N건' 칩(경고 없이 참고만 있으면 흐린 '참고 N건')을 펼치면 `warnings`, 흐린
       참고 목록에 `notices`가 보인다. 'N페이지'·'3–5페이지' 언급은 읽기 뷰 링크다. 전체 화면
-      뷰어 아래에서는 패널을 inert로 둔다.
+      뷰어가 열려 있는 동안 뷰어 밖의 모든 것(번역 참고 사항·PDF 생성 리포트 접이식 목록 포함,
+      `#toast` 제외)이 inert·aria-hidden이다 — 뷰어에서 body까지 조상마다의 형제를 고른다.
     - 결과 툴바 아래 흐린 접이식 목록 두 개: '번역 참고 사항 N건'(`/translate/state`의
       `warnings`)과 'PDF 생성 리포트 · 주의 N건'(PDF 다운로드 뒤 `/pdf/report` — 보존 사유를
       한국어로, 예: `listing_line_unaligned` → '원문 줄 위치 정렬 실패(그 줄만 원문)', 주의
@@ -1563,12 +1569,22 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
   차단(§14)과 이중 방어다. 레이아웃·미리보기 이미지는 `loading=lazy`·`decoding=async`.
 - **수식**: 로컬 KaTeX **0.18.10**(GHSA-238p-pmpm-9mq7은 0.18.2에서 수정). 모든 `katex.render`가
   `constants.katexOptions`(`throwOnError:false, maxSize:10, maxExpand:1000, strict:'ignore',
-  trust:false`)를 쓴다 — `\rule{2000em}` 같은 거대 박스와 무한 매크로를 막는다. 음수 간격
-  (`\hspace{-300em}`)은 KaTeX가 상한을 두지 않아 스크롤 컨테이너가 자른다.
+  trust:false`)를 쓴다 — `\rule{2000em}` 같은 거대 박스와 무한 매크로를 막는다. KaTeX maxSize는
+  양수 크기만 묶는다. 모든 조판은 `ui.renderMath`를 거쳐 크기 인자(`\raisebox{-4000em}`·
+  `\rule[-3000em]`·`\kern-5000em`·`\\[-900em]` …)를 같은 단위의 ±10em으로 묶고
+  (`core.clampTexSizes`), 그래도 조판 결과 style에 100em(`KATEX_MAX_BOX_EM`)을 넘는 길이가 있으면
+  (매크로로 만든 크기·`\arraystretch` 등) 원문 TeX 글자로 보인다(`data-math-fallback="oversized"`).
+  내려받는 standalone HTML의 조판 스크립트(`layout._TYPESET_JS`)에는 아직 이 묶기가 없다.
   `tests/katex-vendor.test.mjs`가 VERSION·번들 일치와 옵션 사용을 고정한다.
 - **리더 노트**(`notes.js`): 하이라이트·인용은 localStorage `uocr-reader-notes-<잡 id>`
   (`{v, updated, items}`, 읽을 때마다 검증)에 잡당 200개, 브라우저당 50개 잡(오래 손대지 않은 잡부터
-  정리)까지 남는다. 저장 실패(용량·사생활 보호 모드)는 '저장됨' 대신 오류 토스트다. [선택 문장
+  정리)까지 남는다. 저장소는 같은 잡을 연 다른 탭과 공유한다 — 저장·삭제는 매번 최신 저장
+  목록 위에 적용하고(read-modify-write), 다른 탭의 변경은 `storage` 이벤트로 목록과 하이라이트에
+  반영한다. 용량 초과(QuotaExceededError)면 가장 오래 갱신하지 않은 다른 잡의 노트부터 지우고
+  다시 저장하며, 저장 토스트가 몇 개 문서의 노트를 지웠는지 알린다. 그 밖의 실패(사생활 보호
+  모드·저장소 차단)는 '저장됨' 대신 오류 토스트다. 목록은 노트 id로 증분 렌더해, 삭제 뒤 키보드
+  포커스가 이웃 줄(목록이 비면 [선택 문장 도구] 요약)로 간다. 레일이나 선택이 든 페이지를 다시
+  그리면(언어 전환 등) 선택을 지우고, 노트의 언어는 문장을 고른 레일의 언어다. [선택 문장
   도구] 안 목록에서 페이지 이동·삭제·Markdown 복사·내보내기(`<이름>.notes.md`). 하이라이트는 레일을
   다시 그린 뒤(언어 전환·정렬 도착·새로고침) 공백 무시 검색으로 다시 칠하고, 카드·페이지를 넘는
   선택은 텍스트 노드 조각마다 `<mark>`로 감싼다(DOM 복제·KaTeX 분할 없음). 수식을 가로지른
@@ -1578,6 +1594,10 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
   `document.fonts.ready` 뒤 레이아웃 맞춤을 다시 돌린다.
 - 테스트: `tests/*.test.mjs`(node --test — `helpers/fake-dom.mjs`·`reader-setup.mjs`로 jsdom 없이
   `js/*.js` 런타임을 돌린다) + `tests/e2e/`(`ui.e2e.mjs` 실서버, `mock-full-flow.e2e.mjs` hermetic).
+  mock E2E는 모든 브라우저 컨텍스트의 잡히지 않은 예외(pageerror·weberror)·콘솔 오류·HTTP ≥400을
+  관문으로 삼고, 시나리오가 일부러 주입한 실패(502·503·429와 CSP 탐침 — URL로 맞춤)만 허용한다
+  (`freshContext(options, label, allow)`). `tests/browser-compat.test.mjs`는 정규식 lookbehind를
+  막는다.
 
 ## 11. 테스트 전략
 

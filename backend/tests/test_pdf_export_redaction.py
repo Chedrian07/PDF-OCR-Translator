@@ -62,6 +62,94 @@ def test_baseline_band_removes_its_line_but_not_the_next(fontname, fontfile, lea
     assert "Below line keeps every word" in text, text
 
 
+def _type3_page_pdf(font_bbox: str) -> bytes:
+    """FontBBox를 마음대로 정한 Type3 글꼴로 세 줄(12pt 행간)을 쓴 한 쪽 PDF.
+
+    글리프는 0~700 단위 높이의 채운 사각형이다. FontBBox가 그보다 낮으면(퇴화 메트릭)
+    PyMuPDF는 span bbox를 1em으로 늘려 보고하지만 MuPDF 리댁션은 FontBBox로 글리프 상자를
+    잡는다.
+    """
+    chars = "abcdeiklmnoprtuwxy "
+    objects: list[bytes] = []
+
+    def add(body: bytes) -> int:
+        objects.append(body)
+        return len(objects)
+
+    procs = {}
+    for char in chars:
+        stream = b"250 0 d0" if char == " " else b"600 0 0 0 500 700 d1 50 0 400 700 re f"
+        procs[char] = add(b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream")
+    names = {char: "space" if char == " " else char for char in chars}
+    charprocs = add(
+        b"<< " + b" ".join(b"/%s %d 0 R" % (names[c].encode(), procs[c]) for c in chars) + b" >>"
+    )
+    first, last = min(map(ord, chars)), max(map(ord, chars))
+    widths = " ".join(
+        "250" if chr(code) == " " else ("600" if chr(code) in chars else "0")
+        for code in range(first, last + 1)
+    )
+    differences = " ".join(f"{ord(c)} /{names[c]}" for c in chars)
+    bfchars = "\n".join(f"<{ord(c):02X}> <{ord(c):04X}>" for c in chars)
+    cmap = (
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /T3 def "
+        f"1 begincodespacerange <00> <FF> endcodespacerange {len(chars)} beginbfchar\n"
+        f"{bfchars}\nendbfchar endcmap CMapName currentdict /CMap defineresource pop end end"
+    ).encode()
+    tounicode = add(b"<< /Length %d >>\nstream\n" % len(cmap) + cmap + b"\nendstream")
+    font = add((
+        f"<< /Type /Font /Subtype /Type3 /FontBBox [{font_bbox}] "
+        "/FontMatrix [0.001 0 0 0.001 0 0] "
+        f"/CharProcs {charprocs} 0 R /Encoding << /Type /Encoding /Differences [{differences}] >> "
+        f"/FirstChar {first} /LastChar {last} /Widths [{widths}] /Resources << >> "
+        f"/ToUnicode {tounicode} 0 R >>"
+    ).encode())
+    content = (
+        b"BT /T3 10 Tf 50 140 Td (upper line kept) Tj 0 -12 Td (middle line redact) Tj "
+        b"0 -12 Td (lower line kept) Tj ET"
+    )
+    contents = add(b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream")
+    page_id = len(objects) + 1
+    add((
+        f"<< /Type /Page /Parent {page_id + 1} 0 R /MediaBox [0 0 300 200] "
+        f"/Resources << /Font << /T3 {font} 0 R >> >> /Contents {contents} 0 R >>"
+    ).encode())
+    add(f"<< /Type /Pages /Kids [{page_id} 0 R] /Count 1 >>".encode())
+    catalog = add(f"<< /Type /Catalog /Pages {page_id + 1} 0 R >>".encode())
+    out = b"%PDF-1.4\n"
+    offsets = []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    out += b"trailer\n<< /Size %d /Root %d 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+        len(objects) + 1, catalog, xref,
+    )
+    return out
+
+
+@pytest.mark.parametrize("font_bbox", ["0 0 600 100", "0 -200 600 800"])
+def test_band_still_removes_glyphs_of_fonts_with_degenerate_metrics(font_bbox):
+    """원래 ascender−descender가 아주 작은 폰트도 자기 줄은 지우고 이웃 줄은 남긴다.
+
+    PyMuPDF는 그런 span의 bbox를 1em으로 늘려 보고한다. 거기서 구한 띠가 MuPDF의 실제
+    글리프 상자(FontBBox 0–0.1em)에 닿지 않아 원문이 남고 번역이 겹쳐 찍혔다(감사 pdf-8).
+    """
+    doc = fitz.open("pdf", _type3_page_pdf(font_bbox))
+    page = doc[0]
+    middle = [span for span in _source_span_records(fitz, page) if "middle" in span.text]
+    assert len(middle) == 1
+
+    _redact(page, [_span_redaction_band(fitz, middle[0])])
+    text = page.get_text()
+    doc.close()
+
+    assert "middle" not in text, text
+    assert "upper line kept" in text and "lower line kept" in text, text
+
+
 def test_span_bbox_redaction_reaches_the_next_line_at_normal_leading():
     """대조군 — 예전 방식(span bbox + 0.25pt)은 12pt 행간에서 아래 줄을 지운다."""
     doc = fitz.open()

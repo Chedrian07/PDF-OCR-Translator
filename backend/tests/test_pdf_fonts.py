@@ -337,31 +337,29 @@ def test_a_quarantined_page_is_skipped_without_giving_up_on_the_rest(tmp_path):
     assert [page["fonts_v"] for page in pages] == [ENRICH_VERSION] * 3
 
 
-def test_request_path_backfill_does_not_wait_for_busy_export_builds(
+def test_export_pool_backfill_waits_for_a_busy_worker_and_then_enriches(
     tmp_path, pdf_worker_processes, monkeypatch,
 ):
-    """API 백필(export 풀)은 빌드가 워커를 모두 쥐고 있으면 그 빌드가 끝날 때까지 기다리지 않는다.
+    """API 백필(export 풀)은 빌드가 워커를 모두 쥐고 있어도 포기하지 않고 빈 워커를 기다려 주입한다.
 
-    예전에는 빈 워커를 무기한 기다려, 빌드 두 건이 도는 동안 /layout·/viewer/pages·/page가
-    빌드 시간만큼 멈췄다(감사 pdf-6: 25쪽 백필 0.23s → 54s). 대기 상한을 넘기면 아무것도 찍지
-    않고 False — 이번 요청은 폴백 휴리스틱으로 응답하고 다음 요청이 다시 시도한다.
+    백필은 요청 밖 백그라운드 스레드에서 돌고 요청은 짧은 유예만 기다린다(api-1). 여기서 대기를
+    끊으면(pdf-6의 3초 상한) 그 스레드가 빌드 중에 스탬프 없이 끝나, 빌드가 끝난 뒤에도 다음
+    요청이 올 때까지 실측 메타가 저장되지 않았다.
     """
     import threading
     import time
 
-    from app.pipeline import pdf_fonts
     from app.pipeline.pdf_fonts import ENRICH_VERSION
 
     pdf_worker = pdf_worker_processes
     monkeypatch.setenv("PDF_EXPORT_MAX_CONCURRENT", "1")
-    monkeypatch.setattr(pdf_fonts, "_EXPORT_POOL_WAIT_S", 0.5)
     pdf = _make_pdf(tmp_path)
     bx1, by1 = _norm(80, 180)
     bx2, by2 = _norm(600, 215)
     pages = [{"page": 1, "blocks": [{"type": "text", "bbox": [bx1, by1, bx2, by2], "content": "x"}]}]
-    # 번역 PDF 빌드처럼 export 워커 하나를 오래 쥐는 작업.
+    # 번역 PDF 빌드처럼 export 워커 하나를 쥐는 작업 — 예전 대기 상한(3초)보다 길게.
     holder = threading.Thread(
-        target=pdf_worker.run, args=("pdf_worker_tasks:sleep", (6.0,)),
+        target=pdf_worker.run, args=("pdf_worker_tasks:sleep", (4.0,)),
         kwargs={"pool": pdf_worker.POOL_EXPORT, "timeout": 30},
     )
     holder.start()
@@ -378,10 +376,6 @@ def test_request_path_backfill_does_not_wait_for_busy_export_builds(
     finally:
         holder.join()
 
-    assert enriched is False
-    assert elapsed < 3.0, elapsed                      # 빌드(6s)가 끝나기를 기다리지 않았다
-    assert "fonts_v" not in pages[0] and "fs" not in pages[0]["blocks"][0]
-    # 워커가 비면 다음 요청은 그대로 실측을 주입한다.
-    with pdf_worker.pool_scope(pdf_worker.POOL_EXPORT):
-        assert enrich_layout_fonts(pdf, pages) is True
+    assert enriched is True
+    assert elapsed >= 2.0, elapsed                     # 빌드가 워커를 놓을 때까지 기다렸다
     assert pages[0]["fonts_v"] == ENRICH_VERSION and "fs" in pages[0]["blocks"][0]

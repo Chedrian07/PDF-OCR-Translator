@@ -1,6 +1,6 @@
 import {
-  PHASE_LABELS, STATUS_LABELS, READER_FOCUS_RATIO, READER_KEEP_RADIUS, READER_NOTE_MAX_CHARS,
-  READER_NOTES_MAX,
+  KATEX_MAX_BOX_EM, KATEX_MAX_SIZE_EM, PHASE_LABELS, STATUS_LABELS, READER_FOCUS_RATIO,
+  READER_KEEP_RADIUS, READER_NOTE_MAX_CHARS, READER_NOTES_MAX,
 } from './constants.js';
 
 /* ============================================================================
@@ -770,6 +770,50 @@ export function splitInlineMath(text) {
   if (pos < s.length) out.push({ type: 'text', value: s.slice(pos) });
   if (!out.length) out.push({ type: 'text', value: '' });
   return out;
+}
+
+/* ── KaTeX 크기 상한 (순수 — tests/에서 검증) ─────────────────────────────────
+ * KaTeX maxSize는 양수 크기만 묶는다(calculateSize = min(크기, maxSize)). 음수 크기 —
+ * \raisebox{-4000em}{x}·\rule[-3000em]{1em}{1em}·\kern-5000em·a\\[-900em] b — 는 그대로라
+ * 업로드 PDF의 수식 하나가 수만 px 박스·여백이 됐다(frontend-4).
+ *  · clampTexSizes: 크기 인자를 받는 명령의 크기 글자만 ±maxEm(같은 단위로 환산)으로 묶는다.
+ *    \text{150 cm}처럼 크기가 아닌 자리의 같은 글자는 건드리지 않는다.
+ *  · katexStyleOversized: 매크로로 만든 크기(\def\x{-4000em}\kern\x)·\arraystretch처럼 글자로
+ *    잡을 수 없는 경우의 뒷문 — 조판 결과 style의 em 길이가 상한을 넘는지 본다.
+ */
+// 단위 → em (KaTeX 기준: 1em = 10pt, ex = x-height, mu = 1/18 em).
+const TEX_EM_PER_UNIT = {
+  em: 1, ex: 0.431, mu: 1 / 18, pt: 0.1, mm: 7227 / 25400, cm: 7227 / 2540, in: 7.227,
+  bp: 0.1 * 803 / 800, pc: 1.2, dd: 0.1 * 1238 / 1157, cc: 1.2 * 1238 / 1157, nd: 0.1 * 685 / 642,
+  nc: 1.2 * 685 / 642, sp: 0.1 / 65536, px: 0.1 * 803 / 800,
+};
+// 크기 인자를 받는 명령과 그 인자 머리: \kern류(괄호 없는 크기도 받는다), \hspace·\raisebox
+// {크기}, \rule[올림]{너비}{높이}, 줄바꿈 \\[크기].
+const TEX_SIZE_HEADER = new RegExp([
+  String.raw`\\(?:kern|mkern|hskip|mskip)(?![a-zA-Z])\s*(?:\{[^{}]*\}|[-+]?\s*(?:\d+(?:\.\d*)?|\.\d+)\s*[a-z]{2})`,
+  String.raw`\\(?:hspace\*?|raisebox)(?![a-zA-Z])\s*\{[^{}]*\}`,
+  String.raw`\\rule(?![a-zA-Z])\s*(?:\[[^\]]*\]\s*)?(?:\{[^{}]*\}\s*){1,2}`,
+  String.raw`\\\\\s*\[[^\]]*\]`,
+].join('|'), 'g');
+const TEX_SIZE_LITERAL = /([-+]?)\s*(\d+(?:\.\d*)?|\.\d+)\s*([a-z]{2})/g;
+
+export function clampTexSizes(tex, maxEm = KATEX_MAX_SIZE_EM) {
+  const s = String(tex == null ? '' : tex);
+  if (!s.includes('\\')) return s;
+  return s.replace(TEX_SIZE_HEADER, (header) => header.replace(TEX_SIZE_LITERAL, (lit, sign, num, unit) => {
+    const perEm = TEX_EM_PER_UNIT[unit];
+    if (!perEm || !(Number(num) * perEm > maxEm)) return lit; // 모르는 단위는 KaTeX가 오류로 보인다
+    return `${sign === '-' ? '-' : ''}${Number((maxEm / perEm).toFixed(3))}${unit}`;
+  }));
+}
+
+const STYLE_EM_LENGTH = /(-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)em\b/gi;
+
+export function katexStyleOversized(style, limitEm = KATEX_MAX_BOX_EM) {
+  for (const m of String(style == null ? '' : style).matchAll(STYLE_EM_LENGTH)) {
+    if (Math.abs(Number(m[1])) > limitEm) return true;
+  }
+  return false;
 }
 
 /* ── 리더 인용·하이라이트 (순수 — tests/에서 검증) ────────────────────────────

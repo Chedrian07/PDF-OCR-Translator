@@ -152,6 +152,9 @@ def test_det_payload_that_is_not_a_box_list_is_unparseable(vendor_mod, payload):
         ("(1, 2, 3, 4)", [(1, 2, 3, 4)]),
         ("[[1, 2, 3, 4], [5, 6, 7, 8]]", [[1, 2, 3, 4], [5, 6, 7, 8]]),
         ("[[0, 0, 999]]", [[0, 0, 999]]),  # 상자 단위 검증은 _clamp_box 몫(번호 1개 소비)
+        # 중첩되지 않은 목록은 첫 원소가 숫자가 아니어도 상자 하나 — 구: 원소마다 상자로 셌다
+        ("['x', 0, 500, 500]", [["x", 0, 500, 500]]),
+        ("[None, 1, 2, 3]", [[None, 1, 2, 3]]),
     ],
 )
 def test_box_lists_still_parse_as_before(vendor_mod, payload, expected):
@@ -174,6 +177,7 @@ _INLINE_FIGURE = "<|det|>image [100, 100, 400, 600]<|/det|>"
         ("<|ref|>image<|/ref|><|det|>None<|/det|>", _REF_FIGURE, False),
         ("<|ref|>image<|/ref|><|det|>0<|/det|>", _REF_FIGURE, False),
         ("<|det|>image [ ]<|/det|>", _INLINE_FIGURE, False),  # 인라인 문법의 빈 목록
+        ("<|det|>image ['x', 0, 500, 500]<|/det|>", _INLINE_FIGURE, False),  # 구: 번호 4개 소비
         # re_match는 라벨을 strip해(또는 전체 매치의 <|ref|>image<|/ref|>로) 그림으로 치환한다 —
         # 크롭·번호 판정도 같은 기준이어야 그 그림 파일이 생기고 뒤 번호가 밀리지 않는다
         ("<|ref|> image <|/ref|><|det|>[[0, 0, 500, 500]]<|/det|>", _REF_FIGURE, True),
@@ -185,6 +189,7 @@ _INLINE_FIGURE = "<|det|>image [100, 100, 400, 600]<|/det|>"
     ],
     ids=[
         "string", "empty-string", "empty-list", "empty-tuple", "none", "zero", "inline-empty-list",
+        "flat-non-numeric",
         "padded-label", "ref-without-det", "unparseable", "inverted", "valid",
     ],
 )

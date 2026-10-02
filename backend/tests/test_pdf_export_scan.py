@@ -81,15 +81,18 @@ def _write_layout(job_dir: Path, blocks: list[dict], translations: dict[int, str
 
 def _scan_job(
     tmp_path: Path, name: str, *, invisible_text: bool = False, translation: str = KO,
-    font_pt: float | None = None,
+    font_pt: float | None = None, jpeg: bool = False,
 ) -> Path:
     job_dir = tmp_path / name
     job_dir.mkdir()
     doc = fitz.open()
     page = doc.new_page(width=PAGE_W, height=PAGE_H)
-    page.insert_image(
-        page.rect, stream=_scan_png(extra=[(150, 190, "E = mc^2 (kept equation)")]),
-    )
+    scan = _scan_png(extra=[(150, 190, "E = mc^2 (kept equation)")])
+    if jpeg:                         # 스캐너가 흔히 내는 JPEG(DCTDecode) 스캔
+        buffer = io.BytesIO()
+        Image.open(io.BytesIO(scan)).convert("RGB").save(buffer, "JPEG", quality=85)
+        scan = buffer.getvalue()
+    page.insert_image(page.rect, stream=scan)
     if invisible_text:
         # Acrobat/ABBYY/ocrmypdf 식 투명 OCR 레이어(렌더 모드 3).
         for index, line in enumerate(LINES):
@@ -159,21 +162,35 @@ def test_scanned_page_translation_covers_the_english_pixels(tmp_path, invisible_
     assert len(images) == 1                           # 스캔 이미지 객체는 그대로다
 
 
-def test_scan_cover_uses_the_paper_colour_and_keeps_the_file_small(tmp_path):
-    """흰 사각형이 도드라지지 않게 바탕색으로 덮고, 스캔 이미지를 다시 쓰지 않는다."""
-    job_dir = _scan_job(tmp_path, "scan-colour")
+def test_scan_cover_uses_the_paper_colour_and_keeps_the_scan_image_untouched(tmp_path):
+    """흰 사각형이 도드라지지 않게 바탕색으로 덮고, 스캔 이미지를 다시 인코딩하지 않는다.
+
+    덮개를 PDF_REDACT_IMAGE_PIXELS로 걸면 MuPDF가 이미지를 디코드해 Flate로 다시 써서 JPEG
+    스캔이 페이지당 0.92→1.73MB로 불어난다. 예전 단언(크기 < 원본 + 200KB)은 원본을
+    무압축 PNG(6.5MB)로 저장해 그 회귀를 잡지 못했다(감사 pdf-10) — JPEG 스캔의 필터와
+    원 스트림이 그대로인지 본다.
+    """
+    job_dir = _scan_job(tmp_path, "scan-colour", jpeg=True)
     result = build_translated_pdf(job_dir, "ko")
     paper = tuple(component / 255 for component in PAPER)
-    with fitz.open(result.path) as exported:
+    with fitz.open(job_dir / "source.pdf") as source, fitz.open(result.path) as exported:
         covers = [
             drawing for drawing in exported[0].get_drawings()
             if drawing.get("fill") is not None
             and drawing["rect"].contains(BLOCK)
         ]
+        (source_xref, *_), = source[0].get_images(full=True)
+        (export_xref, *_), = exported[0].get_images(full=True)
+        source_stream = source.xref_stream_raw(source_xref)
+        export_filter = exported.xref_get_key(export_xref, "Filter")
+        export_stream = exported.xref_stream_raw(export_xref)
     assert covers, "블록 영역을 덮는 채움 사각형이 없다"
     fill = covers[0]["fill"]
     assert all(abs(a - b) <= 6 / 255 for a, b in zip(fill, paper)), fill
-    # 이미지 픽셀을 다시 인코딩하지 않으므로 파일이 스캔 크기만큼 불어나지 않는다.
+    # 스캔 이미지는 원래 JPEG 스트림 그대로다(디코드·재인코딩 없음).
+    assert export_filter == ("name", "/DCTDecode"), export_filter
+    assert export_stream == source_stream
+    # 원본이 압축된 JPEG라 크기 비교도 의미가 있다 — 번역·폰트 서브셋만큼만 는다.
     assert result.path.stat().st_size < (job_dir / "source.pdf").stat().st_size + 200_000
 
 

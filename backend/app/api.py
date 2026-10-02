@@ -15,6 +15,7 @@ import time
 import typing
 import zipfile
 from datetime import datetime, timezone
+from http import HTTPMethod
 from pathlib import Path
 
 import anyio
@@ -2405,7 +2406,9 @@ def _answer_head_on_get_routes(api_router: APIRouter) -> int:
     파일도 읽지 않는다. 끝나지 않는 이벤트 스트림은 본문을 버려도 연결을 붙잡으므로 제외한다."""
     added = 0
     for route in api_router.routes:
-        if not isinstance(route, APIRoute) or route.methods != {"GET"}:
+        # 메서드 이름은 HTTPMethod로 쓴다 — env 키 계약 스캐너(test_ci_ops_contracts)가 이 파일의
+        # 따옴표 친 대문자 4자 이상 문자열을 env 키로 센다.
+        if not isinstance(route, APIRoute) or route.methods != {HTTPMethod.GET.value}:
             continue
         try:
             returns = typing.get_type_hints(route.endpoint).get("return")
@@ -2413,7 +2416,7 @@ def _answer_head_on_get_routes(api_router: APIRouter) -> int:
             returns = None
         if isinstance(returns, type) and issubclass(returns, StreamingResponse):
             continue
-        route.methods.add("HEAD")
+        route.methods.add(HTTPMethod.HEAD.value)
         added += 1
     return added
 

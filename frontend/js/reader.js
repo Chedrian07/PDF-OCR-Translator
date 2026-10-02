@@ -118,7 +118,7 @@ export function resetReaderForJob() {
   state.readerAlignments = { orig: new Map(), ko: new Map() };
   state.readerAlignmentPending = new Set();
   state.readerActiveBlock = '';
-  state.readerSelection = '';
+  clearReaderSelection();
   state.readerSelectionPage = 1;
   state.readerNotes = loadReaderNotes(state.currentJobId); // 잡별로 영속 — 다시 열면 그대로
   state.viewerManifest = null;
@@ -211,6 +211,7 @@ export async function loadReader() {
 // 캐시로 돌아왔을 때 buildReaderRailStack이 "이미 있다"고 판단해, 떼어진 섹션에만
 // 그리고 화면의 레일은 빈 채로 남는다(한국어 로드 실패 → 원문 보기 경로).
 function clearReaderRail() {
+  clearReaderSelection(); // 선택이 걸린 레일 DOM이 사라진다
   el.readerContent.textContent = '';
   state.readerRailKey = '';
   state.readerRailEls = new Map();
@@ -754,6 +755,7 @@ export function buildReaderRailStack() {
   state.readerRailEls = new Map();
   state.readerCardEls = new Map();
   state.readerRailTabPage = 0; // 새 섹션으로 교체 — 이전 Tab 대상은 사라졌다
+  clearReaderSelection();      // 언어 전환 등으로 레일을 새로 만든다 — 이전 선택은 사라진 DOM에 있다
   el.readerContent.textContent = '';
   const frag = document.createDocumentFragment();
   for (let page = 1; page <= total; page += 1) {
@@ -866,6 +868,7 @@ export function onRailLateLayout() {
 
 export function renderRailFlowContent(page, section, body, pages, transient = false) {
   if (transient && section.dataset.transient === '1') return false;
+  dropReaderSelectionIn(body, page);
   section.dataset.mode = 'flow';
   if (transient) section.dataset.transient = '1';
   else delete section.dataset.transient;
@@ -912,6 +915,7 @@ export function renderRailPage(page) {
   const pages = state.readerPages[readerLangKey()] || [];
   if (!cache.has(page)) return; // 아직 미도착 — 자리표시자 유지
   const alignment = cache.get(page);
+  dropReaderSelectionIn(body, page);
   body.textContent = '';
   delete section.dataset.transient;
 
@@ -1588,14 +1592,36 @@ export function updateReaderResearchTools() {
 // 문서 선택을 지운다 — 그 뒤 [하이라이트]를 눌러도 칠할 범위가 남아 있도록 복제해 둔다.
 let readerRange = null;
 
+// 선택 문장 도구를 '선택 없음'으로 되돌린다. 선택이 걸린 레일 DOM을 다시 그리면(언어 전환·
+// 레일 재구성·그 페이지 재렌더) 브라우저 선택은 사라지는데 도구에는 옛 문장이 남아, [인용
+// 저장]이 다른 언어 레일에서 고른 문장을 지금 언어로 저장했다(frontend-7).
+function clearReaderSelection() {
+  readerRange = null;
+  if (!state.readerSelection) return;
+  state.readerSelection = '';
+  state.readerSelectionPage = state.readerPage;
+  updateReaderResearchTools();
+}
+
+// 레일 조각(root)을 다시 그리기 직전 — 선택이 그 안에 걸려 있으면 함께 버린다.
+function dropReaderSelectionIn(root, page) {
+  if (!state.readerSelection) return;
+  const range = readerRange;
+  const inside = range && range.startContainer
+    ? root.contains(range.startContainer) || root.contains(range.endContainer)
+    : state.readerSelectionPage === page;
+  if (inside) clearReaderSelection();
+}
+
 function liveReaderRange() {
   const selection = window.getSelection && window.getSelection();
   if (selection && !selection.isCollapsed && selection.rangeCount) {
     const range = selection.getRangeAt(0);
     if (el.readerContent.contains(range.commonAncestorContainer)) return { range, selection };
   }
+  // 저장해 둔 범위는 그 DOM이 바뀌면 접힌다(live range) — 접힌 범위로는 칠할 것이 없다.
   const saved = readerRange;
-  if (saved && saved.startContainer.isConnected && saved.endContainer.isConnected
+  if (saved && !saved.collapsed && saved.startContainer.isConnected && saved.endContainer.isConnected
       && el.readerContent.contains(saved.commonAncestorContainer)) {
     return { range: saved, selection };
   }
@@ -1624,6 +1650,7 @@ export function captureReaderSelection() {
   }
   state.readerSelection = text;
   state.readerSelectionPage = page;
+  state.readerSelectionLang = readerLangKey(); // 선택한 레일의 언어 — 저장 시점의 언어가 아니다
   updateReaderResearchTools();
 }
 
@@ -1652,11 +1679,11 @@ const newReaderNoteId = () =>
 // 이벤트(onReaderNotesStorage)로 받아 맞춘다. 예전에는 잡을 열 때 한 번 읽은 사본에 더해
 // 목록 전체를 덮어써, 다른 탭에서 저장한 메모가 '저장했습니다' 토스트 뒤에 조용히
 // 사라지고 지운 메모가 되살아났다(frontend-1).
-function persistReaderNote(kind, page, text, id = newReaderNoteId()) {
+function persistReaderNote(kind, page, text, lang, id = newReaderNoteId()) {
   const jobId = state.currentJobId;
   const latest = loadReaderNotes(jobId);
   const result = addReaderNote(latest, {
-    id, kind, page, lang: readerLangKey(), text, at: Date.now(),
+    id, kind, page, lang, text, at: Date.now(),
   });
   if (!result.note) return null;
   if (result.added && !saveReaderNotes(jobId, result.items)) {
@@ -1863,13 +1890,19 @@ function unwrapMark(mark) {
 export function highlightReaderSelection() {
   if (!state.readerSelection) return;
   const live = liveReaderRange();
-  if (!live) return;
+  if (!live) {
+    // 칠할 범위가 화면에서 사라졌다 — 칠하지도 못할 하이라이트를 저장하지 않고 도구를 비운다.
+    clearReaderSelection();
+    return;
+  }
   const { range, selection } = live;
   const page = state.readerSelectionPage;
   const noteId = newReaderNoteId();
   const marks = markRange(range, noteId);
-  // 메모 문장은 실제로 칠한 본문 — 그래야 다시 그린 레일에서 같은 조각을 찾는다.
-  const saved = persistReaderNote('highlight', page, marksText(marks) || state.readerSelection, noteId);
+  // 메모 문장은 실제로 칠한 본문 — 그래야 다시 그린 레일에서 같은 조각을 찾는다. 언어는 칠한
+  // 레일(= 지금 보이는 레일)의 언어다.
+  const saved = persistReaderNote('highlight', page, marksText(marks) || state.readerSelection,
+    readerLangKey(), noteId);
   for (const mark of marks) {
     if (!saved) delete mark.dataset.noteId;           // 저장 실패 — 이번 화면에만 표시
     else mark.dataset.noteId = saved.note.id;         // 이미 있던 같은 메모면 그 id에 묶는다
@@ -1889,8 +1922,9 @@ export function highlightReaderSelection() {
 export function saveReaderCitation() {
   if (!state.readerSelection) return;
   const page = state.readerSelectionPage;
-  // state.readerSelection은 이미 본문·TeX로 정리된 문장이다(captureReaderSelection).
-  const saved = persistReaderNote('citation', page, state.readerSelection);
+  // state.readerSelection은 이미 본문·TeX로 정리된 문장이다(captureReaderSelection). 언어는
+  // 그 문장을 고른 레일의 언어다(frontend-7).
+  const saved = persistReaderNote('citation', page, state.readerSelection, state.readerSelectionLang);
   updateReaderResearchTools();
   if (saved) {
     showToast(saved.added

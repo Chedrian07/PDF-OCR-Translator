@@ -1550,6 +1550,35 @@ def test_스트림_중간의_인증_오류는_전역_오류로_올린다():
     assert not isinstance(exc.value, TranslateUnitRejected) and len(hits) == 1
 
 
+def test_2배_재시도_응답이_상한을_넘으면_잡_오류가_아니라_잘림이다():
+    """xhigh 예산(81,920토큰)의 2배 재시도 사고 스트림(~53MB)은 기본 상한 32MB를 넘는다 —
+    종전에는 상한 오류(TranslateAPIError)가 잘림 처리를 우회해 잡 전체가 실패했다
+    (translate-6). 원인은 여전히 잘림이므로 유닛 단위 거부여야 한다."""
+    from app.translate.types import TranslateOutputTruncated
+
+    seen = []
+    thought = _json.dumps({"choices": [{"index": 0, "delta": {"reasoning": "생각" * 50},
+                                        "finish_reason": None}]})
+    event = f"data: {thought}\n\n".encode()
+
+    class Thinker(_Quiet):
+        def do_POST(self):  # noqa: N802
+            budget = self._body()["max_tokens"]
+            seen.append(budget)
+            self._sse_head()
+            with contextlib.suppress(OSError):
+                for _ in range(4 if budget <= 100 else 20_000):   # 재시도는 상한(1MB)을 넘는다
+                    self.wfile.write(event)
+                self.wfile.write(_chunk(None, "length") + b"data: [DONE]\n\n")
+
+    with _serve(Thinker) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat",
+                                    max_response_mb=1, max_retries=0))
+        with pytest.raises(TranslateOutputTruncated, match="thinking"):
+            c.complete("s", "u", max_tokens=100)
+    assert seen == [100, 200]
+
+
 def test_stream_설정_검증():
     from app.translate.types import TranslateError
 

@@ -1,8 +1,8 @@
 # Ported from baidu/Unlimited-OCR modeling_unlimitedocr.py (MIT, Copyright (c) 2026 Baidu;
 # 라이선스 전문: ../unlimited_ocr/LICENSE) — torch 벤더의 순수 PIL/regex 후처리와
-# infer()/infer_multi()의 save_results 흐름. [local patch M4] torch-free 분리 + P22 좌표
-# 클램프. torch 벤더 패치 P9(ast.literal_eval)·P13(boxes.json)·P14(raw_pages.json)·
-# P23(페이지 분할) 포함. 출처·패치 내역: PROVENANCE.md
+# infer()/infer_multi()의 save_results 흐름. [local patch M4] torch-free 분리. torch 벤더
+# 패치 P9(ast.literal_eval)·P13(boxes.json)·P14(raw_pages.json)·P22(좌표 clamp·크롭 번호
+# 소비)·P23(페이지 분할) 포함 — 같은 입력에 torch와 같은 산출물. 출처·패치 내역: PROVENANCE.md
 """det/ref 파싱 → figure 크롭·오버레이 → 마크다운 치환 (torch·mlx 무관, PIL/numpy만).
 
 파일 계약은 torch 경로와 같다(파일 이름·result.md 내용·크롭 픽셀·boxes.json·
@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import math
 import os
 import re
 
@@ -78,15 +79,30 @@ def extract_coordinates_and_label(ref_text, image_width, image_height):
     return (label_type, cor_list)
 
 
-def _clamp_box(x1, y1, x2, y2, image_width, image_height):
-    """[local patch P22] 픽셀 좌표를 이미지 경계 [0,W]×[0,H]로 자른다.
+def _clamp_box(points, image_width, image_height):
+    """[torch vendor patch P22] 모델 좌표(0~999 정규화) 상자 → 이미지 안으로 clamp한 픽셀 상자.
 
-    모델이 0~999 밖 좌표를 내면 업스트림은 검은 패딩이 붙은 크롭과 경계 밖 bbox를
-    boxes.json에 남겼다. lane b-torch가 torch 벤더에 같은 P22를 넣는다(같은 규칙)."""
-    x1 = min(max(x1, 0), image_width)
-    x2 = min(max(x2, 0), image_width)
-    y1 = min(max(y1, 0), image_height)
-    y2 = min(max(y2, 0), image_height)
+    torch 벤더 ``_clamp_box``와 같은 규칙(tests/test_mlx_postprocess.py가 무작위 입력으로
+    대조): x/y = int(v/999*size), x는 [0, W], y는 [0, H]로 clamp, clamp 뒤 x2<=x1 또는
+    y2<=y1이면 퇴화 상자로 None. 숫자가 아니거나(bool 포함) 유한하지 않거나 4개가 아닌
+    좌표도 None — 호출자는 crop/draw를 건너뛴다. 모델 출력은 PDF 내용으로 유도할 수 있어
+    거대·음수·뒤집힌 좌표가 그대로 crop에 가면 거대한 검정 크롭이나 Pillow 좌표 산술
+    오버플로(GHSA-6r8x-57c9-28j4)에 닿는다."""
+    try:
+        x1, y1, x2, y2 = points
+        coords = []
+        for value, size in ((x1, image_width), (y1, image_height), (x2, image_width), (y2, image_height)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            scaled = value / 999 * size
+            if not math.isfinite(scaled):
+                return None
+            coords.append(min(max(int(scaled), 0), size))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    x1, y1, x2, y2 = coords
+    if x2 <= x1 or y2 <= y1:
+        return None
     return x1, y1, x2, y2
 
 
@@ -107,41 +123,39 @@ def draw_bounding_boxes(image, refs, ouput_path, image_prefix=""):
     for ref in refs:
         try:
             result = extract_coordinates_and_label(ref, image_width, image_height)
+            if not result and ref[1] == "image":
+                # [torch vendor patch P22] 좌표를 못 읽은 image ref도 마크다운에는
+                # ![](images/{prefix}{idx}.jpg) 한 자리를 차지한다 — 번호를 소비해 뒤 그림이
+                # 앞 그림 파일을 가리키는 어긋남을 막는다.
+                img_idx += 1
             if result:
                 label_type, points_list = result
 
                 color = (np.random.randint(0, 200), np.random.randint(0, 200), np.random.randint(0, 255))
                 color_a = color + (20,)
                 for points in points_list:
-                    x1, y1, x2, y2 = points
-
-                    x1 = int(x1 / 999 * image_width)
-                    y1 = int(y1 / 999 * image_height)
-                    x2 = int(x2 / 999 * image_width)
-                    y2 = int(y2 / 999 * image_height)
-
-                    # [local patch P22] 경계로 자르고, 넓이가 없거나 뒤집힌 상자는 크롭·
-                    # boxes.json·오버레이 모두 건너뛴다. image 라벨은 업스트림(크롭 실패도
-                    # 번호를 소비)처럼 img_idx를 그대로 소비해 마크다운의 images/{k}.jpg
-                    # 번호와 파일 번호의 대응을 유지한다.
-                    x1, y1, x2, y2 = _clamp_box(x1, y1, x2, y2, image_width, image_height)
-                    degenerate = x2 <= x1 or y2 <= y1
+                    # [torch vendor patch P22] 좌표를 이미지 안으로 clamp하고 쓸 수 없는 상자
+                    # (퇴화·숫자 아님·비유한·개수 오류)는 크롭·boxes.json·오버레이를 건너뛴다.
+                    # image 상자는 건너뛰어도 번호를 소비(업스트림의 crop 실패와 같은 규칙)해
+                    # 마크다운 참조·boxes.json과 정렬을 유지한다 — 예외로 ref 전체를 버리지 않는다.
+                    box = _clamp_box(points, image_width, image_height)
+                    if box is None:
+                        if label_type == "image":
+                            img_idx += 1
+                        continue
+                    x1, y1, x2, y2 = box
 
                     if label_type == "image":
-                        if not degenerate:
-                            try:
-                                cropped = image.crop((x1, y1, x2, y2))
-                                cropped.save(f"{ouput_path}/images/{image_prefix}{img_idx}.jpg")
-                                crop_boxes[f"{image_prefix}{img_idx}.jpg"] = {  # [P13]
-                                    "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                                    "image_width": image_width, "image_height": image_height,
-                                }
-                            except Exception as e:  # noqa: BLE001 - 업스트림 동작 유지
-                                logger.debug("figure 크롭 저장 실패: %s", e)
+                        try:
+                            cropped = image.crop((x1, y1, x2, y2))
+                            cropped.save(f"{ouput_path}/images/{image_prefix}{img_idx}.jpg")
+                            crop_boxes[f"{image_prefix}{img_idx}.jpg"] = {  # [P13]
+                                "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                                "image_width": image_width, "image_height": image_height,
+                            }
+                        except Exception as e:  # noqa: BLE001 - 업스트림 동작 유지
+                            logger.debug("figure 크롭 저장 실패: %s", e)
                         img_idx += 1
-
-                    if degenerate:
-                        continue
 
                     try:
                         if label_type == "title":

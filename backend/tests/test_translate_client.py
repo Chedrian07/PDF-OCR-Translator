@@ -1333,6 +1333,64 @@ def test_SSE_줄_분할은_조각_경계와_CRLF에_무관하다():
         assert body["choices"][0]["finish_reason"] == "stop"
 
 
+def _http_chunk(data: bytes) -> bytes:
+    return b"%x\r\n%s\r\n" % (len(data), data)
+
+
+def _keepalive_sse_server(conns: set, *, stall_after_done: float = 0.0, chunked: bool = True):
+    """HTTP/1.1 keep-alive SSE — chunked(vLLM·llama.cpp·LM Studio 형식) 또는 Content-Length."""
+    parts = (_chunk("안녕"), _chunk("하세요", "stop"), b"data: [DONE]\n\n")
+
+    class KeepAliveSSE(_Quiet):
+        def do_POST(self):  # noqa: N802
+            self._body()
+            conns.add(self.client_address)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            if not chunked:
+                body = b"".join(parts)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for part in parts:
+                self.wfile.write(_http_chunk(part))
+                self.wfile.flush()
+            if stall_after_done:
+                time.sleep(stall_after_done)       # [DONE] 뒤에도 스트림을 열어 둔다
+            with contextlib.suppress(OSError):
+                self.wfile.write(b"0\r\n\r\n")
+
+    return KeepAliveSSE
+
+
+@pytest.mark.parametrize("chunked", [True, False])
+@pytest.mark.parametrize("helper_thread", [False, True])
+def test_길이가_정해진_SSE는_DONE_뒤_본문_끝을_읽어_연결을_재사용한다(helper_thread, chunked):
+    """[DONE]에서 바로 반환하면 requests가 덜 읽힌 응답의 소켓을 닫아, 원격 HTTPS에서는
+    유닛마다 TCP+TLS를 새로 맺었다(10요청 → 연결 10개, translate-4)."""
+    conns: set = set()
+    with _serve(_keepalive_sse_server(conns, chunked=chunked)) as base:
+        c = OpenAICompatClient(
+            _cfg(base_url=f"{base}/v1", api_mode="chat"),
+            cancel_check=(lambda: False) if helper_thread else None,
+        )
+        for _ in range(5):
+            assert c.complete("s", "u", max_tokens=10) == "안녕하세요"
+    assert len(conns) == 1
+
+
+def test_DONE_뒤_스트림을_닫지_않는_서버에도_오래_막히지_않는다():
+    conns: set = set()
+    with _serve(_keepalive_sse_server(conns, stall_after_done=5.0)) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat", timeout_s=30))
+        t0 = time.monotonic()
+        assert c.complete("s", "u", max_tokens=10) == "안녕하세요"
+        assert time.monotonic() - t0 < 3.0       # 소진은 짧게 시도하고 포기한다
+
+
 def test_스트리밍을_거부하는_서버는_비스트리밍으로_래치한다():
     seen = []
 

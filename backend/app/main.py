@@ -21,10 +21,14 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from http import HTTPMethod
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import MutableHeaders
+from starlette.routing import Match, Mount
 
 from . import __version__
 from .api import router
@@ -598,6 +602,7 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
     app.state.llm_router = build_router(settings)
 
     app.include_router(router)
+    _answer_unmatched_api_paths(app)
 
     if frontend is not None:
         app.mount("/", StaticFiles(directory=frontend, html=True), name="frontend")
@@ -606,6 +611,37 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
         logger.warning("프론트엔드 디렉터리를 찾지 못했습니다 (FRONTEND_DIR 설정 가능)")
 
     return app
+
+
+def _answer_unmatched_api_paths(app: FastAPI) -> None:
+    """어떤 API 라우트에도 FULL로 맞지 않은 /api 요청을 정적 마운트("/")로 내려보내지 않는다.
+
+    Starlette는 FULL 매칭(경로·메서드 모두)을 PARTIAL(경로만)보다 먼저 쓴다. 정적 마운트는 모든
+    경로·메서드에 FULL로 맞아, 라우트가 있는데 메서드만 다른 요청(HEAD …/events·GET …/cancel)도
+    StaticFiles의 404 'Not Found'를 받았다 — 있는 자원이 없는 것처럼 보였다(감사
+    delta-api-frontend-infra-4). 이 라우트는 정적 마운트 앞에서 /api 아래를 받아, PARTIAL로 맞는
+    라우트가 있으면 405 + Allow, 없으면 404 JSON으로 답한다. 스키마에는 싣지 않는다."""
+
+    async def _unmatched_api_path(request: Request) -> JSONResponse:
+        # API 라우터의 라우트를 직접 본다 — 앱은 포함한 라우터를 한 항목으로 감싸 두기도 한다
+        allowed: set[str] = set()
+        for route in router.routes:
+            if isinstance(route, Mount):
+                continue
+            match, _child = route.matches(request.scope)
+            if match == Match.PARTIAL:
+                allowed |= set(getattr(route, "methods", None) or ())
+        if allowed:
+            return JSONResponse(
+                {"detail": "Method Not Allowed"}, status_code=405,
+                headers={"Allow": ", ".join(sorted(allowed))},
+            )
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+
+    app.add_api_route(
+        "/api/{rest:path}", _unmatched_api_path,
+        methods=[method.value for method in HTTPMethod], include_in_schema=False,
+    )
 
 
 # `app` 지연 생성을 한 번으로 묶는다 (동시에 처음 접근해도 앱은 하나).

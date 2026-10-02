@@ -610,6 +610,23 @@ def test_docker_context_drops_dev_job_data_and_secrets_at_any_depth(rel):
     assert _docker_excludes(rel, _dockerignore_rules()), f"빌드 컨텍스트에 들어간다: {rel}"
 
 
+# Node 테스트 러너 전용 매니페스트 — `COPY frontend`가 정적 서빙 루트(/srv/frontend)에 실어
+# 무인증으로 공개했다(GET /package.json 200, 감사 security-4). 브라우저·서버는 쓰지 않는다.
+_FRONTEND_DEV_ONLY = ("frontend/package.json", "frontend/package-lock.json")
+
+
+@pytest.mark.parametrize("rel", _FRONTEND_DEV_ONLY)
+def test_docker_context_drops_frontend_dev_manifests(rel):
+    assert _docker_excludes(rel, _dockerignore_rules()), f"정적 루트에 실린다: {rel}"
+    runtime = [REPO / "frontend" / "index.html", REPO / "frontend" / "app.js",
+               *sorted((REPO / "frontend" / "js").glob("*.js"))]
+    for path in runtime:                       # 런타임이 읽지 않는다는 전제
+        assert "package.json" not in path.read_text(encoding="utf-8"), path
+    smoke = (REPO / "scripts" / "smoke_image.sh").read_text(encoding="utf-8")
+    assert "/srv/frontend/$f" in smoke and "package-lock.json" in smoke, \
+        "이미지 스모크가 정적 루트의 개발 매니페스트를 검사하지 않는다"
+
+
 def test_docker_context_keeps_every_build_input():
     """반대 방향 — 패턴을 넓히다(예: `**/data/`) 앱 내장 데이터(backend/app/translate/data)를 빼면
     이미지가 조용히 깨진다. Dockerfile이 COPY하는 추적 파일은 의도한 제외(frontend/tests)
@@ -631,5 +648,9 @@ def test_docker_context_keeps_every_build_input():
     files = [f for f in listed.split("\0") if f]
     assert any(f.startswith("backend/app/translate/data/") for f in files)
     rules = _dockerignore_rules()
-    dropped = [f for f in files if _docker_excludes(f, rules) and not f.startswith("frontend/tests/")]
+    dropped = [
+        f for f in files
+        if _docker_excludes(f, rules)
+        and not f.startswith("frontend/tests/") and f not in _FRONTEND_DEV_ONLY
+    ]
     assert not dropped, f".dockerignore가 빌드 입력을 뺀다: {dropped[:10]}"

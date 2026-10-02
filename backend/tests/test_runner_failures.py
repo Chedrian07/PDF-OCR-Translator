@@ -831,6 +831,42 @@ def test_canceled_chunk_skips_marker_correction_and_the_fidelity_gate(tmp_path):
     assert "페이지 1" in md and "페이지 2" in md     # 부분 결과는 보존된다
 
 
+class CancelDuringFallbackEngine(FakeEngine):
+    """multi는 실패하고, 페이지별 single의 2쪽 생성 도중 취소가 들어온다 — torch·MLX처럼
+    예외 대신 그때까지의 부분 출력을 정상 반환한다."""
+
+    def __init__(self):
+        super().__init__(delay=0.0)
+        self.single_calls: list[int] = []
+
+    def run_multi(self, image_paths, out_dir, sink, cancel):
+        raise RuntimeError("8쪽 prefill OOM (모의)")
+
+    def run_single(self, image_path, out_dir, sink, cancel):
+        page = int(Path(image_path).stem.rsplit("_", 1)[-1])
+        self.single_calls.append(page)
+        md = super().run_single(image_path, out_dir, sink, cancel)
+        if page == 2:
+            cancel.set()
+            return md[: len(md) // 4] + " PARTIAL-CUT"
+        return md
+
+
+def test_cancel_during_per_page_recovery_marks_the_partial_page(tmp_path):
+    """페이지별 복구 중 취소된 페이지가 잘린 채 경고 없이 병합돼 부분 결과에서 정상 페이지와
+    구분할 수 없었다(감사 pipeline-5) — 메인 경로처럼 '취소로 중단' 경고를 남기고 멈춘다."""
+    engine = CancelDuringFallbackEngine()
+    job = _run_job(tmp_path, engine, pages=4, pages_per_chunk=4)
+
+    assert job.status == "canceled"
+    assert engine.single_calls == [1, 2]  # 취소 뒤 3·4쪽은 처리하지 않는다
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert "PARTIAL-CUT" in md  # 생성된 부분까지는 보존한다
+    assert any("2페이지" in w and "취소로 중단된 페이지" in w for w in job.warnings), job.warnings
+    meta = json.loads((job.dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["warnings"] == job.warnings
+
+
 # ── 페이지 단위 엔진·타임아웃 재시도 정책 ──────────────────────────────────
 
 

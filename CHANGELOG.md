@@ -59,7 +59,8 @@ Performance figures below were measured on an Apple M4 Max during this work, par
 - Scanned tables are translated from a pixel grid: only the changed cells' text is covered, rules and untouched cells stay intact, and a table whose columns cannot be located is kept with a warning.
 - Rotated pages lay out multi-line translations in screen orientation.
 - List items left untranslated (the unit kept its original text) keep their original typesetting instead of being redrawn as plain text with stray fraction bars.
-- Inline math rules (fraction bars, root overlines) inside a translated paragraph are removed with its text and no longer block its space, so translations are not shrunk below readable size and no stray bars remain (a 25-page paper went from seven shrink/no-fit warnings to one). Export format version 12 rebuilds cached PDFs.
+- Inline math rules (fraction bars, root overlines) inside a translated paragraph are removed with its text and no longer block its space, so translations are not shrunk below readable size and no stray bars remain (a 25-page paper went from seven shrink/no-fit warnings to one).
+- Inner-product brackets (`\langle`, `\rangle`) are drawn as ⟨ ⟩ (〈 〉 on fonts without them) instead of the words `langle`/`rangle`. Export format version 13 rebuilds cached PDFs.
 - Scan covers leave overlapping figures and kept blocks intact; tiled and margined scans and searchable scans with the text layer under the image are recognised; narrow multi-line scan columns are no longer kept as vertical text; lines set in fonts with degenerate metrics are removed.
 - `PDF_EXPORT_FORMAT_VERSION` is now 11 and `ENRICH_VERSION` 6.
 

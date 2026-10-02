@@ -1553,3 +1553,48 @@ def test_job_list_pages_beyond_the_newest_fifty(client):
     assert client.get("/api/jobs?limit=0").status_code == 422
     assert client.get("/api/jobs?limit=501").status_code == 422
     assert client.get("/api/jobs?before=j_000000000000").status_code == 422
+
+
+# ── HEAD /api/… (P4 실앱: 프런트엔드 정적 마운트가 가로채 404) ───────────────────────
+
+
+def test_api_get_routes_answer_head_like_get_without_a_body(settings, sample_pdf):
+    """FastAPI GET 라우트는 HEAD를 받지 않아 정적 마운트("/")가 HEAD /api/…를 가로채 404를 줬다
+    — 다운로드 관리자·프로브가 있는 문서를 없다고 봤다. 이제 GET과 같은 상태·헤더, 본문 없음."""
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    settings.frontend_dir = Path(__file__).resolve().parents[2] / "frontend"
+    with TestClient(create_app(settings)) as client:
+        jid = _upload(client, sample_pdf).json()["job_id"]
+        assert wait_done(client, jid)["status"] == "done"
+        for path in (
+            "/api/health", f"/api/jobs/{jid}", f"/api/jobs/{jid}/markdown",
+            f"/api/jobs/{jid}/html", f"/api/jobs/{jid}/document.html",
+            f"/api/jobs/{jid}/archive", f"/api/jobs/{jid}/files/pages/page_0001.png",
+        ):
+            get = client.get(path)
+            head = client.head(path)
+            assert get.status_code == 200, path
+            assert head.status_code == 200, (path, head.status_code)
+            assert head.content == b"", path
+            assert head.headers["content-type"] == get.headers["content-type"], path
+            if "content-length" in get.headers:
+                assert head.headers["content-length"] == get.headers["content-length"], path
+        # 없는 잡은 HEAD도 GET처럼 404다(정적 마운트가 아니라 라우트가 답한다)
+        missing = client.head("/api/jobs/j_000000000000")
+        assert missing.status_code == 404
+        assert missing.headers["content-type"].startswith("application/json")
+
+
+def test_event_stream_routes_do_not_take_head():
+    """끝나지 않는 SSE는 본문을 버려도 연결을 붙잡는다 — HEAD 대상에서 뺀다."""
+    from fastapi.routing import APIRoute
+
+    from app.api import router
+
+    methods = {route.path: route.methods for route in router.routes if isinstance(route, APIRoute)}
+    assert methods["/api/jobs/{job_id}/events"] == {"GET"}
+    assert methods["/api/jobs/{job_id}/translate/events"] == {"GET"}
+    assert methods["/api/jobs/{job_id}/pdf"] == {"GET", "HEAD"}

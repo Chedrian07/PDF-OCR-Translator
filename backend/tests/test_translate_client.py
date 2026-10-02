@@ -1205,6 +1205,93 @@ def test_응답_본문_상한을_넘으면_읽기를_멈춘다():
                 c.complete("s", "u", max_tokens=10)
 
 
+def test_길이_없는_HTTP_1_0_SSE도_상한에서_바로_읽기를_멈춘다():
+    """mlx_lm.server 형식(HTTP/1.0, 길이·청크 없음) — 종전에는 iter_content(None)이 EOF까지
+    통째로 읽은 뒤에야 상한을 검사해, 끝없이 보내는 서버에 메모리가 전송량만큼 늘었다
+    (translate-1). 위 EndlessStream은 1MB만 쓰고 닫아 사후 검사로도 통과했다."""
+    total = 64 * 1024 * 1024
+    line = b": " + b"p" * (64 * 1024 - 3) + b"\n"   # SSE 주석 줄 64KB
+    sent = {"n": 0}
+    finished = threading.Event()
+
+    class Http10Stream(_Quiet):
+        protocol_version = "HTTP/1.0"
+
+        def do_POST(self):  # noqa: N802
+            self._body()
+            self.send_response(200)
+            self.send_header("Content-type", "text/event-stream")
+            self.end_headers()
+            try:
+                while sent["n"] < total:
+                    self.wfile.write(line)
+                    sent["n"] += len(line)
+            except OSError:
+                pass
+            finally:
+                finished.set()
+
+    with _serve(Http10Stream) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat",
+                                    max_response_mb=1, max_retries=0))
+        with pytest.raises(TranslateAPIError, match="상한"):
+            c.complete("s", "u", max_tokens=10)
+        assert finished.wait(10)
+    # 소켓 버퍼 몫의 여유만 허용한다 — 종전에는 64MB를 끝까지 받았다.
+    assert sent["n"] < 16 * 1024 * 1024
+
+
+def test_SSE도_선언된_Content_Length가_상한을_넘으면_읽기_전에_거절한다():
+    class DeclaredStream(_Quiet):
+        def do_POST(self):  # noqa: N802
+            self._body()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(50 * 1024 * 1024))
+            self.end_headers()
+            self.close_connection = True
+            with contextlib.suppress(OSError):
+                self.wfile.write(_chunk("번역", "stop") + b"data: [DONE]\n\n")
+
+    with _serve(DeclaredStream) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat",
+                                    max_response_mb=1, max_retries=0, timeout_s=5))
+        with pytest.raises(TranslateAPIError, match="상한"):
+            c.complete("s", "u", max_tokens=10)
+
+
+def test_압축된_SSE는_풀린_크기로_조금씩_읽어_상한을_건다():
+    """iter_content(None)은 urllib3의 압축 해제 상한(max_length)도 꺼, 수십 KB짜리 gzip
+    한 덩이가 상한 검사 전에 통째로 풀렸다(255KB → +257MB 실측, translate-1)."""
+    import gzip
+    import tracemalloc
+
+    bomb = gzip.compress(b"data: " + b"a" * (64 * 1024 * 1024), compresslevel=9)
+
+    class GzipStream(_Quiet):
+        def do_POST(self):  # noqa: N802
+            self._body()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(bomb)))
+            self.end_headers()
+            with contextlib.suppress(OSError):
+                self.wfile.write(bomb)
+
+    with _serve(GzipStream) as base:
+        c = OpenAICompatClient(_cfg(base_url=f"{base}/v1", api_mode="chat",
+                                    max_response_mb=1, max_retries=0))
+        tracemalloc.start()
+        try:
+            with pytest.raises(TranslateAPIError, match="상한"):
+                c.complete("s", "u", max_tokens=10)
+            _now, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    assert peak < 16 * 1024 * 1024   # 풀린 64MB를 한 번에 메모리에 올리지 않는다
+
+
 def test_스트리밍을_거부하는_서버는_비스트리밍으로_래치한다():
     seen = []
 

@@ -57,6 +57,7 @@ Performance figures below were measured on an Apple M4 Max during this work, par
 - Builds run in separate worker processes, truly in parallel, without slowing OCR. Export failures return 409 with a reason instead of 500, and caches are validated by a build stamp.
 - Scanned tables are translated from a pixel grid: only the changed cells' text is covered, rules and untouched cells stay intact, and a table whose columns cannot be located is kept with a warning.
 - Rotated pages lay out multi-line translations in screen orientation.
+- List items left untranslated (the unit kept its original text) keep their original typesetting instead of being redrawn as plain text with stray fraction bars.
 - Scan covers leave overlapping figures and kept blocks intact; tiled and margined scans and searchable scans with the text layer under the image are recognised; narrow multi-line scan columns are no longer kept as vertical text; lines set in fonts with degenerate metrics are removed.
 - `PDF_EXPORT_FORMAT_VERSION` is now 11 and `ENRICH_VERSION` 6.
 

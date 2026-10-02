@@ -69,7 +69,7 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 - Every piece of a large TeX delimiter (stacked `|`/`‖` bars) is removed with its paragraph, so no stray bars overlap the translation. Export format version 15 rebuilds cached PDFs.
 - A short symbol that sticks out of its line and only grazes the OCR box (a radical `√`, a tall bracket, an accent) is removed with the paragraph it touches when that paragraph is translated, instead of staying on top of the translation. Export format version 16 rebuilds cached PDFs.
 - Scan covers leave overlapping figures and kept blocks intact; tiled and margined scans and searchable scans with the text layer under the image are recognised; narrow multi-line scan columns are no longer kept as vertical text; lines set in fonts with degenerate metrics are removed.
-- `PDF_EXPORT_FORMAT_VERSION` is now 11 and `ENRICH_VERSION` 6.
+- `PDF_EXPORT_FORMAT_VERSION` is now 16 and `ENRICH_VERSION` 6.
 
 ### API and UI
 

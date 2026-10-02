@@ -13,6 +13,7 @@ import functools
 import logging
 import os
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -30,6 +31,24 @@ from .objc_pool import autorelease_pool
 from .repetition import SemanticRepetitionDetector
 
 logger = logging.getLogger(__name__)
+
+
+def _default_mps_fallback_env() -> bool:
+    """macOS에서 PYTORCH_ENABLE_MPS_FALLBACK=1을 기본값으로 둔다 — MPS 미구현 op의 CPU 폴백(안전망).
+
+    torch는 이 env를 라이브러리 로드(첫 ``import torch``) 때 한 번만 읽는다. 엔진 생성 시점은
+    늦을 수 있다 — OCR_DEVICE=auto는 registry가 엔진을 만들기 **전에** torch로 CUDA·MPS를
+    조회한다(audit torch-3). 그래서 이 모듈 임포트 때 둔다: registry의 auto 판정도
+    unlimited_mlx(→ 이 모듈)를 torch 조회보다 먼저 임포트한다. 운영자가 정한 값(0 포함)은
+    그대로 둔다. 반환: torch가 이미 이 env 없이 로드돼 기본값이 적용되지 못했는가."""
+    if sys.platform != "darwin":
+        return False
+    missed = "torch" in sys.modules and "PYTORCH_ENABLE_MPS_FALLBACK" not in os.environ
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    return missed
+
+
+_TORCH_LOADED_WITHOUT_MPS_FALLBACK = _default_mps_fallback_env()
 
 MULTI_PROMPT = "<image>Multi page parsing."
 SINGLE_PROMPT = "<image>document parsing."
@@ -154,9 +173,15 @@ class UnlimitedEngine(OCREngine):
         self._model = None
         self._tokenizer = None
         self.dtype_name = ""
-        if self.device == "metal":
-            # MPS 미구현 op를 CPU로 폴백 — torch 첫 임포트 전에 설정돼야 적용된다
-            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+        if self.device == "metal" and _TORCH_LOADED_WITHOUT_MPS_FALLBACK:
+            # 기본값은 모듈 임포트 때 둔다(_default_mps_fallback_env) — 그보다 먼저 torch를
+            # 올린 호출자(스크립트·도구)에서는 적용되지 않으니 조용히 넘어가지 않는다
+            logger.warning(
+                "torch가 PYTORCH_ENABLE_MPS_FALLBACK 없이 이 엔진 모듈보다 먼저 임포트돼 MPS 미구현 "
+                "op의 CPU 폴백(안전망)이 꺼져 있습니다 — 그런 op를 만나면 청크가 NotImplementedError로 "
+                "실패합니다. 프로세스 환경에 PYTORCH_ENABLE_MPS_FALLBACK=1을 두면 임포트 순서와 "
+                "무관하게 켜집니다"
+            )
 
     @property
     def loaded(self) -> bool:

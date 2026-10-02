@@ -51,6 +51,11 @@ export const KATEX_MAX_SIZE_EM = 10;
 export const KATEX_MAX_EXPAND = 1000;
 // 조판 결과의 style 길이 상한(em) — 정상 수식은 30줄 aligned도 약 63em이다. 넘으면 원문 TeX로.
 export const KATEX_MAX_BOX_EM = 100;
+// 조판할 TeX 길이 상한(자) — 넘으면 KaTeX에 넘기지 않고 원문 TeX 글자로 둔다. KaTeX 조판은
+// 긴 입력에 초선형이다(M4 Max 실측 'x+' 반복: 1만 자 31ms, 5만 자 0.5초, 20만 자 11초) —
+// 적대적 PDF의 거대 수식 스팬 하나가 미리보기·리더를 수 초 멈췄다(delta-api-frontend-infra-1).
+// 정상 수식은 긴 aligned 유도도 수천 자이고, 모델 엔진은 쪽당 출력이 16,384자로 묶인다.
+export const KATEX_MAX_TEX_CHARS = 10000;
 export function katexOptions(displayMode) {
   return {
     displayMode: !!displayMode,

@@ -47,10 +47,11 @@ MuPDF C 호출은 GIL을 쥔 채 돌고(`nm -u _mupdf.so`에 PyEval_SaveThread�
 - 로그는 stderr로(서버 콘솔·docker logs에 그대로 섞인다), 프로세스 이름(pdf-ocr-1 등)을 붙인다.
 - SIGINT는 무시한다(개발 서버 Ctrl+C는 부모가 정리한다).
 - 임시 파일(tempfile — 폰트 서브셋 등)은 워커 전용 디렉터리에 만든다. 부모가 워커마다
-  mkdtemp로 새로 만들어(시스템 임시 경로의 pdfocr-worker-<풀>-<서버 pid>-<임의>, 0700) 경로를
-  넘긴다 — 이름을 예측할 수 없고 이미 있는 경로(다른 사용자가 미리 심은 심볼릭 링크 등)를
-  받아들이지 않는다. 상한 초과로 종료된 워커는 정리 코드를 못 돌리므로 부모가 그 디렉터리를
-  지우고, 이전 서버가 SIGKILL로 남긴 것은 첫 풀 생성 때 쓸어 낸다(자기 소유의 진짜 디렉터리만).
+  mkdtemp로 새로 만들어(시스템 임시 경로의 pdfocr-worker-<풀>-<서버 pid>-<기동 토큰>-<임의>,
+  0700) 경로를 넘긴다 — 이름을 예측할 수 없고 이미 있는 경로(다른 사용자가 미리 심은 심볼릭 링크
+  등)를 받아들이지 않는다. 상한 초과로 종료된 워커는 정리 코드를 못 돌리므로 부모가 그 디렉터리를
+  지우고, 이전 서버가 SIGKILL로 남긴 것은 첫 풀 생성 때 쓸어 낸다(자기 소유의 진짜 디렉터리만 —
+  같은 pid로 다시 뜬 서버는 기동 토큰으로 이전 기동의 고아를 가린다).
 - 작업마다 `signal.alarm(상한 + 여유)`를 건다. SIGALRM 기본 동작은 커널이 프로세스를 끝내는
   것이라 GIL이 필요 없다 — 부모가 SIGKILL로 사라져 아무도 죽여 주지 않아도 적대적 작업이 영원히
   CPU를 태우지 않는다.
@@ -85,6 +86,7 @@ import multiprocessing
 import os
 import pickle
 import re
+import secrets
 import shutil
 import signal
 import stat
@@ -537,6 +539,11 @@ def _drop_secret_env() -> None:
 
 
 _SCRATCH_PREFIX = "pdfocr-worker-"
+# 이 서버 프로세스의 기동 토큰 — 워커 임시 디렉터리 이름에 pid와 함께 넣는다. pid만으로는 같은
+# pid로 다시 뜬 서버(컨테이너는 exec 형식 CMD라 서버가 기동마다 pid 1이다)가 이전 기동이
+# SIGKILL로 남긴 디렉터리를 '살아 있는 프로세스(=자기 자신) 것'으로 보고 영원히 남겼다(감사
+# delta-core-3). 16진 숫자뿐이라 이름의 '-' 구분을 깨지 않는다.
+_BOOT_TOKEN = secrets.token_hex(4)
 
 
 def _owned_dir(info: os.stat_result) -> bool:
@@ -556,10 +563,12 @@ def _make_scratch_dir(pool_name: str) -> Path | None:
     예전에는 워커가 `pdfocr-worker-<풀>-<pid>`를 mkdir(exist_ok=True)로 만들어, 공유 /tmp(비컨테이너
     Linux)에서 다른 사용자가 그 이름으로 미리 심어 둔 심볼릭 링크·디렉터리를 검사 없이 채택했다
     (폰트 서브셋이 남의 디렉터리에 쌓이거나 내보내기가 실패 — 감사 security-4). mkdtemp는 이름을
-    예측할 수 없고 이미 있는 경로를 받아들이지 않는다(0700). 이름의 pid는 만든 서버의 것이다 —
-    서버가 SIGKILL로 사라진 뒤의 고아 정리(_sweep_orphan_scratch)가 쓴다."""
+    예측할 수 없고 이미 있는 경로를 받아들이지 않는다(0700). 이름의 pid·기동 토큰은 만든 서버의
+    것이다 — 서버가 SIGKILL로 사라진 뒤의 고아 정리(_sweep_orphan_scratch)가 쓴다."""
     try:
-        return Path(tempfile.mkdtemp(prefix=f"{_SCRATCH_PREFIX}{pool_name}-{os.getpid()}-"))
+        return Path(tempfile.mkdtemp(
+            prefix=f"{_SCRATCH_PREFIX}{pool_name}-{os.getpid()}-{_BOOT_TOKEN}-",
+        ))
     except OSError:
         return None
 
@@ -587,9 +596,12 @@ _SWEPT_GUARD = threading.Lock()
 def _sweep_orphan_scratch() -> None:
     """이전 서버가 SIGKILL로 남긴 워커 임시 디렉터리를 지운다(만든 프로세스가 살아 있으면 둔다).
 
-    이름은 `pdfocr-worker-<풀>-<pid>[-<임의>]`다(pid는 만든 프로세스 — 예전 형식도 같은 자리).
-    자기 소유의 진짜 디렉터리만 지운다 — 같은 이름으로 심어 둔 심볼릭 링크·다른 사용자의
-    디렉터리는 건드리지 않는다."""
+    이름은 `pdfocr-worker-<풀>-<pid>-<기동 토큰>-<임의>`다(pid·토큰은 만든 서버 — 예전 형식
+    `<풀>-<pid>[-<임의>]`은 토큰이 없다). pid가 이 서버와 같으면 기동 토큰으로 가른다: 토큰이 다르거나
+    없으면 같은 pid로 먼저 떴던 서버(PID 1 컨테이너의 이전 기동)의 고아다. 다른 pid는 그 프로세스가
+    살아 있으면 둔다(다른 서버의 워커일 수 있다). 자기 소유의 진짜 디렉터리만 지운다 — 같은
+    이름으로 심어 둔 심볼릭 링크·다른 사용자의 디렉터리는 건드리지 않는다. /tmp를 공유하는 서로
+    다른 PID 네임스페이스(컨테이너 둘이 같은 /tmp 볼륨을 마운트)는 가정하지 않는다."""
     global _SWEPT_SCRATCH
     with _SWEPT_GUARD:
         if _SWEPT_SCRATCH:
@@ -600,22 +612,28 @@ def _sweep_orphan_scratch() -> None:
     except OSError:
         return
     for entry in entries:
+        parts = entry.name[len(_SCRATCH_PREFIX):].split("-")
         try:
-            pid = int(entry.name[len(_SCRATCH_PREFIX):].split("-")[1])
+            pid = int(parts[1])
         except (IndexError, ValueError):
             continue
+        boot = parts[2] if len(parts) >= 4 else None
         try:
             if not _owned_dir(entry.lstat()):
                 continue
         except OSError:
             continue
-        try:
-            os.kill(pid, 0)
-            continue  # 살아 있는 프로세스(다른 서버의 워커일 수 있다)
-        except ProcessLookupError:
-            pass
-        except OSError:
-            continue  # 권한 없음 = 다른 사용자의 살아 있는 프로세스
+        if pid == os.getpid():
+            if boot == _BOOT_TOKEN:
+                continue  # 이번 기동이 만든 디렉터리
+        else:
+            try:
+                os.kill(pid, 0)
+                continue  # 살아 있는 프로세스(다른 서버의 워커일 수 있다)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                continue  # 권한 없음 = 다른 사용자의 살아 있는 프로세스
         shutil.rmtree(entry, ignore_errors=True)
 
 

@@ -551,6 +551,8 @@ _INLINE_RULE_MIN_LENGTH_PT = 1.0
 _INLINE_RULE_MAX_LENGTH_PT = 160.0
 # OCR bbox가 줄 끝 글자를 1pt 안쪽에서 자르기도 해서 소유 판정에 두는 여유.
 _INLINE_RULE_OWNER_SLACK_PT = 1.0
+# 그림 영역 겹침 판정에서 선에 주는 두께(사방) — 높이 0인 선 사각형도 겹침을 볼 수 있게.
+_INLINE_RULE_REGION_PAD_PT = 0.25
 # 상자 판정 — 이 길이 이하의 세로 선 끝점이 가로 선 끝점에서 이 거리 안이면 모서리다.
 _BOX_EDGE_MAX_LENGTH_PT = 30.0
 _BOX_CORNER_TOLERANCE_PT = 1.0
@@ -625,8 +627,17 @@ def _inline_rule_owner(rule_rect, block_rects, oblocks, image_regions) -> int | 
 
     글자가 없는 목록 컨테이너('list')는 주인이 아니다 — 안쪽 항목 블록이 주인이다.
     둘 이상의 문단이 겹쳐 담으면 어느 문단의 수식인지 알 수 없으므로 고정 장애물로 둔다.
+    그림 영역에 걸친 선은 주인이 없다. get_drawings는 스트로크 선('s'·'l' — 대부분의 TeX
+    분수선·matplotlib 범례 선)을 높이 0인 사각형으로 보고하고 빈 사각형의 intersects는 늘
+    거짓이라, 이 가드가 채움 사각형에만 걸려 그림 아래쪽에 겹친 캡션이 범례 선을 소유해
+    지웠다(감사 delta-pdf-translate-6). 두께를 준 사각형으로 겹침을 본다.
     """
-    if any(rule_rect.intersects(region) for region in image_regions):
+    probe = +rule_rect
+    probe += (
+        -_INLINE_RULE_REGION_PAD_PT, -_INLINE_RULE_REGION_PAD_PT,
+        _INLINE_RULE_REGION_PAD_PT, _INLINE_RULE_REGION_PAD_PT,
+    )
+    if any(probe.intersects(region) for region in image_regions):
         return None
     owners = []
     for index, (rect, block) in enumerate(zip(block_rects, oblocks)):

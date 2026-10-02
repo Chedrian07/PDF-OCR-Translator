@@ -401,6 +401,24 @@ def test_metal_unavailable_hint_names_macos14_and_current_version(monkeypatch):
     assert "12.3" not in message
 
 
+def test_metal_unbuilt_hint_points_to_setup_mlx(monkeypatch):
+    """MPS 없이 빌드된 torch 안내는 README가 권하는 `make setup-mlx`를 가리킨다 — 예전에는
+    README가 금지한 `uv sync --extra metal` 단독 실행(mlx·C++ 모듈 삭제)을 권했다."""
+    import torch
+
+    from app.engine.base import EngineError
+
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_built", lambda: False)
+    engine = _engine(monkeypatch, "metal")
+    with pytest.raises(EngineError) as info:
+        engine._load_locked()
+    message = str(info.value)
+    assert "`make setup-mlx`" in message
+    assert "(backend에서 `uv sync --extra metal`)" not in message
+    assert "Docker/Linux에서는 Metal을 쓸 수 없습니다" in message
+
+
 def test_metal_bf16_probe_failure_warns_with_macos_version(monkeypatch, caplog):
     import platform
 

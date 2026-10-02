@@ -667,8 +667,9 @@ class SidecarEngine(OCREngine):
             self._truncated_replay.clear()  # 새 청크 — 이전 청크의 1회용 표식은 무효
         self._ensure_ready(cancel)
         out_dir.mkdir(parents=True, exist_ok=True)
-        # 텍스트 bbox가 없는 엔진(figure_only)은 raw_pages.json을 쓰지 않는다 — 쓰면
+        # 텍스트 bbox가 없는 엔진(figure_only)은 raw_pages.json에 좌표를 싣지 않는다 — 실으면
         # image 블록뿐인 layout.json이 생겨 HTML·PDF 내보내기가 OCR 텍스트를 잃는다.
+        # 파일은 페이지마다 빈 원출력으로 남는다(merge가 원출력 개수로 페이지 수를 맞춰 본다).
         mat = ChunkMaterializer(
             out_dir, single=single,
             write_raw=self._spec.layout_capability == "full",

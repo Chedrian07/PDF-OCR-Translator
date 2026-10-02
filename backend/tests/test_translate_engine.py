@@ -2034,6 +2034,26 @@ def test_이전_실행이_캐시한_루프_출력은_재검증에서_걸러진�
     assert "만만만" not in out and out == ko_expected(md)
 
 
+def test_이전_실행이_캐시한_수식_달러는_재사용할_때_걷어낸다(tmp_path, cfg):
+    """원출력 단계의 '$…$' 정리가 생기기 전에 캐시된 번역은 복원 수식 옆에 '$'가 그대로 있어,
+    재번역해도 캐시 적중으로 같은 문장이 쓰였다 — 전량 강제 재번역(유료) 말고는 고칠 수 없었다
+    (delta-pdf-translate-5). 캐시 적중 때 복원문에서 걷어내고 API는 다시 부르지 않는다."""
+    md = "We define \\( \\langle y, x \\rangle \\) as the inner product of the two vectors.\n"
+    _run_md(tmp_path, cfg, md, EchoClient())
+    upath = tmp_path / "translations/ko/units.json"
+    cache = json.loads(upath.read_text(encoding="utf-8"))
+    [key] = list(cache)
+    cache[key] = cache[key].replace("\\( \\langle", "$\\( \\langle").replace(
+        "\\rangle \\)", "\\rangle \\)$")
+    assert "$\\(" in cache[key]
+    upath.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+
+    again = EchoClient()
+    res, report, out = _run_md(tmp_path, cfg, md, again)
+    assert again.unit_calls == 0 and res.cached == 1
+    assert "$" not in out and out == ko_expected(md)
+
+
 # ── 분할 결합 출력 속의 캔드 응답 (verify_e2e 25쪽 실측) ───────────────────────
 
 class _CannedEverywhere(EchoClient):

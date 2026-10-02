@@ -826,6 +826,46 @@ if (layoutCap !== 'figure_only') {
   }), jobId);
   check('삭제: 저장값·하이라이트·목록이 함께 지워진다',
     cleared.storage === null && cleared.marks === 0 && cleared.empty, JSON.stringify(cleared));
+
+  // (d2) 같은 잡을 두 탭(같은 컨텍스트 = 같은 localStorage)에서 열고 번갈아 저장·삭제해도 서로의
+  //      메모를 덮어쓰지 않고, 다른 탭의 변경은 storage 이벤트로 목록에 바로 보인다(frontend-1).
+  //      예전에는 뒤에 저장한 탭이 잡을 열 때 읽은 사본으로 목록 전체를 덮어썼다.
+  const tabB = await noteCtx.newPage();
+  await tabB.goto(`${BASE}/${jobHash}`, { waitUntil: 'domcontentloaded' });
+  await tabB.waitForSelector('#reader-content .reader-rail-page[data-page="1"] .reader-map-card .reader-map-target',
+    { timeout: 20_000 });
+  const citeCard = (tab, index) => tab.evaluate((i) => {
+    const targets = [...document.querySelectorAll(
+      '#reader-content .reader-rail-page[data-page="1"] .reader-map-card .reader-map-target')];
+    const target = targets[Math.min(i, targets.length - 1)];
+    const range = document.createRange();
+    range.selectNodeContents(target);
+    const selection = getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.getElementById('reader-content').dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    const tools = document.querySelector('.reader-tools-wrap');
+    if (tools && !tools.open) tools.open = true;
+    document.getElementById('reader-cite').click();
+    return document.getElementById('toast')?.textContent || '';
+  }, index);
+  const listCount = (tab) => tab.evaluate(() => document.querySelectorAll('#reader-notes-list li').length);
+  const toastA = await citeCard(notePage, 0);
+  const toastB = await citeCard(tabB, 1);
+  await notePage.waitForFunction(() => document.querySelectorAll('#reader-notes-list li').length === 2,
+    null, { timeout: 5_000 }).catch(() => {});
+  const shared = { stored: (await stored()).length, listA: await listCount(notePage), listB: await listCount(tabB) };
+  check('두 탭 저장: 뒤에 저장한 탭이 앞 탭의 메모를 덮어쓰지 않고 양쪽 목록에 함께 보인다',
+    shared.stored === 2 && shared.listA === 2 && shared.listB === 2
+      && /인용을 저장했습니다/.test(toastA) && /인용을 저장했습니다/.test(toastB),
+    JSON.stringify({ shared, toastA, toastB }));
+  await notePage.locator('#reader-notes-list li .reader-note-del').first().click();
+  await tabB.waitForFunction(() => document.querySelectorAll('#reader-notes-list li').length === 1,
+    null, { timeout: 5_000 }).catch(() => {});
+  const afterDelete = { stored: (await stored()).length, listA: await listCount(notePage), listB: await listCount(tabB) };
+  check('두 탭 삭제: 한 탭에서 지우면 다른 탭 목록에서도 사라지고 남은 메모는 그대로',
+    afterDelete.stored === 1 && afterDelete.listA === 1 && afterDelete.listB === 1,
+    JSON.stringify(afterDelete));
   await noteCtx.close();
 }
 

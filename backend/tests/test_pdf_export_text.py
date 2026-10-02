@@ -80,6 +80,9 @@ def test_layout_font_estimate_counts_text_between_angle_brackets():
     (r"\( W^\top \)", "W^T"),
     (r"\( \operatorname*{arg\,max}_{\theta} \)", "arg max(θ)"),
     (r"\( \underline{m} \)", "m"),
+    # 내적 괄호 — 예전에는 'langle y, xrangle'처럼 명령 이름이 그대로 찍혔다
+    (r"\( \langle y, x \rangle \)", "⟨ y, x ⟩"),
+    (r"\(\left|\langle \boldsymbol{y}, \boldsymbol{x}\rangle\right|^2\)", "|⟨ y, x⟩|²"),
 ])
 def test_plain_text_converts_structural_latex(raw, expected):
     """이름만 남기던 처리('frac1N', 'mathbbR^(d)', '3\\,GB')를 읽을 수 있는 평문으로."""

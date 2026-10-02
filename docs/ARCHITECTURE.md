@@ -1861,6 +1861,12 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
   의존성을 빠뜨린 채 빌드해 컨테이너 기동 시 ImportError로 드러난다.
 - 커버리지는 게이트가 아니라 관측용이다 — `pytest-cov`는 lock을 건드리지 않도록
   `uv run --with`로 임시 설치한다(`make coverage`도 동일).
+- **추적 중 — starlette TestClient의 httpx**: 지금 잠긴 starlette 1.3.1(backend `uv.lock`·두
+  sidecar `requirements.lock`)의 `TestClient`는 `httpx`로 돌면 `StarletteDeprecationWarning`
+  ("install `httpx2` instead")을 낸다 — 백엔드 실행과 sidecar 스위트의 경고 1건이 이것이다. 지금은
+  경고뿐이지만, httpx 지원을 뺀 starlette로 올리는 갱신(Dependabot의 backend uv 묶음 포함)은
+  TestClient를 쓰는 백엔드·sidecar 테스트를 한꺼번에 깨뜨린다. 그 갱신 때 backend dev 그룹과
+  sidecar 테스트 설치에 `httpx2`를 더하고 lock을 함께 다시 만든다(새 패키지라 공급망 검토 대상).
 - **`backend-native`·`verify-e2e`에서는 `uv run`을 쓰지 않는다**: `uv run`은 환경을
   `uv.lock`에 맞춰 재동기화한다. `uocr-native`는 lock 밖 패키지라 정리 대상이 될지가
   uv 버전·설정에 달려 있어, 의존하지 않고 `uv sync` 뒤 `.venv/bin/python`을 직접

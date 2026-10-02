@@ -2476,6 +2476,11 @@ UI가 서버(oMLX·LM Studio·mlx_lm.server)를 켜고 `LLM_LOCAL_OPENAI_BASE_UR
   상태코드: 404 잡 없음 / 409 미완료 잡 / 422 페이지 범위 밖·빈 페이지 /
   400 지원하지 않는 프로바이더·허용목록 밖 모델 / **429 레이트리밋·동시 실행 상한
   초과(`Retry-After` 동반 — §5)** / 503 공급자 미구성 또는 업스트림 LLM 장애.
+  응답은 Localight `/ask` 형태(`answer`·`provider`·`model`·`page`·`reasoning_effort`·
+  `reasoning_summary`·`thinking_requested`·`usage`·`remote`·`local_only`)에 `answer_html`을 더한다 —
+  답변 마크다운·TeX를 `/html`과 같은 안전 렌더러(텍스트 이스케이프, 이미지는 잡 파일만)로 만든
+  조각이다. 질문 탭은 이것을 신뢰된 서버 조각으로 붙이고 수식을 KaTeX로 조판한다(없으면 원문 글자) —
+  예전에는 `**굵게**`·`$$…$$`가 글자 그대로 보였다.
 - **GET /api/health** 추가 필드(추가만 — 기존 필드 의미 불변): `qa_available`
   (기본 공급자의 실제 구성 여부를 반영 — 상수 true가 아니다), `llm_default_provider` (§5 참조).
 

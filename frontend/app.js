@@ -281,9 +281,13 @@ function init() {
       return;
     }
     if (state.viewerOpen && ev.key === 'Tab') {
+      // summary(선택 문장 도구·문서 개요)도 탭 순서에 들고, tabindex=-1 버튼(다른 페이지의
+      // 레일 칸)은 들지 않는다 — 어긋나면 뷰어의 실제 마지막 칸을 '마지막'으로 보지 못해 Tab이
+      // 뷰어 밖으로 샌다(frontend-3).
       const focusable = [...el.viewerRoot.querySelectorAll(
-        'a[href]:not([hidden]),button:not([disabled]):not([hidden]),input:not([disabled]),[tabindex]:not([tabindex="-1"])',
-      )].filter((node) => node.offsetParent !== null
+        'a[href]:not([hidden]),button:not([disabled]):not([hidden]),input:not([disabled]),'
+        + 'select:not([disabled]),textarea:not([disabled]),summary,[tabindex]:not([tabindex="-1"])',
+      )].filter((node) => node.tabIndex >= 0 && node.offsetParent !== null
         && getComputedStyle(node).visibility !== 'hidden'
         && !node.closest('[inert],[aria-hidden="true"]'));
       if (focusable.length) {

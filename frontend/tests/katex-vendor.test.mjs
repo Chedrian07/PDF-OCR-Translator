@@ -18,7 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  KATEX_MAX_BOX_EM, KATEX_MAX_EXPAND, KATEX_MAX_SIZE_EM, katexOptions,
+  KATEX_MAX_BOX_EM, KATEX_MAX_EXPAND, KATEX_MAX_SIZE_EM, KATEX_MAX_TEX_CHARS, katexOptions,
 } from '../js/constants.js';
 import { clampTexSizes, katexStyleOversized } from '../js/core.js';
 import { renderMath, typesetMath } from '../js/ui.js';
@@ -249,6 +249,25 @@ test('renderMath·typesetMath: 크기를 묶어 조판하고, 그래도 거대�
   typesetMath(root);
   assert.equal(inline.dataset.mathDone, '1', '되돌린 수식도 다시 조판하지 않는다');
   assert.equal(inline.dataset.mathFallback, 'oversized');
+});
+
+test('renderMath: 상한보다 긴 TeX는 KaTeX에 넘기지 않고 원문 글자로 둔다', (t) => {
+  // KaTeX 조판은 긴 입력에 초선형이다('x+' 5만 자 0.5초, 20만 자 11초) — 적대적 PDF의 거대
+  // 수식 스팬 하나가 미리보기·리더를 멈추지 않게 한다(delta-api-frontend-infra-1).
+  const doc = installFakeDom(t);
+  const seen = installKatexStub(t);
+  const target = mount(doc, 'span');
+  const tooLong = 'x+'.repeat(KATEX_MAX_TEX_CHARS / 2 + 1);
+  assert.equal(renderMath(target, tooLong, true), true, '끝 — typesetMath가 다시 시도하지 않는다');
+  assert.deepEqual(seen, [], 'KaTeX를 부르지 않는다');
+  assert.equal(target.textContent, tooLong);
+  assert.equal(target.dataset.mathFallback, 'too-long');
+  assert.match(target.getAttribute('title'), /원문 TeX/);
+
+  const fits = mount(doc, 'span');
+  assert.equal(renderMath(fits, 'x^2', false), true);
+  assert.deepEqual(seen, ['x^2']);
+  assert.equal(fits.dataset.mathFallback, undefined);
 });
 
 test('리더 카드 수식(mathTextNodes)도 renderMath를 거친다 — 크기를 묶고 거대 결과는 원문 TeX', (t) => {

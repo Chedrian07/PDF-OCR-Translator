@@ -684,7 +684,8 @@ npm test --prefix frontend
 (`OCR_MPS_TESTS=1` — torch MPS 계약, torch·macOS 업그레이드 전후)와 `make test-mlx-real`
 (`OCR_MLX_REAL_TESTS=1` — MLX 실가중치 패리티, 고정 스냅샷이 로컬 HF 캐시에 있어야 하며
 `make dev`를 한 번 띄우면 받아진다. `.env`의 `HF_HOME`·`HF_HUB_CACHE`도 `make dev`처럼 반영하고,
-가중치가 없으면 pytest 전에 사유를 보이고 종료코드 2로 멈춘다 — `scripts/require_hf_snapshot.py`).
+가중치가 없으면 pytest 전에 사유를 보이고 종료코드 2로 멈춘다 — `scripts/require_hf_snapshot.py`.
+fp32 MLX·torch 모델을 차례로 올려 최고 메모리가 약 23GiB라 32GB 이상 Mac에서 돌린다).
 둘 다 건너뛴 테스트의 사유를 보여 줍니다(`-rs`).
 
 환경변수 전체 목록: [docs/ARCHITECTURE.md §7](docs/ARCHITECTURE.md) —

@@ -291,7 +291,54 @@ def sanitize_translation(
         wrapped += single
         out, invented = _strip_invented_dollars(out, masked)
         wrapped += invented
+        out, tails = _strip_tag_tails(out, masked)
+        wrapped += tails
     return out, count + wrapped + retyped
+
+
+# 플레이스홀더 바로 뒤에 모델이 덧붙인 꼬리 — 미리보기(v)가 잘린 식('\\( [50, 6, 1')이거나 백슬래시로
+# 끝나 속성이 덜 닫힌 것처럼 보이자 '">'·'>'·'"'로 한 번 더 닫았다(실앱 4B: 번역 PDF·리더에
+# 'x(i:j) >'·'\\( \\tilde{x} \\)"'·'[5, 18, 7, 52] "의'). unmask는 '<m1'·'</m1>' 잔여만 보므로
+# 그대로 통과했다. 원문(마스킹본)의 같은 플레이스홀더 바로 뒤에 같은 글자가 없을 때만 지우고,
+# 따옴표는 출력의 따옴표가 원문보다 많을 때 그만큼만, 앞에 여는 따옴표가 붙은 태그는 빼고 지운다.
+_TAG_TAIL_RE = re.compile(r"(<\s*([mkgucft]\d+)\b" + _PH_ATTRS + r"\s*/?\s*>)(\"?/?>)")
+_TAG_QUOTE_RE = re.compile(
+    r"(?<!\")(<\s*([mkgucft]\d+)\b" + _PH_ATTRS + r"\s*/?\s*>)([ \t]?)\""
+)
+
+
+def _source_after_tag(masked: str, pid: str) -> str:
+    """마스킹된 원문에서 그 플레이스홀더 바로 뒤 몇 글자."""
+    found = re.search(r"<\s*" + re.escape(pid) + r"\b" + _PH_ATTRS + r"\s*/?\s*>", masked)
+    return masked[found.end():found.end() + 4] if found else ""
+
+
+def _strip_tag_tails(out: str, masked: str) -> tuple[str, int]:
+    count = 0
+
+    def _tail(match: re.Match) -> str:
+        nonlocal count
+        if _source_after_tag(masked, match.group(2)).startswith(match.group(3)):
+            return match.group(0)
+        count += 1
+        return match.group(1)
+
+    out = _TAG_TAIL_RE.sub(_tail, out)
+    extra = (
+        _outside_placeholder_tags(out).count('"') - _outside_placeholder_tags(masked).count('"')
+    )
+    if extra <= 0:
+        return out, count
+
+    def _quote(match: re.Match) -> str:
+        nonlocal count, extra
+        if extra <= 0 or _source_after_tag(masked, match.group(2)).lstrip(" \t").startswith('"'):
+            return match.group(0)
+        extra -= 1
+        count += 1
+        return match.group(1) + match.group(3)
+
+    return _TAG_QUOTE_RE.sub(_quote, out), count
 
 
 # 원문 산문에 '$'가 없는데 모델이 변수·짧은 식을 '$…$'로 감싼 것('$x$'·'$d=200$'·'$b$-비트') —

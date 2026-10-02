@@ -693,3 +693,82 @@ def test_scan_blocks_inside_an_empty_list_container_are_still_covered(tmp_path):
     with fitz.open(job_dir / "source.pdf") as source:
         left, before = _ink_beyond_translation(source[0], result.path, BLOCK)
     assert before > 500 and left <= before * 0.02, (left, before)
+
+
+def _tiled_scan_job(tmp_path: Path, name: str, *, strips: int = 1, margin: float = 0.0) -> Path:
+    """같은 스캔을 가로 띠 여러 장으로 나눠 넣거나, 여백을 두고 한 장으로 놓은 쪽."""
+    job_dir = tmp_path / name
+    job_dir.mkdir()
+    scale = SCAN_DPI / 72
+    image = Image.open(io.BytesIO(_scan_png()))
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    if margin:
+        # 여백만큼 줄여 놓되 글자는 페이지의 같은 자리에 오게 그 영역만 잘라 넣는다.
+        crop = image.crop((
+            int(margin * scale), int(margin * scale),
+            int((PAGE_W - margin) * scale), int((PAGE_H - margin) * scale),
+        ))
+        buffer = io.BytesIO()
+        crop.save(buffer, "PNG")
+        page.insert_image(
+            fitz.Rect(margin, margin, PAGE_W - margin, PAGE_H - margin),
+            stream=buffer.getvalue(), keep_proportion=False,
+        )
+    else:
+        step = image.height // strips
+        for index in range(strips):
+            bottom = image.height if index == strips - 1 else (index + 1) * step
+            buffer = io.BytesIO()
+            image.crop((0, index * step, image.width, bottom)).save(buffer, "PNG")
+            page.insert_image(
+                fitz.Rect(0, PAGE_H * index * step / image.height, PAGE_W, PAGE_H * bottom / image.height),
+                stream=buffer.getvalue(), keep_proportion=False,
+            )
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+    _write_layout(job_dir, [
+        {"type": "text", "bbox": _bbox(BLOCK), "content": "\n".join(LINES)},
+    ], {0: KO})
+    return job_dir
+
+
+@pytest.mark.parametrize(("strips", "margin"), [(2, 0.0), (4, 0.0), (1, 30.0), (1, 60.0)])
+def test_tiled_or_margined_scans_are_still_scan_backgrounds(tmp_path, strips, margin):
+    """띠로 나뉜 스캔·여백을 둔 스캔(면적 85% 미만)도 스캔 배경이다 — 덮고 번역한다.
+
+    예전에는 래스터 한 장이 페이지의 85% 이상일 때만 스캔으로 봐서, 이런 쪽은 모든 블록이
+    '그림 위 텍스트'로 보존되고 번역이 하나도 들어가지 않았다(감사 pdf-9).
+    """
+    job_dir = _tiled_scan_job(tmp_path, f"tiled-{strips}-{int(margin)}", strips=strips, margin=margin)
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    assert result.replaced == 1, result.report()
+    assert result.raster_blocks_erased == 1, result.report()
+    assert "figure_text" not in result.kept_reasons, result.report()
+    with fitz.open(job_dir / "source.pdf") as source:
+        left, before = _ink_beyond_translation(source[0], result.path, BLOCK)
+    assert before > 500 and left <= before * 0.02, (left, before)
+
+
+def test_large_image_with_visible_text_over_it_is_still_a_figure(tmp_path):
+    """보이는 글자가 위에 얹힌 큰 이미지(born-digital 그림)는 스캔 배경이 아니다 — 그대로 보존."""
+    job_dir = tmp_path / "big-figure"
+    job_dir.mkdir()
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    figure = fitz.Rect(40, 80, 555, 600)                      # 페이지의 53%
+    page.insert_image(figure, stream=_scan_png(lines=[]), keep_proportion=False)
+    page.insert_text((72, 120), "Encoder block with attention", fontsize=11)
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+    _write_layout(job_dir, [
+        {"type": "text", "bbox": _bbox(fitz.Rect(70, 108, 350, 124)),
+         "content": "Encoder block with attention"},
+    ], {0: "어텐션이 있는 인코더 블록"})
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    assert result.replaced == 0, result.report()
+    assert result.kept_reasons.get("figure_text") == 1, result.report()

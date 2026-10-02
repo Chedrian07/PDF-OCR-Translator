@@ -74,6 +74,9 @@ _MAX_BACKOFF_S = 30.0
 
 # 잘린 출력이 '쓸 수 없을 만큼 길다'고 보는 최소 길이(문자) — _hopeless_truncation 참조.
 _OVERLONG_MIN_CHARS = 2000
+# 스트림 도중 폭주(반복 루프·과도한 길이) 검사 간격 — 본문이 이만큼(문자) 늘 때마다 한 번.
+# longest_repetition은 12k자에 ~6ms라 30k자 출력 전체에서도 수십 번·수백 ms다.
+_RUNAWAY_CHECK_EVERY = 1000
 
 # 응답 정지(ReadTimeout) 재시도 상한 — 재시도는 같은 긴 생성의 반복이고 비스트리밍
 # 서버는 끊긴 요청도 끝까지 생성한다(실측: 4회 중복, 고아 32,768토큰). 최대 1회.
@@ -277,7 +280,7 @@ class OpenAICompatClient:
             hdrs = dict(resp.headers)
             ctype = _header(hdrs, "Content-Type").lower()
             if status == 200 and payload.get("stream") and "text/event-stream" in ctype:
-                return status, self._read_sse(resp, hdrs, abort), hdrs
+                return status, self._read_sse(resp, hdrs, abort, _prompt_text(payload)), hdrs
             return status, _decode_body(self._read_body(resp, hdrs, abort)), hdrs
         except requests.exceptions.ConnectionError as exc:
             # stream=True 본문 수신 중 read timeout은 requests가 ConnectionError로 감싼다 —
@@ -315,7 +318,9 @@ class OpenAICompatClient:
                 raise self._too_large()
         return bytes(buf)
 
-    def _read_sse(self, resp, hdrs: dict, abort: threading.Event) -> dict:
+    def _read_sse(
+        self, resp, hdrs: dict, abort: threading.Event, prompt: str | None = None,
+    ) -> dict:
         """SSE(chat.completion.chunk) 스트림을 비스트리밍 응답 모양의 dict로 조립한다.
 
         고정 크기(_BODY_CHUNK)로 읽는다. 종전 iter_content(chunk_size=None)은 청크 전송이
@@ -323,10 +328,15 @@ class OpenAICompatClient:
         urllib3의 압축 해제 상한도 꺼, 끝없이 보내는 서버에는 상한 검사가 본문 전체를
         메모리에 올린 뒤에야 돌았다(translate-1). 파서는 [DONE] 전에는 부분 출력을 쓰지
         않으므로 조각이 묶여 와도 결과·지연은 같다.
+
+        prompt(요청의 사용자 입력)를 주면 본문이 폭주하는지 도중에 본다(_RunawayGuard) — 이미
+        쓸 수 없게 된 출력이면 [DONE]을 기다리지 않고 TranslateOutputTruncated로 끝내고, 호출자가
+        연결을 닫아 서버 생성도 멈춘다.
         """
         cap = self._cap_bytes()
         self._check_declared(hdrs)
         acc = _StreamAccumulator()
+        guard = _RunawayGuard(prompt) if prompt is not None else None
         lines = _LineBuffer()
         received = 0
         chunks = resp.iter_content(_BODY_CHUNK)
@@ -342,6 +352,8 @@ class OpenAICompatClient:
                 if acc.feed(line):
                     _drain_after_done(resp, chunks, abort)
                     return acc.body()
+            if guard is not None:
+                guard.check(acc)
         acc.feed(lines.rest())
         acc.feed(b"")  # 마지막 이벤트 경계
         if not acc.complete:
@@ -729,6 +741,7 @@ class _StreamAccumulator:
     def __init__(self) -> None:
         self.data: list[bytes] = []
         self.parts: list[str] = []
+        self.content_chars = 0
         self.reasoning_chars = 0
         self.finish_reason: str | None = None
         self.usage: dict | None = None
@@ -775,7 +788,9 @@ class _StreamAccumulator:
             if isinstance(delta, dict):
                 content = delta.get("content")
                 if content:
-                    self.parts.append(_content_text(content))
+                    piece = _content_text(content)
+                    self.parts.append(piece)
+                    self.content_chars += len(piece)
                 for key in ("reasoning_content", "reasoning"):
                     if isinstance(delta.get(key), str):
                         self.reasoning_chars += len(delta[key])
@@ -795,6 +810,54 @@ class _StreamAccumulator:
             "usage": self.usage or {},
             "stream_stats": {"reasoning_chars": self.reasoning_chars},
         }
+
+
+class _RunawayGuard:
+    """스트림 도중 이미 쓸 수 없게 된 출력을 알아채 생성을 일찍 끊는다.
+
+    소형 모델의 반복 루프는 max_tokens까지 생성한 뒤에야 거부됐다 — 로컬 0.8B 번역에서 요청
+    415건 중 29건이 8192토큰을 끝까지 태워 전체 요청 시간의 75%를 썼다(P4 실앱). 같은 출력은
+    끝까지 받아도 쓰이지 않는다: 루프는 늘기만 하고, 본문의 반복이 프롬프트(원문 포함)의 반복보다
+    길면 출력 게이트(원문 대비 반복)도 거부하며, 프롬프트의 4배를 넘는 본문은 길이비 게이트를
+    반드시 넘는다. 그래서 본문이 프롬프트의 2배를 넘은 뒤부터 _RUNAWAY_CHECK_EVERY자마다
+    그 둘을 확인한다. 본문은 _postprocess를 거친 것이다 — reasoning을 분리하지 않는 서버의
+    긴 <think>…는 답이 아니므로 세지 않는다(정상 사고 뒤의 답을 끊지 않게).
+    """
+
+    def __init__(self, prompt: str) -> None:
+        self.prompt = prompt
+        self.overlong = max(4 * len(prompt), _OVERLONG_MIN_CHARS)
+        self.next_check = max(2 * len(prompt), _OVERLONG_MIN_CHARS)
+
+    def check(self, acc: "_StreamAccumulator") -> None:
+        if acc.content_chars < self.next_check:
+            return
+        self.next_check = acc.content_chars + _RUNAWAY_CHECK_EVERY
+        text = _postprocess("".join(acc.parts))
+        if is_degenerate_repetition(text, self.prompt):
+            why = "반복 루프에 빠져"
+        elif len(text) > self.overlong:
+            why = "입력의 4배를 넘어"
+        else:
+            return
+        logger.warning("번역 API 출력이 %s %d자에서 스트림을 끊음 — 잘린 번역은 쓰지 않습니다",
+                       why, len(text))
+        raise TranslateOutputTruncated(
+            f"번역 API 출력이 {why} {len(text):,}자에서 생성을 끊었습니다 — 잘린 번역은 쓰지 않습니다"
+        )
+
+
+def _prompt_text(payload: dict) -> str:
+    """요청의 사용자 입력(원문이 든 프롬프트) — _RunawayGuard의 기준."""
+    messages = payload.get("messages")
+    if isinstance(messages, list):
+        return "".join(
+            message["content"] for message in messages
+            if isinstance(message, dict) and message.get("role") == "user"
+            and isinstance(message.get("content"), str)
+        )
+    value = payload.get("input")
+    return value if isinstance(value, str) else ""
 
 
 def _status_code(value) -> int | None:

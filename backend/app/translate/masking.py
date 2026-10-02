@@ -192,6 +192,10 @@ _SANITIZE_SUBS: tuple[tuple[str, str], ...] = (
 
 
 _LEADING_SOURCE_HEADER_RE = re.compile(r"\A\s*\[번역할 원문\][ \t]*\n")
+# 수식 플레이스홀더를 `$…$`로 다시 감싼 출력 — 소형 모델이 LaTeX 습관으로 붙인다(실앱 0.8B·4B:
+# 번역 PDF에 '$〈 y, x̃ 〉$를'). 원문의 `$x$`는 달러까지 한 플레이스홀더로 마스킹되고(통화 `$5`는
+# 수식이 아니라 산문으로 남는다) 플레이스홀더 양옆에 달러가 붙을 일이 없으니 모델이 지어낸 것이다.
+_DOLLAR_WRAPPED_MATH_RE = re.compile(r"\$[ \t]*(<\s*m\d+\b" + _PH_ATTRS + r"\s*/?\s*>)[ \t]*\$")
 
 
 def sanitize_translation(raw: str) -> tuple[str, int]:
@@ -215,7 +219,9 @@ def sanitize_translation(raw: str) -> tuple[str, int]:
         if needle in out:
             count += outside.count(needle)
             out = out.replace(needle, repl)
-    return out, count
+    # 이중 달러를 지운 뒤 — `$$<m1/>$$`는 위에서 이미 맨 플레이스홀더가 됐다
+    out, wrapped = _DOLLAR_WRAPPED_MATH_RE.subn(r"\1", out)
+    return out, count + wrapped
 
 
 # 참고문헌 항목 줄 — "[12] Gersho, A. …" 형태. 헤딩("References") 기반 스킵은

@@ -406,8 +406,10 @@ class OpenAICompatClient:
 
         # concurrency worker들이 모두 _latched=None을 보고 /responses를 중복 probe하지
         # 않게 첫 capability negotiation을 single-flight한다. 성공 뒤 각 유닛 요청은
-        # lock 밖에서 병렬로 흐르고, 최초 probe가 실패하면 그 시점의 동시 대기자 모두
-        # 같은 오류를 받아 죽은 endpoint를 직렬로 다시 두드리지 않는다.
+        # lock 밖에서 병렬로 흐르고, 최초 probe가 전역 원인(연결·인증·5xx)으로 실패하면
+        # 그 시점의 동시 대기자 모두 같은 오류를 받아 죽은 endpoint를 직렬로 다시 두드리지
+        # 않는다. owner 유닛 고유의 거부(TranslateUnitRejected)는 공개하지 않는다 — 대기자는
+        # 각자 자기 요청으로 협상한다(translate-7).
         owner = False
         with self._mode_lock:
             flight = self._mode_flight
@@ -427,42 +429,50 @@ class OpenAICompatClient:
                 self._raise_flight_error(flight.error)
             with self._mode_lock:
                 mode = self._latched
-            if mode is None:  # 방어 경로 — 성공 flight는 반드시 mode를 래치한다.
-                raise TranslateAPIError("번역 API 초기 모드 협상 결과가 없습니다")
+            if mode is None:
+                # owner의 실패가 그 유닛 고유의 거부(400·빈 출력·시간 초과 등)였다 — 협상
+                # 결과가 없으니 이 유닛의 요청으로 직접(병렬로) 협상한다. 그 오류를 복제하면
+                # 요청을 보내지도 않은 유닛이 같은 사유로 거부·강등됐다.
+                return self._negotiate(system, user, max_tokens)
             return self._send(mode, system, user, max_tokens, allow_fallback=False)
 
         if mode is not None:
             return self._send(mode, system, user, max_tokens, allow_fallback=False)
 
         try:
-            try:
-                result = self._send(
-                    "responses", system, user, max_tokens, allow_fallback=True,
-                )
-            except _NeedsFallback:
-                with self._mode_lock:
-                    self._latched = "chat"
-                    self.api_mode_used = "chat"
-                result = self._send(
-                    "chat", system, user, max_tokens, allow_fallback=False,
-                )
-            else:
-                with self._mode_lock:
-                    self._latched = "responses"
-                    self.api_mode_used = "responses"
-            return result
+            return self._negotiate(system, user, max_tokens)
+        except TranslateUnitRejected:
+            raise  # 유닛 단위 거부 — 대기자에게 공개하지 않는다(위 대기자 분기 참조)
         except BaseException as exc:
             flight.error = (type(exc), exc.args)
             raise
         finally:
             flight.event.set()
-            if flight.error is not None:
+            if flight.error is not None or self._latched is None:
                 # 이미 flight 참조를 얻은 동시 대기자들은 같은 오류를 받되, 나중의
                 # 순차 호출은 새 협상을 허용한다. 일시 500/연결 오류 하나를 client
                 # 수명 전체에 영구 래치하면 glossary 실패 뒤 본 번역도 회복할 수 없다.
                 with self._mode_lock:
                     if self._mode_flight is flight:
                         self._mode_flight = None
+
+    def _negotiate(self, system: str, user: str, max_tokens: int) -> tuple[str, bool]:
+        """auto 협상 1회 — responses를 보내고 404/405/501이면 chat으로 래치한다.
+
+        responses가 200이면 responses로 래치한다. 유닛 단위 거부(4xx·빈 출력·시간 초과)는
+        래치 없이 그대로 올린다 — 다음 호출이 다시 협상한다.
+        """
+        try:
+            result = self._send("responses", system, user, max_tokens, allow_fallback=True)
+        except _NeedsFallback:
+            with self._mode_lock:
+                self._latched = "chat"
+                self.api_mode_used = "chat"
+            return self._send("chat", system, user, max_tokens, allow_fallback=False)
+        with self._mode_lock:
+            self._latched = "responses"
+            self.api_mode_used = "responses"
+        return result
 
     # ── 내부 ────────────────────────────────────────────────────────
 

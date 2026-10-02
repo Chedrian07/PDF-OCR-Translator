@@ -59,11 +59,15 @@ _LOST_PAGE_SHARE = 0.10
 _GATE_BREAKER_ATTEMPTS = 3
 
 
-def _retry_fidelity(source_pdf: Path, page_dir: Path, page: int) -> "PageFidelity | None":
+def _retry_fidelity(
+    source_pdf: Path, page_dir: Path, page: int,
+    should_cancel: Callable[[], bool] | None = None,
+) -> "PageFidelity | None":
     """단독 재처리 산출물(raw_pages.json)을 원본 대비로 판정한다.
 
     벤더는 `{"pages": ["<|det|>…"]}` 형식으로 원출력을 남긴다(패치 P14).
     파일이 없거나 깨졌으면 None — 채택하지 않는다(원래 결과를 지킨다).
+    should_cancel이 참이 되면 JobCanceled(판정 워커를 끝낸다).
     """
     import json
 
@@ -76,7 +80,7 @@ def _retry_fidelity(source_pdf: Path, page_dir: Path, page: int) -> "PageFidelit
         return None
     if not raw.strip():
         return None
-    return evaluate_raw_page(source_pdf, raw, page)
+    return evaluate_raw_page(source_pdf, raw, page, should_cancel)
 
 
 def _partial_marker_suffix(text: str) -> int:
@@ -777,6 +781,18 @@ def execute_job(
                     for rest in range(from_page, end_page):
                         sink.emit_page(rest, _relive_text(rest))
 
+                def _cancel_retry(pno: int, page_dir: Path) -> None:
+                    """재처리 도중 취소 — 판정·채택·경고 없이 원래 결과로 되돌리고 끝낸다.
+
+                    torch·MLX는 취소되면 예외 대신 그때까지의 부분 출력을 정상 반환한다. 그것을
+                    판정하면 취소된 잡에 '개선되지 않음' 품질 경고가 영구히 남고, 점수가 오르면
+                    잘린 단독 결과가 채택될 수도 있었다(감사 pipeline-5)."""
+                    shutil.rmtree(page_dir, ignore_errors=True)
+                    sink.rewind_to(pno, "취소 — 재처리 중단")
+                    sink.emit_page(pno, _relive_text(pno))
+                    _refill(pno + 1)
+                    raise JobCanceled()
+
                 for pno in range(first, end_page):
                     if cancel.is_set():
                         # 되감아 놓고 그냥 끝내면 라이브 뷰에서 그 뒤 페이지가 사라진다.
@@ -799,9 +815,13 @@ def execute_job(
                         page_md = engine.run_single(
                             chunk_pages[pno - start_page], page_dir, sink, cancel
                         )
+                        if cancel.is_set():
+                            raise JobCanceled()
                     except JobCanceled:
-                        raise
+                        _cancel_retry(pno, page_dir)
                     except Exception as retry_error:  # noqa: BLE001 — 페이지 격리
+                        if cancel.is_set():
+                            _cancel_retry(pno, page_dir)
                         note = (
                             f"재처리 실패({retry_error.__class__.__name__}) — 원래 결과 유지"
                         )
@@ -809,7 +829,10 @@ def execute_job(
                             "%d페이지 충실도 재처리 실패: %s", pno, retry_error
                         )
                     else:
-                        after = _retry_fidelity(source_pdf, page_dir, pno)
+                        try:
+                            after = _retry_fidelity(source_pdf, page_dir, pno, cancel.is_set)
+                        except JobCanceled:
+                            _cancel_retry(pno, page_dir)
                         if (
                             after is not None
                             and after.measurable
@@ -991,6 +1014,20 @@ def execute_job(
                                 merger, page_dir, global_page, 1, True, page_error, sink
                             )
                     else:
+                        if cancel.is_set():
+                            # 엔진은 취소돼도 그때까지의 부분 출력을 정상 반환한다 — 메인 경로처럼
+                            # 생성된 부분까지만 병합하고 잘린 페이지임을 경고로 남긴 뒤 끝낸다.
+                            # 그냥 병합하면 잘린 페이지가 정상 페이지처럼 굳는다(감사 pipeline-5).
+                            sink.flush()
+                            merger.add_chunk(
+                                ChunkResult(page_dir, global_page, 1, page_md, single=True),
+                                warn=False,
+                            )
+                            merger.warnings.append(
+                                f"{global_page}페이지: 취소로 중단된 페이지 — 생성된 부분까지만 "
+                                "병합했습니다"
+                            )
+                            raise JobCanceled()
                         # 토큰을 흘리지 않는 엔진에서도 세그먼트가 빠지지 않게
                         sink.finish_chunk()
                         merger.add_chunk(

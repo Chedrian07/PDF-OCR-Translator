@@ -161,6 +161,34 @@ def unknown_dotenv_key_warnings(values: dict[str, str | None]) -> list[str]:
     return out[:_MAX_CONFIG_WARNINGS]
 
 
+def shadowed_dotenv_key_warnings(path: Path) -> list[str]:
+    """값이 있는 줄 뒤에 같은 키의 **빈 줄**이 다시 나온 키 — dotenv는 마지막 줄이 이겨 빈 값
+    (미설정)이 적용된다. README의 번역 블록을 .env.example 위쪽에 붙여 넣으면 뒤쪽의 빈
+    OPENAI_* 줄이 이겨 번역이 '프로바이더 미설정'이 됐는데 아무 안내가 없었다(fresh-user-5).
+    키 이름만 담는다 — 값은 로그·/api/health로 내보내지 않는다."""
+    from dotenv.parser import parse_stream
+
+    with_value: set[str] = set()
+    shadowed: list[str] = []
+    try:
+        with path.open(encoding="utf-8-sig") as stream:
+            for binding in parse_stream(stream):
+                key, value = binding.key, binding.value
+                if not key or value is None or not _ENV_NAME.fullmatch(key):
+                    continue
+                if value.strip():
+                    with_value.add(key)
+                elif key in with_value and key not in shadowed:
+                    shadowed.append(key)
+    except (OSError, UnicodeDecodeError):
+        return []
+    return [
+        f"{key}: 값이 있는 줄 뒤에 같은 키의 빈 줄이 다시 나와 빈 값(미설정)이 적용됩니다 — "
+        "뒤쪽 줄을 지우거나 주석 처리하세요"
+        for key in shadowed
+    ][:_MAX_CONFIG_WARNINGS]
+
+
 def load_dotenv_file(path: Path | None = None) -> list[str]:
     """로컬 실행용 .env 주입 — **이미 설정된 키는 건드리지 않는다**.
 
@@ -183,7 +211,8 @@ def load_dotenv_file(path: Path | None = None) -> list[str]:
     .env(실키)를 프로세스 환경에 주입하지 않게 하는 스위치다. path를 명시한
     호출은 이 스위치와 무관하게 그 파일을 읽는다.
 
-    반환: 이 앱이 읽지 않는 키의 안내문 목록(KNOWN_ENV_KEYS 밖이면서 다른 도구의 키도
+    반환: 값이 있던 키를 뒤쪽의 빈 줄이 덮어쓴 안내(shadowed_dotenv_key_warnings)와 이 앱이
+    읽지 않는 키의 안내문 목록(KNOWN_ENV_KEYS 밖이면서 다른 도구의 키도
     아닌 것 — 키 이름과 오타 후보·별칭 안내만, 값은 담지 않는다). 키마다 프로세스에서 한
     번만 WARNING으로 남기고, Settings.config_warnings → /api/health의 config_warnings로
     보인다. 예전에는 모르는 키를 경고 없이 환경에 넣어 오타·다른 이름의 설정이 조용히
@@ -209,7 +238,9 @@ def load_dotenv_file(path: Path | None = None) -> list[str]:
     logger.info(
         ".env 로드: %s (새로 적용 %d개, 이미 설정돼 유지 %d개)", path, applied, kept,
     )
-    warnings = unknown_dotenv_key_warnings(values)
+    warnings = (shadowed_dotenv_key_warnings(path) + unknown_dotenv_key_warnings(values))[
+        :_MAX_CONFIG_WARNINGS
+    ]
     with _LOGGED_LOCK:
         fresh = [w for w in warnings if w not in _LOGGED_DOTENV_WARNINGS]
         _LOGGED_DOTENV_WARNINGS.update(fresh)

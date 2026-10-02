@@ -46,6 +46,8 @@ export const ICON = {
 //    유니코드 수식마다 쌓이던 콘솔 경고도 없앤다.
 export const KATEX_MAX_SIZE_EM = 10;
 export const KATEX_MAX_EXPAND = 1000;
+// 조판 결과의 style 길이 상한(em) — 정상 수식은 30줄 aligned도 약 63em이다. 넘으면 원문 TeX로.
+export const KATEX_MAX_BOX_EM = 100;
 export function katexOptions(displayMode) {
   return {
     displayMode: !!displayMode,

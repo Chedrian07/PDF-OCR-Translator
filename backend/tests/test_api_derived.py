@@ -658,6 +658,49 @@ def test_the_next_test_still_prewarms_while_a_leftover_warm_build_runs(tmp_path,
             derived._forget_job_caches(_LEFTOVER_WARM.pop("job").id)
 
 
+# ── 테스트 격리: 테스트가 띄운 번역 완료 예열(pdf-warm-*) 스레드는 그 테스트 안에서 끝난다 ──
+# 번역 API 테스트가 기다리지 않은 예열 빌드가 다음 테스트까지 살아 build_translated_pdf를 돌리면,
+# 그 테스트가 pdf_export 내부에 건 monkeypatch(호출 횟수 세기)로 남의 PDF 호출이 섞였다(무작위
+# 순서 seed 20261003 재현). conftest의 _fresh_pdf_export_slots가 끝에서 그 스레드를 거둔다 —
+# 아래 두 테스트는 '띄우고 기다리지 않는 테스트' 바로 뒤의 테스트를 그대로 재현한다.
+_UNJOINED_WARM: dict = {}
+
+
+def test_a_test_that_starts_a_prewarm_and_does_not_wait(tmp_path, monkeypatch):
+    """(다음 테스트의 전제) 예열 스레드를 띄운 채 기다리지 않고 끝난다."""
+    from types import SimpleNamespace
+
+    from app.pipeline import derived
+
+    monkeypatch.setenv("PDF_EXPORT_MAX_CONCURRENT", "2")
+    job = _bare_job(tmp_path, "unjoined-warm")
+    build = _fake_build_factory()
+
+    def _slow_build(*args, **kwargs):
+        time.sleep(0.5)                                 # 다음 테스트가 시작할 때도 돌고 있을 만큼
+        return build(*args, **kwargs)
+
+    assert derived.warm_translated_pdf_async(
+        job, "ko", SimpleNamespace(pdf_export_font=""), build=_slow_build,
+    ) is True
+    _UNJOINED_WARM.update(name=f"pdf-warm-{job.id}-ko", job=job)
+
+
+def test_the_next_test_starts_without_the_previous_tests_prewarm_thread():
+    from app.pipeline import derived
+
+    name = _UNJOINED_WARM.pop("name", None)
+    job = _UNJOINED_WARM.pop("job", None)
+    try:
+        alive = [t.name for t in threading.enumerate() if name is not None and t.name == name]
+        assert alive == [], "앞 테스트의 PDF 예열 스레드가 다음 테스트까지 살아 있다"
+        if job is not None:
+            assert (job.dir / "export.ko.pdf").is_file()  # 거둔 예열은 빌드를 끝까지 마쳤다
+    finally:
+        if job is not None:
+            derived._forget_job_caches(job.id)
+
+
 # ── concurrency-6: MuPDF 예외도 사용자용 내보내기 오류로 정규화된다 ─────────────
 def _mupdf_failure(*args, **kwargs):
     import pymupdf

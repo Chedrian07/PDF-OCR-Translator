@@ -80,6 +80,7 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 - Negative KaTeX sizes are clamped and oversized formulas fall back to their TeX source, in the app and in downloaded HTML. The front end no longer uses regex lookbehind, which left Safari 16.0–16.3 with a blank page.
 - A "주의 N건" chip (or "참고 N건") lists job warnings and notices with page links; the job list shows a warning badge; health badges show model load failures and a stopped worker.
 - `/viewer/pages` answers 304, and `archive.zip` is cached by a content signature.
+- `HEAD` works on the API's download and page routes (same status and headers as `GET`, no body) instead of falling through to the front end and returning 404; event streams still take `GET` only.
 - `verify_e2e` gains port options and a paired-tag fault; the OCR benchmark gains warm-up runs and process-time columns. The mock browser E2E fails on uncaught page errors in every browser context.
 
 ### Security and operations

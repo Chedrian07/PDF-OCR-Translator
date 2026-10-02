@@ -288,6 +288,40 @@ def test_두_규칙이_일치하면_불일치가_0이다():
     assert got == {"md_only": 0, "layout_only": 0, "sample_units": []}
 
 
+def test_실제_판정을_넘기면_내용_판정과_deferred_유닛은_불일치가_아니다():
+    """엔진은 실제 건너뜀 사유(내용 판정 포함)와 layout 결과를 받는 md 유닛을 넘긴다.
+
+    heading 표시만 보면 제목 표기 없는 result.md의 참고문헌 목록(내용 판정으로 건너뜀)과
+    layout 보존을 그대로 받는 md 유닛이 모두 '번역 대상'으로 세여 오경보가 났다. 쪽 번호처럼
+    다른 사유로 건너뛰는 layout 블록도 '번역 대상'이 아니다.
+    """
+    from app.translate.segment import reference_rule_mismatch
+
+    ref1 = "[1] Author A. A paper title. Venue, 2020."
+    ref2 = "[2] Author B. Another paper title. Journal, 2021."
+    md_units = split_markdown(f"Body sentence here.\n\n{ref1}\n\n{ref2}\n7\n", SEP)
+    lay_units = layout_units([
+        {"page": 1, "blocks": [
+            {"type": "ref_text", "content": ref1},
+            {"type": "ref_text", "content": ref2},
+            {"type": "page_number", "content": "7"},
+        ]},
+    ])
+    static = reference_rule_mismatch(md_units, lay_units)
+    assert static["layout_only"] == 2  # 예전 규칙: heading이 없으니 md 유닛 모두 '번역 대상'
+
+    ids = [u.id for u in md_units]
+    reasons = {ids[1]: "", ids[2]: "references", "lay:1:2": "non-linguistic"}
+    got = reference_rule_mismatch(
+        md_units, lay_units, reasons=reasons, deferred={ids[1]},
+    )
+    assert got == {"md_only": 0, "layout_only": 0, "sample_units": []}
+
+    # deferred가 아니라 스스로 번역하는 md 유닛이면 여전히 불일치다
+    got = reference_rule_mismatch(md_units, lay_units, reasons=reasons)
+    assert got["layout_only"] == 1 and got["md_only"] == 0
+
+
 def test_불일치_표본은_블록당_한_건만_센다():
     """줄이 많은 블록 하나가 집계를 부풀리지 않는다."""
     from app.translate.segment import reference_rule_mismatch

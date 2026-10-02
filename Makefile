@@ -60,7 +60,8 @@ test-mps:         ## Apple Silicon torch MPS 계약 테스트 — torch·macOS �
 # scripts/require_hf_snapshot.py가 make dev와 같은 .env에서 HF 캐시 위치 키(HF_HOME·HF_HUB_CACHE
 # 등 — 셸 값이 이긴다)만 넘기고, 그 캐시에 가중치가 없으면 pytest를 돌리지 않고 사유를 보인 뒤
 # 종료코드 2로 멈춘다(예전에는 실가중치 2건이 LocalEntryNotFoundError로 실패해 회귀처럼 보였다).
-# make setup-mlx 필요(torch CPU 로짓과 비교), 수 GB·수십 초.
+# make setup-mlx 필요(torch CPU 로짓과 비교). fp32 MLX·torch 모델을 차례로 올려 최고 메모리 약 23GiB
+# (M4 Max 실측 — 예전에는 둘을 함께 들어 44GiB), 약 15초. 32GB 이상 Mac에서 돌린다.
 test-mlx-real:    ## MLX 실가중치 패리티 테스트 — mlx 업그레이드·MLX 포팅 수정·스냅샷 갱신 전후에 돌린다
 	cd backend && OCR_MLX_REAL_TESTS=1 .venv/bin/python ../scripts/require_hf_snapshot.py -- \
 		.venv/bin/python -m pytest -rs tests/test_mlx_model_parity.py

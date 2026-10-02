@@ -102,6 +102,10 @@ class _RequestCancelled(TranslateCancelled):
     """내부용 — 요청 전·진행 중에 cancel/abort를 관찰했다(공개 계약은 TranslateCancelled)."""
 
 
+class _StreamErrorEvent(requests.exceptions.RequestException):
+    """내부용 — 스트림 중간의 일시 장애 이벤트. 전송 오류와 같은 백오프로 재시도한다."""
+
+
 class _ModeFlight:
     """auto 최초 협상의 결과/오류를 동시 호출자에게 한 번만 공개한다."""
 
@@ -530,17 +534,22 @@ class OpenAICompatClient:
             except requests.RequestException as e:
                 # ConnectionError·Timeout뿐 아니라 본문 수신 중 끊김(ChunkedEncodingError·
                 # ContentDecodingError 등 RequestException 계열, ConnectionError 비상속)도
-                # 일시적 네트워크 결함이므로 같은 백오프로 재시도한다. HTTP 상태코드 분기는
-                # _post가 응답을 반환한 경우(아래)라 이 절과 무관하다.
+                # 일시적 네트워크 결함이므로 같은 백오프로 재시도한다. 스트림 중간의 일시
+                # 장애 이벤트(_StreamErrorEvent)도 같다. HTTP 상태코드 분기는 _post가 응답을
+                # 반환한 경우(아래)라 이 절과 무관하다.
+                stream_error = isinstance(e, _StreamErrorEvent)
                 if attempt < self.cfg.max_retries:
                     wait = self._backoff({}, attempt)
                     logger.warning(
-                        "번역 API 연결 오류(%s) — %.1fs 후 재시도 (%d/%d)",
-                        type(e).__name__, wait, attempt + 1, self.cfg.max_retries,
+                        "번역 API %s — %.1fs 후 재시도 (%d/%d)",
+                        "스트림 오류" if stream_error else f"연결 오류({type(e).__name__})",
+                        wait, attempt + 1, self.cfg.max_retries,
                     )
                     self._wait_or_cancel(wait)
                     attempt += 1
                     continue
+                if stream_error:
+                    raise TranslateAPIError(str(e)) from e
                 raise TranslateAPIError(f"번역 API 연결 실패: {e}") from e
 
             if status == 200:
@@ -679,7 +688,8 @@ class _StreamAccumulator:
     """chat.completion.chunk SSE 이벤트를 모아 비스트리밍 응답 모양으로 만든다.
 
     delta.content만 본문으로 잇고 reasoning/reasoning_content는 길이만 센다(사고 과정은
-    번역문이 아니다). 스트림 중간의 {"error": …}는 서버 오류로 올린다.
+    번역문이 아니다). 스트림 중간의 {"error": …}와 finish_reason "error"는 _stream_error가
+    상태코드 정책대로 분류한다 — 부분 출력을 번역문으로 돌려주지 않는다.
     """
 
     def __init__(self) -> None:
@@ -721,7 +731,7 @@ class _StreamAccumulator:
         if not isinstance(event, dict):
             return
         if event.get("error"):
-            raise TranslateAPIError(f"번역 API 스트림 오류: {_body_preview(event)}")
+            raise _stream_error(event["error"])
         if isinstance(event.get("usage"), dict):
             self.usage = event["usage"]
         for choice in event.get("choices") or []:
@@ -737,6 +747,9 @@ class _StreamAccumulator:
                         self.reasoning_chars += len(delta[key])
             if choice.get("finish_reason"):
                 self.finish_reason = choice["finish_reason"]
+        if self.finish_reason == "error":
+            # 오류 객체 없이 생성이 실패로 끝났다 — 여기까지의 부분 출력은 번역문이 아니다.
+            raise _StreamErrorEvent("번역 API 스트림 오류: 생성이 오류로 끝났습니다(finish_reason=error)")
 
     def body(self) -> dict:
         return {
@@ -748,6 +761,48 @@ class _StreamAccumulator:
             "usage": self.usage or {},
             "stream_stats": {"reasoning_chars": self.reasoning_chars},
         }
+
+
+def _status_code(value) -> int | None:
+    """오류 객체의 code/status — 정수 또는 숫자 문자열만 HTTP 상태코드로 본다."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+# 스트림 오류 객체의 type/code 문자열 중 '그 입력이 거부됐다'는 뜻 — 유닛 단위 거부로 본다.
+_STREAM_UNIT_ERROR_KINDS = ("invalid_request", "context_length")
+
+
+def _stream_error(err) -> Exception:
+    """스트림 중간 {"error": …} 이벤트를 HTTP 상태코드와 같은 정책으로 분류한다(translate-5).
+
+    OpenRouter·LiteLLM 같은 게이트웨이는 스트림이 시작된 뒤의 공급자 장애를 HTTP 200 본문
+    안의 오류 이벤트로 보낸다. 종전에는 이를 재시도 없는 API 오류로 올려, 비스트리밍이면
+    502로 와 재시도됐을 일시 장애 한 번에 잡 전체가 실패했다.
+      * 400·413·422 또는 invalid_request·context_length 유형 → 유닛 거부
+      * 401·403 → 인증 실패(전역), 그 밖의 재시도 불가 4xx → 전역 API 오류
+      * 5xx·408·429·코드 없음 → 일시 장애로 보고 백오프 재시도(_StreamErrorEvent)
+    """
+    detail = _body_preview({"error": err})
+    status = None
+    kind = ""
+    if isinstance(err, dict):
+        status = _status_code(err.get("code"))
+        if status is None:
+            status = _status_code(err.get("status"))
+        kind = f"{err.get('type') or ''} {err.get('code') or ''}".lower()
+    if status in _UNIT_REJECTED or any(k in kind for k in _STREAM_UNIT_ERROR_KINDS):
+        return TranslateUnitRejected(f"번역 API 스트림 오류: {detail}")
+    if status in (401, 403):
+        return TranslateAPIError("번역 API 인증 실패 — OPENAI_API_KEY를 확인하세요")
+    if status is not None and 400 <= status < 500 and status not in _RETRYABLE:
+        return TranslateAPIError(f"번역 API 스트림 오류: {detail}")
+    return _StreamErrorEvent(f"번역 API 스트림 오류: {detail}")
 
 
 def _error_detail(body: dict | str) -> str:

@@ -426,6 +426,42 @@ def test_translation_sse_stream_ends_promptly_once_shutdown_starts(client):
         st.store.delete_dir(job)
 
 
+def test_app_worker_stops_taking_queued_jobs_once_shutdown_is_flagged(client, sample_pdf, monkeypatch):
+    """신호 처리기가 세운 종료 표식(app.state.shutdown)이 워커에도 닿는다 — uvicorn의 연결
+    정리(drain) 동안 실행 중 잡이 끝나도 대기 잡은 맡지 않고 대기열(제출 표식)에 남는다.
+    예전에는 lifespan 종료(worker.stop())까지 다음 잡을 맡아 '서버 재시작으로 중단'이 됐다
+    (delta-api-frontend-infra-3)."""
+    import threading
+
+    engine = client.app.state.engine
+    entered, gate = threading.Event(), threading.Event()
+    real_run = engine.run_multi
+
+    def _gated(*args, **kwargs):
+        entered.set()
+        assert gate.wait(30)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "run_multi", _gated)
+    shutdown = client.app.state.shutdown
+    running = _upload(client, sample_pdf)
+    assert entered.wait(15)
+    waiting = _upload(client, sample_pdf)
+    try:
+        shutdown.requested = True     # SIGTERM — 처리기는 표식만 세운다
+        gate.set()                    # drain 창 안에서 실행 중 잡이 끝난다
+        assert wait_done(client, running)["status"] == "done"
+        worker = client.app.state.worker
+        worker.join(timeout=15)
+        assert not worker.is_alive()
+        body = client.get(f"/api/jobs/{waiting}").json()
+        assert body["status"] == "queued", body
+        assert client.app.state.store.get(waiting).submitted   # 다음 기동이 다시 제출한다
+    finally:
+        gate.set()
+        shutdown.requested = False
+
+
 def test_closed_app_flags_shutdown_for_leftover_streams(settings):
     from app.main import create_app
 

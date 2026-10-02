@@ -59,11 +59,16 @@ def re_match(text):
     mathes_image = []
     mathes_other = []
     for a_match in matches:
-        if a_match[1].strip() == "image" or "<|ref|>image<|/ref|>" in a_match[0]:
+        if _is_image_ref(a_match):  # [torch vendor patch P22] 그림 번호 소비와 같은 판정
             mathes_image.append(a_match[0])
         else:
             mathes_other.append(a_match[0])
     return matches, mathes_image, mathes_other
+
+
+def _is_image_ref(a_match):
+    """[torch vendor patch P22] re_match가 마크다운 그림으로 치환하는 매치인가 — 크롭·번호 소비도 같은 판정."""
+    return a_match[1].strip() == "image" or "<|ref|>image<|/ref|>" in a_match[0]
 
 
 def extract_coordinates_and_label(ref_text, image_width, image_height):
@@ -71,7 +76,10 @@ def extract_coordinates_and_label(ref_text, image_width, image_height):
         label_type = ref_text[1]
         # [torch vendor patch P9] 모델 출력(=문서 내용이 조종 가능)을 eval()하지 않는다
         cor_list = ast.literal_eval(ref_text[2])
-        if cor_list and isinstance(cor_list[0], (int, float)):
+        # [torch vendor patch P22] 비어 있지 않은 list/tuple만 상자 목록 — 아니면 해석 불가(번호 1개)
+        if not isinstance(cor_list, (list, tuple)) or not cor_list:
+            return None
+        if not isinstance(cor_list[0], (list, tuple)):  # 중첩되지 않은 목록은 상자 하나
             cor_list = [cor_list]
     except Exception as e:  # noqa: BLE001 - 이상 좌표는 건너뛴다 (업스트림 동작)
         logger.debug("det 좌표 파싱 실패: %s", e)
@@ -122,8 +130,9 @@ def draw_bounding_boxes(image, refs, ouput_path, image_prefix=""):
 
     for ref in refs:
         try:
+            is_image = _is_image_ref(ref)  # [torch vendor patch P22] 마크다운 치환과 같은 기준
             result = extract_coordinates_and_label(ref, image_width, image_height)
-            if not result and ref[1] == "image":
+            if not result and is_image:
                 # [torch vendor patch P22] 좌표를 못 읽은 image ref도 마크다운에는
                 # ![](images/{prefix}{idx}.jpg) 한 자리를 차지한다 — 번호를 소비해 뒤 그림이
                 # 앞 그림 파일을 가리키는 어긋남을 막는다.
@@ -140,12 +149,12 @@ def draw_bounding_boxes(image, refs, ouput_path, image_prefix=""):
                     # 마크다운 참조·boxes.json과 정렬을 유지한다 — 예외로 ref 전체를 버리지 않는다.
                     box = _clamp_box(points, image_width, image_height)
                     if box is None:
-                        if label_type == "image":
+                        if is_image:
                             img_idx += 1
                         continue
                     x1, y1, x2, y2 = box
 
-                    if label_type == "image":
+                    if is_image:
                         try:
                             cropped = image.crop((x1, y1, x2, y2))
                             cropped.save(f"{ouput_path}/images/{image_prefix}{img_idx}.jpg")

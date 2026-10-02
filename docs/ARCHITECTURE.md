@@ -535,7 +535,7 @@ OvisOCR2 잡)도 같은 규칙으로 '레이아웃 없음'이다: `has_layout=fa
 ```
 source.pdf                  # 업로드 원본
 meta.json                   # 상태/진행/파라미터·warnings·notices·started_at/finished_at·
-                            #   page_separator·submitted (재시작 시 복원)
+                            #   page_separator·submitted·submit_order (재시작 시 복원)
 pages/page_0001.png ...     # 렌더된 입력 페이지 (1-based)
 work/chunk_00/ ...          # 모델 원시 출력 (실행 중에만 존재 — 터미널 마감 시 자동 삭제, §15)
 result.md                   # 최종 병합 마크다운
@@ -2127,7 +2127,7 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
     max_tokens를 기다리지 않고 `TranslateOutputTruncated`(2배 재시도 없음)로 끝내고 연결을 닫아
     서버 생성도 멈춘다 — 그 출력은 끝까지 받아도 출력 게이트가 거부한다(루프는 늘기만 하고, 4배
     초과는 길이비 상한 밖). 예전에는 로컬 0.8B 번역에서 요청 415건 중 29건이 8192토큰을 끝까지
-    태워 전체 요청 시간의 75%를 썼다(P4 실앱). 콜드 실행 규칙(첫 성공 전 잘림은 잡 실패)은 같다.
+    태워 전체 요청 시간의 75%를 썼다(실제 앱 실행 실측). 콜드 실행 규칙(첫 성공 전 잘림은 잡 실패)은 같다.
     과다 길이 기준은 답이 사고와 **구분될 때만** 쓴다 — content에 `</think>`가 왔거나(그 뒤가 답)
     reasoning이 별도 필드로 온 스트림이다. 템플릿이 `<think>`를 프롬프트 끝에 미리 넣는 thinking
     모델(Qwen3·QwQ·R1 distill)을 reasoning 분리 없이 서빙하면(llama.cpp `--reasoning-format none`,
@@ -2296,6 +2296,9 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
 | `PROMPT_V` | `translate/types.py` | `"6"` | `translations/{lang}/units.json` **전체**(캐시 키 첫 재료) | **유료 API 전량 재호출** |
 | `PDF_EXPORT_FORMAT_VERSION` | `pipeline/pdf_export/report.py` | `17` | `export.{lang}.pdf`·`.dual.pdf`·`.report.json` | CPU (25쪽 0.33–1.0 s/쪽, CropBox 사본 5.7 s/쪽 — 조건별 실측은 OCR_BENCHMARK §번역 PDF 내보내기, 지금은 export 워커 프로세스) |
 | `ENRICH_VERSION` | `pipeline/pdf_fonts.py` | `6` | `layout.json`의 폰트 메타(`fonts_v`) → 뒤이어 export 캐시 | CPU (재조판) |
+
+표 밖의 `derived._BUILD_STAMP_VERSION`(지금 `2` — §5 `/pdf`의 빌드 스탬프 형식)도 오르면 단일판
+번역 PDF 캐시를 한 번씩 다시 만들게 한다. 비용은 `PDF_EXPORT_FORMAT_VERSION` 상향과 같다(CPU).
 
 - **가장 비싼 것은 번역이다**: 모델·샘플링(`TRANSLATE_TEMPERATURE`·`TRANSLATE_REASONING`)을
   바꿔도 같은 일이 일어난다(§13.4). 재번역은 **번역을 다시 실행할 때만** 일어나므로,

@@ -24,7 +24,8 @@ from pathlib import Path
 #     조판 결과가 달라진다(감사 pdf-1~5·8·9).
 # 12: 원문 그대로 남은 목록 블록을 다시 조판하지 않음, 교체한 문단의 인라인 수식 선(분수선·
 #     근호 윗선)을 함께 지우고 계획의 장애물에서 뺌. 조판 결과가 달라진다.
-PDF_EXPORT_FORMAT_VERSION = 12
+# 13: `\langle`·`\rangle`을 ⟨⟩(폰트에 없으면 〈〉)로 평문화 — 예전에는 'langle'이 찍혔다.
+PDF_EXPORT_FORMAT_VERSION = 13
 
 
 class PdfExportError(RuntimeError):

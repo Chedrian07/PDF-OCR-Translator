@@ -55,9 +55,12 @@ MuPDF C 호출은 GIL을 쥔 채 돌고(`nm -u _mupdf.so`에 PyEval_SaveThread�
   것이라 GIL이 필요 없다 — 부모가 SIGKILL로 사라져 아무도 죽여 주지 않아도 적대적 작업이 영원히
   CPU를 태우지 않는다.
 - 자격 증명처럼 보이는 환경 변수(…KEY·…TOKEN·…SECRET·…PASSWORD — 번역·Q&A API 키, HF 토큰)를
-  기동 즉시 지운다. 워커는 비밀이 필요 없고, MuPDF 메모리 결함(예: CVE-2026-3308)으로 워커가
-  장악돼도 키를 읽지 못하게 하는 심층 방어다. 워커는 자원·장애 격리 경계이지 권한 샌드박스가
-  아니다(같은 사용자·같은 파일 시스템).
+  기동 즉시 지운다. 워커는 비밀이 필요 없으니 파이썬 `os.environ`과 워커가 띄우는 손자
+  프로세스(tesseract 등)에 키가 남지 않게 하는 위생 조치다. 커널이 보존하는 초기 환경 블록
+  (Linux `/proc/self/environ`, macOS `ps -E`)과 같은 사용자의 부모 서버 환경(`/proc/<ppid>/environ`)
+  에는 그대로 있으므로, MuPDF 메모리 결함(예: CVE-2026-3308)으로 워커에서 코드가 실행되면 키는
+  유출된 것으로 보고 로테이션해야 한다. 워커는 자원·장애 격리 경계이지 권한 샌드박스가
+  아니다(같은 사용자·같은 파일 시스템, 서버는 워커가 돌려준 결과를 믿는다).
 - Linux에서는 /proc/self/oom_score_adj를 1000으로 올려 메모리 압박 시 커널이 서버가 아니라
   워커를 먼저 고르게 한다. PDF_WORKER_MEM_LIMIT_MB(>0)면 RLIMIT_AS도 건다(macOS는 커널이
   RLIMIT_AS를 강제하지 않아 건너뛴다).
@@ -504,7 +507,11 @@ _SECRET_ENV_NAME = re.compile(r"(KEY|TOKEN|SECRET|PASSW(OR)?D|CREDENTIAL)", re.I
 
 
 def _drop_secret_env() -> None:
-    """(워커) 자격 증명처럼 보이는 환경 변수를 지운다 — PDF 작업에는 필요 없다."""
+    """(워커) 자격 증명처럼 보이는 환경 변수를 지운다 — PDF 작업에는 필요 없다.
+
+    `os.environ`(과 그것을 물려받는 손자 프로세스)에서만 지운다. spawn은 부모 환경을 exec
+    시점에 그대로 넘기므로 커널의 초기 환경 블록(/proc/self/environ)에는 남는다 — 워커가
+    장악되면 키를 읽을 수 있다(모듈 docstring 참고, 감사 security-3)."""
     for name in [key for key in os.environ if _SECRET_ENV_NAME.search(key)]:
         os.environ.pop(name, None)
 

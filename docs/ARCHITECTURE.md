@@ -175,7 +175,7 @@ torch CPU와 로짓 상대오차 1e-5 수준으로 맞으므로, 엔진 간 회�
 │   ├── src/uocr_native.cpp
 │   └── tests/test_parity.py
 ├── frontend/                   # 정적 SPA (빌드스텝/외부 의존성 0)
-│   ├── index.html · styles.css · layout-fit.js · theme-init.js  # theme-init = CSP 아래 테마 부트스트랩
+│   ├── index.html · styles.css · layout-fit.js · theme-init.js · katex-guard.js  # theme-init = CSP 아래 테마 부트스트랩, katex-guard = 내려받는 HTML의 KaTeX 크기 가드
 │   ├── app.js                  # **진입점만**(372줄) — 부트스트랩 + 모듈 배선. 로직 없음
 │   ├── js/                     # ES module 17개(약 8,080줄) — 실제 로직은 전부 여기 (§10)
 │   │   ├── core.js · state.js · api.js · sse.js · ui.js · constants.js
@@ -1574,7 +1574,10 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
   `\rule[-3000em]`·`\kern-5000em`·`\\[-900em]` …)를 같은 단위의 ±10em으로 묶고
   (`core.clampTexSizes`), 그래도 조판 결과 style에 100em(`KATEX_MAX_BOX_EM`)을 넘는 길이가 있으면
   (매크로로 만든 크기·`\arraystretch` 등) 원문 TeX 글자로 보인다(`data-math-fallback="oversized"`).
-  내려받는 standalone HTML의 조판 스크립트(`layout._TYPESET_JS`)에는 아직 이 묶기가 없다.
+  내려받는 standalone HTML(document·layout)은 ES 모듈을 쓸 수 없어 같은 규칙을 옮긴 클래식
+  스크립트 `katex-guard.js`를 KaTeX 번들 뒤에 인라인해 조판한다(`layout._katex_inline_bundle` —
+  가드 파일이 없으면 KaTeX를 싣지 않아 원문 LaTeX로 둔다). `tests/katex-guard.test.mjs`가 두
+  구현의 크기 묶기·style 상한·옵션을 대조한다.
   `tests/katex-vendor.test.mjs`가 VERSION·번들 일치와 옵션 사용을 고정한다.
 - **리더 노트**(`notes.js`): 하이라이트·인용은 localStorage `uocr-reader-notes-<잡 id>`
   (`{v, updated, items}`, 읽을 때마다 검증)에 잡당 200개, 브라우저당 50개 잡(오래 손대지 않은 잡부터

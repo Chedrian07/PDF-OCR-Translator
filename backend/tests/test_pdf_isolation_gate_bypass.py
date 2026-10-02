@@ -224,8 +224,80 @@ def test_ordinary_do_operands_are_still_counted_exactly():
     assert scan_calls(b"/Fm0 Do " + body) == ({"Fm0": 3, "Im0": 2}, 0)
     # 실행 중간에 이어지는 스트림의 첫 줄은 앞 스트림의 주석·피연산자가 이어질 수 있다
     assert scan_calls(b"/Fm0 Do\nq /Fm0 Do", fresh=False) == ({"Fm0": 1}, 1)
-    # 문자열·주석 안의 'Do'까지 후보로 센다(과대 추정)
-    assert scan_calls(b"(Do) Tj % Do\n") == ({}, 2)
+    # MuPDF 렉서처럼 읽으면 문자열·16진 문자열·주석 안의 'Do'는 연산자가 아니다 — 본문의 'Do'
+    # 단어가 가장 비싼 Form을 부르는 것으로 세여 정상 논문이 거부됐다(delta-core-2)
+    assert scan_calls(b"(Do) Tj % Do\n") == ({}, 0)
+    assert scan_calls(b"BT [(Do)-333(not)] TJ (a (Do) \\) Do) Tj <446F Do> Tj ET q /Im0 Do Q") == (
+        {"Im0": 1}, 0,
+    )
+    # 렉서가 따라갈 수 없는 곳은 예전처럼 전부 센다(과대 추정)
+    assert scan_calls(b"(Do) Tj", fresh=False) == ({}, 1)          # 앞 스트림의 상태를 모른다
+    assert scan_calls(b"BI /W 1 ID (x EI (Do) Tj") == ({}, 1)       # 인라인 이미지 원시 바이트 뒤
+    assert scan_calls(b"(x\\\\) Do") == ({}, 1)                   # 이스케이프된 백슬래시 뒤의 )는 닫는다
+
+
+# ── 문자열·주석 안의 'Do' 단어: 연산자가 아니다 (delta-core-2) ─────────────────
+# 예전 스캐너는 문자열·주석 안까지 모든 'Do'를 '확실하지 않은 Do'로 세어, 본문 문자열의 'Do'
+# 단어 하나가 (1) 리소스의 모든 Form을 바이트 집계에 넣고 (2) 그 Do마다 가장 비싼 XObject를
+# 부르는 것으로 세었다 — MuPDF가 곧바로 렌더하는 정상 논문이 업로드 400으로 거부됐다.
+
+
+def test_do_word_in_text_does_not_pull_in_every_shared_form(tmp_path, small_limits):
+    """공유 /Resources에 Form 10개(합계 약 1.5MB > 상한 1MB), 페이지는 /X0만 부른다."""
+    pdf = _RawPdf()
+    shared = pdf.add(b"null")
+    forms = {b"X%d" % i: pdf.form(LEAF * 11_000, shared=shared) for i in range(10)}
+    pdf.objects[shared] = _RawPdf._xobject_dict(forms)
+    page = b"BT /F1 12 Tf 72 700 Td (Do you see it?) Tj ET\nq /X0 Do Q\n"
+    pdf.page([page], forms)
+    data = pdf.bytes()
+    assert _drawn_paths(data) == 11_000  # MuPDF는 /X0 하나만 그린다
+    assert _probe(tmp_path, data) == 1
+    # 대조군: 문자열 밖의 진짜 Do는 여전히 피연산자를 모르면 가장 비싼 쪽으로 센다
+    pdf.page([page + b"Do\n"], forms)
+    with pytest.raises(ValueError, match="콘텐츠가 너무 큽니다"):
+        _probe(tmp_path, pdf.bytes(), "control.pdf")
+
+
+def test_do_words_in_tj_arrays_do_not_multiply_a_heavy_form(tmp_path, small_limits):
+    """pdfTeX 본문 [(Do)-333(not)]TJ 3개 + 마커 300개를 부르는 산점도 Form(상한 1,000회).
+
+    예전 집계는 301 + 3 × 301 = 1,204회로 거부했다 — MuPDF가 실제로 부르는 것은 301회다."""
+    pdf = _RawPdf()
+    marker = pdf.form(LEAF)
+    scatter = pdf.form(b"q 1 0 0 1 2 2 cm /M0 Do Q\n" * 300, {b"M0": marker})
+    text = b"BT /F1 10 Tf 72 720 Td " + b"[(Do)-333(not)]TJ 0 -12 Td " * 3 + b"ET\n"
+    pdf.page([text + b"q 0.5 0 0 0.5 72 100 cm /Fig Do Q\n"], {b"Fig": scatter})
+    data = pdf.bytes()
+    assert _drawn_paths(data) == 300
+    assert _probe(tmp_path, data) == 1
+
+
+LEXER_TRICKS = {
+    "escaped_backslash_closes": [b"(x\\\\) /Bomb Do"],
+    "escaped_paren_then_close": [b"(x\\) Do) /Bomb Do"],
+    "nested_parens": [b"(a (b) c) /Bomb Do"],
+    "comment_ends_at_cr": [b"% c\r/Bomb Do"],
+    "hex_string_closed": [b"<41 (> /Bomb Do"],
+    "dict_is_not_hex": [b"<</A (x)>> /Bomb Do"],
+    "do_word_then_bomb": [b"BT (Do) Tj ET /Bomb Do"],
+    "inline_image_data": [b"BI /W 1 /H 1 /BPC 8 /CS /G ID (\nEI /Bomb Do"],
+    "string_across_streams": [b"q (x", b") /Bomb Do Q"],
+    "hex_across_streams": [b"<41", b"> /Bomb Do"],
+    "after_closed_stream": [b"(Do) Tj", b"(Do) Tj /Bomb Do"],
+}
+
+
+@pytest.mark.parametrize("label", sorted(LEXER_TRICKS))
+def test_strings_and_comments_cannot_hide_a_real_do(tmp_path, small_limits, label):
+    """문자열·주석을 따라 읽어도 MuPDF가 실제로 실행하는 Do는 그대로 센다."""
+    pdf = _RawPdf()
+    bomb = _chain(pdf, levels=3, fanout=10)
+    pdf.page(LEXER_TRICKS[label], {b"Bomb": bomb})
+    data = pdf.bytes()
+    assert _drawn_paths(data) == 1000  # MuPDF는 그 Do로 체인을 실행한다
+    with pytest.raises(ValueError, match="중첩 그리기 호출"):
+        _probe(tmp_path, data)
 
 
 # ── 순환 Form: 끊은 결과를 맥락과 무관하게 메모하면 팬아웃이 숨는다 ──────────────
@@ -281,7 +353,9 @@ def _fuzz_token(rng: random.Random, names: list[bytes]) -> bytes:
     if roll < 0.60:
         return rng.choice([b"1", b"-2.5", b"+3", b".5", b"0"])
     if roll < 0.66:
-        return b"(" + rng.choice([b"a", b"%", b"q /A Do", b")", b"\\)", b"(n)"]) + b")"
+        body = rng.choice([b"a", b"%", b"q /A Do", b")", b"\\)", b"(n)", b"Do", b"\\\\", b"(/A Do",
+                           b"<", b"\\(", b"%\n/A Do"])
+        return b"(" + body + rng.choice([b")", b")", b""])
     if roll < 0.72:
         return b"%" + rng.choice([b"", b" q", b" /A Do"]) + rng.choice([b"\n", b"\r", b""])
     if roll < 0.77:
@@ -289,7 +363,7 @@ def _fuzz_token(rng: random.Random, names: list[bytes]) -> bytes:
     if roll < 0.81:
         return b"<<" + rng.choice([b"/A 1", b"", b"/B /A"]) + b">>"
     if roll < 0.84:
-        return b"<" + rng.choice([b"41", b"q", b""]) + b">"
+        return b"<" + rng.choice([b"41", b"q", b"", b"/A Do", b"("]) + rng.choice([b">", b""])
     if roll < 0.86:
         return b"BI /W 1 /H 1 /BPC 8 /CS /G ID " + rng.choice([b"x", b"q /A Do x"]) + b" EI"
     return rng.choice([b" ", b"\n", b"\x00", b"\r\n", b"\t"])

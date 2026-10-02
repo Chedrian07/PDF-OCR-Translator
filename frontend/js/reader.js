@@ -19,7 +19,7 @@ import {
   setTrustedHtml, showToast, typesetMath,
 } from './ui.js';
 import { POLL_TIMEOUT_MS, apiGet, fetchTextWithBusyRetry } from './api.js';
-import { loadReaderNotes, saveReaderNotes } from './notes.js';
+import { loadReaderNotes, saveReaderNotes, storeReaderNotes } from './notes.js';
 import { revertToOriginal, setLang } from './translate.js';
 import { prefillQaPageFromReader } from './qa.js';
 import {
@@ -1683,14 +1683,22 @@ function persistReaderNote(kind, page, text, lang, id = newReaderNoteId()) {
     id, kind, page, lang, text, at: Date.now(),
   });
   if (!result.note) return null;
-  if (result.added && !saveReaderNotes(jobId, result.items)) {
+  const stored = result.added ? storeReaderNotes(jobId, result.items) : { ok: true, evicted: 0 };
+  if (!stored.ok) {
     syncReaderNotes(latest); // 이 메모는 못 남겼어도 다른 탭의 변경은 화면에 맞춘다
     showToast('이 브라우저 저장 공간에 남기지 못했습니다 — 저장 공간을 확인해 주세요.', 'error');
     return null;
   }
   // 방금 저장한(또는 이미 있던 같은) 메모는 호출부가 칠하므로 여기서 다시 칠하지 않는다.
   syncReaderNotes(result.items, result.note.id);
-  return result;
+  return { ...result, evicted: stored.evicted };
+}
+
+// 저장 공간이 모자라 다른 문서의 메모를 지웠으면 저장 안내에 덧붙인다 — 조용히 지우지 않는다.
+function evictionNotice(saved) {
+  return saved && saved.evicted
+    ? ` 저장 공간이 모자라 가장 오래 열지 않은 문서 ${saved.evicted}개의 메모를 지웠습니다.`
+    : '';
 }
 
 // 저장소에서 읽은 목록으로 화면을 맞춘다 — 사라진 메모의 하이라이트는 걷고, 새로 생긴
@@ -1911,7 +1919,7 @@ export function highlightReaderSelection() {
   updateReaderResearchTools();
   if (saved) {
     showToast(saved.added
-      ? `${page}페이지 하이라이트를 저장했습니다.`
+      ? `${page}페이지 하이라이트를 저장했습니다.${evictionNotice(saved)}`
       : '이미 저장한 하이라이트입니다.');
   }
 }
@@ -1925,7 +1933,7 @@ export function saveReaderCitation() {
   updateReaderResearchTools();
   if (saved) {
     showToast(saved.added
-      ? `${page}페이지 인용을 저장했습니다 — [선택 문장 도구]에서 보고 Markdown으로 내보낼 수 있습니다.`
+      ? `${page}페이지 인용을 저장했습니다 — [선택 문장 도구]에서 보고 Markdown으로 내보낼 수 있습니다.${evictionNotice(saved)}`
       : '이미 저장한 인용입니다.');
   }
 }

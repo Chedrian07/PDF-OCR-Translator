@@ -223,6 +223,38 @@ def test_visible_text_over_a_full_page_background_is_not_covered(tmp_path):
     assert not result.warnings, result.warnings
 
 
+def test_visible_text_drawn_under_a_later_scan_image_is_treated_as_raster(tmp_path):
+    """'이미지 아래 텍스트' 스캔 — 보이는 모드로 쓴 OCR 텍스트 위에 전면 스캔 이미지를 덮은 쪽.
+
+    칠하기 비트만 보면 그 글자는 '보여서' 래스터 원문으로 잡히지 않았고, 한국어가 영어
+    스캔 픽셀 위에 그대로 겹쳐 찍혔다(감사 pdf-2). 그려진 순서상 이미지에 가려진 글자는
+    원문이 아니다 — 스캔 픽셀을 덮고 번역을 넣는다.
+    """
+    job_dir = tmp_path / "text-under-scan"
+    job_dir.mkdir()
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    for index, line in enumerate(LINES):
+        page.insert_text((72, 120 + index * 15), line, fontsize=11, fontname="tiro")
+    page.insert_image(page.rect, stream=_scan_png())          # 글자 위에 덮는 스캔
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+    _write_layout(job_dir, [
+        {"type": "text", "bbox": _bbox(BLOCK), "content": "\n".join(LINES)},
+    ], {0: KO})
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    assert result.replaced == 1, result.report()
+    assert result.raster_blocks_erased == 1, result.report()
+    with fitz.open(job_dir / "source.pdf") as source:
+        left, before = _ink_beyond_translation(source[0], result.path, BLOCK)
+    with fitz.open(result.path) as exported:
+        text = exported[0].get_text().replace("\xa0", " ")
+    assert before > 500 and left <= before * 0.02, (left, before)
+    assert "Scanned papers" not in text, text
+
+
 def test_text_inside_a_layout_figure_on_a_scan_is_left_alone(tmp_path):
     """스캔 위라도 레이아웃 그림 블록 안의 글자는 원문 보존 — 그림 픽셀을 덮지 않는다."""
     job_dir = tmp_path / "scan-figure"

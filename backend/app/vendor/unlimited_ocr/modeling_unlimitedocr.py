@@ -118,7 +118,9 @@ def extract_coordinates_and_label(ref_text, image_width, image_height):
             # 글자마다, 빈 목록·None은 0개의 그림 번호를 소비해 마크다운 참조와 어긋났다.
             # 해석 불가(None)로 돌려 호출자가 image ref 번호를 정확히 1개 소비하게 한다.
             return None
-        if cor_list and isinstance(cor_list[0], (int, float)):
+        if not isinstance(cor_list[0], (list, tuple)):
+            # [vendor patch P22] 중첩되지 않은 목록은 상자 하나다 — 업스트림은 첫 원소가 숫자일
+            # 때만 감싸 ['x', 0, 500, 500] 같은 기형 상자를 원소마다 번호 4개로 셌다.
             cor_list = [cor_list]
     except Exception as e:
         print(e)

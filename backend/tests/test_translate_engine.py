@@ -1239,12 +1239,42 @@ def test_결정적_4xx_강등은_api_rejected로_집계된다(tmp_path, cfg):
 
 
 def test_참고문헌_규칙_불일치가_경고와_집계로_남는다(tmp_path, cfg):
-    """layout은 ref_text로 원문 유지, md는 heading 스윕 밖이라 번역 — 같은 원문이
-    PDF와 result.ko.md에서 갈라진다. 정책은 그대로 두고 관측만 한다."""
+    """layout은 ref_text로 원문 유지, md는 그 줄을 **스스로** 번역 — 같은 원문이 PDF와
+    result.ko.md에서 갈라진다. md 문단의 다른 줄이 layout과 달라(OCR 차이) layout 결과를
+    그대로 받지 못하는 경우다. 정책은 그대로 두고 관측만 한다."""
     md = (
-        "The accuracy improved on the benchmark dataset that we evaluated.\n\n"
+        "The accuracy improved on the benchmark dataset that we evaluated.\n"
         "[1] Author A. A paper title. Venue, 2020.\n"
     )
+    layout = [{"page": 1, "width": 1000, "height": 1400, "blocks": [
+        {"type": "text", "bbox": [0, 0, 999, 80],
+         "content": "The accuracy improved on the benchmark dataset."},
+        {"type": "ref_text", "bbox": [0, 100, 999, 160],
+         "content": "[1] Author A. A paper title. Venue, 2020."},
+    ]}]
+    (tmp_path / "layout.json").write_text(json.dumps(layout, ensure_ascii=False), encoding="utf-8")
+    _res, report, out = _run_md(tmp_path, cfg, md, EchoClient())
+
+    assert "[1] Author A." not in out  # md 쪽은 정말로 번역했다 — 경고가 사실이다
+    assert report["reference_rule"]["layout_only"] == 1
+    assert report["reference_rule"]["md_only"] == 0
+    assert report["reference_rule"]["sample_units"] == ["lay:1:1"]
+    assert any("참고문헌 규칙 불일치" in w for w in report["warnings"])
+
+
+@pytest.mark.parametrize("md", [
+    # md 유닛 전체가 layout 줄로 덮여 layout 보존을 그대로 받는다(deferred)
+    "The accuracy improved on the benchmark dataset that we evaluated.\n\n"
+    "[1] Author A. A paper title. Venue, 2020.\n",
+    # 제목 표기(#) 없는 result.md — heading 스윕은 못 잡지만 내용 판정이 목록을 건너뛴다
+    "The accuracy improved on the benchmark dataset that we evaluated.\n\n"
+    "References\n[1] Author A. A paper title. Venue, 2020.\n"
+    "[2] Author B. Another paper title. Journal, 2021.\n"
+    "[3] Author C. A third paper title. Conference, 2022.\n",
+])
+def test_두_산출물이_같으면_참고문헌_불일치_경고가_없다(tmp_path, cfg, md):
+    """실서버 25쪽 논문(Unlimited-OCR) — result.ko.md 참고문헌이 한글 0자로 PDF와 같은데도
+    'layout(PDF)만 유지 66건' 경고가 매번 났다. 유닛의 heading 표시만 보던 집계였다."""
     layout = [{"page": 1, "width": 1000, "height": 1400, "blocks": [
         {"type": "text", "bbox": [0, 0, 999, 80],
          "content": "The accuracy improved on the benchmark dataset that we evaluated."},
@@ -1252,12 +1282,11 @@ def test_참고문헌_규칙_불일치가_경고와_집계로_남는다(tmp_path
          "content": "[1] Author A. A paper title. Venue, 2020."},
     ]}]
     (tmp_path / "layout.json").write_text(json.dumps(layout, ensure_ascii=False), encoding="utf-8")
-    _res, report, _out = _run_md(tmp_path, cfg, md, EchoClient())
+    _res, report, out = _run_md(tmp_path, cfg, md, EchoClient())
 
-    assert report["reference_rule"]["layout_only"] == 1
-    assert report["reference_rule"]["md_only"] == 0
-    assert report["reference_rule"]["sample_units"] == ["lay:1:1"]
-    assert any("참고문헌 규칙 불일치" in w for w in report["warnings"])
+    assert "[1] Author A. A paper title. Venue, 2020." in out  # md도 원문 유지
+    assert report["reference_rule"] == {"md_only": 0, "layout_only": 0, "sample_units": []}
+    assert not any("참고문헌 규칙 불일치" in w for w in report["warnings"])
 
 
 def test_모든_유닛에_같은_출력을_주는_공급자는_축퇴로_원문_유지(tmp_path, cfg):

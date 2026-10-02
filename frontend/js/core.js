@@ -1284,12 +1284,19 @@ export function jobNotices(job) {
 //   '3페이지: …', '3–5페이지: …'(첫 쪽으로), '건너뛴 페이지: 3, 5, 7 (…)'(각 번호)
 // '2/10페이지 렌더에 실패'처럼 분수의 분모는 페이지 언급이 아니다 — 링크하지 않는다.
 // 반환: [{type:'text', value} | {type:'page', page, value}] (이어 붙이면 원문 그대로).
+// ⚠ 정규식 lookbehind(후방 탐색)를 쓰지 않는다 — Safari 16.4 미만은 정규식 리터럴의 lookbehind를
+// 모듈 파싱 단계의 SyntaxError로 거절해, core.js를 정적으로 가져오는 앱 전체가 빈 화면이
+// 됐다(frontend-5). 앞 글자는 매치 뒤에 직접 보고, 거절하면 다음 글자부터 다시 찾는다(같은 결과).
 export function warningSegments(text) {
   const s = String(text == null ? '' : text);
   const spans = [];
-  const single = /(?<![\d/.])(\d{1,5})(?:\s*[–—-]\s*\d{1,5})?페이지/g;
+  const single = /(\d{1,5})(?:\s*[–—-]\s*\d{1,5})?페이지/g;
   let m;
   while ((m = single.exec(s)) !== null) {
+    if (m.index > 0 && /[\d/.]/.test(s[m.index - 1])) { // 분수의 분모·소수·더 긴 수의 꼬리
+      single.lastIndex = m.index + 1;
+      continue;
+    }
     spans.push({ start: m.index, end: m.index + m[0].length, page: Number(m[1]) });
   }
   const listed = /페이지:\s*((?:\d{1,5}\s*,\s*)*\d{1,5})(?![\d/])/g;

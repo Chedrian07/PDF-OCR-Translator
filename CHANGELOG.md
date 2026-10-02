@@ -69,9 +69,11 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 - Inner-product brackets (`\langle`, `\rangle`) are drawn as ⟨ ⟩ (〈 〉 on fonts without them) instead of the words `langle`/`rangle`, and a symbol command right before `\boldsymbol{…}` or `\frac{…}{…}` no longer fuses with it (`langley`, `cdotx`).
 - Every piece of a large TeX delimiter (stacked `|`/`‖` bars) is removed with its paragraph, so no stray bars overlap the translation.
 - A short symbol that sticks out of its line and only grazes the OCR box (a radical `√`, a tall bracket, an accent) is removed with the paragraph it touches when that paragraph is translated, instead of staying on top of the translation.
-- The translated PDF no longer carries the upload's active content: open-actions and other automatic actions, document JavaScript, XFA forms, attachments, and links that run scripts, launch programs, submit forms or open other files are removed. Internal links, URI links and the outline stay. Export format version 17 rebuilds cached PDFs.
+- The translated PDF no longer carries the upload's active content: open-actions and other automatic actions, document JavaScript, XFA forms, attachments, and links that run scripts, launch programs, submit forms or open other files are removed. Internal links, URI links and the outline stay.
+- Links over translated text (citations, section and figure references, URLs, e-mail addresses) are kept. Redaction used to remove them, so a translated 25-page paper kept only 17 of its 167 links. The original link is put back after the text is replaced and moved onto the same citation number or URL in the translation when that text appears there unambiguously (134 of the 147 removed links in that paper); otherwise it stays where it was.
+- Text blocks on scanned pages are sized from the original text instead of the translation, so paragraphs set in one size in the scan come out in one size (a scanned page used to mix 8.8 to 13.3 pt body text).
 - Scan covers leave overlapping figures and kept blocks intact; tiled and margined scans and searchable scans with the text layer under the image are recognised; narrow multi-line scan columns are no longer kept as vertical text; lines set in fonts with degenerate metrics are removed.
-- `PDF_EXPORT_FORMAT_VERSION` is now 17 and `ENRICH_VERSION` 6.
+- `PDF_EXPORT_FORMAT_VERSION` is now 18 (cached translated PDFs are rebuilt once) and `ENRICH_VERSION` 6.
 
 ### API and UI
 

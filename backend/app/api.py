@@ -12,12 +12,14 @@ import os
 import queue
 import threading
 import time
+import typing
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 import anyio
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi.routing import APIRoute
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -2392,3 +2394,29 @@ def delete_job(request: Request, job_id: str) -> Response:
         st.store.delete_dir(job)
     _forget_job_caches(job_id)
     return Response(status_code=204)
+
+
+def _answer_head_on_get_routes(api_router: APIRouter) -> int:
+    """GET 라우트가 HEAD에도 답하게 한다 — 이벤트 스트림(SSE) 라우트는 뺀다. 더한 개수를 돌려준다.
+
+    FastAPI GET 라우트는 HEAD를 받지 않아, 프런트엔드 정적 마운트("/")가 HEAD /api/…를 가로채
+    404를 줬다(다운로드 관리자·프로브가 있는 문서를 없다고 봤다). HEAD는 GET과 같은 처리로 같은
+    헤더(Content-Type·Content-Length)를 내고 본문은 서버(uvicorn)가 보내지 않는다 — FileResponse는
+    파일도 읽지 않는다. 끝나지 않는 이벤트 스트림은 본문을 버려도 연결을 붙잡으므로 제외한다."""
+    added = 0
+    for route in api_router.routes:
+        if not isinstance(route, APIRoute) or route.methods != {"GET"}:
+            continue
+        try:
+            returns = typing.get_type_hints(route.endpoint).get("return")
+        except Exception:  # noqa: BLE001 — 해석할 수 없는 주석은 스트리밍으로 보지 않는다
+            returns = None
+        if isinstance(returns, type) and issubclass(returns, StreamingResponse):
+            continue
+        route.methods.add("HEAD")
+        added += 1
+    return added
+
+
+# 라우트를 모두 정의한 뒤 한 번 — 이 라우터를 쓰는 모든 앱에 적용된다
+_answer_head_on_get_routes(router)

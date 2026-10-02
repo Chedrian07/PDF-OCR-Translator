@@ -1105,6 +1105,11 @@ class _TranslationRun:
             if canceled:
                 return self._canceled_result()
             self._verify_endpoint_health()  # 2차 패스의 미뤄둔 4xx도 같은 기준으로 확정
+            # 2차 스윕이 layout 결과까지 축퇴로 지웠을 수 있다(1차에서 원문 2종만 받은 캔드
+            # 응답이 2차 지연 유닛에서 3종째가 될 때). 스윕 전 매핑으로 쓰면 리포트는 원문
+            # 유지라면서 캔드 출력이 layout.{lang}.json·result.{lang}.md에 실렸다(translate-3).
+            # 새로 덮이지 않게 된 지연 md 유닛은 자기 번역이 없으므로 원문으로 남는다(무손실).
+            new_pages, mapping = self._layout_mapping()
         assembled = assemble_markdown(
             self.md_text, self.page_separator, self._md_translations(mapping),
         )

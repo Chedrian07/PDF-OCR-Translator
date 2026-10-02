@@ -16,13 +16,30 @@ gap3-mupdf-analysis-amplification-2). 페이지 수·한 변 길이만 보던 �
 - 콘텐츠 바이트: 페이지 콘텐츠 스트림과, 거기서 도달하는 Form XObject·주석 외형(AP)·
   타일링 패턴·Type3 글리프 스트림의 압축 해제 길이 합. 서로 다른 스트림은 한 번씩만 센다
   (같은 그림을 여러 번 부르는 것은 아래 호출 수의 몫이다).
-- 펼친 XObject 호출 수: 콘텐츠의 `/이름 Do`를 그 리소스로 해석해, Form이면 그 안의 호출을
-  곱해 더한다(DAG 메모·포화 덧셈 — 10^12도 즉시 계산된다). 이미지 Do도 한 번의 그리기로
-  센다. 주석 외형·패턴·Type3 글리프는 페이지에서 한 번 실행되는 것으로 센다.
+- 펼친 XObject 호출 수: 콘텐츠의 `Do`마다 그것이 부를 XObject를 그 리소스에서 찾아, Form이면
+  그 안의 호출을 곱해 더한다(DAG 메모·포화 덧셈 — 10^12도 즉시 계산된다). 이미지 Do도 한 번의
+  그리기로 센다. 주석 외형·패턴·Type3 글리프는 페이지에서 한 번 실행되는 것으로 센다.
 
-정확한 비용 모델이 아니라 값싼 상한 검사다 — 문자열·주석 안의 'Do'까지 세는 쪽(과대
-추정 = 안전한 쪽)으로 틀린다. Type3 글리프 반복·거대 이미지·셰이딩처럼 여기서 세지 않는
-비용은 워커 프로세스의 페이지별 시간 상한(pdf_worker)이 받친다.
+## 과소 추정하지 않는다
+
+정확한 비용 모델이 아니라 값싼 **상한** 검사다 — 틀리면 반드시 과대 추정(= 안전한 쪽)이어야
+한다. 콘텐츠를 MuPDF와 다르게 토큰화하면 그 차이가 곧 우회로다(감사 isolation-1: `/Fm#E9`처럼
+비ASCII 바이트를 이스케이프한 이름을 못 찾아 10^4 체인을 0회로 셌다). 그래서:
+
+- `Do` 후보는 뒤가 토큰 경계인 모든 `Do`다 — 문자열·주석·인라인 이미지 안까지 센다.
+- 이름은 MuPDF 렉서와 같은 규칙으로 푼다(`#xx` 이스케이프 — `#00`은 그대로, 콘텐츠 이름 버퍼
+  255바이트에서 자름, PyMuPDF가 사전 키를 돌려주는 UTF-8·surrogateescape 문자열). 리소스는
+  사전 키를 순회해 찾는다(비ASCII 키를 C 문자열 조회에 넘기지 않는다).
+- MuPDF는 Do에 직전 연산자 이후 **처음** 나온 이름을 쓴다(`/A /B Do`는 A). `/이름 Do` 쌍은
+  이름 앞을 거슬러 공백·숫자만 지나 연산자(키워드)나 실행 시작에 닿을 때만 확실하다고 본다 —
+  사이에 주석·문자열·배열·다른 이름이 끼거나 이전 콘텐츠 스트림에서 피연산자·주석이 이어질 수
+  있으면 확실하지 않다. 확실하지 않은 Do와 리소스에서 못 찾은 이름은 그 리소스의 **가장 비싼**
+  XObject를 부르는 것으로 센다.
+- 순환 Form(MuPDF는 실행 중인 Form을 다시 실행하지 않는다)은 순환을 끊은 결과가 호출 맥락에
+  따라 달라지므로 맥락과 무관할 때만 메모한다. 메모할 수 없는 순환이 너무 얽혀 있으면 거부한다.
+
+Type3 글리프 반복·거대 이미지·셰이딩처럼 여기서 세지 않는 비용은 워커 프로세스의 페이지별
+시간 상한(pdf_worker)이 받친다.
 """
 
 from __future__ import annotations
@@ -31,10 +48,24 @@ import re
 from collections import deque
 from dataclasses import dataclass
 
-# 콘텐츠 스트림의 XObject 호출 `/이름 Do` — 이름은 PDF 구분자 전까지, 뒤에 이름 문자가
-# 이어지면(`Dox`) 연산자가 아니다.
-_DO_OPERATOR = re.compile(rb"/([^\s/\[\]()<>{}%]+)\s*Do(?![^\s/\[\]()<>{}%])")
+# PDF 공백(NUL 포함)과 구분자 밖의 바이트가 '정규 문자'다 — 이름·키워드를 이룬다(MuPDF 렉서와 같다)
+_WS = b"\x00\t\n\x0c\r "
+_DELIMITERS = b"()<>[]{}/%"
+_REGULAR = rb"[^\x00\t\n\x0c\r ()<>\[\]{}/%]"
+# `Do` 키워드가 될 수 있는 자리 — 뒤가 토큰 경계인 모든 `Do`(과대 추정)
+_DO_KEYWORD = re.compile(rb"Do(?!" + _REGULAR + rb")")
+# `/이름 Do` — 이름과 Do 사이에는 PDF 공백만(주석·다른 피연산자가 끼면 쌍으로 보지 않는다)
+_DO_PAIR = re.compile(
+    rb"/(" + _REGULAR + rb"+)[\x00\t\n\x0c\r ]*Do(?!" + _REGULAR + rb")"
+)
+_TRAILING_RUN = re.compile(_REGULAR + rb"+\Z")
 _NAME_ESCAPE = re.compile(rb"#([0-9A-Fa-f]{2})")
+# 이름과 그 앞 연산자 사이에 올 수 있는 것 — 공백과 숫자 피연산자(이름 피연산자를 바꾸지 않는다)
+_WS_OR_NUMBER = _WS + b"0123456789.+-"
+# MuPDF 콘텐츠 렉서의 이름 버퍼(256바이트, NUL 포함) — 더 긴 이름은 잘린 채로 리소스를 찾는다
+_MAX_NAME_BYTES = 255
+# 쌍의 피연산자를 확인할 때 되돌아볼 최대 바이트 — 넘으면 확실하지 않은 것으로 센다
+_PAIR_LOOKBACK = 256
 # Form 중첩 깊이 상한 — 정상 문서는 한 자릿수다. 그보다 깊은 체인은 단계마다 팬아웃 1로
 # 숨겼다가 아래에서 폭발시킬 수 있어 세다 멈추지 않고 거부한다.
 MAX_FORM_DEPTH = 64
@@ -42,6 +73,10 @@ MAX_FORM_DEPTH = 64
 # 압축 폭탄이 메모리를 다 쓰지 않게 이만큼까지만 푼다.
 _DECODE_CAP_WHEN_UNLIMITED = 256 * 1024 * 1024
 _UNBOUNDED_CALLS = 10**15
+# 메모할 수 없는(호출 맥락에 따라 달라지는) 순환 Form을 **다시** 펼치는 작업 상한 — 정상
+# 문서는 순환이 없어 (Form, 리소스) 조합마다 한 번씩만 펼친다(처음 펼치는 것은 세지 않는다).
+_MAX_REEXPANSIONS = 20_000
+_NO_CUT = 1 << 30
 
 
 class ContentTooComplex(ValueError):
@@ -55,8 +90,100 @@ class PageCost:
     xobject_calls: int   # 포화값 — 상한+1이면 '상한 초과'
 
 
+@dataclass(frozen=True)
+class _Scan:
+    """스트림 하나의 XObject 호출 — 리소스와 무관하게 콘텐츠만 본 결과."""
+
+    size: int                 # 압축 해제 길이
+    named: dict[str, int]     # 피연산자가 확실한 Do: MuPDF가 찾을 리소스 이름 → 횟수
+    uncertain: int            # 피연산자를 확정하지 못한 Do 후보 수(가장 비싼 XObject로 센다)
+
+
 def _decode_name(raw: bytes) -> str:
-    return _NAME_ESCAPE.sub(lambda m: bytes([int(m.group(1), 16)]), raw).decode("latin-1")
+    """콘텐츠 스트림의 이름 토큰(`/` 뒤 바이트) → MuPDF가 리소스 사전에서 찾는 키 문자열.
+
+    MuPDF 렉서처럼 두 자리 16진 `#xx`를 바이트로 풀되 `#00`은 그대로 두고, 콘텐츠 렉서의
+    이름 버퍼(255바이트)에서 자른다. PyMuPDF는 이름(C 문자열)을 UTF-8·surrogateescape로
+    파이썬 문자열화하므로 같은 방식으로 바꿔야 `pdf_to_name()`이 준 사전 키와 비교된다
+    (latin-1로 풀면 `/Fm#E9`가 'Fmé'가 되어 키 'Fm\\udce9'와 어긋났다)."""
+    def unescape(match: re.Match) -> bytes:
+        if match.group(1) == b"00":
+            return match.group(0)
+        return bytes([int(match.group(1), 16)])
+
+    data = _NAME_ESCAPE.sub(unescape, raw)[:_MAX_NAME_BYTES]
+    return data.decode("utf-8", "surrogateescape")
+
+
+def _first_eol(data: bytes, start: int, end: int) -> int:
+    """data[start:end]의 첫 줄바꿈(\\r·\\n) 위치, 없으면 -1."""
+    hits = [pos for pos in (data.find(b"\n", start, end), data.find(b"\r", start, end))
+            if pos >= 0]
+    return min(hits) if hits else -1
+
+
+def scan_calls(data: bytes, *, fresh: bool = True, max_candidates: int = 0) -> tuple[dict, int]:
+    """콘텐츠 바이트의 Do를 (확실한 이름별 횟수, 확실하지 않은 Do 수)로 나눈다 — 순수 함수.
+
+    fresh=False는 실행 중간에 이어지는 스트림(페이지의 두 번째 이후 콘텐츠 스트림)이다 — 앞
+    스트림의 피연산자·주석이 이어질 수 있어 스트림 처음은 '실행 시작'이 아니고, 첫 줄은 주석
+    안일 수 있다. max_candidates를 넘는 Do 후보는 쌍을 따지지 않고 전부 확실하지 않은 것으로
+    센다(정상 문서는 그만큼 Do를 쓰지 않는다 — 분석 시간을 묶는다).
+    """
+    total = _DO_KEYWORD.subn(b"", data)[1]
+    if not total:
+        return {}, 0
+    if max_candidates and total > max_candidates:
+        return {}, total
+    named: dict[str, int] = {}
+    certain = 0
+    has_comment = (b"%" in data) or not fresh
+    scanned = 0
+    last_pct = -1 if fresh else -2   # 이어지는 스트림은 처음 앞에 주석이 열려 있을 수 있다
+    eol_after_pct = -1
+    eol_scanned = 0
+    for match in _DO_PAIR.finditer(data):
+        start = match.start()
+        if has_comment:
+            pct = data.rfind(b"%", scanned, start)
+            if pct >= 0:
+                last_pct, eol_after_pct, eol_scanned = pct, -1, pct + 1
+            scanned = start
+        lo = max(0, start - _PAIR_LOOKBACK)
+        head = data[lo:start].rstrip(_WS_OR_NUMBER)
+        if not head:
+            # 공백·숫자만 지나 스트림 처음에 닿았다 — 실행 시작이면 피연산자 스택이 비어 있다
+            if lo or not fresh:
+                continue
+            run_start = 0
+        else:
+            if head[-1:] in _WS + _DELIMITERS:
+                continue  # 문자열·배열·사전·이름 등 — 앞에 다른 이름 피연산자가 있을 수 있다
+            run = _TRAILING_RUN.search(head)
+            if run is None or (run.start() == 0 and lo):
+                continue  # 연산자가 되돌아볼 범위 밖까지 이어진다
+            if run.start() and head[run.start() - 1:run.start()] == b"/":
+                continue  # 연산자가 아니라 이름이다
+            run_start = lo + run.start()
+        if has_comment and last_pct != -1:
+            # 연산자 줄(또는 그 앞)에서 열린 주석이 연산자·이름을 숨겼을 수 있다
+            if eol_after_pct < 0 and eol_scanned < run_start:
+                eol_after_pct = _first_eol(data, max(0, eol_scanned), run_start)
+                eol_scanned = run_start
+            if not 0 <= eol_after_pct < run_start:
+                continue
+        name = _decode_name(match.group(1))
+        named[name] = named.get(name, 0) + 1
+        certain += 1
+    return named, max(0, total - certain)
+
+
+class _TooTangled(Exception):
+    pass
+
+
+class _TooDeep(Exception):
+    pass
 
 
 class ComplexityScanner:
@@ -70,15 +197,24 @@ class ComplexityScanner:
         self.max_calls = max(0, int(max_xobject_calls))
         self._call_cap = self.max_calls + 1 if self.max_calls else _UNBOUNDED_CALLS
         self._decode_cap = self.max_bytes or _DECODE_CAP_WHEN_UNLIMITED
-        # 스트림 번호 → (압축 해제 길이, {XObject 이름: Do 횟수})
-        self._streams: dict[int, tuple[int, dict[str, int]]] = {}
-        # (스트림 번호, 리소스 키) → 한 번 실행 시 펼친 호출 수
+        # (스트림 번호, fresh) → 콘텐츠 해석 결과
+        self._streams: dict[tuple[int, bool], _Scan] = {}
+        # (스트림 번호, 리소스 키) → 한 번 실행 시 펼친 호출 수(호출 맥락과 무관한 것만)
         self._calls: dict[tuple, int] = {}
-        self._active: set[int] = set()
+        # 리소스 키 → {XObject 이름: 객체}, 그중 가장 비싼 호출(맥락과 무관하게 셀 수 있을 때만)
+        self._xobjects: dict[tuple, dict] = {}
+        self._worst: dict[tuple, int] = {}
+        # 실행 중인 Form 스트림 번호 → 그 스택 깊이(순환 절단·메모 판단용)
+        self._active: dict[int, int] = {}
+        self._expanded: set[tuple] = set()
+        self._reexpansions = 0
+        # 객체 번호 → (Form인가, 자기 /Resources(없으면 None)) — 순환을 다시 펼칠 때 저수준 조회를 줄인다
+        self._forms: dict[int, tuple[bool, tuple | None]] = {}
 
     # ── PDF 객체 도우미 ─────────────────────────────────────────────────
 
     def _get(self, obj, key: str):
+        """ASCII 고정 키 조회 전용 — 콘텐츠에서 온 이름은 _xobject_map으로 찾는다."""
         if obj is None or not self.mu.pdf_is_dict(obj):
             return None
         value = self.mu.pdf_dict_gets(obj, key)
@@ -112,10 +248,24 @@ class ComplexityScanner:
             return own, self._res_key(own, self.mu.pdf_to_num(stream_obj))
         return parent_res, parent_key
 
+    def _xobject_map(self, resources, res_key: tuple) -> dict:
+        """리소스의 XObject 사전 — 키를 순회해 {pdf_to_name 문자열: 스트림 객체}로 만든다.
+
+        비ASCII 이름을 pdf_dict_gets(C 문자열)로 찾으면 surrogate 문자열에서 TypeError가 나
+        페이지 검사가 통째로 건너뛰어졌다 — 파이썬 쪽에서 비교한다."""
+        cached = self._xobjects.get(res_key)
+        if cached is None:
+            cached = {
+                name: value for name, value in self._items(self._get(resources, "XObject"))
+                if self.mu.pdf_is_stream(value)
+            }
+            self._xobjects[res_key] = cached
+        return cached
+
     # ── 스트림 해석 ─────────────────────────────────────────────────────
 
-    def _stream(self, num: int) -> tuple[int, dict[str, int]]:
-        cached = self._streams.get(num)
+    def _stream(self, num: int, fresh: bool = True) -> _Scan:
+        cached = self._streams.get((num, fresh))
         if cached is not None:
             return cached
         try:
@@ -123,49 +273,117 @@ class ComplexityScanner:
             size = int(self.mu.fz_skip(stm, self._decode_cap + 1))
         except Exception:  # noqa: BLE001 — 깨진 스트림은 렌더도 건너뛴다
             size = 0
-        calls: dict[str, int] = {}
+        named: dict[str, int] = {}
+        uncertain = 0
         if 0 < size <= self._decode_cap and (not self.max_bytes or size <= self.max_bytes):
             try:
                 data = self.doc.xref_stream(num) or b""
             except Exception:  # noqa: BLE001
                 data = b""
-            for match in _DO_OPERATOR.finditer(data[: self._decode_cap]):
-                name = _decode_name(match.group(1))
-                calls[name] = calls.get(name, 0) + 1
-        self._streams[num] = (size, calls)
-        return size, calls
+            named, uncertain = scan_calls(
+                data[: self._decode_cap], fresh=fresh,
+                max_candidates=self.max_calls,
+            )
+        scan = _Scan(size, named, uncertain)
+        self._streams[(num, fresh)] = scan
+        return scan
 
-    def _expand(self, num: int, resources, res_key: tuple, depth: int) -> int:
-        """스트림을 한 번 실행할 때 일어나는 XObject 호출 수(중첩을 펼친 값, 포화)."""
+    def _form_info(self, target) -> tuple[int, bool, tuple | None]:
+        """(객체 번호, Form인가, 자기 리소스 (사전, 키) — 없으면 None). 객체 번호로 캐시한다."""
+        num = self.mu.pdf_to_num(target)
+        info = self._forms.get(num)
+        if info is None:
+            own = None
+            is_form = self._is_form(target)
+            if is_form:
+                found = self._get(target, "Resources")
+                if found is not None and self.mu.pdf_is_dict(found):
+                    own = (found, self._res_key(found, num))
+            info = (is_form, own)
+            self._forms[num] = info
+        return num, info[0], info[1]
+
+    def _cost(self, target, resources, res_key: tuple, depth: int) -> tuple[int, int]:
+        """XObject 하나를 부르는 비용(호출 1 + Form이면 펼친 내부 호출)과 순환 절단 깊이."""
+        num, is_form, own = self._form_info(target)
+        if is_form:
+            sub_res, sub_key = own if own is not None else (resources, res_key)
+            inner, low = self._expand(num, sub_res, sub_key, depth + 1)
+            return min(1 + inner, self._call_cap), low
+        return 1, _NO_CUT
+
+    def _charge(self, scan: _Scan, resources, res_key: tuple, depth: int) -> tuple[int, int]:
+        """스트림을 한 번 실행할 때의 XObject 호출 수(포화)와 부딪힌 순환 절단 중 가장 얕은 깊이."""
+        xobjects = self._xobject_map(resources, res_key)
+        total, low = 0, _NO_CUT
+        uncertain = scan.uncertain
+        for name, count in scan.named.items():
+            target = xobjects.get(name)
+            if target is None:
+                uncertain += count  # 못 찾은 이름 — 어느 XObject든 될 수 있다고 본다
+                continue
+            cost, cut = self._cost(target, resources, res_key, depth)
+            low = min(low, cut)
+            total = min(total + count * cost, self._call_cap)
+            if total >= self._call_cap:
+                return total, low
+        if uncertain and xobjects:
+            worst = self._worst.get(res_key)
+            if worst is None:
+                worst, worst_low = 0, _NO_CUT
+                for target in xobjects.values():
+                    cost, cut = self._cost(target, resources, res_key, depth)
+                    worst_low = min(worst_low, cut)
+                    worst = max(worst, cost)
+                    if worst >= self._call_cap:
+                        break
+                low = min(low, worst_low)
+                if worst_low == _NO_CUT:
+                    self._worst[res_key] = worst
+            total = min(total + uncertain * worst, self._call_cap)
+        return total, low
+
+    def _expand(self, num: int, resources, res_key: tuple, depth: int) -> tuple[int, int]:
+        """Form 스트림을 한 번 실행할 때의 XObject 호출 수(중첩을 펼친 값, 포화)와 순환 절단 깊이.
+
+        실행 중인 Form을 다시 부르면 MuPDF처럼 끊는다(0). 끊은 결과는 호출 맥락(어느 Form이
+        실행 중인가)에 따라 달라지므로, 이 Form보다 얕은(= 바깥 맥락의) Form에서 끊긴 계산은
+        메모하지 않는다 — 메모하면 순환 짝을 다른 곳에서 여러 번 부를 때 그 안의 팬아웃을
+        빠뜨린다."""
         key = (num, res_key)
         cached = self._calls.get(key)
         if cached is not None:
-            return cached
-        if num in self._active:
-            return 0  # 순환 Form — MuPDF는 재귀 XObject를 다시 실행하지 않는다
+            return cached, _NO_CUT
+        active = self._active.get(num)
+        if active is not None:
+            return 0, active  # 순환 Form — MuPDF는 실행 중인 XObject를 다시 실행하지 않는다
         if depth > MAX_FORM_DEPTH:
             raise _TooDeep()
-        self._active.add(num)
+        if key in self._expanded:
+            self._reexpansions += 1
+            if self._reexpansions > _MAX_REEXPANSIONS:
+                raise _TooTangled()
+        self._expanded.add(key)
+        self._active[num] = depth
         try:
-            _size, calls = self._stream(num)
-            xobjects = self._get(resources, "XObject")
-            total = 0
-            for name, count in calls.items():
-                target = self._get(xobjects, name)
-                if target is None or not self.mu.pdf_is_stream(target):
-                    continue
-                total += count
-                if self._is_form(target):
-                    sub_res, sub_key = self._own_resources(target, resources, res_key)
-                    inner = self._expand(self.mu.pdf_to_num(target), sub_res, sub_key, depth + 1)
-                    total += count * inner
-                if total >= self._call_cap:
-                    total = self._call_cap
-                    break
+            total, low = self._charge(self._stream(num), resources, res_key, depth)
         finally:
-            self._active.discard(num)
-        self._calls[key] = total
-        return total
+            del self._active[num]
+        if low >= depth:
+            self._calls[key] = total
+            low = _NO_CUT
+        return total, low
+
+    def _reachable_forms(self, scan: _Scan, resources, res_key: tuple):
+        """이 스트림이 부를 수 있는 Form — 확실하지 않은 Do가 있으면 리소스의 모든 Form."""
+        xobjects = self._xobject_map(resources, res_key)
+        names = list(scan.named)
+        if scan.uncertain or any(name not in xobjects for name in names):
+            names = list(xobjects)
+        for name in names:
+            target = xobjects.get(name)
+            if target is not None and self._form_info(target)[1]:
+                yield target
 
     # ── 페이지 ──────────────────────────────────────────────────────────
 
@@ -215,40 +433,42 @@ class ComplexityScanner:
                 for ap in streams:
                     appearances.append((ap, *self._own_resources(ap, resources, res_key)))
 
+        # 페이지 콘텐츠 스트림들은 MuPDF가 이어서 한 번 실행한다 — 앞 스트림의 피연산자·주석이
+        # 다음 스트림으로 이어지므로 두 번째부터는 '실행 시작'이 아니다(fresh=False).
         calls = 0
-        for stream in contents:
-            calls = self._add(calls, self._expand(mu.pdf_to_num(stream), resources, res_key, 0))
+        for position, stream in enumerate(contents):
+            scan = self._stream(mu.pdf_to_num(stream), fresh=position == 0)
+            calls = self._add(calls, self._charge(scan, resources, res_key, 0)[0])
         for ap, ap_res, ap_key in appearances:
-            calls = self._add(calls, 1 + self._expand(mu.pdf_to_num(ap), ap_res, ap_key, 1))
+            calls = self._add(calls, 1 + self._expand(mu.pdf_to_num(ap), ap_res, ap_key, 1)[0])
 
         # 도달하는 스트림을 한 번씩 돌며 바이트를 더하고, 처음 보는 리소스 사전의 패턴·Type3
         # 글리프를 한 번 실행으로 더한다.
         content_bytes = 0
         seen_streams: set[int] = set()
         seen_resources: set[tuple] = set()
-        queue = deque([(s, resources, res_key) for s in contents] + appearances)
+        queue = deque(
+            [(s, resources, res_key, position == 0) for position, s in enumerate(contents)]
+            + [(ap, ap_res, ap_key, True) for ap, ap_res, ap_key in appearances]
+        )
         while queue:
-            obj, res, key = queue.popleft()
+            obj, res, key, fresh = queue.popleft()
             if key not in seen_resources:
                 seen_resources.add(key)
                 for extra, extra_res, extra_key in self._extra_roots(res, key):
-                    calls = self._add(
-                        calls, 1 + self._expand(mu.pdf_to_num(extra), extra_res, extra_key, 1),
-                    )
-                    queue.append((extra, extra_res, extra_key))
+                    inner = self._expand(mu.pdf_to_num(extra), extra_res, extra_key, 1)[0]
+                    calls = self._add(calls, 1 + inner)
+                    queue.append((extra, extra_res, extra_key, True))
             num = mu.pdf_to_num(obj)
             if num in seen_streams:
                 continue
             seen_streams.add(num)
-            size, names = self._stream(num)
-            content_bytes += size
+            scan = self._stream(num, fresh)
+            content_bytes += scan.size
             if self.max_bytes and content_bytes > self.max_bytes:
                 break
-            xobjects = self._get(res, "XObject")
-            for name in names:
-                target = self._get(xobjects, name)
-                if target is not None and mu.pdf_is_stream(target) and self._is_form(target):
-                    queue.append((target, *self._own_resources(target, res, key)))
+            for target in self._reachable_forms(scan, res, key):
+                queue.append((target, *self._own_resources(target, res, key), True))
         return PageCost(index + 1, content_bytes, calls)
 
     def check(self, index: int) -> PageCost:
@@ -258,6 +478,11 @@ class ComplexityScanner:
         except _TooDeep:
             raise ContentTooComplex(
                 f"{index + 1}페이지의 Form XObject 중첩이 {MAX_FORM_DEPTH}단계를 넘습니다 — "
+                "처리할 수 없는 PDF입니다"
+            ) from None
+        except _TooTangled:
+            raise ContentTooComplex(
+                f"{index + 1}페이지의 Form XObject가 서로를 부르는 순환이 너무 얽혀 있습니다 — "
                 "처리할 수 없는 PDF입니다"
             ) from None
         if self.max_bytes and cost.content_bytes > self.max_bytes:
@@ -274,7 +499,3 @@ class ComplexityScanner:
                 "PDF_MAX_PAGE_XOBJECT_CALLS). 렌더에 비정상적으로 오래 걸리는 PDF입니다"
             )
         return cost
-
-
-class _TooDeep(Exception):
-    pass

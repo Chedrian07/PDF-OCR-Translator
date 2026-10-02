@@ -487,3 +487,39 @@ def test_worker_children_do_not_inherit_credentials(pdf_worker_processes, monkey
     names = set(output.split())
     assert not {"OPENAI_API_KEY", "HF_TOKEN"} & names
     assert "PATH" in names
+
+
+# ── 자체 점검: 워커가 죽은 원인이 입력인지 환경인지 가른다 (P4 Rosetta + RLIMIT_AS) ──
+
+
+def _break_worker_environment(monkeypatch, tmp_path) -> None:
+    """새로 뜨는 워커만 PyMuPDF 임포트에서 죽게 한다 — spawn 워커는 부모의 sys.path를 물려받고,
+    이 프로세스는 진짜 pymupdf를 이미 올려 두어 영향이 없다(에뮬레이션에서 메모리 상한 때문에
+    워커가 기동 직후 죽던 환경의 대역)."""
+    import fitz  # noqa: F401 — 이 프로세스는 진짜 PyMuPDF를 먼저 올려 둔다
+    import pymupdf  # noqa: F401
+
+    fake = tmp_path / "broken-env"
+    fake.mkdir()
+    (fake / "pymupdf.py").write_text("import os\nos._exit(3)\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(fake))
+    pdf_worker.shutdown_pools()  # 이미 뜬(멀쩡한) 워커를 버린다
+
+
+def test_selftest_passes_on_a_healthy_worker_and_fails_where_every_worker_dies(
+    pdf_worker_processes, monkeypatch, tmp_path,
+):
+    assert pdf_worker.workers_can_start(pdf_worker.POOL_PROBE) is True
+    # 입력 탓 크래시(작업이 워커를 죽임)는 환경 문제가 아니다 — 다음 자체 점검은 통과한다
+    with pytest.raises(PdfWorkerCrashed):
+        pdf_worker.run("pdf_worker_tasks:exit_now", (3,), pool=pdf_worker.POOL_PROBE, timeout=30)
+    assert pdf_worker.workers_can_start(pdf_worker.POOL_PROBE) is True
+
+    _break_worker_environment(monkeypatch, tmp_path)
+    assert pdf_worker.workers_can_start(pdf_worker.POOL_PROBE) is False
+
+
+def test_worker_unavailable_error_pickles_and_names_the_server_side():
+    error = pickle.loads(pickle.dumps(pdf_worker.PdfWorkerUnavailable()))
+    assert isinstance(error, pdf_worker.PdfWorkerError)
+    assert "서버 설정 문제" in str(error) and "PDF_WORKER_MEM_LIMIT_MB" in str(error)

@@ -273,3 +273,61 @@ def test_stopped_worker_leaves_queued_jobs_for_the_next_start(tmp_path):
     assert (meta["status"], meta["submitted"]) == ("queued", True)
     restored = JobStore(tmp_path / "jobs").load_existing()
     assert [job.id for job in restored] == [second.id]   # 다음 기동이 다시 제출한다
+
+
+# ── 종료 신호 뒤 연결 정리(drain) 창: 대기 잡을 새로 맡지 않는다 ──────────────────
+
+
+class _GatedEngine(FakeEngine):
+    """첫 실행이 gate를 기다린다 — 실행 중 잡 A가 끝나는 시점을 테스트가 정한다."""
+
+    def __init__(self) -> None:
+        super().__init__(delay=0.0)
+        import threading
+
+        self.entered = threading.Event()
+        self.gate = threading.Event()
+        self.runs = 0
+
+    def run_multi(self, image_paths, out_dir, sink, cancel):
+        self.runs += 1
+        self.entered.set()
+        assert self.gate.wait(30), "테스트가 gate를 열지 않았다"
+        return super().run_multi(image_paths, out_dir, sink, cancel)
+
+
+def test_worker_takes_no_queued_job_once_shutdown_is_requested(tmp_path):
+    """uvicorn은 종료 신호 뒤 연결 정리(--timeout-graceful-shutdown, 기본 무제한)를 마친 뒤에야
+    lifespan 종료(worker.stop())를 부른다. 그 사이 실행 중 잡이 끝나면 워커가 다음 대기 잡을
+    맡아, 프로세스와 함께 죽은 그 잡이 다음 기동에 '서버 재시작으로 중단' 오류가 됐다(delta-api-
+    frontend-infra-3). 신호 처리기가 세운 종료 요청을 보면 대기 잡은 대기열(제출 표식)에 남는다."""
+    flag = {"requested": False}
+    engine = _GatedEngine()
+    store = JobStore(tmp_path / "jobs")
+    settings = Settings(engine="fake", device="cpu", data_dir=tmp_path / "data", fake_delay=0.0)
+    worker = Worker(
+        store, EventBroker(), engine, settings, {}, stop_requested=lambda: flag["requested"],
+    )
+    running, waiting = (store.create(f"{name}.pdf", "multi", dpi=72) for name in ("a", "b"))
+    for job in (running, waiting):
+        (job.dir / "source.pdf").write_bytes(make_pdf_bytes(pages=1, with_image=False))
+    engine.load()
+    worker.start()
+    try:
+        worker.submit(running)
+        worker.submit(waiting)
+        assert engine.entered.wait(30)
+        flag["requested"] = True       # 종료 신호(처리기는 락 없이 표식만 세운다)
+        engine.gate.set()              # drain 창 안에서 실행 중 잡이 끝난다
+        worker.join(timeout=30)
+        assert not worker.is_alive(), "종료 요청 뒤 워커가 끝나야 한다"
+        assert running.status == "done"
+        assert engine.runs == 1
+        assert waiting.status == "queued" and waiting.submitted, waiting.status
+        assert worker.current_job_id is None
+    finally:
+        engine.gate.set()
+        worker.stop()
+        worker.join(timeout=10)
+    restored = JobStore(tmp_path / "jobs")
+    assert [job.id for job in restored.load_existing()] == [waiting.id]   # 다음 기동이 다시 제출

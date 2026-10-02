@@ -38,7 +38,8 @@ _WARNINGS_SAMPLE = 50
 # 17: 원본의 능동 콘텐츠(문서 열기 스크립트·/AA·문서 JavaScript·위험한 링크 동작·첨부 파일)를
 #     번역 PDF에 싣지 않음(security-3). 캐시된 PDF가 그것을 그대로 내보내지 않게 올린다.
 #     같은 버전에서: 그림 영역 안의 두께 0 선(범례 등)을 겹친 캡션이 소유해 지우지 않음
-#     (delta-pdf-translate-6).
+#     (delta-pdf-translate-6), 회전 쪽(/Rotate 90·270)의 분수선·근호 윗선 소유와 튀어나온
+#     기호(√) 부착을 화면 좌표로 판정(delta-pdf-translate-2). 조판 결과가 달라진다.
 PDF_EXPORT_FORMAT_VERSION = 17
 
 

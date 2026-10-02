@@ -7,6 +7,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import math
 import os
 import queue
 import threading
@@ -183,10 +184,12 @@ class _AbuseGuard:
     def check_rate(self, keys, cost: int = 1) -> None:
         retry = self.limiter.hit_many(keys, cost)
         if retry is not None:
+            # 올림한다 — 버림(int)이면 안내받은 초만큼 쉬고 다시 보낸 클라이언트(라이브
+            # 미리보기 자동 재시도 등)가 창이 1초 미만 남은 시점에 닿아 429를 한 번 더 받았다.
             raise HTTPException(
                 429,
                 "요청이 너무 잦습니다 — 잠시 후 다시 시도하세요",
-                headers={"Retry-After": str(max(1, int(retry)))},
+                headers={"Retry-After": str(max(1, math.ceil(retry)))},
             )
 
     def acquire(self) -> bool:

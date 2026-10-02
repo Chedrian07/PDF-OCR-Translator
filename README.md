@@ -188,11 +188,16 @@ OCR_ENGINE=fake docker compose up -d --build
 ## macOS · Apple Silicon (MLX 기본 · torch MPS 폴백)
 
 Docker(맥의 Linux VM)에는 GPU 패스스루가 없어 Metal을 쓸 수 없습니다. Apple Silicon
-Mac(macOS 14+, arm64)에서는 로컬(uv)로 실행하세요:
+Mac(macOS 14+, arm64)에서는 로컬(uv)로 실행하세요. 먼저 필요한 것:
+
+- **uv** — `brew install uv` 또는 [docs.astral.sh/uv](https://docs.astral.sh/uv/) 설치 스크립트
+  (없으면 `make setup-mlx`가 `uv: command not found`로 멈춥니다). Python 3.12는 uv가 받습니다.
+- **Xcode Command Line Tools**(`xcode-select --install`) — C++ 가속 모듈(`native/`) 빌드용.
 
 ```bash
 make setup-mlx    # = cd backend && uv sync --extra metal --extra mlx && uv pip install ../native
 make dev          # http://127.0.0.1:8000 — OCR_DEVICE=auto → mlx
+make dev PORT=8010   # 8000을 다른 서버가 쓰고 있으면 포트만 바꾼다(dev-metal·dev-textlayer도 같다)
 ```
 
 - **기본 엔진은 in-process MLX**입니다(`backend/app/vendor/unlimited_ocr_mlx` — mlx-vlm 0.7.4의
@@ -725,7 +730,7 @@ fp32 MLX·torch 모델을 차례로 올려 최고 메모리가 약 23GiB라 32GB
 | `make setup-mlx` | **Apple Silicon 권장** — MLX 엔진 + torch MPS 폴백 + C++ 모듈 (`uv sync --extra metal --extra mlx && uv pip install ../native`) |
 | `make setup-metal` | `setup-mlx`와 같다 (예전 metal 단독 sync는 mlx·C++ 모듈을 지웠다) |
 | `make setup-native` | C++ 가속 모듈 설치 (선택) |
-| `make dev` | 개발 서버 — `127.0.0.1:8000`, `--reload`, 디바이스 자동 선택(`make dev OCR_DEVICE=cpu`처럼 지정 가능) |
+| `make dev` | 개발 서버 — `127.0.0.1:8000`(`make dev PORT=8010`으로 변경), `--reload`, 디바이스 자동 선택(`make dev OCR_DEVICE=cpu`처럼 지정 가능) |
 | `make dev-metal` | torch MPS(Metal) 폴백으로 개발 서버 — MLX와 결과·속도 비교용 |
 | `make dev-textlayer` | `OCR_ENGINE=textlayer`로 개발 서버 (모델 불필요) |
 | `make test` | 핵심 로컬 검사 — backend pytest · ruff · frontend 테스트 |

@@ -120,6 +120,9 @@ OvisOCR2는 vLLM `finish_reason=length`(페이지당 `OVIS_MAX_OUTPUT_TOKENS` �
 - 그 밖(스캔 문서·대조 불가·점수가 기준 이상·임계값 ≤ 0)은 잘린 출력을 그대로 쓰고
   `출력 토큰 상한에서 잘린 페이지 — … 잘린 출력을 그대로 씁니다` 경고를 남긴다. 표·수식·
   그림 구조가 살아 있는 출력을 평문 텍스트 레이어나 빈 페이지로 바꾸지 않기 위해서다.
+  경고에는 판정하지 못한 사유가 그대로 적힌다(분석 시간 상한이면 `PDF_PAGE_TIMEOUT_S`,
+  처리 프로세스 비정상 종료, 원본 PDF 열기 실패, 신뢰할 수 없는 텍스트 레이어).
+  `대조할 PDF 텍스트 레이어가 없어`는 텍스트 레이어가 정말 비어 있을 때만 쓴다.
 - 텍스트 레이어 복구는 그림·표 구조를 잃는다 — 임계값을 바꾸면 이 판정도 함께 바뀐다.
 
 ### block type (정규화 어휘)
@@ -139,8 +142,11 @@ backend `protocol.TYPE_ALIASES`가 정규화한다. figure/image는 내부적으
   `&#91;&#91;FIGURE:` — 숫자 문자 참조라 렌더하면 `[[FIGURE:`로 보이지만 placeholder
   정규식에는 걸리지 않는다. `\[`로 이스케이프하면 렌더러가 디스플레이 수식(`\[ … \]`)으로
   읽으므로 쓰지 않는다.
-  - OvisOCR2(`parser.py`): 엉뚱한 `<img>` 태그를 지운 뒤, 유효한 figure 태그 **사이의
-    텍스트 조각마다** 이스케이프한다(유효 태그가 만든 placeholder는 건드리지 않는다).
+  - OvisOCR2(`parser.py`): **채택된** figure 태그 사이의 텍스트 조각마다, 그 조각 안의
+    거부된 figure 태그(좌표 이상·퇴화·중복·개수 상한 초과)와 엉뚱한 `<img>` 태그를 지운 뒤
+    이스케이프한다(채택된 태그가 만든 placeholder는 건드리지 않는다). 거부된 태그를 조각
+    경계에서 지우면 이미 이스케이프된 양쪽의 `[`와 `[FIGURE:0]]`이 이어져 placeholder가
+    위조된다.
   - PaddleOCR-VL(`adapter.py`): 조립한 페이지 markdown에서만 이스케이프한다. 블록
     `content`는 리터럴을 그대로 둔다 — placeholder로 읽히는 것은 페이지 markdown뿐이다.
 - backend(`protocol.sanitize_page`)는 제어 문법(`<PAGE>`·`<|…|>`)을 placeholder **사이
@@ -169,9 +175,12 @@ sidecar가 추론을 내부에서 직렬화하므로(Ovis `max_num_seqs=1`+락, 
 스레드) **속도 이득은 없다**(c1 48.3s vs c4 48.7s). 기본값 1이 옳다. 동시성>1에서도
 페이지 실패는 그 페이지로 격리된다 — runner는 페이지 단위 엔진의 여러 쪽 청크를
 통째로 다시 보내지 않고(정상 페이지까지 GPU에서 다시 추론하게 된다) 곧바로 페이지별
-처리로 내린다. 앞 페이지 실패로 버려진 형제 페이지의 sidecar 경고는 잡 경고로 올리지
-않는다 — 경고는 페이지 결과를 **소비할 때** 승격되고, 그 페이지들은 다시 처리돼 자기
-경고를 남긴다.
+처리로 내린다. 그 페이지별 처리(`run_single`)는 실패한 청크에서 **이미 끝난 형제 페이지를
+다시 추론하지 않고** 받아 둔 결과를 쓰며, 읽기 타임아웃이 난 페이지는 sidecar에 다시 보내지
+않고 같은 `SidecarTimeoutError`로 텍스트 레이어에 넘긴다(1회용 — 다음 청크·잡 전환에서
+비움, `_keep_for_page_recovery`). 앞 페이지 실패로 버려진 형제 페이지의 sidecar 경고는 잡
+경고로 올리지 않는다 — 경고는 페이지 결과를 **소비할 때** 승격되고, 그 페이지들은 다시
+처리돼 자기 경고를 남긴다.
 
 오류 분류:
 
@@ -179,6 +188,7 @@ sidecar가 추론을 내부에서 직렬화하므로(Ovis `max_num_seqs=1`+락, 
 |---|---|---|
 | `SidecarUnavailableError` | 연결 실패 · **HTTP 503**(재시작/모델 재로드 중) | `transient=True` — 대기하면 풀린다 |
 | `SidecarTimeoutError` | 읽기 응답 시간 초과 (`SidecarUnavailableError` 서브클래스) | provider는 살아서 그 페이지를 계속 추론 중일 수 있다 — 같은 페이지를 곧장 다시 보내면 그 뒤에 줄을 서 또 타임아웃이 난다. `retry_same_page=False`라 엔진의 복귀-대기 재시도도, runner의 청크 재시도도 하지 않고 **곧바로 페이지 격리**(텍스트 레이어 → placeholder)로 간다 |
+| `SidecarRestartLoopError` | 복귀를 기다려 다시 보낸 페이지 요청에서도 503·연결 끊김 (`engine/sidecar.py`) | `SidecarUnavailableError` 하위·`retry_same_page=False` — runner 재시도 없이 곧바로 페이지 격리 |
 | `SidecarOutputTruncated` | `truncated:true` 페이지가 텍스트 레이어 대조에서 기준 미달 (위 §잘린 페이지) | `OutputLimitError` 하위·`retry_same_page=False` — runner의 잘림 복구 |
 | `SidecarError` | 5xx 추론 실패(503 제외) | 하드 실패 |
 | `SidecarProtocolError` | 스키마/크기/버전 위반, 4xx 요청 거부 — malformed provider response | 하드 실패(대기 무의미) |
@@ -258,11 +268,19 @@ sidecar의 첫 모델 로드는 다운로드 + (Ovis) vLLM 컴파일로 수 분 
 
 1. `SidecarUnavailableError`(연결 실패·503)를 잡아 health 캐시를 무효화하고
    (stale `loaded=True`가 남으면 대기가 즉시 반환돼 무효화된다),
-2. `"sidecar 재시작/모델 재로드 대기 중… (해당 페이지는 복귀 후 재시도)"` 경고를
-   잡에 적재한 뒤,
+2. 대기 중 상태 문구는 잡 경고로 쌓지 않은 채,
 3. 취소 가능하게 복귀를 기다리고(`_await_recovery`),
-4. **그 페이지만 1회** 재요청한다(`request_id`에 `r` 접미사). 재요청도 실패하면
-   그대로 전파해 기존 페이지 격리 경로를 탄다.
+4. **그 페이지만 1회** 재요청한다(`request_id`에 `r` 접미사). 재요청이 성공하면 잡
+   참고(notices)에 `sidecar 재시작/모델 재로드로 끊긴 페이지 요청을 복귀 뒤 다시 보내
+   처리했습니다` 한 줄만 남는다(청크 시작에 복귀를 기다렸으면 `sidecar 재시작/모델 재로드가
+   끝나기를 기다린 뒤 이어서 진행했습니다` — 엔진 `drain_notices`, 품질 상태에 영향 없음).
+   재요청도 503·연결 끊김이면 health 캐시를 다시 무효화하고 `SidecarRestartLoopError`
+   (`SidecarUnavailableError` 하위, `retry_same_page=False`)로 올린다 — runner는 같은
+   페이지를 다시 보내지 않고 곧바로 페이지 격리(텍스트 레이어 → 플레이스홀더)로 간다.
+   동시성>1의 페이지별 복구가 그 페이지를 `run_single`로 한 번 더 보낼 때는(1회용 표식)
+   또 내려가도 기다려 다시 보내지 않는다 — 같은 재시작에 휘말린 형제 페이지는 그 한 번으로
+   정상 처리된다. 엔진을 결정적으로 죽이는 페이지 하나의 컨테이너 재시작은 동시성 1에서
+   2회, 동시성 4에서 3회다.
 
 대기 예산은 **장애 한 번에 하나**다: 첫 대기가 시작될 때 `OCR_SIDECAR_MODEL_WAIT_S`
 데드라인을 잡고 그 장애의 모든 페이지가 공유한다(페이지마다 900초씩 곱해지지 않는다).
@@ -340,7 +358,8 @@ ParseResponse ─ protocol.sanitize_page (clamp/폐기/상한/특수토큰 제�
                  ├ result_with_boxes[_{local}].jpg (타입별 색 오버레이)
                  ├ raw_pages.json — 기존 layout.py 문법을 normalized block에서 합성
                  │   (inline det만 사용: 문서 순서 == image crop_index 순서 보장)
-                 │   layout=full 엔진만 쓴다(write_raw). figure_only(OvisOCR2)는 쓰지 않아
+                 │   좌표는 layout=full 엔진만 싣는다(write_raw). figure_only(OvisOCR2)는
+                 │   페이지마다 빈 원출력만 남겨(merge가 원출력 개수로 페이지 수를 맞춰 본다)
                  │   layout.json이 생기지 않는다 → has_layout=false, 좌표 기능 대신 /html
                  └ [[FIGURE:n]] → ![](images/…) 치환
              → 기존 IncrementalMerger (무수정)

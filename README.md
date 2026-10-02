@@ -63,6 +63,14 @@ Markdown**을 만들어 주는 셀프호스팅 서비스입니다. 기본 엔진
 
 ## 0.1.0 릴리스 이미지
 
+> **주의 — 0.1.0은 이 README가 설명하는 보안 수정 이전의 이미지입니다.** PyMuPDF 1.28.2
+> (MuPDF CVE-2026-3308)·Pillow 12.3.0 갱신, PyMuPDF 워커 프로세스 격리, 업로드 복잡도
+> 게이트(압축·중첩 XObject 폭탄 거부)가 없어, 악의적인 PDF 한 장으로 서버가 멈추거나 MuPDF
+> 취약점에 닿을 수 있습니다. MLX 엔진·`local-openai` Q&A 공급자·번역 스트리밍
+> (`TRANSLATE_STREAM`·`TRANSLATE_REASONING_STYLE`)도 없습니다. 출처를 모르는 PDF를 다룬다면
+> 아래 §빠른 시작 (Docker)의 소스 빌드(`docker compose up -d --build`)를 쓰거나 다음 릴리스를
+> 기다리세요.
+
 [v0.1.0 릴리스](https://github.com/Chedrian07/PDF-OCR-Translator/releases/tag/v0.1.0)의
 CPU 이미지는 Linux amd64/arm64를 지원합니다. 모델 없이 PDF 내장 텍스트와
 Tesseract를 사용하는 textlayer 엔진으로 바로 시작할 수 있습니다:
@@ -89,17 +97,24 @@ docker tag ghcr.io/chedrian07/pdf-ocr-translator:0.1.0-cpu-amd64 \
 ```
 
 번역·Q&A를 활성화하려면 실행 명령에 `--env-file .env`를 추가합니다. `.env`의
-설정 예시는 아래 한국어 번역·페이지 Q&A 절을 참조하세요. `docker run --env-file`은
+설정 예시는 아래 한국어 번역·페이지 Q&A 절을 참조하세요 — 단 `LLM_PROVIDER=local-openai`·
+`LLM_LOCAL_OPENAI_*`·`TRANSLATE_STREAM`·`TRANSLATE_REASONING_STYLE`·`TRANSLATE_EXTRA_BODY`는
+0.1.0 이후 설정입니다(0.1.0은 `LLM_PROVIDER=local-openai`면 설정 오류로 기동하지 못해 재시작을
+반복하고, 나머지 키는 무시합니다). `docker run --env-file`은
 따옴표와 줄 끝 주석을 값에 그대로 넣으므로 `KEY=값` 형식으로만 적습니다
 (`.env.example`은 설명을 별도 줄에 둡니다). CPU Unlimited-OCR을
 사용하려면 `OCR_ENGINE=unlimited`로 바꿉니다. CUDA·sidecar 배포는 아래
 소스 빌드용 Compose 프로필을 사용합니다.
 
-버전별 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 있습니다. 릴리스 워크플로는
-같은 커밋의 CI 통과를 확인하고(진행 중이면 최대 90분 기다린다) 각 아키텍처 이미지에서
-실제 PDF 업로드→OCR→Markdown/ZIP 다운로드를 검증한 뒤, `trivy` 게이트(수정판이 있는
-HIGH/CRITICAL이면 중단 — 수용 목록 `.github/trivyignore.yaml`, 2027-04-01 만료)를 통과한
-이미지만 배포합니다. 오프라인 설치 tarball과 `SHA256SUMS`는 워크플로가 릴리스에 직접
+버전별 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 있습니다.
+
+### 릴리스 절차 (다음 릴리스부터 — 0.1.0에는 적용되지 않음)
+
+릴리스 워크플로는 같은 커밋의 CI 통과를 확인하고(진행 중이면 최대 90분 기다린다) 각
+아키텍처 이미지에서 실제 PDF 업로드→OCR→Markdown/ZIP 다운로드를 검증한 뒤, `trivy`
+게이트(수정판이 있는 HIGH/CRITICAL이면 중단 — 수용 목록 `.github/trivyignore.yaml`,
+2027-04-01 만료)를 통과한 이미지만 배포합니다. 0.1.0은 이 게이트를 도입하기 전에
+배포됐습니다. 오프라인 설치 tarball과 `SHA256SUMS`는 워크플로가 릴리스에 직접
 첨부합니다(릴리스가 없으면 초안을 만든다). 베이스 이미지 digest는
 `docker buildx imagetools inspect`로 갱신하고, Dependabot이 갱신 PR을 엽니다.
 

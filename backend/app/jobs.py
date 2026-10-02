@@ -71,6 +71,12 @@ LEGACY_NOTICE_MARKERS = (
     "개선되어 단독 재처리 결과를 채택",
     "측정 한계로 판단",
     "페이지별 재처리",  # 청크 복구 경위(MAX_LENGTH 도달·반복 감지·청크 변환 실패)
+    # 0.1.0(a9a4400) sidecar 엔진이 복구에 성공한 재시작·모델 로딩 대기를 warnings로 남긴 문구 —
+    # 지금은 같은 경위를 notices로 남긴다(sidecar._RECOVERED_NOTICE·_RESUMED_NOTICE). 빠져
+    # 있어 정상 복구된 옛 잡이 '주의 N건'·degraded로 보였다(감사 migration-3). 복귀에 실패하면
+    # 텍스트 레이어 복구·플레이스홀더 경고가 따로 남으므로 실제 손실은 가려지지 않는다.
+    "sidecar 재시작/모델 재로드 대기 중",
+    "모델 로딩 대기 중… (최초 기동은",
 )
 
 
@@ -136,11 +142,18 @@ class Job:
     # 중단된 잡은 실제로 멈춘 시각을 몰라 finished_at을 비워 둔다. 구버전 meta에도 없다.
     started_at: str | None = None
     finished_at: str | None = None
+    # notices 이전 meta(키 없음)에서 읽은 원래의 합쳐진 warnings(런타임 전용). None이 아니면
+    # meta()가 분리 결과 대신 이 목록을 warnings로 쓰고 notices 키를 쓰지 않는다 — 기동마다
+    # 지금의 LEGACY_NOTICE_MARKERS로 다시 가른다. 예전에는 page_separator를 고정하며 meta를
+    # 다시 쓸 때 분리 결과를 영구 기록해, 표식을 고친 뒤에도 이식된 잡은 다시 가르지 못했다.
+    legacy_warnings: list[str] | None = None
 
     def mark_running(self) -> None:
         """실행 시작 — 상태와 시작 시각을 함께 바꾼다(저장은 호출자 몫)."""
         self.status = "running"
         self.started_at = _now_iso()
+        # 다시 실행되는 잡의 메시지는 새로 쌓인다 — 옛 meta 모양을 더는 지키지 않는다
+        self.legacy_warnings = None
 
     def mark_finished(self, status: str, error: str | None = None) -> None:
         """터미널 상태(done|error|canceled)로 마감 — 상태·오류·종료 시각을 함께 바꾼다."""
@@ -214,7 +227,7 @@ class Job:
         return d
 
     def meta(self) -> dict:
-        return {
+        meta = {
             "id": self.id,
             "filename": self.filename,
             "mode": self.mode,
@@ -235,6 +248,11 @@ class Job:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
         }
+        if self.legacy_warnings is not None:
+            # 옛 meta는 분리 전 모양 그대로 — 분류는 기동마다 지금 표식으로 다시 한다
+            meta["warnings"] = list(self.legacy_warnings)
+            del meta["notices"]
+        return meta
 
 
 def _created_order(created_at: str) -> int:
@@ -476,11 +494,14 @@ class JobStore:
                 m = json.loads(meta_path.read_text(encoding="utf-8"))
                 warnings = [str(w) for w in m.get("warnings") or []]
                 notices = m.get("notices")
+                legacy_warnings = None
                 if isinstance(notices, list):
                     notices = [str(n) for n in notices]
                 else:
                     # notices 이전 meta — 한 목록에 섞여 있던 정보성 메모를 가려낸다(메모리만;
-                    # 터미널 잡의 meta.json mtime은 TTL GC 시계라 이 일로 다시 쓰지 않는다)
+                    # 터미널 잡의 meta.json mtime은 TTL GC 시계라 이 일로 다시 쓰지 않는다).
+                    # 다른 이식으로 meta를 다시 써도 분리 결과는 남기지 않는다(Job.legacy_warnings)
+                    legacy_warnings = warnings
                     warnings, notices = split_legacy_warnings(warnings)
                 job = Job(
                     id=m["id"], filename=m["filename"], mode=m.get("mode", "multi"),
@@ -495,6 +516,7 @@ class JobStore:
                     submit_order=_int_or_none(m.get("submit_order")),
                     page_separator=m.get("page_separator"),
                     started_at=m.get("started_at"), finished_at=m.get("finished_at"),
+                    legacy_warnings=legacy_warnings,
                 )
                 if job.page_separator is None and default_page_separator is not None:
                     job.page_separator = default_page_separator

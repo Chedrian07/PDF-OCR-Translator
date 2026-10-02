@@ -16,6 +16,7 @@ from pathlib import Path
 
 from ..layout import estimate_font_size_cqw
 from ..pdf import quiet_fitz
+from .active_content import strip_active_content
 from .constants import (
     _BODY_LINEHEIGHTS,
     _CAPTION_LINEHEIGHTS,
@@ -2428,6 +2429,11 @@ def _build_translated_pdf(job_dir: Path, lang: str, *, fontfile: str) -> PdfExpo
             tmp = job_dir / f".export.{lang}.{uuid.uuid4().hex}.tmp"
             try:
                 _restore_space_tounicode(doc, fonts)
+                # 원본의 문서 열기 스크립트·추가 동작·첨부 파일은 번역 PDF로 옮기지 않는다
+                # (업로드 PDF는 적대적 입력 — 감사 security-3). garbage가 남은 객체를 버린다.
+                stripped = strip_active_content(fitz, doc)
+                if stripped:
+                    logger.info("번역 PDF에서 원본의 능동 콘텐츠 %d개를 뺐습니다(lang=%s)", stripped, lang)
                 doc.save(tmp, garbage=3, deflate=True)
                 tmp.replace(result.path)
             except Exception as error:  # noqa: BLE001 — 디스크 만원·삭제된 잡 디렉터리 등

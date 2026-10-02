@@ -57,6 +57,26 @@ def make_pdf_bytes(pages: int = 3, with_image: bool = True) -> bytes:
     return data
 
 
+@pytest.fixture(autouse=True)
+def _fresh_pdf_export_slots():
+    """테스트마다 PDF 내보내기 빌드·예열 슬롯을 새로 만든다.
+
+    슬롯은 app.pipeline.derived의 모듈 전역이고 번역 완료 예열은 데몬 스레드라 TestClient보다
+    오래 산다. 앞 테스트의 예열 빌드가 아직 돌면 예열 몫(PDF_EXPORT_MAX_CONCURRENT-1 = 1)을
+    쥔 채 다음 테스트로 넘어와, 새 예열이 대기 없이 포기했다(CI 러너 속도에서 '번역 직후에
+    PDF가 준비돼 있어야 한다'가 간헐 실패). 남은 스레드는 자기가 잡은 옛 세마포어에
+    반납하므로 새 슬롯과 섞이지 않는다.
+    """
+    from app.pipeline import derived
+
+    with derived._PDF_EXPORT_SLOTS_GUARD:
+        derived._PDF_EXPORT_SLOTS = None
+        derived._PDF_EXPORT_SLOTS_SIZE = 0
+        derived._WARM_SLOTS = None
+        derived._WARM_SLOTS_SIZE = 0
+    yield
+
+
 @pytest.fixture
 def sample_pdf() -> bytes:
     return make_pdf_bytes()

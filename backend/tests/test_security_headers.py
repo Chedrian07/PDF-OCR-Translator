@@ -209,6 +209,23 @@ def test_static_frontend_is_revalidated_not_heuristically_cached(spa_client, pat
         assert "content-security-policy" not in response.headers   # 문서가 아닌 정적 파일
 
 
+@pytest.mark.parametrize(("path", "status"), [
+    ("/", 200), ("/app.js", 200), ("/js/core.js", 200), ("/styles.css", 200),
+    ("/vendor/katex/katex.min.js", 200), ("/api/health", 200), ("/api/no-such-route", 404),
+])
+def test_every_response_forbids_mime_sniffing(spa_client, path, status):
+    """모든 응답에 X-Content-Type-Options: nosniff — 브라우저가 명시한 Content-Type 밖으로 내용을
+    추측해 해석하지 않는다(보안 리뷰 관찰: 헤더가 없었다). ES 모듈은 원래 MIME을 엄격히 보므로
+    정적 파일의 JS MIME이 맞는지도 함께 고정한다."""
+    response = spa_client.get(path)
+    assert response.status_code == status
+    assert response.headers["x-content-type-options"] == "nosniff"
+    if path.endswith(".js"):
+        assert response.headers["content-type"].split(";")[0] in (
+            "text/javascript", "application/javascript",
+        )
+
+
 def test_api_html_responses_carry_csp_and_keep_route_headers(client, sample_pdf):
     """API가 내보내는 HTML(조각·내려받기 문서)도 같은 리소스 출처 규칙을 받는다.
     document.html은 KaTeX를 인라인으로 품으므로 스크립트는 'unsafe-inline'이다."""

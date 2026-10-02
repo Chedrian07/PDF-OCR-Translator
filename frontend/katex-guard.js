@@ -17,6 +17,7 @@
   var MAX_SIZE_EM = 10;   // constants.KATEX_MAX_SIZE_EM
   var MAX_EXPAND = 1000;  // constants.KATEX_MAX_EXPAND
   var MAX_BOX_EM = 100;   // constants.KATEX_MAX_BOX_EM
+  var MAX_TEX_CHARS = 10000; // constants.KATEX_MAX_TEX_CHARS — 넘으면 조판하지 않고 원문 TeX
 
   // 단위 → em (KaTeX 기준: 1em = 10pt, ex = x-height, mu = 1/18 em) — core.js와 같은 표.
   var EM_PER_UNIT = {
@@ -24,12 +25,14 @@
     bp: 0.1 * 803 / 800, pc: 1.2, dd: 0.1 * 1238 / 1157, cc: 1.2 * 1238 / 1157, nd: 0.1 * 685 / 642,
     nc: 1.2 * 685 / 642, sp: 0.1 / 65536, px: 0.1 * 803 / 800,
   };
-  // 크기 인자를 받는 명령과 그 인자 머리 — core.js TEX_SIZE_HEADER와 같은 식.
+  // 크기 인자를 받는 명령과 그 인자 머리 — core.js TEX_SIZE_HEADER와 같은 식. 공백·괄호 인자
+  // 반복의 상한(64자)이 입력 길이에 선형인 시간을 지킨다(상한 없는 \s*·[^\]]*는 닫는 괄호 없는
+  // '\\[' 반복에서 제곱 시간 — 내려받은 HTML을 열 때 23초 멈췄다, delta-api-frontend-infra-1).
   var SIZE_HEADER = new RegExp([
-    String.raw`\\(?:kern|mkern|hskip|mskip)(?![a-zA-Z])\s*(?:\{[^{}]*\}|[-+]?\s*(?:\d+(?:\.\d*)?|\.\d+)\s*[a-z]{2})`,
-    String.raw`\\(?:hspace\*?|raisebox)(?![a-zA-Z])\s*\{[^{}]*\}`,
-    String.raw`\\rule(?![a-zA-Z])\s*(?:\[[^\]]*\]\s*)?(?:\{[^{}]*\}\s*){1,2}`,
-    String.raw`\\\\\s*\[[^\]]*\]`,
+    String.raw`\\(?:kern|mkern|hskip|mskip)(?![a-zA-Z])\s{0,64}(?:\{[^{}]{0,64}\}|(?:[-+]\s{0,64})?(?:\d+(?:\.\d*)?|\.\d+)\s{0,64}[a-z]{2})`,
+    String.raw`\\(?:hspace\*?|raisebox)(?![a-zA-Z])\s{0,64}\{[^{}]{0,64}\}`,
+    String.raw`\\rule(?![a-zA-Z])\s{0,64}(?:\[[^\]]{0,64}\]\s{0,64})?(?:\{[^{}]{0,64}\}\s{0,64}){1,2}`,
+    String.raw`\\\\\s{0,64}\[[^\]]{0,64}\]`,
   ].join('|'), 'g');
   var SIZE_LITERAL = /([-+]?)\s*(\d+(?:\.\d*)?|\.\d+)\s*([a-z]{2})/g;
   var STYLE_EM_LENGTH = /(-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)em\b/gi;
@@ -78,6 +81,13 @@
 
   // 수식 하나를 조판한다. true = 끝(조판했거나 원문으로 되돌림), false = 예외(원문 유지).
   function renderMath(katex, target, tex, display) {
+    if (String(tex == null ? '' : tex).length > MAX_TEX_CHARS) {
+      // KaTeX 조판은 긴 입력에 초선형이다('x+' 20만 자 11초) — 조판하지 않고 원문 TeX로 둔다
+      target.textContent = tex;
+      target.setAttribute('data-math-fallback', 'too-long');
+      target.setAttribute('title', '수식이 너무 길어 원문 TeX로 보여 줍니다');
+      return true;
+    }
     try {
       katex.render(clampTexSizes(tex), target, options(display));
     } catch (_) {

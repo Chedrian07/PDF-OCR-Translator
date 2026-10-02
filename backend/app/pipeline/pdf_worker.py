@@ -55,9 +55,11 @@ MuPDF C 호출은 GIL을 쥔 채 돌고(`nm -u _mupdf.so`에 PyEval_SaveThread�
 - 작업마다 `signal.alarm(상한 + 여유)`를 건다. SIGALRM 기본 동작은 커널이 프로세스를 끝내는
   것이라 GIL이 필요 없다 — 부모가 SIGKILL로 사라져 아무도 죽여 주지 않아도 적대적 작업이 영원히
   CPU를 태우지 않는다.
-- 자격 증명처럼 보이는 환경 변수(…KEY·…TOKEN·…SECRET·…PASSWORD — 번역·Q&A API 키, HF 토큰)를
-  기동 즉시 지운다. 워커는 비밀이 필요 없으니 파이썬 `os.environ`과 워커가 띄우는 손자
-  프로세스(tesseract 등)에 키가 남지 않게 하는 위생 조치다. 커널이 보존하는 초기 환경 블록
+- 자격 증명이 들 수 있는 환경 변수(…KEY·…TOKEN·…SECRET·…PASSWORD — 번역·Q&A API 키, HF 토큰 —
+  와 …_URL·…PROXY·TRANSLATE_EXTRA_BODY — base URL 쿼리·userinfo·프록시 user:pass)를 기동 즉시
+  지운다. 워커는 비밀도 네트워크도 필요 없으니 파이썬 `os.environ`과 워커가 띄우는 자식
+  프로세스에 키가 남지 않게 하는 위생 조치다(Tesseract는 워커가 아니라 서버 프로세스가
+  띄운다 — engine/textlayer.py). 커널이 보존하는 초기 환경 블록
   (Linux `/proc/self/environ`, macOS `ps -E`)과 같은 사용자의 부모 서버 환경(`/proc/<ppid>/environ`)
   에는 그대로 있으므로, MuPDF 메모리 결함(예: CVE-2026-3308)으로 워커에서 코드가 실행되면 키는
   유출된 것으로 보고 로테이션해야 한다. 워커는 자원·장애 격리 경계이지 권한 샌드박스가
@@ -524,8 +526,13 @@ def _prefer_oom_kill() -> None:
         Path("/proc/self/oom_score_adj").write_text("1000", encoding="ascii")
 
 
-# 워커에서 지울 환경 변수 이름 — 대소문자 무시, 이름 어디에든 들어 있으면
-_SECRET_ENV_NAME = re.compile(r"(KEY|TOKEN|SECRET|PASSW(OR)?D|CREDENTIAL)", re.IGNORECASE)
+# 워커에서 지울 환경 변수 이름 — 대소문자 무시, 이름 어디에든 들어 있으면. 이름이 자격 증명이
+# 아니어도 값에 실릴 수 있는 것도 지운다: URL(OPENAI_BASE_URL 등 — 쿼리·userinfo에 키를 싣는
+# 게이트웨이 설정), 프록시(HTTP(S)_PROXY·ALL_PROXY의 user:pass@), TRANSLATE_EXTRA_BODY(요청 본문
+# 덧붙임). PDF 작업은 네트워크를 쓰지 않는다.
+_SECRET_ENV_NAME = re.compile(
+    r"KEY|TOKEN|SECRET|PASSW(OR)?D|CREDENTIAL|_URLS?$|_URI$|PROXY|EXTRA_BODY", re.IGNORECASE,
+)
 
 
 def _drop_secret_env() -> None:

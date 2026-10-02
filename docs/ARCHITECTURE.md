@@ -2084,7 +2084,8 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
     5xx·408·429·코드 없음은 5xx처럼 백오프 재시도, 400·413·422 또는 invalid_request·
     context_length 유형은 유닛 거부, 401·403은 인증 오류. 부분 출력은 번역문으로 쓰지 않는다.
   - 연결 실패 문구는 원인 요약만 담고(`번역 API 연결 실패(연결 거부) — OPENAI_BASE_URL과 …`)
-    URL·호스트·쿼리는 쿼리를 가린 서버 로그에만 남긴다. 엔진이 쓰는 state.json `error`는
+    URL·호스트·쿼리는 쿼리를 가린 서버 로그에만 남긴다(원인 사슬을 끊어 `logger.exception`의
+    traceback에도 requests·urllib3 예외의 쿼리가 찍히지 않는다). 엔진이 쓰는 state.json `error`는
     500자 상한이다.
 - **Responses `store:false`**: 번역의 Responses 요청도 `store:false`를 싣는다. 서버가 `store`를
   이유로 400/422를 내면 한 번 빼고 다시 보내 그 클라이언트에서 고정하고 경고를 남긴다.

@@ -44,7 +44,7 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 - Transient mid-stream provider errors (OpenRouter-style error events) are retried like HTTP 5xx, and streamed requests reuse keep-alive connections.
 - A truncation retry that exceeds the response cap is treated as a truncated unit, not a failed job.
 - `TRANSLATE_REASONING_STYLE=auto` recognises regional OpenAI hosts (`eu.api.openai.com`) and Podman, LAN and `.internal` host names.
-- Connection errors no longer show the base URL or its query string, including in server log tracebacks, and `TRANSLATE_EXTRA_BODY` values are no longer written to `state.json`.
+- Connection errors no longer show the base URL or its query string, including in server log tracebacks, and `TRANSLATE_EXTRA_BODY` values are no longer written to `state.json`. When an upstream error body echoes the configured API key or a base URL query value, that value is replaced with `<redacted>` in the error shown by `/translate/state`.
 - The last translation's warnings appear under the result as "번역 참고 사항".
 - The "참고문헌 규칙 불일치" warning only appears when the translated Markdown and the PDF really treat a reference line differently; Unlimited-OCR papers no longer get it on every translation.
 - README guide for local MLX translation servers (oMLX, LM Studio, mlx_lm.server) with a sample `.env`.

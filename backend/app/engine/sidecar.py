@@ -194,6 +194,27 @@ def _truncated_page_fidelity(
     )[0]
 
 
+# fidelity.page_fidelity_blocks가 정답(텍스트 레이어) 글자가 모자랄 때 남기는 사유
+_SHORT_TRUTH_REASON = "정답 텍스트 부족"
+
+
+def _no_text_layer(fid: "PageFidelity") -> bool:
+    """대조가 끝까지 돌았고 텍스트 레이어에 글자가 하나도 없었는가 (스캔 페이지).
+
+    시간 상한·처리 프로세스 사망·원본 열기 실패도 truth_chars=0으로 오지만, 그건
+    '텍스트 레이어가 없다'가 아니라 '대조하지 못했다'다."""
+    return fid.truth_chars == 0 and fid.reason == _SHORT_TRUTH_REASON
+
+
+def _unjudged_reason(fid: "PageFidelity") -> str:
+    """판정하지 못한 사유 — 분석 시간 상한이면 조정할 설정 이름을 붙인다."""
+    from ..pipeline.fidelity import ANALYSIS_TIMEOUT_REASON
+
+    if fid.timed_out and fid.reason == ANALYSIS_TIMEOUT_REASON:
+        return f"{fid.reason}; 상한은 PDF_PAGE_TIMEOUT_S"
+    return fid.reason
+
+
 @dataclass(frozen=True)
 class SidecarSpec:
     default_model_id: str
@@ -581,6 +602,7 @@ class SidecarEngine(OCREngine):
         """
         threshold = self._settings.ocr_fidelity_threshold
         if threshold > 0:
+            failure = ""
             try:
                 fid = _truncated_page_fidelity(
                     image_path, page, self._spec.layout_capability == "full", cancel.is_set,
@@ -593,6 +615,7 @@ class SidecarEngine(OCREngine):
                     e.__class__.__name__, str(e)[:200],
                 )
                 fid = None
+                failure = e.__class__.__name__
             if fid is not None and fid.score is not None and fid.score < threshold:
                 return SidecarOutputTruncated(
                     "sidecar 출력이 페이지당 출력 토큰 상한에서 잘림 — PDF 텍스트 레이어 대조 "
@@ -600,8 +623,13 @@ class SidecarEngine(OCREngine):
                 )
             if fid is not None and fid.score is not None:
                 why = f"PDF 텍스트 레이어 대조 충실도가 {fid.score:.2f}로 기준({threshold:.2f}) 이상이라"
-            elif fid is not None and fid.truth_chars and fid.reason:
-                why = f"텍스트 레이어로 판정할 수 없어({fid.reason})"
+            elif fid is not None and fid.reason and not _no_text_layer(fid):
+                # 텍스트 레이어가 없는 게 아니라 대조를 못 했다 — 시간 상한·처리 프로세스 사망·
+                # 원본 열기 실패·신뢰할 수 없는 텍스트 레이어. 사유를 그대로 보여야 운영자가
+                # 진짜 원인(예: PDF_PAGE_TIMEOUT_S)을 본다.
+                why = f"텍스트 레이어로 판정할 수 없어({_unjudged_reason(fid)})"
+            elif failure:
+                why = f"텍스트 레이어 대조가 실패해({failure})"
             else:
                 why = "대조할 PDF 텍스트 레이어가 없어"
         else:

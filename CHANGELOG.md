@@ -68,7 +68,7 @@ Performance figures below were measured on an Apple M4 Max during this work, par
 - Only one backend may own a job store; `.env` is parsed with python-dotenv; numeric settings are validated at startup.
 - Dependency upgrades: PyMuPDF 1.28.2 (MuPDF CVE-2026-3308), Pillow 12.3.0, urllib3 2.8.0, anyio 4.14.2. Sidecars install from hash-checked locks.
 - CI audits dependencies and builds and smoke-tests the CPU image on amd64 and arm64. Releases wait for CI, gate images on `trivy`, and attach offline image tarballs with `SHA256SUMS`. Actions are pinned to commit SHAs and Dependabot proposes updates.
-- Compose drops all capabilities, runs CPU-image backends with a read-only root filesystem and a `/tmp` tmpfs, and limits processes. Application code in the image is root-owned, and uvicorn shuts down within 5 seconds.
+- Services in `docker-compose.yml` drop all capabilities, the backends have a process limit, and the CPU-image backends run with a read-only root filesystem and a `/tmp` tmpfs. The optional Ollama overlay keeps the upstream image's root user and default capabilities. Application code in the image is root-owned, and uvicorn shuts down within 5 seconds.
 - New `make test-mps`, `make test-mlx-real` and `make audit` targets.
 
 ### Breaking and behaviour changes

@@ -442,26 +442,23 @@ _STANDALONE_HEAD_META = (
     '<meta name="referrer" content="no-referrer">\n'
 )
 
-# 내려받기 파일의 KaTeX 옵션 — ⚠ SYNC: frontend/js/constants.js katexOptions와 같아야 한다
-# (test_layout이 대조). 수식 TeX는 업로드 PDF(OCR·텍스트 레이어)에서 온 신뢰할 수 없는
-# 입력이다: maxSize(em)가 \rule{2000em}{2000em} 같은 거대 박스를, maxExpand가 무한 매크로
-# 루프를 묶고, trust·strict를 명시해 오염된 Object.prototype이 기본값을 덮어 \href 등이
-# 살아나는 경로(GHSA-238p-pmpm-9mq7)를 버전과 무관하게 끊는다.
-_KATEX_OPTIONS_JS = "throwOnError:false,maxSize:10,maxExpand:1000,strict:'ignore',trust:false"
-_TYPESET_JS = (
-    "document.querySelectorAll('.math-inline,.math-display').forEach(function(e){"
-    "try{katex.render(e.textContent,e,{displayMode:e.classList.contains('math-display'),"
-    f"{_KATEX_OPTIONS_JS}}});}}catch(_){{}}}});"
-)
+# 내려받기 파일의 수식 조판 — frontend/katex-guard.js(클래식 스크립트)를 KaTeX 번들 뒤에 그대로
+# 인라인하고 DOMContentLoaded에서 부른다. 앱(js/ui.js renderMath)과 같은 옵션(maxSize·maxExpand·
+# trust·strict 명시 — GHSA-238p-pmpm-9mq7), 크기 인자 묶기(±10em), 조판 결과 상한(100em이면
+# 원문 TeX)을 쓴다 — 두 구현은 frontend/tests/katex-guard.test.mjs가 대조한다. 수식 TeX는 업로드
+# PDF(OCR·텍스트 레이어)에서 온 신뢰할 수 없는 입력이다: 예전처럼 KaTeX를 직접 부르면 maxSize가
+# 양수 크기만 묶어 \raisebox{-4000em}{x} 하나로 내려받은 파일이 수만 px로 늘어났다(감사 frontend-4).
+_TYPESET_JS = "if(window.uocrKatexGuard){window.uocrKatexGuard.typesetMath(document);}"
 
 
 @functools.lru_cache(maxsize=1)
 def _katex_inline_bundle(frontend_dir_str: str) -> str:
-    """벤더 KaTeX css(woff2 폰트 data-URI 인라인)+js — 단일 파일 배포용.
-    자산이 없으면 빈 문자열 (수식은 원문 LaTeX 표기로 폴백)."""
-    fd = Path(frontend_dir_str) / "vendor" / "katex"
-    css_p, js_p = fd / "katex.min.css", fd / "katex.min.js"
-    if not css_p.is_file() or not js_p.is_file():
+    """벤더 KaTeX css(woff2 폰트 data-URI 인라인)+js + 크기 가드 — 단일 파일 배포용.
+    자산이 하나라도 없으면 빈 문자열 (수식은 원문 LaTeX 표기로 폴백 — 상한 없는 조판보다 낫다)."""
+    root = Path(frontend_dir_str)
+    fd = root / "vendor" / "katex"
+    css_p, js_p, guard_p = fd / "katex.min.css", fd / "katex.min.js", root / "katex-guard.js"
+    if not css_p.is_file() or not js_p.is_file() or not guard_p.is_file():
         return ""
 
     def _font(m: re.Match) -> str:
@@ -473,8 +470,9 @@ def _katex_inline_bundle(frontend_dir_str: str) -> str:
 
     css = re.sub(r"url\((fonts/[^)]+)\)", _font, css_p.read_text(encoding="utf-8"))
     js = js_p.read_text(encoding="utf-8")
+    guard = guard_p.read_text(encoding="utf-8")
     return (
-        f"<style>{css}</style><script>{js}</script>"
+        f"<style>{css}</style><script>{js}</script><script>{guard}</script>"
         f"<script>window.addEventListener('DOMContentLoaded',function(){{{_TYPESET_JS}}});</script>"
     )
 

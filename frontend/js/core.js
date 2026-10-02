@@ -451,21 +451,29 @@ export function rateLimitNotice(retryAfter, detail, nowMs = Date.now()) {
   };
 }
 
-// 처음 고를 Q&A 공급자 — 저장값 → 서버 기본 → 그 밖의 순이되 쓸 수 있는(available) 공급자를
-// 먼저 고른다. 예전에는 LLM_PROVIDER를 비운 배포에서 서버 기본(openai-responses — 키가 없어
-// '설정 필요')을 골라, 쓸 수 있는 공급자가 local-openai뿐인데도 첫 질문이 안내 문구로 막혔다
-// (P4 실앱). 쓸 수 있는 공급자가 하나도 없으면 예전 순서 그대로(선택한 공급자의 설정 안내).
+// 처음 고를 Q&A 공급자. 의도 = 저장값(사용자가 고른 것) → 서버 기본(운영자가 고른 것) 중 카탈로그에
+// 있는 첫 값이다. 의도를 지금 쓸 수 있으면(available) 그대로, 못 쓰면 쓸 수 있는 공급자로 넘어간다
+// — 예전에는 LLM_PROVIDER를 비운 배포에서 서버 기본(openai-responses — 키가 없어 '설정 필요')을
+// 골라, 쓸 수 있는 공급자가 local-openai뿐인데도 첫 질문이 안내 문구로 막혔다(P4 실앱).
+// 단 로컬(remote:false) 의도는 로컬 공급자로만 넘어간다. 가용성은 실시간 프로브라 로컬 서버가
+// 아직 안 떴거나 바쁘기만 해도 '못 씀'인데, 그때 원격으로 넘어가면 사용자가 사적 문서 때문에
+// 고른 로컬 대신 페이지 원문이 원격 유료 API로 나갔다(delta-api-frontend-infra-2). 넘어갈 곳이
+// 없으면 의도 그대로 — 질문 전송 가드가 설정 안내를 보이고 막는다.
 export function pickQaProvider(catalog, savedProvider) {
   const providers = (catalog && Array.isArray(catalog.providers))
     ? catalog.providers.filter((p) => p && typeof p.id === 'string' && p.id)
     : [];
-  const ids = providers.map((p) => p.id);
-  const usable = providers.filter((p) => p.available).map((p) => p.id);
+  const byId = new Map(providers.map((p) => [p.id, p]));
   const preferred = [savedProvider, catalog && catalog.default_provider];
-  for (const id of preferred) if (usable.includes(id)) return id;
-  if (usable.length) return usable[0];
-  for (const id of preferred) if (ids.includes(id)) return id;
-  return ids[0] || '';
+  const intent = preferred.find((id) => byId.has(id));
+  if (intent && byId.get(intent).available) return intent;
+  const localOnly = Boolean(intent) && byId.get(intent).remote === false;
+  const allowed = (p) => Boolean(p && p.available) && (!localOnly || p.remote === false);
+  const preferredUsable = preferred.find((id) => allowed(byId.get(id)));
+  if (preferredUsable) return preferredUsable;
+  const fallback = providers.find(allowed);
+  if (fallback) return fallback.id;
+  return intent || (providers[0] ? providers[0].id : '');
 }
 
 // Thinking 토글의 값 — 사용자가 고른 적이 있으면 그 값, 없으면 원격(OpenAI) 공급자만 켠다.

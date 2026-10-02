@@ -1152,8 +1152,10 @@ auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은
 - gundam 모드는 torch처럼 크롭 전부(최대 32타일)를 SAM 배치 하나로 인코딩한다 — 아주 긴 이미지는
   메모리가 작은 Mac에서 순간적으로 튈 수 있다.
 - 메모리: 파라미터 bf16 6.67 GB(8비트 3.92 GB), 8쪽 청크 피크 약 8.3 GB(8비트 5.5 GB). 생성 중
-  256토큰마다·실행 뒤 캐시를 비워 활성 메모리가 파라미터 크기로 돌아온다. 잡 단위 ObjC 풀은 쓰지
-  않는다(§4 — 실측상 누적 없음). 속도 실측은 OCR_BENCHMARK.md(M4 Max: bf16 3.8–3.97 s/쪽).
+  256토큰마다·실행 뒤 캐시를 비워 활성 메모리가 파라미터 크기로 돌아온다. 프로세스 phys_footprint는
+  잡 사이 약 7,300 MB이고 최고치(약 11,600 MB)는 위 gundam 크롭 경로에서 나온다 — 로드 직후 워밍업도
+  이 경로를 돈다. 잡 단위 ObjC 풀은 쓰지 않는다(§4 — 실측상 누적 없음). 속도 실측은
+  OCR_BENCHMARK.md(M4 Max, 조용한 머신, 2026-10-02: bf16 8쪽 청크 3.8 s/쪽, 25쪽 잡 3.85 s/쪽).
 - `mlx==0.32.3` 고정. `mx.fast.rope`·`scaled_dot_product_attention`·`gather_mm`/`gather_qmm`·
   `nn.quantize`에 기대므로, 올릴 때는 패리티 테스트와 `make test-mlx-real`을 다시 돌린다.
 
@@ -1179,12 +1181,14 @@ auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은
     RSS +584 → +0.8 MB, 새 프롬프트 길이 묶음의 첫 실행 비용 +3–12초 → +0.1–0.3초 — 그래서 로드 시
     워밍업 생성은 두지 않는다).
   - P19(rotary 스텝 캐시)와 `fast_decode.py`의 명시적 `position_ids`.
-  - 측정(M4 Max, 다른 작업과 경합): 1쪽 캡 384토큰 42.5–44.9 → 91–96 tok/s, 8쪽 청크 무제한
-    34.0 → 9.8 s/쪽(112 tok/s), 전부 토큰 동일(OCR_BENCHMARK.md). 융합 경로는 P18 대비 토큰 동일
+  - 측정(M4 Max, 조용한 머신, 2026-10-02 — 개선 전은 a9a4400 감사 값): 1쪽 캡 384토큰 50.6 →
+    99–101 tok/s, 8쪽 청크 무제한 34.0 → 9.0–9.1 s/쪽(119 tok/s), `OCR_MOE_FUSED=0`은 16.4 s/쪽
+    (65 tok/s), 전부 토큰 동일(OCR_BENCHMARK.md). 융합 경로는 P18 대비 토큰 동일
     실측이지만 비트 동일을 보장하지는 않는다 — `OCR_MOE_FUSED=0`이 P18을 정확히 복원한다.
   - `OCR_SDPA=1`(P16)은 옵트인: M4 Max에서 붕괴 없이 15–28% 빨랐지만 출력이 비트 동일하지 않다.
-  - 청크 크기에 따른 디코드 속도 차이는 작다(캡 기준 1쪽 약 95, 8쪽 85–90 tok/s) —
-    `PAGES_PER_CHUNK`는 Phase 4의 종단 간 재측정 전까지 8을 유지한다.
+  - 청크 크기에 따른 차이는 작다(캡 기준 1쪽 약 100, 8쪽 약 96 tok/s; 25쪽 잡은 4쪽 청크 234.6 s ·
+    8쪽 231.8 s). 2026-10-02 재측정에서 4·12쪽 청크가 같은 품질로 10% 넘게 빠르지 않아(MLX도 최대
+    3.4%) `PAGES_PER_CHUNK` 기본 8을 유지한다 — 디바이스별 기본값도 두지 않는다(OCR_BENCHMARK.md).
 - `PYTORCH_ENABLE_MPS_FALLBACK=1`을 macOS에서 torch 엔진 모듈(`engine/unlimited.py`) 임포트 때
   `setdefault` — 미구현 op는 CPU 폴백 (안전망). torch는 이 값을 첫 `import torch` 때만 읽으므로
   auto 판정(registry의 torch 조회 — `unlimited_mlx`가 이 모듈을 먼저 임포트한다)보다 먼저 둔다.
@@ -1771,7 +1775,7 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
 6. 동시 워커 (GPU 멀티 인스턴스 / 페이지 병렬) — **미완료**. 워커는 여전히
    프로세스당 1개이며(`main.py`가 `Worker`를 하나만 만든다) 잡은 FIFO다.
 7. ~~Apple Silicon in-process MLX 엔진~~ — 완료 (§2·§6, `OCR_DEVICE=auto`의 Apple 기본. torch
-   MPS는 폴백). **남은 항목**: 성능 기준선은 Phase 4에서 순차로 다시 잰다(OCR_BENCHMARK.md).
+   MPS는 폴백). 성능 기준선은 조용한 머신에서 순차로 다시 쟀다(2026-10-02, OCR_BENCHMARK.md).
 8. ~~PyMuPDF 프로세스 격리 + 업로드 복잡도 게이트~~ — 완료 (§18). **남은 항목**: 큰 내보내기
    빌드를 페이지 범위로 나눠 여러 워커에서 병렬로 만들기, 쉬는 워커 회수, 업로드 검증 전용의
    더 짧은 시간 상한.

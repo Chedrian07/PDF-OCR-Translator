@@ -178,7 +178,13 @@ def _nonempty_lines(text: str) -> list[str]:
     return [ln.strip() for ln in text.split("\n") if ln.strip()]
 
 
-def reference_rule_mismatch(md_units: list[Unit], lay_units: list[Unit]) -> dict:
+def reference_rule_mismatch(
+    md_units: list[Unit],
+    lay_units: list[Unit],
+    *,
+    reasons: dict[str, str] | None = None,
+    deferred: set[str] | frozenset[str] = frozenset(),
+) -> dict:
     """md·layout 두 참고문헌 규칙의 불일치를 센다 (정책 변경 없이 관측만).
 
     md 경로는 heading 스윕(`_REF_HEADING_RE` 제목 이후 구간)을, layout 경로는 블록
@@ -188,14 +194,34 @@ def reference_rule_mismatch(md_units: list[Unit], lay_units: list[Unit]) -> dict
     규칙을 통일하는 대신, 같은 원문 줄이 **한쪽에서만** 원문 유지되는 경우를 세어
     리포트 경고로 남긴다(같은 영역이 result.ko.md에선 번역, PDF에선 영어로 남는 사례).
 
+    엔진은 `reasons`(유닛 id → 실제 건너뜀 사유: heading 스윕 또는 should_skip의 내용
+    판정)와 `deferred`(layout 줄에 전부 덮여 layout 번역·보존을 그대로 받는 md 유닛 id)를
+    넘긴다. 둘 다 실제 산출물 기준이다 — 예전에는 유닛의 heading 스윕 표시만 봐서,
+    Unlimited-OCR처럼 result.md에 제목 표기(#)가 없는 잡은 참고문헌 목록을 내용으로
+    건너뛰거나 layout 보존을 그대로 받아 두 산출물이 같아도 매번 '불일치' 경고를 냈다
+    (실서버 25쪽 논문: layout만 유지 66건 경고, 실제 result.ko.md 참고문헌 한글 0자).
+    `reasons`가 없으면 예전처럼 유닛의 `skip_reason`만 본다.
+
     반환: {"md_only": n, "layout_only": n, "sample_units": [유닛 id ...]}
       md_only     — md는 references로 건너뛰는데 layout은 번역 대상인 블록 수
       layout_only — layout은 ref_text로 건너뛰는데 md는 번역 대상인 블록 수
     """
+
+    def _reason(unit: Unit) -> str:
+        return unit.skip_reason if reasons is None else reasons.get(unit.id, unit.skip_reason)
+
     md_ref: set[str] = set()
     md_plain: set[str] = set()
     for unit in md_units:
-        target = md_ref if unit.skip_reason == "references" else md_plain
+        reason = _reason(unit)
+        if reason == "references":
+            target = md_ref
+        elif reasons is None or (not reason and unit.id not in deferred):
+            # 실제 판정 기준에서는 md 쪽이 **스스로 번역하는** 줄만 센다 — 다른 사유로
+            # 건너뛰거나 layout 결과를 받는(deferred) 유닛은 갈라질 수 없다.
+            target = md_plain
+        else:
+            continue
         for line in _nonempty_lines(unit.src):
             target.add(line)
 
@@ -203,11 +229,14 @@ def reference_rule_mismatch(md_units: list[Unit], lay_units: list[Unit]) -> dict
     layout_only = 0
     sample_units: list[str] = []
     for unit in lay_units:
-        is_ref = unit.skip_reason == "references"
+        reason = _reason(unit)
+        is_ref = reason == "references"
+        # 실제 판정 기준에서 '번역 대상'은 아무 사유로도 건너뛰지 않는 블록뿐이다(쪽 번호 등 제외).
+        translated = not is_ref if reasons is None else not reason
         for line in _nonempty_lines(unit.src):
             if is_ref and line in md_plain and line not in md_ref:
                 layout_only += 1
-            elif not is_ref and line in md_ref and line not in md_plain:
+            elif translated and line in md_ref and line not in md_plain:
                 md_only += 1
             else:
                 continue

@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 
 import fitz
+import pytest
 
 from app.pipeline.pdf_export import build_translated_pdf
 
@@ -233,3 +234,68 @@ def test_translating_a_caption_keeps_the_figure_legend_line(tmp_path):
         if abs(rect.y0 - 392) < 1 and rect.x0 < 165 and rect.x1 > 180 and rect.height < 2
     ]
     assert legend_lines, _drawings(result.path)
+
+
+# ── 회전 페이지(/Rotate 90·270, 내용은 돌려 그려 화면에서 똑바로) ─────────────────
+# pdflscape 가로 쪽·회전 출력된 쪽은 내용 스트림을 돌려 그리고 /Rotate로 화면을 바로 세운다.
+# get_drawings·span은 회전 전 좌표라 화면의 가로 분수선이 세로선으로, span 방향이 (0,-1)로
+# 보고된다 — 모양 판정을 그 좌표로 하던 때는 회전 쪽의 분수선을 하나도 소유하지 못해, 번역
+# 문단이 5–6pt로 축소되고 원문 분수선이 번역문 사이에 떠 있었다(delta-pdf-translate-2).
+
+
+def rotate_display_preserving(path: Path, rot: int) -> None:
+    """화면은 그대로 두고 내용 스트림을 돌려 그린 뒤 /Rotate로 바로 세운다(레이아웃 bbox 유효)."""
+    doc = fitz.open(path)
+    for page in doc:
+        width, height = page.mediabox.width, page.mediabox.height
+        if rot == 90:
+            matrix, box = (0, 1, -1, 0, height, 0), (0, 0, height, width)
+        elif rot == 270:
+            matrix, box = (0, -1, 1, 0, 0, width), (0, 0, height, width)
+        else:
+            raise ValueError(rot)
+        pre = doc.get_new_xref()
+        doc.update_object(pre, "<<>>")
+        doc.update_stream(pre, ("q %g %g %g %g %g %g cm\n" % matrix).encode())
+        post = doc.get_new_xref()
+        doc.update_object(post, "<<>>")
+        doc.update_stream(post, b"\nQ\n")
+        contents = " ".join("%d 0 R" % xref for xref in page.get_contents())
+        doc.xref_set_key(page.xref, "Contents", "[%d 0 R %s %d 0 R]" % (pre, contents, post))
+        doc.xref_set_key(page.xref, "MediaBox", "[%g %g %g %g]" % box)
+        doc.xref_set_key(page.xref, "CropBox", "[%g %g %g %g]" % box)
+        doc.xref_set_key(page.xref, "Rotate", str(rot))
+    rotated = path.with_name(path.stem + f".rot{rot}.pdf")
+    doc.save(rotated)
+    doc.close()
+    rotated.replace(path)
+
+
+@pytest.mark.parametrize("rot", [90, 270])
+def test_rotated_page_paragraph_drops_its_fraction_bar_and_keeps_full_size(tmp_path, rot):
+    above = "Previous paragraph line that stays in English above the target."
+    below = "Next paragraph line that stays in English below the target block."
+    job_dir, doc, page = _new_source(tmp_path, f"fraction-{rot}")
+    page.insert_text((72, 188), above, fontsize=10, fontname="tiro")
+    _paragraph_with_fraction(page)
+    page.insert_text((72, 236), below, fontsize=10, fontname="tiro")
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+    rotate_display_preserving(job_dir / "source.pdf", rot)
+    with fitz.open(job_dir / "source.pdf") as source:
+        assert source[0].rotation == rot
+        [bar] = [fitz.Rect(d["rect"]) for d in source[0].get_drawings()]
+        assert bar.width < 1 < bar.height        # 회전 전 좌표에서는 세로선으로 보고된다
+    blocks = [
+        _block(fitz.Rect(70, 179, 420, 191.5), above),
+        _block(fitz.Rect(70, 192, 420, 227), "\n".join(LINES)),
+        _block(fitz.Rect(70, 227.5, 420, 239), below),
+    ]
+    _write_job(tmp_path, f"fraction-{rot}", blocks, {1: KO})
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    assert result.replaced == 1, result.report()
+    assert result.warnings == [], result.warnings         # 예전: 5–6pt 축소 경고
+    assert min(_korean_font_sizes(result.path)) >= 8.0
+    assert _drawings(result.path) == []                   # 원문 분수선이 떠 있지 않다

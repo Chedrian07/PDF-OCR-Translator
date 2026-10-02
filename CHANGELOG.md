@@ -56,7 +56,7 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 
 - On scanned and image pages, translations are drawn over a cover in the page's background colour instead of over the original pixels.
 - Redaction removes a band per text line, so neighbouring lines survive. Rotated pages, list bullets, emphasis, LaTeX fractions, roots and accents, and HTML-like text such as `p < 0.05` are flattened correctly, and copied spaces are no longer non-breaking.
-- `GET /api/jobs/{id}/pdf/report` returns the build report; after a download the UI lists preserved-block reasons and per-page warnings.
+- `GET /api/jobs/{id}/pdf/report` returns the build report; after a download the UI lists preserved-block reasons and per-page warnings. The report also counts preserved blocks per page (`kept_pages`) and lists every page with a warning (`warning_pages`), beyond the 50-warning sample, and `verify_e2e` uses them to tell explained from silent translation loss.
 - Builds run in separate worker processes, truly in parallel, without slowing OCR (a 25-page translated PDF builds in about 8 s; MLX decoding stays at about 290 tok/s meanwhile). Export failures return 409 with a reason instead of 500, and caches are validated by a build stamp.
 - Scanned tables are translated from a pixel grid: only the changed cells' text is covered, rules and untouched cells stay intact, and a table whose columns cannot be located is kept with a warning.
 - Rotated pages lay out multi-line translations in screen orientation.

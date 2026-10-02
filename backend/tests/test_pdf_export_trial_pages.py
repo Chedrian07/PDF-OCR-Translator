@@ -117,3 +117,29 @@ def test_outside_a_build_the_source_page_is_used_and_trial_docs_are_closed():
         trial_doc = trial.parent
     assert trial_doc.is_closed
     doc.close()
+
+
+def test_mixed_page_sizes_keep_only_a_few_trial_docs_open():
+    """쪽 크기가 제각각인 문서(폰 스캔 자동 자르기·여러 출처를 합친 PDF)는 기하마다 시험 문서를
+    새로 열어 빌드가 끝날 때까지 닫지 않았다 — 100쪽에 시험 문서 82개, 빌드 최대 메모리가
+    379MB → 718MB(300쪽 540MB → 1.9GB)로 늘었고 속도 이득도 없었다(delta-pdf-translate-3).
+    최근 기하 몇 개만 남기고 밀려난 시험 문서는 바로 닫는다."""
+    import fitz
+
+    doc = fitz.open()
+    for index in range(20):
+        _heavy_page(doc, mediabox=fitz.Rect(0, 0, 600 - index, 780 - index))
+    trial_docs = []
+    with fitting.trial_pages():
+        for page in doc:
+            trial = fitting._trial_page(page)
+            assert trial is not page
+            trial_docs.append(trial.parent)
+            open_docs = sum(1 for trial_doc in trial_docs if not trial_doc.is_closed)
+            assert open_docs <= fitting._TRIAL_CACHE_MAX, open_docs
+        last = doc[len(doc) - 1]
+        assert _plan(last) is not None               # 밀어낸 뒤에도 시험은 정상이다
+        # 다시 돌아온 기하(최근 것)는 그대로 재사용한다
+        assert fitting._trial_page(last).parent is trial_docs[-1]
+    assert all(trial_doc.is_closed for trial_doc in trial_docs)
+    doc.close()

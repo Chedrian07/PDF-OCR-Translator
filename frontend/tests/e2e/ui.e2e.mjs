@@ -64,6 +64,33 @@ const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } })
 const page = await ctx.newPage();
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 page.on('response', (r) => { if (r.status() >= 400) errors.push(`HTTP ${r.status()} ${r.url()}`); });
+// 미처리 예외·거부된 Promise는 console 이벤트로 오지 않는다 — pageerror를 따로 듣는다(frontend-9).
+page.on('pageerror', (err) => errors.push(`pageerror: ${err.message}`));
+
+// 시나리오 컨텍스트(주 페이지 밖)의 오류 — 미처리 예외(weberror)·콘솔 error·HTTP ≥400을 모은다.
+// 각 시나리오가 일부러 일으킨 실패(주입한 502/503/429·CSP probe)만 그 컨텍스트의 allow 정규식으로
+// 거르고, 미처리 예외는 거르지 않는다. 예전에는 이 컨텍스트들이 오류를 아예 모으지 않아, 노트·
+// 경고·health 시나리오의 예외나 CSP 위반이 게이트를 통과했다(frontend-9).
+const contextErrors = [];
+const freshContext = async (options = {}, label = 'scenario', allow = []) => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, ...options });
+  const report = (text, allowable = true) => {
+    if (allowable && allow.some((re) => re.test(text))) return;
+    contextErrors.push(`[${label}] ${text}`);
+  };
+  context.on('weberror', (err) => report(`pageerror: ${err.error().message}`, false));
+  context.on('console', (m) => {
+    if (m.type() === 'error') report(`console: ${m.text()}${m.location().url ? ` @ ${m.location().url}` : ''}`);
+  });
+  context.on('response', (r) => { if (r.status() >= 400) report(`HTTP ${r.status()} ${r.url()}`); });
+  return context;
+};
+// 주입한 일시 장애 — 그 시나리오가 막은 주소의 응답과 그 리소스 실패 콘솔('Failed to load
+// resource … status of N @ 주소')만 허용한다.
+const injectedFailure = (status, path) => [
+  new RegExp(`^HTTP ${status} .*${path}`),
+  new RegExp(`^console: Failed to load resource: .*status of ${status}\\b.* @ .*${path}`),
+];
 
 // ── 1) 업로드 → 완료 대기 ───────────────────────────────────────────────
 await page.goto(BASE, { waitUntil: 'networkidle' });
@@ -530,7 +557,7 @@ await page.waitForTimeout(500);
 check('Markdown 탭 본문', await page.evaluate(() => document.getElementById('md-code').innerText.length > 100));
 
 const jobHash = await page.evaluate(() => location.hash);
-const dctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: 'dark' });
+const dctx = await freshContext({ colorScheme: 'dark' }, 'dark');
 const dpage = await dctx.newPage();
 await dpage.goto(`${BASE}/${jobHash}`, { waitUntil: 'networkidle' });
 await dpage.waitForTimeout(800);
@@ -550,13 +577,14 @@ await dpage.screenshot({ path: path.join(OUT, 'dark-preview.png') });
 await dctx.close();
 
 // ── 5.5) 안전·접근성·연구 도구 회귀 (frontend lane) ──────────────────────
-// 각 시나리오는 별도 컨텍스트에서 돈다 — 주 페이지의 콘솔/HTTP 오류 수집을 오염시키지 않게.
+// 각 시나리오는 별도 컨텍스트에서 돈다 — 주 페이지의 오류 수집과 섞이지 않게, 컨텍스트마다
+// 자기 허용 목록으로 따로 모은다(freshContext).
 const jobId = jobHash.replace(/^#/, '');
-const freshContext = (options = {}) => browser.newContext({ viewport: { width: 1280, height: 900 }, ...options });
 
 // (a) 문서 속 외부 이미지(열람 추적 비컨·LAN 주소)는 요청되지 않고 자리표시로 바뀐다(frontend-3).
 {
-  const imgCtx = await freshContext();
+  const imgCtx = await freshContext({}, 'external-image',
+    [/^console: .*'https:\/\/tracker\.example\/csp-probe\.png' violates .*img-src/]); // 아래 CSP probe
   const beaconHits = [];
   imgCtx.on('request', (r) => {
     if (/tracker\.example|192\.168\.0\.1/.test(r.url())) beaconHits.push(r.url());
@@ -601,7 +629,7 @@ const freshContext = (options = {}) => browser.newContext({ viewport: { width: 1
 //      조판 전에 묶고, 매크로로 만든 거대 박스는 원문 TeX로 되돌려 미리보기 문단이 수만 px로
 //      늘어나지 않는다(frontend-4). 텍스트 레이어·OCR 수식은 서버가 .math-inline으로 그대로 준다.
 {
-  const mathCtx = await freshContext();
+  const mathCtx = await freshContext({}, 'katex-size');
   await mathCtx.route((url) => url.pathname === `/api/jobs/${jobId}/html`, async (route) => {
     const res = await route.fetch();
     const body = await res.text();
@@ -666,7 +694,7 @@ const freshContext = (options = {}) => browser.newContext({ viewport: { width: 1
 //      버튼이 보인다(api-jobs-7). 이 하네스의 잡은 몇 개뿐이라 목록 API를 51건짜리 가짜 목록으로
 //      대신한다(api.list_jobs와 같은 limit·before·has_more·total 규칙).
 {
-  const moreCtx = await freshContext();
+  const moreCtx = await freshContext({}, 'job-list-more');
   const fakeJobs = Array.from({ length: 51 }, (_, i) => ({
     job_id: `e2e-list-${String(i).padStart(2, '0')}`, filename: `list-${i}.pdf`, status: 'done',
     created_at: new Date(Date.UTC(2026, 0, 1) - i * 60_000).toISOString(),
@@ -707,7 +735,7 @@ const freshContext = (options = {}) => browser.newContext({ viewport: { width: 1
 
 // (c) 잡 품질 경고: '주의 N건' 칩 → 펼침 목록, 'N페이지'는 리더 이동 링크, 목록 줄 표시(frontend-2).
 {
-  const warnCtx = await freshContext();
+  const warnCtx = await freshContext({}, 'job-warnings');
   const injected = [
     '2페이지: single OCR 실패 후 PDF 내장 텍스트 레이어로 복구 (이미지·정밀 레이아웃 제외; RuntimeError: e2e)',
   ];
@@ -760,7 +788,7 @@ const freshContext = (options = {}) => browser.newContext({ viewport: { width: 1
 // (d) 인용·하이라이트: 카드 경계를 넘는 하이라이트가 DOM을 복제하지 않고, 탭 전환·새로고침
 //     뒤에도 남으며, 목록·Markdown 내보내기·삭제가 동작한다(frontend-5/6/10).
 if (layoutCap !== 'figure_only') {
-  const noteCtx = await freshContext({ acceptDownloads: true });
+  const noteCtx = await freshContext({ acceptDownloads: true }, 'reader-notes');
   const notePage = await noteCtx.newPage();
   await notePage.goto(`${BASE}/${jobHash}`, { waitUntil: 'domcontentloaded' });
   await notePage.waitForSelector('#reader-content .reader-rail-page[data-page="1"] .reader-map-card .reader-map-target',
@@ -923,7 +951,7 @@ if (layoutCap !== 'figure_only') {
 
 // (e) health: 프리로드 실패·워커 중지를 '로딩 중'과 구분해 보인다(frontend-8).
 {
-  const healthCtx = await freshContext();
+  const healthCtx = await freshContext({}, 'health');
   await healthCtx.route((url) => url.pathname === '/api/health', (route) => route.fulfill({
     status: 200, contentType: 'application/json',
     body: JSON.stringify({
@@ -974,7 +1002,7 @@ if (layoutCap !== 'figure_only') {
 // (f) SSE 첫 연결이 비-200(프록시 502)이면 기다리지 않고 바로 상태 폴링으로 강등한다(frontend-1).
 //     새 PDF를 하나 더 변환하므로 즉시 끝나는 FakeEngine 하네스에서만 돈다(실 모델은 수 분).
 if (health.engine === 'fake') {
-  const sseCtx = await freshContext();
+  const sseCtx = await freshContext({}, 'sse-502', injectedFailure(502, '/events\\b'));
   let uploadedId = '';
   let fakedRunning = false;
   await sseCtx.route((url) => /\/api\/jobs\/[^/]+\/events$/.test(url.pathname), (route) => route.fulfill({
@@ -1131,7 +1159,7 @@ if (VERIFY_MOCK_LLM) {
      보이며 Retry-After만큼 기다렸다 다시 묻고, 전역 언어를 원문으로 되돌리지 않는다
      (frontend-9 · gap1-metal-real-e2e-7). 리더(/html)와 레이아웃 탭(/layout) 둘 다 본다. */
   {
-    const busyCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const busyCtx = await freshContext({}, 'ko-503', injectedFailure(503, '/(html|layout)\\?'));
     const busyHits = { html: 0, layout: 0 };
     const busyOnce = (kind) => async (route) => {
       busyHits[kind] += 1;
@@ -1178,7 +1206,7 @@ if (VERIFY_MOCK_LLM) {
      사라진다 — 예전에는 옛 선택이 남아 [인용 저장]이 한국어 문장을 '원문' 인용으로 저장했다
      (frontend-7). */
   {
-    const langCtx = await freshContext();
+    const langCtx = await freshContext({}, 'lang-switch');
     const langPage = await langCtx.newPage();
     const firstTarget = '#reader-content .reader-rail-page[data-page="1"] .reader-map-card .reader-map-target';
     await langPage.goto(`${BASE}/${jobHash}`, { waitUntil: 'domcontentloaded' });
@@ -1272,7 +1300,8 @@ if (VERIFY_MOCK_LLM) {
     // download.path()는 확장자 없는 임시 파일이라 file://로 열면 평문으로 보인다 — .html로 남긴다.
     const standalonePath = path.join(OUT, 'standalone.ko.html');
     await htmlDownload.saveAs(standalonePath);
-    const fileCtx = await freshContext();
+    const fileCtx = await freshContext({}, 'standalone-html',
+      [/^console: .*'http:\/\/127\.0\.0\.1:9\/e2e-standalone-beacon\.png' violates .*img-src/]); // 아래 beacon
     const filePage = await fileCtx.newPage();
     const fileHits = [];
     filePage.on('requestfinished', (r) => { if (!/^(file|data):/.test(r.url())) fileHits.push(r.url()); });
@@ -1378,7 +1407,7 @@ if (VERIFY_MOCK_LLM) {
 
   // 정렬 API만 일시 장애여도 본문 자체는 /html 폴백으로 읽을 수 있어야 하며,
   // 재시도는 0.8/1.6초 두 번으로 제한되어 빠른 5xx 요청 루프가 생기면 안 된다.
-  const failureCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const failureCtx = await freshContext({}, 'alignment-503', injectedFailure(503, '/(alignment|viewer/pages)\\b'));
   let failedBatchCalls = 0;
   let failedSingleCalls = 0;
   let failureHtmlCalls = 0;
@@ -1456,7 +1485,7 @@ if (VERIFY_MOCK_LLM) {
   await failureCtx.close();
 
   // transient가 풀리면 flow 안내를 걷고 원문 bbox ↔ 카드 정렬 모드로 복귀한다.
-  const recoveryCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const recoveryCtx = await freshContext({}, 'alignment-recovery', injectedFailure(503, '/(alignment|viewer/pages)\\b'));
   let recoveryBatchCalls = 0;
   let recoverySingleCalls = 0;
   const recoveryBatchAt = [];
@@ -1504,7 +1533,7 @@ if (VERIFY_MOCK_LLM) {
      429를 준다. 그런데 잡 전환은 번역 버튼을 되살렸다: 눌리기만 하고 요청은 나가지
      않는 버튼. 표시 상태가 잠금과 일치하는지 본다. (mock 하네스에서만 — 새 잡을
      하나 더 변환해야 잡 전환 경로를 탈 수 있다.) */
-  const lockCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const lockCtx = await freshContext({}, 'translate-429', injectedFailure(429, '/translate\\b'));
   let lockTranslatePosts = 0;
   await lockCtx.route('**/*', async (route) => {
     const request = route.request();
@@ -1557,7 +1586,7 @@ if (VERIFY_MOCK_LLM) {
    정렬이 좌측 keep 창(±6) 밖까지 버튼을 붙이면, 좌측이 움직이지 않는 동안에는
    걷어내는 경로(hydrateReaderPages)가 돌지 않아 그대로 누적된다(Tab 순환·히트 테스트 저하). */
 if (layoutCap !== 'figure_only') {
-  const railCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const railCtx = await freshContext({}, 'rail-sync-off');
   const railPage = await railCtx.newPage();
   await railPage.goto(`${BASE}/${jobHash}`, { waitUntil: 'domcontentloaded' });
   await railPage.waitForSelector('#reader-content .reader-map-card', { timeout: 20_000 });
@@ -1619,7 +1648,7 @@ if (layoutCap !== 'figure_only') {
     const res = await fetch(`${BASE}/api/jobs/${jobId}/page/1`);
     if (res.ok) pagePng = Buffer.from(await res.arrayBuffer()); // 실제 페이지 PNG = 충분히 큰 그림
   } catch { /* 아래에서 건너뛴다 */ }
-  const lateCtx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const lateCtx = await freshContext({}, 'late-images', injectedFailure(503, '/(alignment|viewer/pages)\\b'));
   await lateCtx.route('**/*', async (route) => {
     const url = new URL(route.request().url());
     const alignment = url.pathname.endsWith('/alignment')
@@ -1675,8 +1704,10 @@ if (layoutCap !== 'figure_only') {
   await lateCtx.close();
 }
 
-check('프로덕션 뷰어 포함 콘솔 에러/HTTP 4xx·5xx 없음',
+check('프로덕션 뷰어 포함 콘솔 에러/미처리 예외/HTTP 4xx·5xx 없음',
   errors.length === 0, errors.slice(0, 5).join(' | '));
+check('시나리오 컨텍스트: 미처리 예외·콘솔 에러·의도하지 않은 HTTP 오류 없음',
+  contextErrors.length === 0, contextErrors.slice(0, 5).join(' | '));
 await browser.close();
 
 console.log(failures.length ? `\n${failures.length}개 실패` : '\n전부 통과');

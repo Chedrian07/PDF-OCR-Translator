@@ -137,6 +137,8 @@ Uploaded PDFs, and the text an OCR model produces from them, are treated as host
   `backend/tests/test_security_headers.py` fails if they drift.
 - `Referrer-Policy: same-origin` (header and `index.html` meta) keeps the instance address
   out of requests to other origins.
+- `X-Content-Type-Options: nosniff` on every response, so browsers never reinterpret a
+  response outside its declared `Content-Type`.
 - **Standalone downloads** (`document.html`, both the facsimile and the semantic export)
   are self-contained and carry their own meta CSP — `default-src 'none'; img-src data:
   blob:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'` — and

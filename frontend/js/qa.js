@@ -80,9 +80,11 @@ export async function loadQaCatalog() {
   }
   state.qaCatalog = catalog;
 
-  // 저장된 선택 복원 — 쓸 수 있는 공급자 우선(저장값 → 서버 기본 → 첫 가용 공급자)
+  // 저장된 선택 복원 — 쓸 수 있는 공급자 우선(저장값 → 서버 기본 → 첫 가용 공급자, 로컬 의도는
+  // 로컬로만). 고른 값은 저장하지 않는다 — 저장은 사용자가 공급자를 바꿀 때(app.js)만 한다.
+  // 예전에는 로컬 서버가 잠깐 바쁜 사이 고른 원격 공급자를 사용자 선택으로 덮어써 굳혔다
+  // (delta-api-frontend-infra-2).
   state.qaProvider = pickQaProvider(catalog, localGet(QA_LS_PROVIDER));
-  localSet(QA_LS_PROVIDER, state.qaProvider);
 
   const savedEffort = localGet(QA_LS_EFFORT);
   state.qaEffort = QA_EFFORTS.includes(savedEffort) ? savedEffort

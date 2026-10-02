@@ -19,6 +19,7 @@ from types import ModuleType as _ModuleType
 from ..layout import estimate_font_size_cqw
 from ..pdf import quiet_fitz
 from . import (
+    active_content,
     constants,
     report,
     models,
@@ -291,8 +292,8 @@ __all__ = [
 ]
 
 _SUBMODULES = (
-    constants, report, models, text, fonts, geometry, spans, tables, raster_tables,
-    fitting, subset, build,
+    active_content, constants, report, models, text, fonts, geometry, spans, tables,
+    raster_tables, fitting, subset, build,
 )
 
 

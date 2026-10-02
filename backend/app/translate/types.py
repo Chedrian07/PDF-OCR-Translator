@@ -344,13 +344,19 @@ class TranslateConfig:
         방식(종전 유일 방식)이고 extra body가 없으면 기존 units.json이 그대로 적중한다.
         off를 chat_template_kwargs로 보내면 실제로 thinking이 꺼져 출력이 달라지므로
         키가 바뀌어야 한다 — 종전 off가 무효였던 서버의 캐시를 재사용하지 않는다.
+
+        extra body는 원문이 아니라 SHA-256 앞 16자리만 싣는다. 이 값은 state.json에 기록돼
+        무인증 /translate/state로 그대로 나가는데, 운영자가 TRANSLATE_EXTRA_BODY에 넣은
+        게이트웨이 키·테넌트 토큰까지 노출됐다(translate-10). 캐시 키 재료로는 해시로
+        충분하다(값이 바뀌면 키도 바뀐다 — 종전 원문 키의 캐시는 1회 재번역된다).
         """
         parts = []
         style = self.effective_reasoning_style
         if self.reasoning and style != "openrouter":
             parts.append(f"reasoning_style={style}")
         if self.extra_body:
-            parts.append(f"extra_body={self.extra_body}")
+            digest = hashlib.sha256(self.extra_body.encode()).hexdigest()[:16]
+            parts.append(f"extra_body=sha256:{digest}")
         return ";".join(parts)
 
     @classmethod

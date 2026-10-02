@@ -1589,12 +1589,34 @@ def test_api_get_routes_answer_head_like_get_without_a_body(settings, sample_pdf
 
 
 def test_event_stream_routes_do_not_take_head():
-    """끝나지 않는 SSE는 본문을 버려도 연결을 붙잡는다 — HEAD 대상에서 뺀다."""
+    """끝나지 않는 SSE는 본문을 버려도 연결을 붙잡는다 — HEAD 짝을 달지 않는다."""
+    from collections import defaultdict
+
     from fastapi.routing import APIRoute
 
     from app.api import router
 
-    methods = {route.path: route.methods for route in router.routes if isinstance(route, APIRoute)}
+    methods: dict[str, set[str]] = defaultdict(set)
+    for route in router.routes:
+        if isinstance(route, APIRoute):
+            methods[route.path] |= route.methods
     assert methods["/api/jobs/{job_id}/events"] == {"GET"}
     assert methods["/api/jobs/{job_id}/translate/events"] == {"GET"}
     assert methods["/api/jobs/{job_id}/pdf"] == {"GET", "HEAD"}
+
+
+def test_head_twins_stay_out_of_the_openapi_schema(client):
+    """HEAD 짝 라우트는 스키마에 없다 — GET 라우트에 HEAD를 더하면 같은 operationId의 head
+    연산이 20개 생겨 'Duplicate Operation ID' 경고가 나고 클라이언트 생성기가 깨졌다."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                 # 중복 operationId 경고는 실패
+        schema = client.get("/openapi.json").json()
+    operations = [
+        (method, op["operationId"])
+        for path in schema["paths"].values() for method, op in path.items()
+        if isinstance(op, dict) and "operationId" in op
+    ]
+    assert all(method != "head" for method, _ in operations)
+    assert len({op_id for _, op_id in operations}) == len(operations)

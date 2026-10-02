@@ -252,7 +252,9 @@ def strip_math_dollars(text: str, mapping: dict, src: str) -> str:
     return text
 
 
-def sanitize_translation(raw: str, masked: str = "") -> tuple[str, int]:
+def sanitize_translation(
+    raw: str, masked: str = "", mapping: dict | None = None,
+) -> tuple[str, int]:
     """모델 발명 수식 딜리미터·리터럴 <PAGE>를 제거. (정리문, 치환 건수) 반환.
 
     엔진의 모든 complete() 출력 경로(최초·repair·분할 반쪽)에 unmask 직전 적용한다.
@@ -260,7 +262,9 @@ def sanitize_translation(raw: str, masked: str = "") -> tuple[str, int]:
     치환은 전체에 적용하되 **카운트는 플레이스홀더 태그 밖만** 센다 — v 속성의
     수식 미리보기(v="\\( E=mc…")까지 세면 리포트가 실측(25p 784건)처럼 부풀려진다.
     masked(마스킹된 원문)를 주면 수식 플레이스홀더 한쪽에만 붙은 '$'도, 원문의 같은 자리에
-    '$'가 없을 때 지운다(delta-pdf-translate-5).
+    '$'가 없을 때 지운다(delta-pdf-translate-5). 원문 산문에 '$'가 하나도 없으면 태그 밖의
+    '$'는 전부 모델이 지어낸 것이라 지우고('$x$' → 'x'), mapping(플레이스홀더 → 원문)까지 주면
+    수식 플레이스홀더 바로 옆에 같은 식을 TeX로 다시 친 '$b \\geq 0$ <m3/>'의 앞 조각을 지운다.
     """
     count = 0
     # 소형 로컬 모델(실측 Qwen3.5-0.8B)이 프롬프트의 마지막 헤더 '[번역할 원문]' 한 줄을
@@ -275,12 +279,131 @@ def sanitize_translation(raw: str, masked: str = "") -> tuple[str, int]:
         if needle in out:
             count += outside.count(needle)
             out = out.replace(needle, repl)
+    # 플레이스홀더 옆에 같은 식을 TeX로 다시 친 조각 — 한쪽 달러 규칙이 그 '$'를 먼저 지우면
+    # '$b \\geq 0 <m3/>'처럼 짝을 잃어 알아볼 수 없으므로 달러 규칙보다 먼저 본다
+    retyped = 0
+    if masked and mapping:
+        out, retyped = _strip_retyped_math(out, mapping)
     # 이중 달러를 지운 뒤 — `$$<m1/>$$`는 위에서 이미 맨 플레이스홀더가 됐다
     out, wrapped = _DOLLAR_WRAPPED_MATH_RE.subn(r"\1", out)
     if masked:
         out, single = _strip_one_sided_math_dollars(out, masked)
         wrapped += single
-    return out, count + wrapped
+        out, invented = _strip_invented_dollars(out, masked)
+        wrapped += invented
+    return out, count + wrapped + retyped
+
+
+# 원문 산문에 '$'가 없는데 모델이 변수·짧은 식을 '$…$'로 감싼 것('$x$'·'$d=200$'·'$b$-비트') —
+# 소형 모델의 LaTeX 습관이다(실앱 4B: 25쪽 번역 PDF 6쪽에 '$' 39자, 원문 0자). 원문의 수식은
+# 달러까지 통째로 플레이스홀더라, 원문 산문(태그 밖)에 '$'가 없으면 출력의 태그 밖 '$'는 지어낸
+# 것이다. 원문 산문에 '$'(통화 '$5')가 있으면 이 규칙을 쓰지 않고, 숫자 앞의 '$'는 '10 dollars'를
+# 옮긴 통화일 수 있어 남긴다.
+_INVENTED_DOLLAR_RE = re.compile(r"\$(?!\d)")
+
+
+def _outside_placeholder_tags(text: str) -> str:
+    return _ANY_PLACEHOLDER_RE.sub(" ", text)
+
+
+def _strip_invented_dollars(out: str, masked: str) -> tuple[str, int]:
+    if "$" in _outside_placeholder_tags(masked):
+        return out, 0
+    count = 0
+    pieces: list[str] = []
+    last = 0
+    for tag in [*_ANY_PLACEHOLDER_RE.finditer(out), None]:
+        segment = out[last:tag.start() if tag else len(out)]
+        segment, n = _INVENTED_DOLLAR_RE.subn("", segment)
+        count += n
+        pieces.append(segment)
+        if tag is not None:
+            pieces.append(tag.group(0))
+            last = tag.end()
+    return "".join(pieces), count
+
+
+# 수식 플레이스홀더 바로 앞·뒤에 같은 식을 TeX로 다시 친 '$…$'(실앱 4B: '어떤 $b \\geq 0$ <m3/>에
+# 대해' → 'b ≥ 0 b ≥ 0'으로 두 번 찍혔다). 식이 그 플레이스홀더 원문과 같으면(공백·중괄호·
+# 딜리미터 무시) 다시 친 쪽을 지운다. 원문 산문까지 함께 다시 친 경우('B = b <m2 \\cdot/> d'를
+# '$B = b \\cdot d$ <m2/>'로)는 그 안에 플레이스홀더의 식이 한 번만 나오면 그 자리에 플레이스홀더를
+# 옮겨 넣는다('B = b <m2/> d') — 다른 식이면 번역의 일부일 수 있어 건드리지 않는다.
+_RETYPED_BEFORE_RE = re.compile(
+    r"\$([^$\n<>]{1,160}?)\$[ \t]*(<\s*(m\d+)\b" + _PH_ATTRS + r"\s*/?\s*>)"
+)
+_RETYPED_AFTER_RE = re.compile(
+    r"(<\s*(m\d+)\b" + _PH_ATTRS + r"\s*/?\s*>)[ \t]*\$([^$\n<>]{1,160}?)\$"
+)
+# 닫는 '$' 없이 플레이스홀더에 붙은 다시 친 식 — 한쪽 달러 규칙이 닫는 '$'를 이미 지운 옛 캐시
+# ('$b \\geq 0\\( b \\geq 0 \\)')나, 모델이 여는 '$'만 쓴 출력
+_RETYPED_OPEN_RE = re.compile(
+    r"\$([^$\n<>]{1,160}?)[ \t]*(<\s*(m\d+)\b" + _PH_ATTRS + r"\s*/?\s*>)"
+)
+_MATH_KEY_DROP_RE = re.compile(r"\\[()\[\]]|\$|[\s{}]")
+_MATH_DELIMS_RE = re.compile(r"^\s*(?:\\\(|\\\[|\$\$?)(.*?)(?:\\\)|\\\]|\$\$?)\s*$", re.DOTALL)
+# 이보다 짧은 식('x')은 다시 친 식 안에서 우연히 겹치기 쉬워 자리를 옮기지 않는다
+_RETYPED_INNER_MIN = 2
+
+
+def _math_key(text: str) -> str:
+    return _MATH_KEY_DROP_RE.sub("", text)
+
+
+def _retyped_fix(typed: str, tag: str, original) -> str | None:
+    """다시 친 식(typed)과 플레이스홀더(tag)를 합친 결과 — 해당 없으면 None."""
+    if original is None or not _math_key(typed):
+        return None
+    if _math_key(typed) == _math_key(str(original)):
+        return tag
+    match = _MATH_DELIMS_RE.match(str(original))
+    inner = (match.group(1) if match else "").strip()
+    if len(inner) >= _RETYPED_INNER_MIN and typed.count(inner) == 1:
+        return typed.replace(inner, tag)
+    return None
+
+
+def _strip_retyped_math(out: str, mapping: dict) -> tuple[str, int]:
+    count = 0
+
+    def _before(match: re.Match) -> str:
+        nonlocal count
+        fixed = _retyped_fix(match.group(1), match.group(2), mapping.get(match.group(3)))
+        if fixed is None:
+            return match.group(0)
+        count += 1
+        return fixed
+
+    def _after(match: re.Match) -> str:
+        nonlocal count
+        fixed = _retyped_fix(match.group(3), match.group(1), mapping.get(match.group(2)))
+        if fixed is None:
+            return match.group(0)
+        count += 1
+        return fixed
+
+    out = _RETYPED_BEFORE_RE.sub(_before, out)
+    out = _RETYPED_AFTER_RE.sub(_after, out)
+    out = _RETYPED_OPEN_RE.sub(_before, out)
+    return out, count
+
+
+def tidy_cached_translation(text: str, mapping: dict, src: str) -> str:
+    """이전 실행이 캐시한 복원문에 원출력 단계 정리를 다시 적용한다.
+
+    정리 규칙(지어낸 '$'·다시 친 수식 등)이 생기기 전에 캐시된 번역은 재번역해도 캐시 적중으로
+    그대로 쓰였다. 복원문의 수식·인용 원문을 그 플레이스홀더로 되돌려(긴 것부터) 같은
+    sanitize_translation을 돌리고 다시 복원한다. 되돌린 결과가 플레이스홀더 정합(누락·중복 없음)을
+    통과하지 못하면 손대지 않는다."""
+    text = strip_math_dollars(text, mapping, src)
+    masked = mask(src)[0]
+    pseudo = text
+    for pid, original in sorted(mapping.items(), key=lambda item: len(str(item[1])), reverse=True):
+        pseudo = pseudo.replace(str(original), f"<{pid}/>")
+    clean, changed = sanitize_translation(pseudo, masked, mapping)
+    if not changed:
+        return text
+    restored, missing, dup = unmask(clean, mapping, masked)
+    return text if missing or dup else restored
 
 
 # 참고문헌 항목 줄 — "[12] Gersho, A. …" 형태. 헤딩("References") 기반 스킵은

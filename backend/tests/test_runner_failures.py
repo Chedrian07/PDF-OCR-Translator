@@ -646,7 +646,9 @@ def test_chunk_budget_note_uses_the_full_prompt_formula(tmp_path):
     note = chunk_length_budget_note(_budget_settings(tmp_path), engine)
     assert note is not None
     assert "MAX_LENGTH=32,768" in note and "51,341토큰" in note and "8쪽" in note
-    assert "내용은 빠지지 않습니다" in note and "PAGES_PER_CHUNK" in note
+    assert "잘린 페이지부터 페이지별로 다시 처리" in note and "PAGES_PER_CHUNK" in note
+    # 텍스트 레이어가 없는 스캔은 원본과 대조할 수 없다 — 무손실을 단정하지 않는다
+    assert "원본 본문과 대조" in note and "빠지지 않" not in note
 
     # 최악 길이 = 8 × (6,144 + 273) + 5 — 프롬프트(이미지 토큰)까지 넣어야 경계가 맞다
     assert chunk_length_budget_note(_budget_settings(tmp_path, max_length=51_341), engine) is None

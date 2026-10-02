@@ -822,6 +822,14 @@ class _RunawayGuard:
     반드시 넘는다. 그래서 본문이 프롬프트의 2배를 넘은 뒤부터 _RUNAWAY_CHECK_EVERY자마다
     그 둘을 확인한다. 본문은 _postprocess를 거친 것이다 — reasoning을 분리하지 않는 서버의
     긴 <think>…는 답이 아니므로 세지 않는다(정상 사고 뒤의 답을 끊지 않게).
+
+    길이 기준은 답이 사고와 **구분될 때만** 쓴다 — content에 `</think>`가 왔거나(그 뒤가 답),
+    서버가 reasoning을 별도 필드로 보낸다(content가 곧 답). 템플릿이 `<think>`를 프롬프트 끝에
+    미리 넣는 thinking 모델(Qwen3·QwQ·R1 distill)을 reasoning 분리 없이 서빙하면 content가 여는
+    태그 없이 사고로 시작해, `</think>`가 오기 전에는 사고와 답을 가를 수 없다. 그 사고를 답으로
+    세어 '입력의 4배'로 끊었더니 정상 사고 뒤의 답까지 잃고 콜드 런 잡 전체가 실패했다(감사
+    delta-pdf-translate-1). 그런 출력은 반복 루프만 본다 — 루프는 사고든 답이든 쓸 수 없다.
+    길이로 끊지 않은 출력도 완료 뒤 엔진의 길이비 게이트가 판정한다(느릴 뿐 틀리지 않는다).
     """
 
     def __init__(self, prompt: str) -> None:
@@ -833,10 +841,13 @@ class _RunawayGuard:
         if acc.content_chars < self.next_check:
             return
         self.next_check = acc.content_chars + _RUNAWAY_CHECK_EVERY
-        text = _postprocess("".join(acc.parts))
+        raw = "".join(acc.parts)
+        text = _postprocess(raw)
+        # 답이 사고와 구분되는가 — `</think>` 뒤이거나, 사고가 reasoning 필드로 따로 왔다
+        delimited = _THINK_CLOSE in raw or acc.reasoning_chars > 0
         if is_degenerate_repetition(text, self.prompt):
             why = "반복 루프에 빠져"
-        elif len(text) > self.overlong:
+        elif delimited and len(text) > self.overlong:
             why = "입력의 4배를 넘어"
         else:
             return

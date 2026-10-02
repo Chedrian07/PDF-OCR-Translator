@@ -340,6 +340,41 @@ def test_translated_output_routes(client, sample_pdf, provider_env, monkeypatch)
 
 
 # ── 4. 400 잘못된 lang / 409 미완료 잡 / 503 env 미설정 ────────────────────
+def test_translation_failure_logs_never_print_the_base_url_query(
+    client, sample_pdf, monkeypatch, caplog,
+):
+    """쿼리 키를 요구하는 게이트웨이(OPENAI_BASE_URL=…?api-key=…)가 내려가면 번역 실패 로그
+    (logger.exception)의 traceback 원인 사슬에 키가 평문으로 남았다 — 문구와 경고 줄은 가렸지만
+    `raise … from e`로 이어진 requests·urllib3 예외가 그대로 찍혔다(security-1)."""
+    import logging
+    import socket
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()                                       # 닫힌 포트 — 연결 거부
+    secret = "sk-p5-LOG-REDACTION-PROBE"
+    monkeypatch.setenv("OPENAI_BASE_URL", f"http://127.0.0.1:{port}/v1?api-key={secret}")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.setenv("TRANSLATE_MAX_RETRIES", "0")
+    monkeypatch.setenv("TRANSLATE_API_MODE", "chat")
+    jid = _done_job(client, sample_pdf)
+    # 가짜 OCR 출력은 한국어라 번역할 유닛이 없다 — 영어 문단을 하나 넣어 실제 API 호출까지 간다
+    job_dir = client.app.state.store.get(jid).dir
+    english = "This paragraph explains how the model reads each page of the paper in detail.\n"
+    (job_dir / "result.md").write_text(english, encoding="utf-8")
+    with caplog.at_level(logging.DEBUG):
+        r = client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"})
+        assert r.status_code == 202, r.text
+        body = _wait_until_status(client, jid, "error", timeout=15)
+        _wait_no_task(client, jid)
+    assert "연결 실패" in body["error"] and secret not in body["error"]
+    formatter = logging.Formatter("%(name)s %(message)s")
+    printed = "\n".join(formatter.format(record) for record in caplog.records)
+    assert "번역 실패" in printed                          # 실패는 로그에 남는다
+    assert secret not in printed, printed[-1500:]
+
+
 def test_translate_validation_errors(client, sample_pdf, monkeypatch):
     jid = _done_job(client, sample_pdf)
     monkeypatch.setenv("OPENAI_BASE_URL", "http://x/v1")

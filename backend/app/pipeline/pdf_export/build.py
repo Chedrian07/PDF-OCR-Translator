@@ -1049,12 +1049,15 @@ def _plan_text_block(
     align = {"center": 1, "right": 2, "justify": 3}.get(align_value, 0)
     bold = bool(ob.get("bold")) or block_type == "title"
     owned_records = ctx.source_ownership.get(block_index, [])
+    # 줄 구조 판단(시각 줄 수·리스팅 정렬·굵은 접두)에는 블록 줄의 span만 — 줄 밖으로 튀어나와
+    # 붙인 기호(edge)는 교체할 때 함께 지우기만 한다.
+    line_records = [span for span in owned_records if not span.edge]
     local_source_records = [
         span for span in ctx.source_records
         if _source_span_matches_rect(span, rect)
     ]
     if block_index in ctx.ambiguous_blocks or (
-        not owned_records and local_source_records
+        not line_records and local_source_records
     ):
         result.keep("ambiguous_source")
         result.warnings.append(
@@ -1066,12 +1069,12 @@ def _plan_text_block(
     # 문단의 줄바꿈이 아니라 가로 배치(표 헤더·행)의 평탄화다.
     # bbox 높이는 원문 줄 수만큼뿐이라 축소로는 절대 들어가지 않는다.
     reflow_text = _reflow_flattened_text(
-        old, new, owned_records, base_pt,
+        old, new, line_records, base_pt,
     )
     # 리스팅·표는 줄 구조와 열 위치 자체가 의미다. 원문 좌표에 줄별로
     # 그대로 조판할 수 있으면 흘려 넣기(리플로우)보다 항상 낫다.
     listing_segments = (
-        _listing_segments(old, new, owned_records, base_pt, rect.x1)
+        _listing_segments(old, new, line_records, base_pt, rect.x1)
         if reflow_text is not None
         else ()
     )
@@ -1128,7 +1131,7 @@ def _plan_text_block(
         # span bbox가 아니라 baseline 띠로 지운다 — 일반 행간에서 이웃 보존 줄을 지키려고.
         _source_text_rects(ctx.page, rect, owned_records),
         rect,
-        None if bold else _leading_bold_prefix(owned_records, new),
+        None if bold else _leading_bold_prefix(line_records, new),
         reflow_text,
         listing_segments,
         listing_dropped,

@@ -598,19 +598,22 @@ def test_real_bf16_greedy_prefix_matches_reference(real_page1):
 
 @real_weights
 def test_real_fp32_logits_match_torch_cpu(real_page1, tmp_path):
+    """MLX fp32 로짓을 먼저 모두 구하고 MLX 모델을 내린 뒤 torch CPU fp32 모델을 올린다 — 두
+    fp32 사본(각 ~12GB+활성)을 한 프로세스에 함께 들면 이 테스트 하나의 최고 메모리가 36GiB를
+    넘었다(P4 실측, 16–36GB Mac에서 스왑·종료)."""
     torch = pytest.importorskip("torch")
+    import gc
+
+    import mlx.core as mx
+
     from app.config import Settings
     from app.engine.unlimited import UnlimitedEngine
     from app.vendor.unlimited_ocr_mlx import load
 
+    gc.collect()
+    mx.clear_cache()  # 앞 테스트(bf16 실가중치)가 남긴 MLX 버퍼 캐시도 비우고 시작한다
     s = _settings()
     model, tok, _ = load(s.model_id, s.model_revision, dtype="float32", local_files_only=True)
-    eng = UnlimitedEngine(
-        Settings(engine="unlimited", device="cpu", dtype="float32", data_dir=tmp_path / "d",
-                 preload_model=False)
-    )
-    eng.load()
-    tmodel = eng._model
     forced = EXPECTED_PAGE1_IDS[:16]
     # 멀티: 프롬프트 + 강제 16토큰을 캐시 없이 한 번에 (W=128 미만이라 링 의미론과 같다)
     inp = P.prepare_multi(tok, MULTI_PROMPT, [real_page1], image_size=1024)
@@ -619,12 +622,25 @@ def test_real_fp32_logits_match_torch_cpu(real_page1, tmp_path):
     Image.open(real_page1).crop((0, 0, 1700, 800)).save(top)
     inp_single = P.prepare_single(tok, SINGLE_PROMPT, str(top))
     assert inp_single.spatial_crop == (2, 1)
+    cases = []
     for x, extra in ((inp, forced), (inp_single, [])):
         ids = np.concatenate([x.input_ids, np.asarray(extra, dtype=np.int64)])
         mask = np.concatenate([x.images_seq_mask, np.zeros(len(extra), bool)])
         feats = model.encode_images(x.global_views, x.crops, x.spatial_crop)
         emb = model.get_input_embeddings(ids, mask, feats)
         m = np.array(model.language_model(None, inputs_embeds=emb, last_only=True)[0, -1])
+        cases.append((x, ids, mask, m))
+    del model, feats, emb
+    gc.collect()
+    mx.clear_cache()
+
+    eng = UnlimitedEngine(
+        Settings(engine="unlimited", device="cpu", dtype="float32", data_dir=tmp_path / "d",
+                 preload_model=False)
+    )
+    eng.load()
+    tmodel = eng._model
+    for x, ids, mask, m in cases:
         with torch.no_grad():
             out = tmodel(
                 input_ids=torch.tensor([ids.tolist()]),

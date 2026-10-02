@@ -17,9 +17,11 @@ import { warningSegments } from '../js/core.js';
 
 const FRONTEND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-// 브라우저가 실행하는 모든 스크립트 — 앱 모듈, 클래식 스크립트, 벤더 번들.
+// 브라우저가 실행하는 모든 스크립트 — 앱 모듈, 클래식 스크립트(내려받는 HTML에 인라인되는 것 포함), 벤더 번들.
 function browserScripts() {
-  const files = ['app.js', 'layout-fit.js', 'theme-init.js', path.join('vendor', 'katex', 'katex.min.js')];
+  const files = [
+    'app.js', 'layout-fit.js', 'theme-init.js', 'katex-guard.js', path.join('vendor', 'katex', 'katex.min.js'),
+  ];
   for (const name of fs.readdirSync(path.join(FRONTEND, 'js'))) {
     if (name.endsWith('.js')) files.push(path.join('js', name));
   }

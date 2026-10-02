@@ -2054,6 +2054,50 @@ def test_이전_실행이_캐시한_수식_달러는_재사용할_때_걷어낸�
     assert "$" not in out and out == ko_expected(md)
 
 
+class _DollarHabitClient(EchoClient):
+    """소형 모델의 LaTeX 습관(실앱 4B) — 변수를 '$x$'로 감싸고 수식 플레이스홀더 앞에 같은 식을
+    TeX로 다시 친다. 태그는 온전해 게이트를 통과하므로 sanitize가 걷어내야 한다."""
+
+    def complete(self, system, user, *, max_tokens):
+        self._count(_marker(user) is not None)
+        src = _marker(user)
+        if src is None:
+            return ""
+        out = koreanize(src)
+        tag = re.search(r"<m\d+\b[^>]*>", out)
+        if tag:
+            out = out.replace(tag.group(0), "$v_{i}$ " + tag.group(0), 1)
+        return out + " $x$ 와 $y$"
+
+
+def test_지어낸_달러와_다시_친_수식은_결과에_남지_않는다(tmp_path, cfg):
+    """원문 산문에 '$'가 없으면 출력의 태그 밖 '$'는 모델이 지어낸 것이다 — 번역 PDF·리더에
+    '$x$'·'b ≥ 0 b ≥ 0'이 찍혔다(실앱 4B: 25쪽 6쪽에 '$' 39자). 원문 수식은 그대로 한 번만."""
+    md = "We use letters such as x and y for the rows \\( v_{i} \\) of the matrix.\n"
+    res, report, out = _run_md(tmp_path, cfg, md, _DollarHabitClient())
+    assert res.status == "done" and res.kept_original == []
+    assert "$" not in out
+    assert out.count("v_{i}") == 1 and "\\( v_{i} \\)" in out
+    assert out.rstrip().endswith("x 와 y")
+    assert report["sanitized"] >= 5                       # 다시 친 식 1 + 지어낸 '$' 4
+
+
+def test_이전_실행이_캐시한_지어낸_달러도_재사용할_때_걷어낸다(tmp_path, cfg):
+    md = "We use letters such as x and y for the rows \\( v_{i} \\) of the matrix.\n"
+    _run_md(tmp_path, cfg, md, EchoClient())
+    upath = tmp_path / "translations/ko/units.json"
+    cache = json.loads(upath.read_text(encoding="utf-8"))
+    [key] = list(cache)
+    cache[key] = cache[key].replace("\\( v_{i} \\)", "$v_{i}\\( v_{i} \\)") + " $x$"
+    upath.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+
+    again = EchoClient()
+    res, _report, out = _run_md(tmp_path, cfg, md, again)
+    assert again.unit_calls == 0 and res.cached == 1
+    assert "$" not in out and out.count("v_{i}") == 1
+    assert out.rstrip() == ko_expected(md).rstrip() + " x"
+
+
 # ── 분할 결합 출력 속의 캔드 응답 (verify_e2e 25쪽 실측) ───────────────────────
 
 class _CannedEverywhere(EchoClient):

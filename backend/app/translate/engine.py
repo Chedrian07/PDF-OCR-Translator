@@ -939,9 +939,11 @@ class _TranslationRun:
         # 보내면 PDF 내보내기가 "실패"가 아니라 "의도적 보존"으로 집계한다.
         self.preserved_layout: dict[str, str] = {}
         self.md_skipped = set()
+        reasons: dict[str, str] = {}
         for u in all_units:
             # 유닛 자체 사유(references)가 우선, 없으면 게이트 판정 사유를 그대로 쓴다.
             reason = u.skip_reason or should_skip(u.src)
+            reasons[u.id] = reason
             if reason:
                 self.skipped += 1
                 self.skip_reasons[reason] = self.skip_reasons.get(reason, 0) + 1
@@ -953,10 +955,6 @@ class _TranslationRun:
                 targets.append(u)
         self.targets = targets
         self.total = len(targets)
-
-        # md(heading 스윕)와 layout(ref_text) 참고문헌 규칙의 불일치 관측 — 같은 영역이
-        # result.{lang}.md와 PDF에서 서로 다르게 처리되는 사례를 리포트로 드러낸다.
-        self.ref_rule = reference_rule_mismatch(self.md_units, self.lay_units)
 
         # 2단 패스 — **모든 줄이 layout 블록에 커버되는** md 유닛은 layout 번역을 그대로
         # 쓰므로(유닛 단위 reconcile, _md_translations) 1차에서 빼둔다(deferred). 그
@@ -982,6 +980,15 @@ class _TranslationRun:
                         remaining.append(u)
                 self.targets = remaining
                 self.total = len(remaining)
+
+        # md(heading 스윕·내용 판정)와 layout(ref_text) 참고문헌 규칙의 불일치 관측 — 같은
+        # 영역이 result.{lang}.md와 PDF에서 서로 다르게 처리되는 사례를 리포트로 드러낸다.
+        # 실제 건너뜀 사유와 deferred(layout 결과를 그대로 받는 md 유닛)로 판정한다 — 유닛의
+        # heading 표시만 보면 제목 표기 없는 result.md(Unlimited-OCR)마다 오경보가 났다.
+        self.ref_rule = reference_rule_mismatch(
+            self.md_units, self.lay_units,
+            reasons=reasons, deferred={u.id for u in self.deferred},
+        )
 
         self.context_map = {}
         if self.cfg.context:

@@ -2117,6 +2117,30 @@ def test_태그_뒤에_모델이_덧붙인_꼬리는_결과에_남지_않는다(
     assert '">' not in out and "\\( [50, 6, 15] \\)." in out
 
 
+class _HeadingMarkClient(EchoClient):
+    """제목·문단 번역 앞에 원문에 없는 '## '를 붙인다(실앱 4B: '2 Preliminaries' → '## 2 예비 연구')."""
+
+    def complete(self, system, user, *, max_tokens):
+        self._count(_marker(user) is not None)
+        src = _marker(user)
+        if src is None:
+            return ""
+        out = koreanize(src)
+        return out if src.lstrip().startswith("#") else "## " + out
+
+
+def test_원문에_없는_제목_표시는_레이아웃_제목에_남지_않는다(job, cfg):
+    """layout 제목 블록의 '## '가 리더 개요(/outline)·document.html에 그대로 찍혔다."""
+    res = run_translation(job, "ko", cfg, client=_HeadingMarkClient())
+    assert res.status == "done" and res.kept_original == []
+    pages = json.loads((job / "layout.ko.json").read_text(encoding="utf-8"))
+    contents = [b.get("content") or "" for page in pages for b in page["blocks"]]
+    assert contents and not any(c.lstrip().startswith("#") for c in contents), contents
+    md_out = (job / "result.ko.md").read_text(encoding="utf-8")
+    assert md_out.startswith("# ") and "\n## " in md_out           # md 원문의 제목 표시는 그대로
+    assert "## ## " not in md_out and "\n\n## " + koreanize("We") not in md_out
+
+
 # ── 분할 결합 출력 속의 캔드 응답 (verify_e2e 25쪽 실측) ───────────────────────
 
 class _CannedEverywhere(EchoClient):

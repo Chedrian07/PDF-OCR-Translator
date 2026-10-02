@@ -693,8 +693,13 @@ def test_scan_block_inside_a_kept_block_is_reported_instead_of_silently_overprin
 
 
 def test_scan_blocks_inside_an_empty_list_container_are_still_covered(tmp_path):
-    """내용이 빈 컨테이너(자식 항목을 감싼 list)는 지킬 픽셀이 없다 — 자식 교체는 그대로 덮는다."""
-    job_dir = _scan_job(tmp_path, "scan-container")
+    """내용이 빈 컨테이너(자식 항목을 감싼 list)는 제 픽셀이 없다 — 지키지도, 막지도 않는다.
+
+    컨테이너를 '남는 블록'으로 지키면 자식의 덮개가 통째로 사라지고(실측: 목록 항목 11개가
+    덮이지 않음), 남는 래스터 블록으로 세면 자식 번역이 자랄 자리를 막아 축소 배치로
+    떨어진다. 원문 크기(11pt)를 아는 번역이 컨테이너 아래로 자라야 하는 구성이다.
+    """
+    job_dir = _scan_job(tmp_path, "scan-container", font_pt=11)
     layout = json.loads((job_dir / "layout.json").read_text(encoding="utf-8"))
     translated = json.loads((job_dir / "layout.ko.json").read_text(encoding="utf-8"))
     container = {"type": "list", "bbox": _bbox(fitz.Rect(60, 96, 380, 164)), "content": ""}
@@ -709,7 +714,11 @@ def test_scan_blocks_inside_an_empty_list_container_are_still_covered(tmp_path):
     assert not result.warnings, result.warnings
     with fitz.open(job_dir / "source.pdf") as source:
         left, before = _ink_beyond_translation(source[0], result.path, BLOCK)
+    with fitz.open(result.path) as exported:
+        placed = _korean_line_rects(exported[0])
     assert before > 500 and left <= before * 0.02, (left, before)
+    # 번역은 제자리에서 아래로 자란다 — 컨테이너에 막혀 블록 위로 끌려 올라가지 않는다.
+    assert placed and min(rect.y0 for rect in placed.values()) >= BLOCK.y0 - 1, placed
 
 
 def _tiled_scan_job(tmp_path: Path, name: str, *, strips: int = 1, margin: float = 0.0) -> Path:

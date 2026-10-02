@@ -576,3 +576,88 @@ def test_scan_table_vertical_rules_survive_the_cell_covers(tmp_path):
             source[0], result.path, fitz.Rect(302, 124, 418, 142),
         )
     assert before > 20 and left <= before * 0.02, (left, before)
+
+
+def test_scan_cover_spares_an_overlapping_figure_and_its_axis_labels(tmp_path):
+    """캡션 bbox가 그림 bbox와 몇 pt 겹쳐도 덮개는 그림 픽셀(눈금 라벨)을 지우지 않는다.
+
+    OCR bbox는 0–999 격자라 캡션·그림이 겹치기 쉽다. 예전 덮개는 캡션 bbox(+0.8pt)를
+    그대로 덮어 그림 안쪽 x축 눈금 라벨의 아랫부분을 지웠다(감사 pdf-3: 261→77px).
+    """
+    job_dir = tmp_path / "scan-figure-caption"
+    job_dir.mkdir()
+    scale = SCAN_DPI / 72
+    image = Image.new("RGB", (int(PAGE_W * scale), int(PAGE_H * scale)), PAPER)
+    draw = ImageDraw.Draw(image)
+    font = _font(9 * scale)
+    draw.rectangle([80 * scale, 110 * scale, 360 * scale, 285 * scale], outline=(0, 0, 0), width=2)
+    for index, label in enumerate(("0", "10", "20", "30", "40", "50")):
+        draw.text(((80 + index * 56) * scale, 288 * scale), label, fill=INK, font=font)
+    caption = "Figure 1: Accuracy of the scanned model over epochs."
+    draw.text((120 * scale, 304 * scale), caption, fill=INK, font=font)
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+    doc = fitz.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    page.insert_image(page.rect, stream=buffer.getvalue())
+    doc.save(job_dir / "source.pdf")
+    doc.close()
+    _write_layout(job_dir, [
+        {"type": "image", "bbox": _bbox(fitz.Rect(70, 100, 370, 300)), "content": "",
+         "image": "p0001_0.jpg"},
+        # 캡션 bbox가 그림 bbox와 6pt 겹친다(그림 안쪽 294~300pt에 눈금 라벨이 있다).
+        {"type": "image_caption", "bbox": _bbox(fitz.Rect(70, 294, 370, 318)), "content": caption},
+    ], {1: "그림 1: 에포크에 따른 스캔 모델의 정확도."})
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    assert result.replaced == 1, result.report()
+    assert result.raster_blocks_erased == 1, result.report()
+    assert not result.warnings, result.warnings
+    labels = fitz.Rect(78, 286, 372, 300)
+    with fitz.open(job_dir / "source.pdf") as source, fitz.open(result.path) as exported:
+        before = len(_dark_pixels(source[0], labels))
+        after = len(_dark_pixels(exported[0], labels))
+        left, english = _ink_beyond_translation(
+            source[0], result.path, fitz.Rect(70, 301, 370, 318),
+        )
+    assert before > 50 and after == before, (before, after)           # 눈금 라벨 그대로
+    assert english > 100 and left <= english * 0.02, (left, english)  # 캡션 영어는 덮였다
+
+
+def test_scan_block_inside_a_kept_block_is_reported_instead_of_silently_overprinted(tmp_path):
+    """덮을 영역이 전부 남는 블록 안이면 덮지 않는다 — 겹쳐 보일 수 있다고 알린다."""
+    job_dir = _scan_job(tmp_path, "scan-nested")
+    layout = json.loads((job_dir / "layout.json").read_text(encoding="utf-8"))
+    translated = json.loads((job_dir / "layout.ko.json").read_text(encoding="utf-8"))
+    # 바깥 블록은 번역이 원문과 같아 남는다(교체되지 않는다).
+    outer = {"type": "text", "bbox": _bbox(fitz.Rect(60, 96, 380, 164)), "content": "Outer note"}
+    layout[0]["blocks"].append(outer)
+    translated[0]["blocks"].append(dict(outer))
+    (job_dir / "layout.json").write_text(json.dumps(layout), encoding="utf-8")
+    (job_dir / "layout.ko.json").write_text(json.dumps(translated, ensure_ascii=False), encoding="utf-8")
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    assert result.raster_blocks_erased == 0, result.report()
+    assert any("덮지 못함" in warning for warning in result.warnings), result.warnings
+
+
+def test_scan_blocks_inside_an_empty_list_container_are_still_covered(tmp_path):
+    """내용이 빈 컨테이너(자식 항목을 감싼 list)는 지킬 픽셀이 없다 — 자식 교체는 그대로 덮는다."""
+    job_dir = _scan_job(tmp_path, "scan-container")
+    layout = json.loads((job_dir / "layout.json").read_text(encoding="utf-8"))
+    translated = json.loads((job_dir / "layout.ko.json").read_text(encoding="utf-8"))
+    container = {"type": "list", "bbox": _bbox(fitz.Rect(60, 96, 380, 164)), "content": ""}
+    layout[0]["blocks"].append(container)
+    translated[0]["blocks"].append(dict(container))
+    (job_dir / "layout.json").write_text(json.dumps(layout), encoding="utf-8")
+    (job_dir / "layout.ko.json").write_text(json.dumps(translated, ensure_ascii=False), encoding="utf-8")
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    assert result.raster_blocks_erased == 1, result.report()
+    assert not result.warnings, result.warnings
+    with fitz.open(job_dir / "source.pdf") as source:
+        left, before = _ink_beyond_translation(source[0], result.path, BLOCK)
+    assert before > 500 and left <= before * 0.02, (left, before)

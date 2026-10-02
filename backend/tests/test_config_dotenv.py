@@ -218,6 +218,36 @@ def test_모르는_dotenv_키는_이름과_안내만_한_번_경고한다(tmp_pa
     assert not [r for r in caplog.records if r.levelno == logging.WARNING]
 
 
+def test_값_뒤에_다시_나온_빈_줄이_덮어쓰면_키_이름으로_경고한다(tmp_path, monkeypatch, caplog, fresh_dotenv_log):
+    """README의 번역 .env 블록을 .env.example 위쪽에 붙여 넣으면 뒤쪽의 빈 OPENAI_* 줄이 이겨
+    (dotenv는 마지막 줄이 이긴다) 번역이 '프로바이더 미설정' 503이 됐는데 config_warnings도
+    비어 원인을 찾기 어려웠다(fresh-user-5). 값은 남기지 않고 키 이름만 알린다."""
+    env = tmp_path / ".env"
+    env.write_text(
+        "OPENAI_BASE_URL=http://127.0.0.1:8080/v1\n"
+        "OPENAI_MODEL=value-must-not-leak\n"
+        "OPENAI_API_KEY=sk-must-not-leak\n"
+        "# … .env.example 본문 …\n"
+        "OPENAI_BASE_URL=\n"
+        "OPENAI_MODEL=\n"
+        "TRANSLATE_MODEL=\n"                     # 앞에 값이 없던 빈 줄 — 경고하지 않는다
+        "OPENAI_API_KEY=sk-later-value\n",        # 다른 값으로 바꾼 것 — 빈 값이 아니다
+        encoding="utf-8",
+    )
+    for key in ("OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY", "TRANSLATE_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="app.config"):
+        warnings = load_dotenv_file(env)
+
+    assert [w.split(":", 1)[0] for w in warnings] == ["OPENAI_BASE_URL", "OPENAI_MODEL"]
+    assert all("빈 값" in w for w in warnings), warnings
+    everything = "\n".join(warnings + [r.getMessage() for r in caplog.records])
+    assert "must-not-leak" not in everything and "sk-later" not in everything
+    assert "127.0.0.1" not in everything
+    assert os.environ["OPENAI_BASE_URL"] == ""             # 적용 규칙(마지막 줄)은 그대로
+
+
 def test_모르는_키_안내는_상한을_두고_이름_꼴이_아닌_키는_보지_않는다(tmp_path, fresh_dotenv_log):
     from app.config import unknown_dotenv_key_warnings
 

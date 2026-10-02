@@ -51,6 +51,7 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 
 - New `local-openai` provider for loopback OpenAI-compatible servers (`LLM_LOCAL_OPENAI_BASE_URL`, `LLM_LOCAL_OPENAI_MODEL`, `LLM_LOCAL_OPENAI_MODELS`, `LLM_LOCAL_OPENAI_API_KEY`).
 - `local-openai` answers cut off at the token limit are reported as an error instead of being shown as complete.
+- The question tab starts on a provider that is actually available (for example `local-openai` when no OpenAI key is set) instead of the unconfigured server default, and Thinking starts off for local providers (Ollama, `local-openai`), whose thinking models otherwise spent the whole answer budget thinking. A choice you made yourself is kept.
 
 ### PDF export
 

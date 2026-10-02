@@ -2100,7 +2100,7 @@ def _plan_until_consistent(base_ctx: _PageContext, result: PdfExportResult):
             _plan_flow_targets(ctx, flow_candidates, targets, trial)
             break
         cleared = cleared - missing
-    result.merge(trial)
+    result.merge(trial, page=base_ctx.pno)
     return targets, links
 
 
@@ -2114,7 +2114,7 @@ def _process_page(
     if hit is not None:
         elsewhere, score, mine = hit
         blocks = opage.get("blocks", [])
-        result.keep("page_source_mismatch", max(1, len(blocks)))
+        result.keep("page_source_mismatch", max(1, len(blocks)), page=pno)
         result.warnings.append(
             f"p{pno}: 레이아웃이 {elsewhere}쪽 내용과 일치해 이 페이지는 건너뜀 "
             f"(대조 {score:.0%} vs 제자리 {mine:.0%}) — 재변환이 필요합니다"

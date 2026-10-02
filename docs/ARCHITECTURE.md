@@ -988,6 +988,9 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   덮지 못했다는 경고를 남긴다. 세로로 길고 좁은 래스터 블록 중 한 줄짜리(종횡비 6 이상·12자
   이상·줄바꿈 없음·글자 수×폭×0.45 ≤ 높이×1.5)만 여백 도장처럼 세로쓰기로 보고 원문을 두며 그
   사실을 경고로 남긴다 — 좁은 다줄 단(신문 단)은 덮고 번역한다. 리포트 키 `raster_blocks_erased`.
+  글자 크기(`fs`)가 없는 블록의 기준 크기는 **원문** 글자로 면적 추정(`estimate_font_size_cqw`)하고,
+  본문(`text`)은 그 쪽 본문 블록 추정의 중앙값을 넘지 않는다 — 예전에는 번역문 길이로 추정해 같은
+  크기로 스캔된 문단이 번역 길이에 따라 8.8–13.3pt로 갈렸다(포맷 버전 18).
 - **리댁션은 줄마다 기준선 띠**: span bbox 대신 MuPDF가 지우는 글리프 상자(폰트 상하단에서
   위아래 10%를 뺀 것)의 가운데 띠(최대 0.5em)를 줄 방향을 따라 지운다 — 10pt/12pt 행간에서
   예전 사각형이 다음 줄을 지우던 문제가 사라졌다. 블록·리스팅·표 셀 경로가 함께 쓴다.
@@ -1035,6 +1038,19 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   동작을 지운다 — 예전에는 그대로 실려 번역 PDF를 연 다른 사용자에게 원본 작성자의 스크립트·
   폼 전송 비컨·실행 유도가 동작했다(감사 security-3). 내부 이동·URI 링크·목차·목적지
   `/OpenAction`은 그대로다. 대조판은 새 문서라 처음부터 없다(포맷 버전 17).
+- **링크 되살리기**(`build._restore_redacted_links`): MuPDF 리댁션은 지우는 영역과 겹친 링크
+  annotation을 페이지 `/Annots`에서 뺀다(객체는 남는다) — 예전에는 번역한 블록 위의 인용·절·URL
+  링크가 그래서 사라졌다(25쪽 논문: 원본 167개 중 17개만 남음). 리댁션 전에 링크와 그 아래 원문
+  (글자 중심 기준, 끝 구두점 제외)을 적어 두고, 번역문을 넣은 뒤 같은 annotation 객체를 다시 단다 —
+  목적지·동작·테두리가 원본 그대로이고, 능동 콘텐츠 제거는 그 뒤 xref 전체를 훑으므로 되단 링크의
+  위험한 동작도 지운다. 인용 번호·URL·그림·표·절 참조는 마스킹돼 번역문에 원문 그대로 나오므로,
+  그 원문이 링크를 지운 블록의 번역문에 링크 수만큼 나오면(숫자 앞뒤에 숫자가 붙은 것은 제외 —
+  '5'가 '52'로, '[5'가 '[53'으로 잡히지 않게) `/Rect`를 그 글자로 옮기고 `/QuadPoints`를 지운다.
+  더 많이 나오면 같은 줄의 바로 앞 단어까지 붙여('Section 4.1'·'[5') 다시 찾고, 그래도 모호하거나
+  못 찾으면(번역된 '정리 1'의 '1') 원래 자리에 둔다. 좌표는 `/Rect`를 `transformation_matrix`로
+  옮긴 비회전 좌표다(`get_links()`의 'from'은 회전 쪽에서 화면 좌표라 글자 추출과 어긋난다).
+  같은 25쪽: 167개 모두 남고, 지워졌던 147개 중 134개가 번역문의 글자 위로 옮겨진다. 빌드 +0.2초
+  (rawdict 한 번씩 — 링크마다 `get_textbox`를 부르면 1.4초가 더 들었다)(포맷 버전 18).
 - 폰트: 원본 span의 실측 크기·굵기·정렬과 `font_style=serif|sans`를 추출한다.
   serif 블록은 시스템 한글 명조(macOS AppleMyungjo, Linux Noto Serif CJK),
   sans 블록은 시스템 한글 고딕에 대응하고 PyMuPDF 내장 CJK(`korea`)로 폴백한다.
@@ -2288,13 +2304,13 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
 
 이 리포에는 산출물 캐시를 무효화하는 **버전 상수가 셋** 있다. 오르면 기존 배포를 올린 뒤
 잡마다 1회씩 아래가 실제로 일어난다. **코드 변경 없이 조용히 일어나므로**, 모르면 "왜 갑자기
-느리고 청구서가 늘었나"가 된다. 0.1.0 이후 사이클에서는 `PDF_EXPORT_FORMAT_VERSION`(→ 17)과
+느리고 청구서가 늘었나"가 된다. 0.1.0 이후 사이클에서는 `PDF_EXPORT_FORMAT_VERSION`(→ 18)과
 `ENRICH_VERSION`(→ 6)이 올랐고 `PROMPT_V`는 그대로다(아래 '이번 업그레이드').
 
 | 상수 | 위치 | 현재 값 | 상향 시 무효화되는 것 | 비용 |
 |---|---|---|---|---|
 | `PROMPT_V` | `translate/types.py` | `"6"` | `translations/{lang}/units.json` **전체**(캐시 키 첫 재료) | **유료 API 전량 재호출** |
-| `PDF_EXPORT_FORMAT_VERSION` | `pipeline/pdf_export/report.py` | `17` | `export.{lang}.pdf`·`.dual.pdf`·`.report.json` | CPU (25쪽 0.33–1.0 s/쪽, CropBox 사본 5.7 s/쪽 — 조건별 실측은 OCR_BENCHMARK §번역 PDF 내보내기, 지금은 export 워커 프로세스) |
+| `PDF_EXPORT_FORMAT_VERSION` | `pipeline/pdf_export/report.py` | `18` | `export.{lang}.pdf`·`.dual.pdf`·`.report.json` | CPU (25쪽 0.33–1.0 s/쪽, CropBox 사본 5.7 s/쪽 — 조건별 실측은 OCR_BENCHMARK §번역 PDF 내보내기, 지금은 export 워커 프로세스) |
 | `ENRICH_VERSION` | `pipeline/pdf_fonts.py` | `6` | `layout.json`의 폰트 메타(`fonts_v`) → 뒤이어 export 캐시 | CPU (재조판) |
 
 표 밖의 `derived._BUILD_STAMP_VERSION`(지금 `2` — §5 `/pdf`의 빌드 스탬프 형식)도 오르면 단일판
@@ -2325,7 +2341,7 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
 
 #### 이번 업그레이드(0.1.0 → 현재)에서 운영자가 보게 되는 것
 
-- **내보내기 캐시 1회 재생성**: `PDF_EXPORT_FORMAT_VERSION` 17과 새 빌드 스탬프(§5 `/pdf` —
+- **내보내기 캐시 1회 재생성**: `PDF_EXPORT_FORMAT_VERSION` 18과 새 빌드 스탬프(§5 `/pdf` —
   옛 `export.{lang}.font.txt`는 스탬프가 아니라 무효), `archive.zip`의 내용 서명 때문에 잡마다
   번역 PDF·대조 PDF·ZIP을 한 번씩 다시 만든다. `ENRICH_VERSION` 6이라 layout 폰트 메타도 잡마다
   한 번 다시 주입된다(회전 페이지 수정).

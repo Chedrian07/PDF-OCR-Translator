@@ -452,7 +452,17 @@ class LocalOpenAIClient:
             raise LlmError(f"Local OpenAI-compatible request failed: {exc}") from exc
 
         data = response.json()
-        message = (data.get("choices") or [{}])[0].get("message") or {}
+        choice = (data.get("choices") or [{}])[0]
+        if choice.get("finish_reason") == "length":
+            # 생성이 max_tokens에서 잘렸다 — thinking이 예산과 함께 차감돼 답이 중간에 끊겼거나,
+            # reasoning을 분리하지 않는 서버(llama.cpp --reasoning-format none, LM Studio 분리
+            # 끔)면 content가 태그 없는 원시 사고일 수 있다. 어느 쪽이든 완전한 답처럼 보여
+            # 주지 않는다 — 원시 chain-of-thought 비노출 계약(translate-11).
+            raise LlmError(
+                f"local-openai answer was cut off at max_tokens ({LOCAL_MAX_TOKENS}); "
+                "turn thinking off or ask a narrower question."
+            )
+        message = choice.get("message") or {}
         raw = message.get("content") or ""
         if isinstance(raw, list):
             raw = "".join(

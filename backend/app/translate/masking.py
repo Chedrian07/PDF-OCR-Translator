@@ -515,6 +515,13 @@ def _numbers_dropped(residual: str, out_text: str) -> bool:
 # 연속 원문 단어열은 8단어 이상 원문에서 최대 39%(참고문헌 표제)다. 80% 이상이 한 덩어리로
 # 같은 순서로 남으면 번역이 아니라 echo다. 8단어 미만 원문은 고유명사·라벨 echo 면제와 같다.
 _ECHO_MIN_SRC_WORDS = 8
+# 출력의 연속을 볼 토큰 — 영단어와, 연속을 끊는 한글 어절. 영단어만 뽑으면 사이에 낀 한글 역어가
+# 사라져 '대규모 언어 모델(large language models), 검색 증강 생성(retrieval augmented …)'처럼
+# 프롬프트 규칙 4의 '역어(원어)' 병기로 옮긴 키워드 목록이 원문 단어 100%의 한 덩어리로 보여
+# echo로 거부됐다(감사 delta-pdf-translate-4). 한국어 메타 문장 사이에 원문을 통째로 넣은 echo는
+# 그 안에 한글이 없어 그대로 잡힌다.
+_ECHO_OUT_TOKEN_RE = re.compile(r"[A-Za-z]{2,}|[가-힣]+")
+_ECHO_BREAK = "\x00"  # 한글 어절 자리 — 어떤 원문 단어와도 같지 않다
 
 
 def _embeds_source_run(src_words: list[str], out_words: list[str]) -> bool:
@@ -604,7 +611,11 @@ def untranslated_reason(src: str, out: str, mapping: dict) -> str:
     # 한국어 메타 문장으로 감싼 원문 echo('…번역하지 않습니다. 문서: <원문> 번역: …')는 한글
     # 비율도 길이비도 통과한다 — 원문 문장이 통째로 남았는지를 따로 본다.
     if len(src_words) >= _ECHO_MIN_SRC_WORDS and _embeds_source_run(
-        src_words, [w.lower() for w in re.findall(r"[A-Za-z]{2,}", out_text)],
+        src_words,
+        [
+            _ECHO_BREAK if "가" <= token[0] <= "힣" else token.lower()
+            for token in _ECHO_OUT_TOKEN_RE.findall(out_text)
+        ],
     ):
         return "echo"
     # 한국어 거부문·한 줄 요약은 한글 비율을 통과하므로 길이비로 잡는다.

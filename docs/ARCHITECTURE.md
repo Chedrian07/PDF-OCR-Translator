@@ -2341,6 +2341,11 @@ httpx만 사용하는 자립 모듈(app.* 임포트 없음, lazy import 원칙�
 프런트는 공급자를 늘 명시해 보내므로 `POST /qa`가 `local-openai`를 받는다. 서버가 꺼져 있으면
 UI가 서버(oMLX·LM Studio·mlx_lm.server)를 켜고 `LLM_LOCAL_OPENAI_BASE_URL`·
 `LLM_LOCAL_OPENAI_MODEL`을 확인하라고 안내한다 — 오류 문구는 URL이 아니라 설정 이름을 적는다.
+프런트의 첫 공급자는 저장값 → 서버 기본(`LLM_PROVIDER`) → 그 밖의 순이되 `available`인 공급자를
+먼저 고른다(`core.pickQaProvider` — `LLM_PROVIDER`를 비운 배포에서 키 없는 `openai-responses`를
+골라 쓸 수 있는 `local-openai`를 두고 첫 질문이 막혔다). Thinking 토글은 사용자가 고른 적이
+없으면 원격 공급자만 켜고 로컬(`remote: false` — Ollama·local-openai)은 끈다(`core.qaThinkingDefault`
+— 로컬 사고 모델은 8192토큰 예산을 사고로 다 써 503이 났다). 고른 값은 localStorage에 남아 그대로다.
 
 ### 17.2 REST 계약 (Q&A)
 

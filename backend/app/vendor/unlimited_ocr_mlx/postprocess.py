@@ -1,8 +1,8 @@
 # Ported from baidu/Unlimited-OCR modeling_unlimitedocr.py (MIT, Copyright (c) 2026 Baidu;
 # 라이선스 전문: ../unlimited_ocr/LICENSE) — torch 벤더의 순수 PIL/regex 후처리와
 # infer()/infer_multi()의 save_results 흐름. [local patch M4] torch-free 분리 + P22 좌표
-# 클램프. torch 벤더 패치 P9(ast.literal_eval)·P13(boxes.json)·P14(raw_pages.json) 포함.
-# 출처·패치 내역: PROVENANCE.md
+# 클램프. torch 벤더 패치 P9(ast.literal_eval)·P13(boxes.json)·P14(raw_pages.json)·
+# P23(페이지 분할) 포함. 출처·패치 내역: PROVENANCE.md
 """det/ref 파싱 → figure 크롭·오버레이 → 마크다운 치환 (torch·mlx 무관, PIL/numpy만).
 
 파일 계약은 torch 경로와 같다(파일 이름·result.md 내용·크롭 픽셀·boxes.json·
@@ -34,6 +34,17 @@ def _dump_raw_pages(output_path, pages) -> None:
             json.dump({"pages": list(pages)}, f, ensure_ascii=False)
     except Exception as e:  # noqa: BLE001 - 레이아웃은 부가 기능 (업스트림 동작 유지)
         logger.warning("raw_pages.json 기록 실패: %s", e)
+
+
+def _split_multi_pages(outputs: str) -> list[str]:
+    """[torch vendor patch P23] infer_multi 출력 → 페이지 원문 목록 (torch와 같은 규칙).
+
+    업스트림 ``outputs.split("<PAGE>")[1:]``는 첫 마커 앞을 늘 버린다 — 모델이 선행 마커를
+    생략하면 1쪽이 result·raw_pages에서 사라지고 뒤 페이지 크롭이 한 칸 앞 래스터
+    (images[page_idx])에서 잘렸다. 앱 merge.split_pages와 같은 규칙: 첫 마커 앞이 공백뿐일
+    때만 버린다(마커가 0개면 출력 전체가 1쪽, 빈 출력이면 0쪽)."""
+    parts = outputs.split("<PAGE>")
+    return parts[1:] if not parts[0].strip() else parts
 
 
 def re_match(text):
@@ -219,7 +230,7 @@ def save_results_single(outputs: str, image, output_path) -> str:
 def save_results_multi(outputs: str, images, output_path) -> str:
     """torch ``infer_multi(save_results=True)`` 후반부 — ``<PAGE>`` 마커로 묶은 마크다운."""
     _ensure_dirs(output_path)
-    pages = outputs.split("<PAGE>")[1:]
+    pages = _split_multi_pages(outputs)  # [torch vendor patch P23]
     _dump_raw_pages(output_path, [p.strip() for p in pages])  # [torch vendor patch P14]
     processed_pages = []
     for page_idx, page_output in enumerate(pages):

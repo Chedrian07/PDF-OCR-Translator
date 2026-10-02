@@ -605,6 +605,59 @@ def test_single_slot_deployment_does_not_prewarm(tmp_path, monkeypatch):
         derived._forget_job_caches(job.id)
 
 
+# ── 테스트 격리: 앞 테스트가 남긴 예열 빌드가 다음 테스트의 예열을 막지 않는다 ─────────
+# 예열은 TestClient보다 오래 사는 데몬 스레드이고 빌드 슬롯은 모듈 전역이다. conftest의
+# _fresh_pdf_export_slots가 없을 때는 CI 러너 속도에서 test_archive_includes_translation의 예열이
+# 예열 몫(기본 1)을 쥔 채 남아, 바로 다음 test_번역이_끝나면_내보내기_PDF를_미리_만들어_둔다의
+# 예열이 조용히 포기하고 실패했다(P4 Linux CI 재현). 아래 두 테스트는 그 순서를 그대로 재현한다.
+_LEFTOVER_WARM: dict = {}
+
+
+def test_a_warm_build_left_running_past_its_test(tmp_path, monkeypatch):
+    """(다음 테스트의 전제) 끝나지 않은 예열 빌드를 남긴 채 끝난다 — 다음 테스트가 정리한다."""
+    from types import SimpleNamespace
+
+    from app.pipeline import derived
+
+    monkeypatch.setenv("PDF_EXPORT_MAX_CONCURRENT", "2")
+    gate = threading.Event()
+    entered: list[str] = []
+    job = _bare_job(tmp_path, "leftover-warm")
+    thread = threading.Thread(
+        target=derived.warm_translated_pdf,
+        args=(job, "ko", SimpleNamespace(pdf_export_font="")),
+        kwargs={"build": _fake_build_factory(gate, entered)},
+        daemon=True,
+    )
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not entered and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert entered == ["leftover-warm"]                 # 예열 몫을 쥐고 빌드 중
+    _LEFTOVER_WARM.update(gate=gate, thread=thread, job=job)
+
+
+def test_the_next_test_still_prewarms_while_a_leftover_warm_build_runs(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.pipeline import derived
+
+    monkeypatch.setenv("PDF_EXPORT_MAX_CONCURRENT", "2")
+    job = _bare_job(tmp_path, "next-test-warm")
+    try:
+        assert derived.warm_translated_pdf(
+            job, "ko", SimpleNamespace(pdf_export_font=""), build=_fake_build_factory(),
+        ) is True, "앞 테스트가 남긴 예열이 예열 몫을 쥐고 있어 새 예열이 포기했다"
+        assert (job.dir / "export.ko.pdf").is_file()
+    finally:
+        derived._forget_job_caches(job.id)
+        gate = _LEFTOVER_WARM.pop("gate", None)
+        if gate is not None:
+            gate.set()
+            _LEFTOVER_WARM.pop("thread").join(10)
+            derived._forget_job_caches(_LEFTOVER_WARM.pop("job").id)
+
+
 # ── concurrency-6: MuPDF 예외도 사용자용 내보내기 오류로 정규화된다 ─────────────
 def _mupdf_failure(*args, **kwargs):
     import pymupdf

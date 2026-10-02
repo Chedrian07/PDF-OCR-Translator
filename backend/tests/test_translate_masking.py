@@ -258,6 +258,20 @@ def test_sanitize_keeps_quotes_and_brackets_the_source_has_after_a_placeholder()
     assert sanitize_translation(f'용어 "{pt}"는 고정이다.', plain, pmap)[1] == 0
 
 
+def test_sanitize_keeps_a_moved_inequality_and_currency_before_retyped_math():
+    """원문 '$x$ > 0'을 모델이 '<m1/>>0'으로 붙여 쓴 것은 꼬리가 아니라 옮긴 부등호다 — 출력의
+    '>'가 원문보다 많을 때만 지운다. 원문 산문에 통화 '$'가 있으면 닫는 '$' 없는 다시 친 식을 고치지
+    않는다(그 '$'가 통화인지 가릴 수 없다)."""
+    ineq, imap = mask("Here $x$ > 0 holds for every sample.")
+    it = re.search(r"<m\d+[^>]*>", ineq).group(0)
+    clean, n = sanitize_translation(f"여기서 {it}>0 이 모든 표본에서 성립한다.", ineq, imap)
+    assert n == 0 and unmask(clean, imap, ineq)[0] == "여기서 $x$>0 이 모든 표본에서 성립한다."
+    priced, pmap = mask(r"It costs $5 and uses \( x_{i} \) per row.")
+    pt = re.search(r"<m\d+[^>]*>", priced).group(0)
+    clean, _ = sanitize_translation(f"비용은 $5 x_{{i}} {pt}를 행마다 쓴다.", priced, pmap)
+    assert unmask(clean, pmap, priced)[0].startswith("비용은 $5 x_{i}")
+
+
 def test_cached_translation_drops_tails_after_restored_math():
     from app.translate.masking import tidy_cached_translation
 

@@ -258,6 +258,9 @@ class _PageContext:
     # 패스마다 `replace()`로 새 컨텍스트를 만들어도 같은 dict를 가리킨다 — 리댁션
     # 전의 원본 페이지에서만 유효하므로 `_process_page`가 계획 직후 비운다.
     analysis: dict = field(default_factory=dict)
+    # 블록이 소유한 인라인 수식 선(분수선·근호 윗선, `_PageVisuals.inline_rules`). 원문
+    # 글리프와 같이 그 블록이 남을 때만 장애물이고, 교체되면 함께 지운다.
+    owned_rules: dict = field(default_factory=dict)
 
     def obstacle_spans(self, exclude: "set[int] | frozenset[int]" = frozenset()):
         """이번 패스에서 **남을** 원문 span들 — 계획의 장애물 집합."""
@@ -266,6 +269,9 @@ class _PageContext:
                 continue
             for span in spans:
                 yield span.rect
+        for owner, rules in self.owned_rules.items():
+            if owner not in self.cleared_indices and owner not in exclude:
+                yield from rules
         for owner, rects in self.residual_spans.items():
             if owner in self.cleared_indices and owner not in exclude:
                 yield from rects
@@ -336,6 +342,9 @@ class _PageVisuals:
     scan_rasters: list = field(default_factory=list)
     # get_image_info() 원본(상자·소프트 마스크 여부) — 이미지에 가려진 span 판정이 쓴다.
     image_infos: list = field(default_factory=list)
+    # 텍스트 블록 안의 인라인 수식 선 — {블록 인덱스: [선 사각형]}(`_inline_rule_owner`).
+    # 장애물(drawing_rects)에서 빠지고, 그 블록이 교체되면 리댁션으로 함께 지운다.
+    inline_rules: dict = field(default_factory=dict)
 
 
 def _page_image_infos(page) -> list:
@@ -447,8 +456,12 @@ def _page_visual_obstacles(
     page_area_all = page.rect.width * page.rect.height or 1.0
     drawing_rects = []
     horizontal_segments: list | None = []
+    # 인라인 수식 선 후보 — 소유 블록은 그림 영역을 안 뒤에 정한다(_inline_rule_owner).
+    rule_candidates: list = []
+    drawings: list = []
     try:
-        for drawing in page.get_drawings():
+        drawings = page.get_drawings()
+        for drawing in drawings:
             # 표 rule 보정용 가로 선분도 같은 순회에서 뽑는다 — 표 블록 × 계획 패스마다
             # 페이지 벡터 목록 전체를 다시 파싱하지 않게.
             horizontal_segments.extend(_drawing_horizontal_segments(drawing))
@@ -456,6 +469,13 @@ def _page_visual_obstacles(
             if bbox is None:
                 continue
             drawing_rect = fitz.Rect(bbox)
+            if _is_inline_rule_shape(drawing):
+                pad = 0.5 + float(drawing.get("width") or 0.0) / 2
+                rule_rect = drawing_rect + (-pad, -pad, pad, pad)
+                rule_rect &= page.mediabox
+                if not rule_rect.is_empty:
+                    rule_candidates.append((fitz.Rect(bbox), rule_rect))
+                continue
             drawing_rect += (-0.5, -0.5, 0.5, 0.5)
             drawing_rect &= page.mediabox
             if drawing_rect.is_empty:
@@ -472,6 +492,7 @@ def _page_visual_obstacles(
     except Exception:  # noqa: BLE001 — 벡터 목록 실패가 텍스트 교체를 막지 않는다
         drawing_rects = []
         horizontal_segments = None
+        rule_candidates = []
     # 그림 위 텍스트 방어용 영역: layout image 블록 ∪ 래스터 인스턴스.
     # 스캔 배경(페이지의 85% 이상을 덮는 래스터 — 띠로 나뉜 스캔이면 그 덩어리, 여백 있는
     # 스캔도 포함: _scan_backgrounds)은 제외한다 — 스캔 문서에서 모든 블록 교체가 생략되는
@@ -496,12 +517,136 @@ def _page_visual_obstacles(
         r for index, r in enumerate(raster_rects)
         if index not in scan_members and 0 < r.width * r.height < page_area * 0.85
     ]
+    inline_rules: dict[int, list] = {}
+    box_edges = _box_edge_candidates(drawings, rule_candidates)
+    for index, (raw_rect, rule_rect) in enumerate(rule_candidates):
+        owner = None
+        if index not in box_edges:
+            owner = _inline_rule_owner(raw_rect, block_rects, oblocks, image_regions)
+        if owner is None:
+            drawing_rects.append(rule_rect)  # 주인 없는 선은 예전처럼 고정 장애물
+        else:
+            inline_rules.setdefault(owner, []).append(rule_rect)
     fixed_visuals = image_regions + drawing_rects
     scan_rasters = [bounds for bounds, _members in backgrounds]
     return _PageVisuals(
         raster_rects, image_regions, fixed_visuals, drawing_rects, horizontal_segments,
-        scan_rasters, image_infos,
+        scan_rasters, image_infos, inline_rules,
     )
+
+
+# ── 인라인 수식 선 ────────────────────────────────────────────────────────────
+# TeX 계열 PDF의 분수선·근호 윗선·\overline은 글리프가 아니라 얇은 가로 선(path)이다.
+# 텍스트 리댁션(LINE_ART_NONE)은 글리프만 지우므로, 그 문단을 번역문으로 바꾸면 원문
+# 수식의 가로줄만 번역문 옆에 떠 있었다. 게다가 고정 장애물로 잡혀 자기 블록 안에서
+# 번역문의 자리를 막아, 들어갈 자리가 있는 번역이 가독성 하한 아래(5–6pt)로 축소됐다
+# (실측: 25쪽 논문 축소 경고 6건 중 5건이 블록 안 선 2–5개). 그래서 블록이 소유한 선은
+# 원문 글리프처럼 다룬다 — 블록이 남으면 장애물, 교체되면 함께 지운다.
+# 가로로 얇고(두께 ≤ 1.5pt) 짧은(1–160pt) 선 하나만 대상이다. 상자·표·도형·긴 구분선은
+# 지금처럼 보존되고, 그림 영역에 걸친 선(QED 상자를 그림으로 본 경우 등)도 건드리지 않는다.
+_INLINE_RULE_MAX_THICKNESS_PT = 1.5
+_INLINE_RULE_MIN_LENGTH_PT = 1.0
+_INLINE_RULE_MAX_LENGTH_PT = 160.0
+# OCR bbox가 줄 끝 글자를 1pt 안쪽에서 자르기도 해서 소유 판정에 두는 여유.
+_INLINE_RULE_OWNER_SLACK_PT = 1.0
+# 상자 판정 — 이 길이 이하의 세로 선 끝점이 가로 선 끝점에서 이 거리 안이면 모서리다.
+_BOX_EDGE_MAX_LENGTH_PT = 30.0
+_BOX_CORNER_TOLERANCE_PT = 1.0
+
+
+def _box_edge_candidates(drawings: list, rule_candidates: list) -> set[int]:
+    """끝점에 짧은 세로 선이 닿는 후보 — 상자(QED □를 선 네 개로 그린 경우)·괄호의 변.
+
+    가로 변만 인라인 수식 선으로 지우면 세로 변만 남은 깨진 상자가 된다 — 이런 선은
+    예전처럼 보존한다. 후보 끝점 주변 1pt 격자만 색인하므로 path가 수십만 개인 차트
+    페이지에서도 메모리는 후보 수에 비례하고, 후보가 없으면 다시 훑지 않는다.
+    """
+    if not rule_candidates:
+        return set()
+    tol = _BOX_CORNER_TOLERANCE_PT
+    cells: dict[tuple[int, int], list[tuple[int, float, float]]] = {}
+    for index, (raw, _rule) in enumerate(rule_candidates):
+        y = (raw.y0 + raw.y1) / 2
+        for x in (raw.x0, raw.x1):
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    cells.setdefault((int(x // 1) + dx, int(y // 1) + dy), []).append((index, x, y))
+    touching: set[int] = set()
+    for drawing in drawings:
+        for item in drawing.get("items") or ():
+            try:
+                if item[0] != "l":
+                    continue
+                start, end = item[1], item[2]
+                height = abs(start.y - end.y)
+                if abs(start.x - end.x) > 0.3 or not 0.5 <= height <= _BOX_EDGE_MAX_LENGTH_PT:
+                    continue
+                points = ((float(start.x), float(start.y)), (float(end.x), float(end.y)))
+            except (AttributeError, IndexError, TypeError, ValueError):
+                continue
+            for px, py in points:
+                for index, x, y in cells.get((int(px // 1), int(py // 1)), ()):
+                    if abs(px - x) <= tol and abs(py - y) <= tol:
+                        touching.add(index)
+    return touching
+
+
+def _is_inline_rule_shape(drawing: dict) -> bool:
+    """도형이 얇고 짧은 가로 선 하나인가(인라인 수식의 분수선·근호 윗선 모양)."""
+    items = drawing.get("items") or ()
+    rect = drawing.get("rect")
+    if len(items) != 1 or rect is None:
+        return False
+    item = items[0]
+    stroke = float(drawing.get("width") or 0.0) if "s" in str(drawing.get("type") or "") else 0.0
+    try:
+        if item[0] == "l":
+            start, end = item[1], item[2]
+            if abs(start.y - end.y) > 0.3:
+                return False
+            thickness = stroke
+        elif item[0] == "re":
+            thickness = abs(item[1].height) + stroke
+        else:
+            return False
+        length = abs(rect.x1 - rect.x0)
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return False
+    return (
+        thickness <= _INLINE_RULE_MAX_THICKNESS_PT
+        and _INLINE_RULE_MIN_LENGTH_PT <= length <= _INLINE_RULE_MAX_LENGTH_PT
+    )
+
+
+def _inline_rule_owner(rule_rect, block_rects, oblocks, image_regions) -> int | None:
+    """선을 담는 내용 있는 교체 가능 블록이 **정확히 하나**면 그 인덱스, 아니면 None.
+
+    글자가 없는 목록 컨테이너('list')는 주인이 아니다 — 안쪽 항목 블록이 주인이다.
+    둘 이상의 문단이 겹쳐 담으면 어느 문단의 수식인지 알 수 없으므로 고정 장애물로 둔다.
+    """
+    if any(rule_rect.intersects(region) for region in image_regions):
+        return None
+    owners = []
+    for index, (rect, block) in enumerate(zip(block_rects, oblocks)):
+        if rect is None or not isinstance(block, dict):
+            continue
+        if str(block.get("type") or "") not in _REPLACEABLE_TYPES:
+            continue
+        if not str(block.get("content") or "").strip():
+            continue
+        grown = +rect
+        grown += (
+            -_INLINE_RULE_OWNER_SLACK_PT, -_INLINE_RULE_OWNER_SLACK_PT,
+            _INLINE_RULE_OWNER_SLACK_PT, _INLINE_RULE_OWNER_SLACK_PT,
+        )
+        if grown.contains(rule_rect):
+            owners.append(index)
+    return owners[0] if len(owners) == 1 else None
+
+
+def _all_owned_rules(ctx: "_PageContext") -> list:
+    """모든 블록의 인라인 수식 선 — 선을 지우지 않는 줄 단위 조판이 피할 장애물."""
+    return [rect for rules in ctx.owned_rules.values() for rect in rules]
 
 
 # image_regions의 85% 규칙과 같은 기준 — 이 비율 이상을 덮는 래스터가 스캔 배경이다.
@@ -939,6 +1084,8 @@ def _plan_text_block(
             for span in spans
         )
         listing_avoid.extend(ctx.fixed_visuals)
+        # 줄 단위 조판은 인라인 수식 선을 지우지 않는다 — 예전처럼 모두 피한다.
+        listing_avoid.extend(_all_owned_rules(ctx))
         listing_avoid.extend(ctx.raster_obstacles(skip={block_index}))
         listing_avoid.extend(
             target.plan.ink_rect
@@ -1322,7 +1469,7 @@ def _plan_flow_components(
                     candidate.listing_segments,
                     candidate.fontname,
                     candidate.fontfile,
-                    obstacles + list(decorative),
+                    obstacles + list(decorative) + _all_owned_rules(ctx),
                     candidate.block_index,
                     bold=candidate.bold,
                 )
@@ -1457,11 +1604,14 @@ def _redact_in_chunks(page, rects, chunk: int = _REDACT_CHUNK, **apply_kwargs) -
         page.apply_redactions(**apply_kwargs)
 
 
-def _apply_page_redactions(fitz, page, targets, raster_rects, raster_covers=()) -> None:
+def _apply_page_redactions(
+    fitz, page, targets, raster_rects, raster_covers=(), rule_rects=(),
+) -> None:
     """원문 텍스트(그리고 이모지의 이미지 절반)만 지운다 — 그래픽은 보존.
 
     `raster_covers`는 `(영역, 바탕색)` 목록이다. 원문이 스캔 픽셀인 교체 블록의
     영역을 바탕색으로 덮는다 — 텍스트 리댁션으로는 지울 수 없는 원문이다.
+    `rule_rects`는 교체한 블록이 소유한 인라인 수식 선(`_PageVisuals.inline_rules`)이다.
     """
     # 2) 원문 텍스트 리댁션 (이미지·그래픽 보존) — 삽입 전에 일괄 적용
     source_rects = []
@@ -1521,6 +1671,18 @@ def _apply_page_redactions(fitz, page, targets, raster_rects, raster_covers=()) 
             page, emoji_boxes,
             images=fitz.PDF_REDACT_IMAGE_REMOVE,
             graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+            text=fitz.PDF_REDACT_TEXT_NONE,
+        )
+    # 2b') 교체한 블록의 인라인 수식 선(분수선·근호 윗선). 글리프가 아니라 선이라 위
+    # 텍스트 리댁션으로는 남는다. 선 자신의 사각형으로만 걸어(REMOVE_IF_COVERED) 그 선
+    # 말고는 아무 도형도 덮이지 않게 하고, 채움은 끈다(바탕이 흰색이 아닐 수 있다).
+    rules = list(rule_rects)
+    for start in range(0, len(rules), _REDACT_CHUNK):
+        for rect in rules[start:start + _REDACT_CHUNK]:
+            page.add_redact_annot(rect, fill=False)
+        page.apply_redactions(
+            images=fitz.PDF_REDACT_IMAGE_NONE,
+            graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
             text=fitz.PDF_REDACT_TEXT_NONE,
         )
     # 2c) 스캔 픽셀 덮기. 리댁션의 채움(fill)은 적용 시 페이지 내용 맨 위에 그려지고,
@@ -1993,6 +2155,7 @@ def _process_page(
         drawing_visuals=visuals.drawing_rects,
         raster_blocks=_raster_backed_blocks(block_rects, oblocks, source_records, visuals),
         analysis={"horizontal_segments": visuals.horizontal_segments},
+        owned_rules=visuals.inline_rules,
     )
     try:
         targets, repeated_scheme_link_rects = _plan_until_consistent(base_ctx, result)
@@ -2018,8 +2181,15 @@ def _process_page(
             f"p{pno}: 블록 {index + 1}의 원문 픽셀이 이웃 그림·보존 블록과 겹쳐 덮지 못함 — "
             "번역이 원문과 겹쳐 보일 수 있음"
         )
+    # 통째로 교체된(flow) 텍스트 블록의 인라인 수식 선은 원문 글리프와 함께 지운다.
+    # 줄 단위 리스팅은 남는 줄이 있을 수 있어 지금처럼 둔다.
+    replaced_blocks = sorted({
+        target.block_index for target in targets
+        if target.kind == "text" and target.block_index in visuals.inline_rules
+    })
     _apply_page_redactions(
         fitz, page, targets, visuals.raster_rects, list(zip(erase_regions, erase_fills)),
+        rule_rects=[rect for index in replaced_blocks for rect in visuals.inline_rules[index]],
     )
     result.raster_blocks_erased += len({
         target.block_index for target in targets

@@ -8,7 +8,8 @@ import {
 } from './core.js';
 import { el, state } from './state.js';
 import {
-  applyRetryLock, h, localGet, localSet, lockRetry, retryLockRemaining, safeParse, showToast,
+  applyRetryLock, h, localGet, localSet, lockRetry, retryLockRemaining, safeParse, setTrustedHtml,
+  showToast, typesetMath,
 } from './ui.js';
 import { apiGet } from './api.js';
 
@@ -164,9 +165,21 @@ export function setQaMessageError(node, message) {
 
 // 응답 도착 — 로딩 말풍선을 답변 + 메타 한 줄(공급자 · 모델 · effort)로 교체,
 // reasoning summary가 있으면 접힌 <details>로 덧붙인다.
+// 답변은 마크다운·TeX로 온다 — 서버가 /html과 같은 안전 렌더러로 만든 조각(answer_html: 텍스트
+// 이스케이프, 이미지는 잡 파일만)을 붙이고 수식은 KaTeX로 조판한다. 예전에는 '**TURBOQUANT**'·
+// '$$D…$$'가 글자 그대로 보였다. 조각이 없으면(구 서버) 원문 글자 그대로.
 export function renderQaAnswer(node, d) {
   node.classList.remove('loading');
-  node.textContent = String(d.answer || '');
+  const html = typeof d.answer_html === 'string' ? d.answer_html : '';
+  if (html) {
+    node.textContent = '';
+    const body = h('div', { class: 'qa-answer markdown-body' });
+    setTrustedHtml(body, html);
+    typesetMath(body);
+    node.appendChild(body);
+  } else {
+    node.textContent = String(d.answer || '');
+  }
   const meta = [qaProviderLabel(d.provider || state.qaProvider), d.model, d.reasoning_effort]
     .filter((x) => typeof x === 'string' && x)
     .join(' · ');

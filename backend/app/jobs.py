@@ -761,6 +761,7 @@ class Worker(threading.Thread):
         settings: "Settings",
         cancel_events: dict[str, threading.Event],
         load_state: dict | None = None,
+        stop_requested: "Callable[[], bool] | None" = None,
     ) -> None:
         super().__init__(name="ocr-worker", daemon=True)
         self.store = store
@@ -781,6 +782,11 @@ class Worker(threading.Thread):
         # current_job_id가 None에서 잡으로 바뀌지 않는다(앱 종료가 이 값을 믿고 판단한다).
         self._stopping = False
         self._state_lock = threading.Lock()
+        # 서버의 종료 신호(main.ShutdownSignal — 신호 처리기가 락 없이 세운다)를 읽는 함수.
+        # uvicorn은 신호 뒤 연결 정리(drain)를 마친 다음에야 lifespan 종료(stop())를 부른다 —
+        # 그 사이 실행 중 잡이 끝나면 다음 대기 잡을 맡아, 프로세스와 함께 죽은 그 잡이 다음
+        # 기동에 '서버 재시작으로 중단' 오류가 됐다(감사 delta-api-frontend-infra-3).
+        self._stop_requested = stop_requested
 
     def _settings_for(self, job: Job) -> "Settings":
         """이 잡을 실행할 설정 — 페이지 구분자는 잡에 고정된 값을 쓴다(재시작으로 다시
@@ -843,7 +849,11 @@ class Worker(threading.Thread):
         while True:
             job_id = self._queue.get()
             with self._state_lock:
-                if job_id is None or self._stopping:
+                # 종료 신호를 받았으면 대기 잡을 맡지 않는다 — 제출 표식이 meta에 남아 다음
+                # 기동이 다시 제출한다(stop()과 같은 규칙, 신호 시점부터 적용)
+                if job_id is None or self._stopping or (
+                    self._stop_requested is not None and self._stop_requested()
+                ):
                     return
                 self.current_job_id = job_id
             # 잡 단위 예외 방벽 — execute_job이나 마감 경로(store.save의 OSError 등)에서

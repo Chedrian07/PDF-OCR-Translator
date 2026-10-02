@@ -39,8 +39,8 @@ import { submitQaQuestion, updateQaProviderControls } from './js/qa.js';
 import {
   applyReaderZoom, cancelReaderJump, captureReaderSelection, copyReaderNotes,
   downloadPdfWithReport, exportReaderNotes,
-  highlightReaderSelection, onReaderPaneScroll, onReaderRailScroll, onReaderStackError,
-  onReaderStackLoad, openReaderQa, previewReaderBlock, readerIsActive, readerTotal,
+  highlightReaderSelection, onReaderNotesStorage, onReaderPaneScroll, onReaderRailScroll,
+  onReaderStackError, onReaderStackLoad, openReaderQa, previewReaderBlock, readerIsActive, readerTotal,
   readerViewportFocus, readerZoomBy, remeasureReaderWithAnchor, renderReaderPage,
   saveReaderCitation, setReaderActiveBlock, setReaderPage, setReaderSync,
 } from './js/reader.js';
@@ -228,6 +228,8 @@ function init() {
   // 저장한 인용·하이라이트 — Markdown 복사/파일 내보내기
   el.readerNotesCopy.addEventListener('click', copyReaderNotes);
   el.readerNotesExport.addEventListener('click', exportReaderNotes);
+  // 같은 잡을 연 다른 탭이 메모를 바꾸면 목록·하이라이트를 저장소에 맞춘다(frontend-1).
+  window.addEventListener('storage', onReaderNotesStorage);
   el.readerTranslateBtn.addEventListener('click', startTranslate); // 기존 번역 시작 경로에 위임
   el.readerContent.addEventListener('mouseup', captureReaderSelection);
   el.readerContent.addEventListener('keyup', captureReaderSelection);

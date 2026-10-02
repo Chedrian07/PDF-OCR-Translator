@@ -134,3 +134,56 @@ def test_links_away_from_replaced_text_are_left_alone(tmp_path):
     (link, _text), = _exported_links(result.path)
     assert link["uri"] == "https://example.org/far"
     assert tuple(fitz.Rect(link["from"])) == pytest.approx(tuple(far), abs=0.05)
+
+
+def test_number_only_links_keep_their_own_reference_when_the_translation_reorders(tmp_path):
+    """'Figure 3'과 'Section 3'의 '3'에만 걸린 링크 둘 — 번역이 둘의 순서를 바꾸면 원문 '3'만으로
+    순서대로 짝지은 링크가 서로의 목적지로 뒤바뀌었다(리뷰). 앞 단어까지 붙여 찾는다."""
+    src = "As shown in Figure 3, the method of Section 3 works well in practice."
+    job_dir = _unit_job(tmp_path, src_text=src)
+    _translate_to(job_dir, "Section 3의 방법은 Figure 3에서 보듯이 실제로 잘 작동한다.")
+    doc = fitz.open(job_dir / "source.pdf")
+    page = doc[0]
+    figure, section = page.search_for("Figure 3")[0], page.search_for("Section 3")[0]
+    for phrase, uri in ((figure, "https://example.org/fig3"), (section, "https://example.org/sec3")):
+        three = [hit for hit in page.search_for("3") if phrase.contains(hit)]
+        page.insert_link({"kind": fitz.LINK_URI, "from": three[0], "uri": uri})
+    doc.saveIncr()
+    doc.close()
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    with fitz.open(result.path) as doc:
+        page = doc[0]
+        targets = {"https://example.org/fig3": page.search_for("Figure 3")[0],
+                   "https://example.org/sec3": page.search_for("Section 3")[0]}
+        links = page.get_links()
+        assert sorted(link["uri"] for link in links) == sorted(targets)
+        for link in links:
+            rect = fitz.Rect(link["from"])
+            center = fitz.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
+            assert targets[link["uri"]].contains(center), (link["uri"], rect)
+
+
+def test_restoring_links_keeps_inline_annotations_in_the_page_array(tmp_path):
+    """/Annots를 문자열로 풀어 다시 쓰면 배열 안의 직접(인라인) annotation 사전이 사라지고 그 /P(쪽)
+    참조가 annotation으로 끼어들었다(리뷰). MuPDF 객체로 링크만 덧붙인다."""
+    job_dir = _unit_job(tmp_path, src_text=SRC_TEXT)
+    _translate_to(job_dir, KO_TEXT)
+    _add_links(job_dir, [{"anchor": "[12]", "kind": fitz.LINK_GOTO, "page": 0, "to": fitz.Point(0, 0)}])
+    doc = fitz.open(job_dir / "source.pdf")
+    page = doc[0]
+    kind, value = doc.xref_get_key(page.xref, "Annots")
+    inline = f"<</Type/Annot/Subtype/Text/Rect[500 780 520 800]/Contents(note)/P {page.xref} 0 R>>"
+    doc.xref_set_key(page.xref, "Annots", value[:-1] + " " + inline + "]")
+    doc.saveIncr()
+    doc.close()
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    with fitz.open(result.path) as doc:
+        page = doc[0]
+        _kind, annots = doc.xref_get_key(page.xref, "Annots")
+        assert "/Subtype/Text" in annots.replace(" ", ""), annots   # 인라인 메모가 남는다
+        assert f"{page.xref} 0 R" not in annots.split("/P")[0], annots  # 쪽 자신이 끼지 않는다
+        assert [link["kind"] for link in page.get_links()] == [fitz.LINK_GOTO]

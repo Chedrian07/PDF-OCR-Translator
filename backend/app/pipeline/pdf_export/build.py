@@ -1620,6 +1620,260 @@ def _hide_visible_link_borders(page) -> None:
             logger.warning("PDF 링크 테두리를 숨기지 못했습니다: xref=%s", xref)
 
 
+# ── 리댁션이 걷어낸 링크 되살리기 ────────────────────────────────────────────────
+# MuPDF 리댁션은 지우는 영역과 겹친 링크 annotation을 페이지 /Annots에서 뺀다(객체는 남는다).
+# 그래서 번역으로 바꾼 블록 위의 인용·절·URL·이메일 링크가 사라졌다(실측 25쪽 논문: 원본 링크
+# 167개 중 17개만 남음). 같은 annotation 객체를 다시 달아 목적지·동작·테두리가 원본 그대로다.
+# 인용 번호·URL·이메일·그림·표·절 참조는 번역 때 마스킹돼 원문 그대로 복원되므로, 링크 아래
+# 원문이 그 블록의 번역문에 같은 수만큼 다시 나오면 클릭 영역을 그 글자로 옮긴다(같은 25쪽:
+# 147개 중 134개). 못 찾거나 모호하면(번역된 '정리 1'의 '1'처럼) 원래 자리에 둔다 — 번역문은
+# 같은 블록 영역에 들어가므로 링크가 없어지는 것보다 낫다. 능동 콘텐츠 정리(strip_active_content)
+# 는 그 뒤 xref 전체를 훑으므로 되단 링크의 위험한 동작도 똑같이 지운다.
+_ANNOT_REF_RE = re.compile(r"(\d+)\s+(\d+)\s+R")
+_PDF_NUMBER_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)")
+# 링크 원문 끝의 구두점 — 'Section 4.1,'의 쉼표는 번역문에서 조사·다른 구두점으로 바뀐다
+_ANCHOR_TRAILING_PUNCT = ",.;:"
+# 링크 바로 앞의 '단어 + 사이 공백' — 'Section 4.1'은 'Section ', '[5,'는 '['
+_ANCHOR_PREFIX_RE = re.compile(r"(\S+\s*)$")
+
+
+@dataclass(frozen=True)
+class _PageLink:
+    """리댁션 전 페이지의 링크 annotation 하나."""
+
+    xref: int
+    gen: int
+    rect: object      # 비회전 페이지 좌표 — get_text·리댁션 사각형과 같은 공간
+    anchor: str = ""  # 그 영역 아래 원문(공백 정규화, 끝 구두점 제외) — 새 자리를 찾는 열쇠
+    prefix: str = ""  # 같은 줄에서 바로 앞 단어 — 번호만 링크인 참조('Section 4.1')용
+
+
+def _page_annot_refs(doc, page) -> list[tuple[int, int]]:
+    """페이지 /Annots의 (xref, 세대) 목록 — 배열이 간접 객체여도 따라간다."""
+    kind, value = doc.xref_get_key(page.xref, "Annots")
+    if kind == "xref":
+        try:
+            value = doc.xref_object(int(value.split()[0]), compressed=True)
+        except Exception:  # noqa: BLE001 — 깨진 참조는 annotation 없음으로 본다
+            return []
+    elif kind != "array":
+        return []
+    return [(int(m.group(1)), int(m.group(2))) for m in _ANNOT_REF_RE.finditer(value)]
+
+
+def _link_annot_rect(fitz, doc, page, xref: int):
+    """링크 annotation의 /Rect를 비회전 페이지 좌표로 — 링크가 아니거나 못 읽으면 None.
+
+    get_links()의 'from'은 회전한 쪽(/Rotate 90·180·270)에서 화면 좌표라 get_text(비회전)와
+    어긋난다. /Rect를 직접 읽어 transformation_matrix로 옮기면 같은 공간이 된다(insert_link가
+    'from'을 /Rect로 바꿀 때 쓰는 변환의 역)."""
+    try:
+        if doc.xref_get_key(xref, "Subtype") != ("name", "/Link"):
+            return None
+        kind, value = doc.xref_get_key(xref, "Rect")
+    except Exception:  # noqa: BLE001 — 지워졌거나 손상된 객체
+        return None
+    numbers = _PDF_NUMBER_RE.findall(value) if kind == "array" else []
+    if len(numbers) != 4:
+        return None
+    rect = fitz.Rect(*(float(n) for n in numbers)) * page.transformation_matrix
+    rect.normalize()
+    return None if rect.is_empty else rect
+
+
+def _target_redaction_rects(target) -> tuple:
+    return target.redact_rects or (
+        target.redact_rect if target.redact_rect is not None else target.plan.rect,
+    )
+
+
+def _link_text_lines(fitz, page) -> list[tuple[object, bool, str, list[tuple[float, ...]]]]:
+    """[(줄 사각형, 가로줄인가, 줄 글자열, 글자별 bbox)] — rawdict 한 번(쪽당 수 ms).
+
+    링크마다 get_textbox를 부르면 매번 페이지 전체 글자를 다시 훑어 25쪽 논문에서 1.4 s가
+    더 들었다."""
+    try:
+        raw = page.get_text("rawdict", flags=(
+            fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_MEDIABOX_CLIP
+        ))
+    except Exception:  # noqa: BLE001 — 글자를 못 읽으면 링크는 원래 자리에 되단다
+        return []
+    out = []
+    for block in raw.get("blocks", ()):
+        for line in block.get("lines", ()):
+            bbox = line.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+            chars = [
+                (str(c.get("c") or " ")[:1] or " ", tuple(c["bbox"]))
+                for span in line.get("spans", ()) for c in span.get("chars", ())
+                if c.get("bbox") and len(c["bbox"]) == 4
+            ]
+            direction = line.get("dir") or (1.0, 0.0)
+            out.append((
+                fitz.Rect(bbox),
+                abs(direction[1]) < 1e-3 and direction[0] > 0,
+                "".join(c for c, _box in chars),
+                [box for _c, box in chars],
+            ))
+    return out
+
+
+def _link_anchor(lines, rect) -> tuple[str, str]:
+    """링크 사각형 안 글자(중심 기준)와, 가로줄이면 같은 줄에서 바로 앞 단어."""
+    parts: list[str] = []
+    prefix = ""
+    for line_rect, horizontal, text, boxes in lines:
+        if not line_rect.intersects(rect):
+            continue
+        centers = [((b[0] + b[2]) / 2, (b[1] + b[3]) / 2) for b in boxes]
+        inside = "".join(
+            c for c, (x, y) in zip(text, centers)
+            if rect.x0 <= x <= rect.x1 and rect.y0 <= y <= rect.y1
+        )
+        if not inside.strip():
+            continue
+        parts.append(inside)
+        if horizontal and not prefix:
+            before = "".join(
+                c for c, (x, y) in zip(text, centers) if x < rect.x0 and rect.y0 <= y <= rect.y1
+            )
+            match = _ANCHOR_PREFIX_RE.search(before)
+            prefix = re.sub(r"\s+", " ", match.group(1)) if match else ""
+    anchor = " ".join(" ".join(parts).split())
+    return (anchor.rstrip(_ANCHOR_TRAILING_PUNCT) or anchor), prefix
+
+
+def _snapshot_page_links(fitz, page, targets) -> list[_PageLink]:
+    """리댁션 전에 페이지의 링크 annotation과, 지워질 링크는 그 아래 원문을 적어 둔다.
+
+    원문은 이번에 지울 블록(targets의 리댁션 사각형)과 겹친 링크만 읽는다."""
+    doc = page.parent
+    links: list[_PageLink] = []
+    for xref, gen in _page_annot_refs(doc, page):
+        rect = _link_annot_rect(fitz, doc, page, xref)
+        if rect is not None:
+            links.append(_PageLink(xref, gen, rect))
+    doomed = [
+        index for index, link in enumerate(links)
+        if any(
+            _rect_overlap_area(link.rect, rect) > 0
+            for target in targets for rect in _target_redaction_rects(target)
+        )
+    ]
+    if doomed:
+        lines = _link_text_lines(fitz, page)
+        for index in doomed:
+            anchor, prefix = _link_anchor(lines, links[index].rect)
+            links[index] = replace(links[index], anchor=anchor, prefix=prefix)
+    return links
+
+
+def _anchor_pattern(text: str) -> str:
+    """원문 조각의 정규식 — 공백은 공백 여럿과, 숫자로 시작·끝나면 이웃 숫자 없이만 맞는다
+    ('5'가 '52'·'15'의 일부로, '[5'가 '[53'의 일부로 잡히지 않게)."""
+    body = r"\s+".join(re.escape(part) for part in text.split())
+    if text[:1].isdigit():
+        body = r"(?<!\d)" + body
+    if text[-1:].isdigit():
+        body += r"(?!\d)"
+    return body
+
+
+def _anchor_hits(fitz, lines, anchor: str, clip, prefix: str = "") -> list:
+    """번역문 줄들에서 원문 조각(anchor)이 나온 자리 — 글자 중심이 clip 안인 것만.
+
+    prefix를 주면 'prefix+anchor'로 찾고 그중 anchor 부분의 사각형을 돌려준다."""
+    pattern = re.compile(
+        (re.escape(prefix.rstrip()) + (r"\s+" if prefix != prefix.rstrip() else "") if prefix else "")
+        + "(" + _anchor_pattern(anchor) + ")"
+    )
+    hits = []
+    for line_rect, _horizontal, text, boxes in lines:
+        if not line_rect.intersects(clip):
+            continue
+        for match in pattern.finditer(text):
+            span = boxes[match.start(1):match.end(1)]
+            if not span:
+                continue
+            hit = fitz.Rect(
+                min(b[0] for b in span), min(b[1] for b in span),
+                max(b[2] for b in span), max(b[3] for b in span),
+            )
+            if clip.contains(fitz.Point((hit.x0 + hit.x1) / 2, (hit.y0 + hit.y1) / 2)):
+                hits.append(hit)
+    return hits
+
+
+def _relocated_link_rects(fitz, page, lost: list[_PageLink], targets) -> dict[int, object]:
+    """되달 링크 중 원문이 그 블록의 번역문에 같은 수만큼 다시 나오는 것의 새 자리 {xref: Rect}.
+
+    링크마다 그 링크를 지운 교체 블록(리댁션 사각형이 겹친 블록)이 정확히 하나일 때만 옮긴다.
+    같은 블록·같은 원문의 링크가 여럿이면 원문과 번역문에서 같은 순서로 짝짓는다. 원문이 번역문에
+    더 많이 나오면 같은 줄의 바로 앞 단어까지 붙여('Section 4.1'·'[5') 다시 찾는다."""
+    groups: dict[tuple[int, str], list[_PageLink]] = {}
+    for link in lost:
+        if not link.anchor:
+            continue
+        owners = [
+            index for index, target in enumerate(targets)
+            if any(_rect_overlap_area(link.rect, rect) > 0 for rect in _target_redaction_rects(target))
+        ]
+        if len(owners) == 1:
+            groups.setdefault((owners[0], link.anchor), []).append(link)
+    if not groups:
+        return {}
+    lines = _link_text_lines(fitz, page)
+    moved: dict[int, object] = {}
+    for (index, anchor), group in groups.items():
+        clip = targets[index].plan.rect
+        hits = _anchor_hits(fitz, lines, anchor, clip)
+        prefixes = {link.prefix for link in group}
+        if len(hits) != len(group) and len(prefixes) == 1 and "" not in prefixes:
+            hits = _anchor_hits(fitz, lines, anchor, clip, prefixes.pop())
+        if len(hits) != len(group):
+            continue
+        for link, hit in zip(
+            sorted(group, key=lambda link: _reading_key(link.rect)), sorted(hits, key=_reading_key),
+        ):
+            moved[link.xref] = hit
+    return moved
+
+
+def _reading_key(rect) -> tuple[float, float]:
+    return (round(rect.y0, 1), rect.x0)
+
+
+def _restore_redacted_links(fitz, page, links: list[_PageLink], targets) -> int:
+    """리댁션이 /Annots에서 뺀 링크 annotation을 다시 단다 — 되단 수."""
+    if not links:
+        return 0
+    doc = page.parent
+    present = _page_annot_refs(doc, page)
+    attached = {xref for xref, _gen in present}
+    lost = [
+        link for link in links
+        if link.xref not in attached and _link_annot_rect(fitz, doc, page, link.xref) is not None
+    ]
+    if not lost:
+        return 0
+    moved = _relocated_link_rects(fitz, page, lost, targets)
+    to_pdf = ~page.transformation_matrix
+    for link in lost:
+        hit = moved.get(link.xref)
+        if hit is None:
+            continue
+        rect = hit * to_pdf
+        rect.normalize()
+        doc.xref_set_key(link.xref, "Rect", f"[{rect.x0:g} {rect.y0:g} {rect.x1:g} {rect.y1:g}]")
+        # 옛 자리의 QuadPoints가 남으면 그것을 따르는 뷰어에서는 클릭 영역이 원래 자리다
+        if doc.xref_get_key(link.xref, "QuadPoints")[0] != "null":
+            doc.xref_set_key(link.xref, "QuadPoints", "null")
+    refs = [*present, *((link.xref, link.gen) for link in lost)]
+    doc.xref_set_key(page.xref, "Annots", "[" + " ".join(f"{x} {g} R" for x, g in refs) + "]")
+    return len(lost)
+
+
 def _redact_in_chunks(page, rects, chunk: int = _REDACT_CHUNK, **apply_kwargs) -> None:
     """리댁션을 나눠 건다 — PyMuPDF의 annot 이름 부여가 페이지당 2차이기 때문.
 
@@ -2227,6 +2481,7 @@ def _process_page(
         target.block_index for target in targets
         if target.kind == "text" and target.block_index in visuals.inline_rules
     })
+    links = _snapshot_page_links(fitz, page, targets)
     _apply_page_redactions(
         fitz, page, targets, visuals.raster_rects, list(zip(erase_regions, erase_fills)),
         rule_rects=[rect for index in replaced_blocks for rect in visuals.inline_rules[index]],
@@ -2237,6 +2492,7 @@ def _process_page(
         and target.block_index not in uncovered
     })
     _insert_page_targets(page, targets, result)
+    _restore_redacted_links(fitz, page, links, targets)
 
 
 _TOUNICODE_BFCHAR_RE = re.compile(

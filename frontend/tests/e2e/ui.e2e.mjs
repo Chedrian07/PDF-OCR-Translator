@@ -1126,6 +1126,20 @@ if (VERIFY_MOCK_LLM) {
   await page.waitForSelector('#production-viewer.is-open');
   await page.waitForFunction(() =>
     document.querySelectorAll('#reader-content .reader-map-card').length > 0);
+  // 결과 아래 details(번역 참고 사항)가 보이는 잡에서 뷰어(aria-modal)를 열어도 뷰어 밖에 Tab으로
+  // 갈 수 있는 요소가 없어야 한다 — 예전에는 그 summary가 inert에서 빠져 포커스가 가려진
+  // 배경으로 샜다(frontend-3).
+  const outsideTabbables = await page.evaluate(() => {
+    const viewer = document.getElementById('production-viewer');
+    const notes = document.getElementById('translate-warnings');
+    const items = [...document.querySelectorAll('a[href],button,input,select,textarea,summary,[tabindex]')]
+      .filter((node) => !viewer.contains(node) && node.tabIndex >= 0 && !node.disabled
+        && !node.closest('[inert]') && node.getClientRects().length > 0)
+      .map((node) => `${node.tagName}#${node.id}`);
+    return { notesVisible: !!notes && !notes.hidden, items };
+  });
+  check('mock 번역 뷰어: 결과 아래 details가 보여도 뷰어 밖에 Tab 이동 가능한 요소가 없다',
+    outsideTabbables.notesVisible && outsideTabbables.items.length === 0, JSON.stringify(outsideTabbables));
   check('mock 번역 뷰어: 오른쪽 한국어 rail + 왼쪽 원문 고정', await page.evaluate(() => {
     const text = document.getElementById('reader-content')?.innerText || '';
     const image = document.getElementById('reader-image')?.getAttribute('src') || '';

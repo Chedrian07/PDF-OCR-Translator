@@ -325,6 +325,30 @@ def _job_render_lock(job_id: str) -> threading.RLock:
         return _FACSIMILE_LOCKS.setdefault(job_id, threading.RLock())
 
 
+# 이 스레드가 쥔 잡 락의 중첩 깊이와, 가장 바깥 락을 놓은 뒤에 할 일(재예열).
+# facsimile 경로는 잡 락을 쥔 채 `_ensure_translated_pdf`를 부른다(RLock 중첩) — 그 안에서
+# 시작한 예열은 대기 0이라 아직 쥐고 있는 바깥 락을 얻지 못하고 즉시 포기했다(감사 pdf-7).
+_HELD_JOB_LOCKS = threading.local()
+
+
+def _held_job_locks() -> dict[str, int]:
+    held = getattr(_HELD_JOB_LOCKS, "depth", None)
+    if held is None:
+        held = _HELD_JOB_LOCKS.depth = {}
+    return held
+
+
+def _after_job_lock(job_id: str, callback) -> None:
+    """이 스레드가 그 잡 락을 쥐고 있으면 가장 바깥 락을 놓은 뒤에, 아니면 바로 `callback`."""
+    if _held_job_locks().get(job_id):
+        pending = getattr(_HELD_JOB_LOCKS, "after", None)
+        if pending is None:
+            pending = _HELD_JOB_LOCKS.after = {}
+        pending.setdefault(job_id, []).append(callback)
+        return
+    callback()
+
+
 @contextlib.contextmanager
 def _job_render_guard(job_id: str):
     """잡 단위 렌더 락 진입 + 사용 수 추적.
@@ -334,26 +358,40 @@ def _job_render_guard(job_id: str):
     사용 중 항목을 버리면 같은 잡에 락이 둘 생겨 중복 빌드가 되살아난다.
 
     획득 순서는 잡 락 → 전역 슬롯을 유지하고(순환 대기 없음), 잡 락 대기도 슬롯과
-    같은 예산 아래 둔다 — 예전에는 무한 대기라 동시 K건의 대기가 K배로 누적됐다."""
+    같은 예산 아래 둔다 — 예전에는 무한 대기라 동시 K건의 대기가 K배로 누적됐다.
+
+    가장 바깥 락을 놓은 뒤에는 그 안에서 미뤄 둔 일(`_after_job_lock` — 재예열)을 한다."""
     with _FACSIMILE_LOCKS_GUARD:
         lock = _FACSIMILE_LOCKS.setdefault(job_id, threading.RLock())
         _JOB_LOCK_REFS[job_id] = _JOB_LOCK_REFS.get(job_id, 0) + 1
+    deferred: list = []
     try:
         with export_wait_budget():
             if not _acquire_within_budget(lock.acquire):
                 raise _busy_error()
+            held = _held_job_locks()
+            held[job_id] = held.get(job_id, 0) + 1
             try:
                 yield
             finally:
                 lock.release()
+                held[job_id] -= 1
+                if not held[job_id]:
+                    del held[job_id]
+                    deferred = getattr(_HELD_JOB_LOCKS, "after", {}).pop(job_id, [])
     finally:
-        with _FACSIMILE_LOCKS_GUARD:
-            remaining = _JOB_LOCK_REFS.get(job_id, 1) - 1
-            if remaining > 0:
-                _JOB_LOCK_REFS[job_id] = remaining
-            else:
-                _JOB_LOCK_REFS.pop(job_id, None)
-            _evict_idle_job_locks()
+        try:
+            # 본문이 실패해도(래스터 오류 등) 입력이 바뀐 캐시의 재예열은 한다 — 락은 이미 놓았다.
+            for callback in deferred:
+                callback()
+        finally:
+            with _FACSIMILE_LOCKS_GUARD:
+                remaining = _JOB_LOCK_REFS.get(job_id, 1) - 1
+                if remaining > 0:
+                    _JOB_LOCK_REFS[job_id] = remaining
+                else:
+                    _JOB_LOCK_REFS.pop(job_id, None)
+                _evict_idle_job_locks()
 
 
 def _evict_idle_job_locks() -> None:
@@ -705,12 +743,17 @@ def _ensure_translated_pdf(job, lang: str, settings, *, build=build_translated_p
         # 빌드 도중 번역·레이아웃이 바뀌었다 — 이 요청에는 방금 만든(요청 시점
         # 입력의) PDF를 주되, 캐시는 '낡음'으로 남기고 새 입력으로 다시 예열한다.
         # 잡 락을 놓은 뒤에 부른다: 예열은 대기 0이라 락을 쥔 채 부르면 즉시 포기한다.
+        # 바깥에서 같은 잡 락을 아직 쥐고 있으면(facsimile 경로) 그 락을 놓을 때까지 미룬다.
         logger.info("PDF 빌드 도중 입력이 바뀌어 캐시로 확정하지 않음 — 재예열: %s/%s",
                     job.id, lang)
-        try:
-            warm_translated_pdf_async(job, lang, settings, build=build)
-        except Exception:  # noqa: BLE001 — 재예열 실패가 이미 만든 결과를 깨지 않는다
-            logger.warning("PDF 재예열 시작 실패: %s/%s", job.id, lang, exc_info=True)
+
+        def _rewarm() -> None:
+            try:
+                warm_translated_pdf_async(job, lang, settings, build=build)
+            except Exception:  # noqa: BLE001 — 재예열 실패가 이미 만든 결과를 깨지 않는다
+                logger.warning("PDF 재예열 시작 실패: %s/%s", job.id, lang, exc_info=True)
+
+        _after_job_lock(job.id, _rewarm)
     return result
 
 

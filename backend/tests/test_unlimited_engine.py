@@ -11,6 +11,10 @@
 """
 
 import contextlib
+import json
+import os
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -79,8 +83,6 @@ class _RecordingModel:
 
 
 def _engine(monkeypatch, device: str, **overrides) -> UnlimitedEngine:
-    # metal 생성자는 PYTORCH_ENABLE_MPS_FALLBACK을 setdefault한다 — 테스트 밖으로 새지 않게
-    monkeypatch.setenv("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     settings = Settings(engine="unlimited", device=device, preload_model=False, **overrides)
     engine = UnlimitedEngine(settings)
     engine._tokenizer = _Tokenizer()
@@ -409,3 +411,98 @@ def test_metal_bf16_probe_failure_warns_with_macos_version(monkeypatch, caplog):
     with caplog.at_level("WARNING", logger="app.engine.unlimited"):
         assert unlimited_mod._resolve_dtype("metal", "auto") is torch.float32
     assert "macOS 26.6.2" in caplog.text and "프로브가 실패" in caplog.text
+
+
+# ── MPS CPU 폴백 env는 torch 첫 임포트 전에 (audit torch-3) ──
+
+# 하위 프로세스 공통 준비 — darwin으로 간주해 Linux CI에서도 같은 경로를 탄다. mlx는 미설치처럼
+# 막고, torch는 가짜 모듈(CUDA 없음·MPS 있음)로 바꿔 **첫 임포트 시점**의 env를 기록한다.
+# torch는 PYTORCH_ENABLE_MPS_FALLBACK을 라이브러리 로드 때 한 번만 읽으므로 그 시점 값이
+# 실제 폴백 여부다(실측: 임포트 뒤에 설정하면 linalg.eig(mps)가 NotImplementedError).
+_ISOLATED_PRELUDE = '''
+import importlib.abc, importlib.machinery, json, logging, os, sys, types
+sys.platform = "darwin"
+seen, warned = [], []
+
+
+class _Capture(logging.Handler):
+    def emit(self, record):
+        if record.levelno >= logging.WARNING and "PYTORCH_ENABLE_MPS_FALLBACK" in record.getMessage():
+            warned.append(record.getMessage())
+
+
+logging.getLogger("app.engine.unlimited").addHandler(_Capture())
+
+
+class _StubTorch(importlib.abc.Loader):
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module):
+        seen.append(os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK"))
+        module.cuda = types.SimpleNamespace(is_available=lambda: False)
+        module.backends = types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: True))
+
+
+class _Finder(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name == "mlx" or name.startswith("mlx."):
+            raise ImportError("test: mlx 미설치")
+        if name == "torch":
+            return importlib.machinery.ModuleSpec("torch", _StubTorch())
+        return None
+
+
+sys.meta_path.insert(0, _Finder())
+'''
+
+
+def _run_isolated(code: str) -> dict:
+    env = {k: v for k, v in os.environ.items() if k != "PYTORCH_ENABLE_MPS_FALLBACK"}
+    env["DISABLE_DOTENV"] = "1"
+    proc = subprocess.run(
+        [sys.executable, "-c", _ISOLATED_PRELUDE + code],
+        cwd=Path(__file__).resolve().parents[1], env=env,
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_auto_metal_path_sets_mps_fallback_before_torch_is_first_imported():
+    """mlx가 없는 Mac의 OCR_DEVICE=auto: registry가 엔진을 만들기 **전에** torch로 CUDA·MPS를
+    조회한다 — 엔진 생성 시 setdefault는 늦어 문서화된 안전망이 조용히 꺼졌다."""
+    out = _run_isolated(
+        "from app.config import Settings\n"
+        "from app.engine.registry import build_engine\n"
+        "engine = build_engine(Settings(engine='unlimited', device='auto', preload_model=False))\n"
+        "print(json.dumps({'engine': type(engine).__name__, 'device': engine.device,"
+        " 'seen': seen, 'warned': warned}))\n"
+    )
+    assert out == {"engine": "UnlimitedEngine", "device": "metal", "seen": ["1"], "warned": []}
+
+
+@pytest.mark.parametrize(
+    "preset,device,warns,final",
+    [
+        (None, "metal", True, "1"),  # torch가 env 없이 먼저 로드됨 — 폴백 꺼짐을 알린다
+        (None, "cpu", False, "1"),  # MPS를 쓰지 않는 엔진은 조용히
+        ("0", "metal", False, "0"),  # 운영자가 끈 값은 존중(덮어쓰지 않고 경고도 없음)
+        ("1", "metal", False, "1"),  # 프로세스 env로 켠 경우는 임포트 순서와 무관하게 적용됨
+    ],
+)
+def test_metal_engine_warns_when_torch_was_loaded_without_the_fallback(preset, device, warns, final):
+    out = _run_isolated(
+        f"preset = {preset!r}\n"
+        "if preset is not None:\n"
+        "    os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = preset\n"
+        "import torch  # 엔진 모듈보다 먼저 — 스크립트·도구가 torch를 먼저 올린 경우\n"
+        "from app.config import Settings\n"
+        "from app.engine.unlimited import UnlimitedEngine\n"
+        f"UnlimitedEngine(Settings(engine='unlimited', device={device!r}, preload_model=False))\n"
+        "print(json.dumps({'seen': seen, 'warned': warned,"
+        " 'env': os.environ.get('PYTORCH_ENABLE_MPS_FALLBACK')}))\n"
+    )
+    assert out["seen"] == [preset]
+    assert bool(out["warned"]) is warns
+    assert out["env"] == final

@@ -818,14 +818,29 @@ if (layoutCap !== 'figure_only') {
 
   await notePage.click('.reader-tools-wrap > summary');
   const deleteButtons = notePage.locator('#reader-notes-list li .reader-note-del');
+  // 키보드로 지우면 포커스가 남은 메모의 삭제 버튼으로 옮겨 간다 — 예전에는 목록을 통째로 다시
+  // 만들어 body로 날아갔다(frontend-6).
+  await deleteButtons.first().focus();
+  await notePage.keyboard.press('Enter');
+  const focusAfterDelete = await notePage.evaluate(() => ({
+    active: document.activeElement?.className || document.activeElement?.tagName || '',
+    rows: document.querySelectorAll('#reader-notes-list li').length,
+  }));
+  check('삭제(키보드): 포커스가 남은 메모의 삭제 버튼으로 옮겨 간다',
+    focusAfterDelete.rows === 1 && /reader-note-del/.test(focusAfterDelete.active),
+    JSON.stringify(focusAfterDelete));
   for (let i = 0; i < 5 && await deleteButtons.count(); i += 1) await deleteButtons.first().click();
   const cleared = await notePage.evaluate((id) => ({
     storage: localStorage.getItem(`uocr-reader-notes-${id}`),
     marks: document.querySelectorAll('#reader-content mark.reader-highlight').length,
     empty: !document.getElementById('reader-notes-empty').hidden,
+    active: document.activeElement?.closest('.reader-tools-wrap > summary') ? 'tools-summary'
+      : (document.activeElement?.tagName || ''),
   }), jobId);
   check('삭제: 저장값·하이라이트·목록이 함께 지워진다',
     cleared.storage === null && cleared.marks === 0 && cleared.empty, JSON.stringify(cleared));
+  check('삭제: 마지막 메모를 지우면 포커스가 [선택 문장 도구] 제목으로 간다',
+    cleared.active === 'tools-summary', JSON.stringify(cleared));
 
   // (d2) 같은 잡을 두 탭(같은 컨텍스트 = 같은 localStorage)에서 열고 번갈아 저장·삭제해도 서로의
   //      메모를 덮어쓰지 않고, 다른 탭의 변경은 storage 이벤트로 목록에 바로 보인다(frontend-1).

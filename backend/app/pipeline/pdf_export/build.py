@@ -1987,9 +1987,8 @@ def _apply_page_redactions(
     for target in targets:
         # 삽입 bbox가 아래 빈 공간으로 커져도 실제 원문 bbox만 지운다.
         # 확장 사각형 전체를 리댁션하면 인접한 원문 글리프가 함께 사라질 수 있다.
-        target_redactions = target.redact_rects or (
-            target.redact_rect if target.redact_rect is not None else target.plan.rect,
-        )
+        # 링크 되살리기(_snapshot_page_links)도 같은 사각형으로 지워질 링크를 고른다.
+        target_redactions = _target_redaction_rects(target)
         text_rects.extend(target_redactions)
         source_rects.append((
             +(

@@ -308,8 +308,8 @@ class OpenAICompatClient:
         cap = self._cap_bytes()
         self._check_declared(hdrs)
         acc = _StreamAccumulator()
+        lines = _LineBuffer()
         received = 0
-        pending = b""
         for chunk in resp.iter_content(_BODY_CHUNK):
             if abort.is_set():
                 raise _RequestCancelled("번역 요청이 취소되었습니다")
@@ -318,12 +318,10 @@ class OpenAICompatClient:
             received += len(chunk)
             if received > cap:
                 raise self._too_large()
-            pending += chunk
-            *lines, pending = pending.split(b"\n")
-            for line in lines:
-                if acc.feed(line.rstrip(b"\r")):
+            for line in lines.feed(chunk):
+                if acc.feed(line):
                     return acc.body()
-        acc.feed(pending.rstrip(b"\r"))
+        acc.feed(lines.rest())
         acc.feed(b"")  # 마지막 이벤트 경계
         if not acc.complete:
             raise requests.exceptions.ChunkedEncodingError(
@@ -637,6 +635,37 @@ class OpenAICompatClient:
             # 사고만 내고 끝났거나 빈 문자열 — 같은 프롬프트(온도 0)면 같은 결과라 유닛 단위.
             raise TranslateEmptyOutput("번역 API가 빈 응답을 반환했습니다")
         return text, truncated
+
+
+class _LineBuffer:
+    """받은 바이트 조각을 줄 단위로 나눈다(줄 끝 CR 제거) — 전체 비용이 받은 바이트에 선형.
+
+    종전에는 조각마다 누적 버퍼를 새로 이어 붙이고 처음부터 다시 split해, 개행 없는 줄이
+    길어질수록 CPU가 제곱으로 늘었다(8MB에 9초 — 데이터가 계속 와 read timeout도 걸리지
+    않는다, translate-8). 새로 붙은 구간에서만 개행을 찾고, 완성된 줄들은 한 번만 자른다.
+    """
+
+    __slots__ = ("_buf", "_scan")
+
+    def __init__(self) -> None:
+        self._buf = bytearray()
+        self._scan = 0  # 이 위치 앞에는 개행이 없다
+
+    def feed(self, chunk: bytes) -> list[bytes]:
+        buf = self._buf
+        buf += chunk
+        end = buf.rfind(b"\n", self._scan)
+        if end < 0:
+            self._scan = len(buf)
+            return []
+        complete = bytes(buf[:end])
+        del buf[:end + 1]
+        self._scan = len(buf)  # 마지막 개행 뒤 조각에는 개행이 없다
+        return [line.rstrip(b"\r") for line in complete.split(b"\n")]
+
+    def rest(self) -> bytes:
+        """개행으로 끝나지 않은 마지막 줄."""
+        return bytes(self._buf).rstrip(b"\r")
 
 
 class _StreamAccumulator:

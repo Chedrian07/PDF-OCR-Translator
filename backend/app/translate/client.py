@@ -36,6 +36,7 @@ from collections.abc import Callable
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
+from urllib3.exceptions import HTTPError as Urllib3HTTPError
 from urllib3.exceptions import ReadTimeoutError
 
 from .masking import is_degenerate_repetition
@@ -79,6 +80,10 @@ _MAX_TIMEOUT_RETRIES = 1
 _CANCEL_POLL_S = 0.1
 # 본문 수신 조각 크기 — 비스트리밍·SSE 공통. 상한 검사가 이 단위로 점진적으로 걸린다.
 _BODY_CHUNK = 64 * 1024
+# [DONE] 뒤 본문 끝(청크 종료 표시) 소진 상한 — keep-alive 연결을 풀에 돌려주려고 짧게만
+# 읽는다. [DONE] 뒤에도 스트림을 열어 두는 서버에 막히지 않게 시간·바이트를 묶는다.
+_DRAIN_TIMEOUT_S = 1.0
+_DRAIN_MAX_BYTES = 64 * 1024
 # auto 스트리밍을 서버가 거부했다고 보는 상태코드 — 같은 요청을 비스트리밍으로 1회 시도
 _STREAM_REJECTED = frozenset({400, 415, 422})
 
@@ -310,7 +315,8 @@ class OpenAICompatClient:
         acc = _StreamAccumulator()
         lines = _LineBuffer()
         received = 0
-        for chunk in resp.iter_content(_BODY_CHUNK):
+        chunks = resp.iter_content(_BODY_CHUNK)
+        for chunk in chunks:
             if abort.is_set():
                 raise _RequestCancelled("번역 요청이 취소되었습니다")
             if not chunk:
@@ -320,6 +326,7 @@ class OpenAICompatClient:
                 raise self._too_large()
             for line in lines.feed(chunk):
                 if acc.feed(line):
+                    _drain_after_done(resp, chunks, abort)
                     return acc.body()
         acc.feed(lines.rest())
         acc.feed(b"")  # 마지막 이벤트 경계
@@ -796,6 +803,16 @@ def _is_read_timeout(exc: BaseException) -> bool:
     return isinstance(inner, ReadTimeoutError) or "Read timed out" in str(exc)
 
 
+def _response_socket(resp):
+    """응답이 읽고 있는 소켓 — urllib3 내부 속성에 기대므로 못 찾으면 None."""
+    raw = getattr(resp, "raw", None)
+    sock = getattr(getattr(raw, "_connection", None), "sock", None)
+    if sock is None:
+        fp = getattr(getattr(raw, "_fp", None), "fp", None)
+        sock = getattr(getattr(fp, "raw", None), "_sock", None)
+    return sock
+
+
 def _shutdown_socket(resp) -> None:
     """진행 중인 응답의 소켓을 끊는다 — 서버는 다음 토큰 쓰기에서 끊김을 보고 생성을 멈춘다.
 
@@ -804,17 +821,52 @@ def _shutdown_socket(resp) -> None:
     여기서 반납하면 다른 워커가 아직 읽히는 중인 연결을 재사용할 수 있다.
     urllib3 내부 속성에 기대므로 찾지 못하면 조용히 넘어간다(헬퍼가 다음 청크에서 끊는다).
     """
-    raw = getattr(resp, "raw", None)
-    sock = getattr(getattr(raw, "_connection", None), "sock", None)
-    if sock is None:
-        fp = getattr(getattr(raw, "_fp", None), "fp", None)
-        sock = getattr(getattr(fp, "raw", None), "_sock", None)
+    sock = _response_socket(resp)
     if sock is None:
         return
     try:
         sock.shutdown(socket.SHUT_RDWR)
     except OSError:
         pass
+
+
+def _drain_after_done(resp, chunks, abort: threading.Event) -> None:
+    """[DONE] 뒤 남은 본문(청크 종료 표시)을 짧게 읽어 연결을 keep-alive 풀로 돌려준다.
+
+    requests는 본문을 끝까지 읽지 않은 응답을 close()에서 소켓째 닫는다. [DONE]에서 바로
+    반환하면 종료 청크(0\\r\\n\\r\\n)가 소켓에 남아, 원격 HTTPS에서는 유닛 요청마다 TCP+TLS를
+    새로 맺었다(translate-4). 길이가 정해진 keep-alive 본문(chunked·Content-Length)만
+    시도하고, [DONE] 뒤에도 스트림을 열어 두는 서버에 막히지 않게 소켓 읽기 시간과 총
+    시간·바이트를 묶는다. 다 읽지 못하면 종전처럼 연결을 닫을 뿐이다.
+    """
+    raw = getattr(resp, "raw", None)
+    if raw is None:
+        return
+    framed = bool(getattr(raw, "chunked", False)) or getattr(raw, "length_remaining", None) is not None
+    if not framed or "close" in _header(dict(resp.headers), "Connection").lower():
+        return
+    sock = _response_socket(resp)
+    if sock is None:
+        return
+    try:
+        previous = sock.gettimeout()
+        sock.settimeout(_DRAIN_TIMEOUT_S)
+    except OSError:
+        return
+    deadline = time.monotonic() + _DRAIN_TIMEOUT_S
+    drained = 0
+    try:
+        for chunk in chunks:  # 끝까지 돌면 requests가 본문을 다 읽은 것으로 보고 연결을 반납한다
+            drained += len(chunk)
+            if abort.is_set() or drained > _DRAIN_MAX_BYTES or time.monotonic() > deadline:
+                return
+    except (requests.RequestException, OSError, Urllib3HTTPError):
+        return  # 시간 초과·끊김 — 연결은 close()가 닫는다
+    finally:
+        try:
+            sock.settimeout(previous)
+        except OSError:
+            pass
 
 
 def _hopeless_truncation(text: str, user: str) -> str:

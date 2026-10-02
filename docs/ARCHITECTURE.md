@@ -26,7 +26,7 @@
 | 항목 | 내용 |
 |---|---|
 | 모델 | `baidu/Unlimited-OCR`, revision `ee63731b6461c8afcdcc7b15352e7d2ffecc2ead` 고정 |
-| 로딩 | 벤더링된 모델 코드(`backend/app/vendor/unlimited_ocr/`)의 `UnlimitedOCRForCausalLM.from_pretrained()` — `trust_remote_code` 불필요. 커밋 해시로 고정한 리비전은 `local_files_only`로 HF 캐시에서 먼저 읽고, 캐시에 없거나 불완전할 때만 Hub에 묻는다(`app/engine/hf_snapshot.py` — 예전에는 캐시가 완전해도 로드마다 선택 파일 HEAD 6회·API 1회로 huggingface.co에 접속했다). 브랜치·태그 리비전은 갱신을 받도록 예전처럼 Hub에 묻는다 |
+| 로딩 | 벤더링된 모델 코드(`backend/app/vendor/unlimited_ocr/`)의 `UnlimitedOCRForCausalLM.from_pretrained()` — `trust_remote_code` 불필요. 커밋 해시로 고정한 리비전은 `local_files_only`로 HF 캐시에서 먼저 읽고, 캐시에 없거나 불완전할 때만 Hub에 묻는다(`app/engine/hf_snapshot.py` — 예전에는 캐시가 완전해도 로드마다 선택 파일 HEAD 6회·API 1회로 huggingface.co에 접속했다). 캐시만 보는 시도가 **어떤 예외로든** 실패하면 Hub 호출로 한 번 다시 한다 — 중단된 첫 다운로드(tokenizer.json 누락)는 OSError가 아니라 ImportError(protobuf)·ValueError(trust_remote_code)로 끝나기 때문이다. MLX 경로가 캐시 디렉터리를 바로 쓰는 완전성 판정은 config.json·tokenizer_config.json·토크나이저 본체(tokenizer.json 또는 tokenizer.model)·인덱스의 샤드 전부다. 브랜치·태그 리비전은 갱신을 받도록 예전처럼 Hub에 묻는다 |
 | 단일 이미지 | `model.infer(tokenizer, prompt='<image>document parsing.', ...)` — gundam(1024/640/crop) 또는 base(1024/1024) |
 | PDF/멀티페이지 | `model.infer_multi(tokenizer, prompt='<image>Multi page parsing.', image_files=[...], image_size=1024, max_length=32768, no_repeat_ngram_size=35, ngram_window=1024, save_results=True)` |
 | 페이지 구분 | 출력 텍스트에 `<PAGE>` 마커 |

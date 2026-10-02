@@ -1878,6 +1878,9 @@ layout 블록 하나(여러 줄 블록 포함)와 같을 때만 layout 번역을
   `/viewer/pages?start=N&limit=L&include=alignment` 배치 응답(구버전은 단건
   `/alignment?page={n}` 폴백)의 블록 인덱스와 bbox로 양방향 스크롤을 맞춘다.
   따라서 번역 PDF 재조판 결과가 아니라 OCR 원문의 실제 위치를 항상 가리킨다.
+  표 블록의 원문·번역은 OCR가 낸 표 HTML이다 — 레일 카드는 구조 태그(table·thead·tbody·tfoot·
+  tr·th·td)와 숫자 colspan/rowspan(1~64)만 읽어(`core.splitHtmlTables`) innerHTML 없이 새 표로
+  그리고, 그 밖의 태그는 셀 글자로 남긴다(예전에는 `<table><tr><td>…` 문자열이 그대로 보였다).
   페이지 점프·줌·패널 접기·창 리사이즈 때는 `{page,fraction}` 앵커를 새 높이에
   다시 매핑하고, 잡별 마지막 페이지와 연동 설정을 localStorage에 보존한다.
 

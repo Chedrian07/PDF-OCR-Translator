@@ -243,6 +243,14 @@ class OpenAIClient:
         )
 
 
+# 로컬 공급자(Ollama·local-openai)는 HTTP(S)_PROXY·ALL_PROXY 같은 환경 프록시를 따르지 않는다.
+# httpx는 기본(trust_env=True)으로 그 env를 따르고 루프백도 예외로 두지 않아, HF 다운로드용
+# 프록시를 .env에 둔 사내망 배포에서 페이지 원문·질문·LLM_LOCAL_OPENAI_API_KEY가 프록시로
+# 평문 전송됐다 — '루프백·host.docker.internal 전용(온디바이스)' 경계(validate.local_openai_url)가
+# 조용히 깨졌다(감사 security-2). 원격 OpenAIClient는 그대로 env 프록시를 따른다.
+_LOCAL_TRUST_ENV = False
+
+
 class OllamaClient:
     """Client for an explicitly local Ollama server."""
 
@@ -258,7 +266,9 @@ class OllamaClient:
 
     async def models(self) -> list[ModelInfo]:
         try:
-            async with httpx.AsyncClient(timeout=2.5, transport=self.transport) as client:
+            async with httpx.AsyncClient(
+                timeout=2.5, transport=self.transport, trust_env=_LOCAL_TRUST_ENV,
+            ) as client:
                 response = await client.get(f"{self.base_url}/api/tags")
                 response.raise_for_status()
         except (httpx.HTTPError, OSError):
@@ -308,7 +318,9 @@ class OllamaClient:
             "options": {"temperature": 0.1},
         }
         try:
-            async with httpx.AsyncClient(timeout=600, transport=self.transport) as client:
+            async with httpx.AsyncClient(
+                timeout=600, transport=self.transport, trust_env=_LOCAL_TRUST_ENV,
+            ) as client:
                 response = await client.post(f"{self.base_url}/api/chat", json=payload)
                 response.raise_for_status()
         except httpx.ConnectError as exc:
@@ -391,6 +403,7 @@ class LocalOpenAIClient:
         try:
             async with httpx.AsyncClient(
                 timeout=2.5, transport=self.transport, headers=self._headers(),
+                trust_env=_LOCAL_TRUST_ENV,
             ) as client:
                 response = await client.get(f"{self.base_url}/models")
         except (httpx.HTTPError, OSError):
@@ -437,6 +450,7 @@ class LocalOpenAIClient:
         try:
             async with httpx.AsyncClient(
                 timeout=600, transport=self.transport, headers=self._headers(),
+                trust_env=_LOCAL_TRUST_ENV,
             ) as client:
                 response = await client.post(f"{self.base_url}/chat/completions", json=payload)
                 response.raise_for_status()

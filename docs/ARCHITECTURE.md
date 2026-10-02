@@ -2141,6 +2141,11 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
     URL·호스트·쿼리는 쿼리를 가린 서버 로그에만 남긴다(원인 사슬을 끊어 `logger.exception`의
     traceback에도 requests·urllib3 예외의 쿼리가 찍히지 않는다). 엔진이 쓰는 state.json `error`는
     500자 상한이다.
+  - 상류 오류 본문(4xx 미리보기 200자·스트림 오류 이벤트·404 서버 메시지)은 오류 문구로 state.json
+    → 무인증 `/translate/state`·SSE에 실리므로, 게이트웨이가 요청 URL·`Authorization`을 되울려도
+    설정된 API 키·base URL 쿼리 값(인코딩 전후)·userinfo 비밀번호 원문은 `<redacted>`로 가린다 —
+    미리보기를 자르기 **전에** 가리고(경계에 걸친 키의 앞부분 차단) `complete()` 경계에서 한 번 더
+    가린다. 6자 미만 값(테스트 더미·`tenant=x`)은 문구를 망가뜨리므로 가리지 않는다.
 - **Responses `store:false`**: 번역의 Responses 요청도 `store:false`를 싣는다. 서버가 `store`를
   이유로 400/422를 내면 한 번 빼고 다시 보내 그 클라이언트에서 고정하고 경고를 남긴다.
 - **think 정리**: 마지막 `</think>` 뒤만 남긴다(여는 태그가 없어도). 닫히지 않은 선행

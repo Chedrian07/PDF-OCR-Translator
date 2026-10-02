@@ -222,6 +222,46 @@ def test_workers_are_recycled_after_many_tasks(pdf_worker_processes, monkeypatch
     assert pdf_worker.pool_stats()["pools"]["ocr"]["recycled"] == 2
 
 
+def test_peak_rss_is_the_workers_own_high_water_mark(monkeypatch, tmp_path):
+    """Linux의 ru_maxrss는 fork·exec를 넘어 부모의 최댓값을 물려받는다 — 모델을 올린 서버(수 GB)가
+    띄운 워커가 첫 작업부터 1.5GB 상한을 넘은 것으로 보여 작업마다 폐기·재생성됐다(감사
+    infra-docs-1). 워커 자신의 VmHWM을 읽어야 한다."""
+    import resource
+    from types import SimpleNamespace
+
+    status = tmp_path / "status"
+    status.write_text(
+        "Name:\tpython3\nVmPeak:\t  999999 kB\nVmHWM:\t   14336 kB\nVmRSS:\t   12000 kB\n",
+        encoding="ascii",
+    )
+    inherited = 13 * 1024 * 1024  # 13GB(Linux ru_maxrss 단위 KB) — 부모에게서 물려받은 값
+    monkeypatch.setattr(resource, "getrusage", lambda _who: SimpleNamespace(ru_maxrss=inherited))
+    monkeypatch.setattr(pdf_worker, "_PROC_STATUS", str(status))
+    assert pdf_worker._peak_rss_bytes() == 14336 * 1024
+    # procfs가 없으면 ru_maxrss — 기동 시점 값(물려받은 몫)을 넘지 않았으면 이 워커의 값이 아니다
+    monkeypatch.setattr(pdf_worker, "_PROC_STATUS", str(tmp_path / "missing"))
+    monkeypatch.setattr(pdf_worker, "_START_MAXRSS", pdf_worker._ru_maxrss_bytes())
+    assert pdf_worker._peak_rss_bytes() == 0
+    monkeypatch.setattr(pdf_worker, "_START_MAXRSS", 1024)
+    assert pdf_worker._peak_rss_bytes() == pdf_worker._ru_maxrss_bytes() > 1024
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="ru_maxrss 상속은 Linux 커널 동작")
+def test_workers_spawned_by_a_big_parent_are_reused(pdf_worker_processes, monkeypatch):
+    """부모의 최대 RSS가 교체 기준을 넘어도 워커가 작업마다 교체되지 않는다(1.5GB를 할당하지
+    않고 기준을 부모 최댓값 바로 아래로 내려 같은 상황을 만든다)."""
+    import resource
+
+    blob = b"\x01" * (256 << 20)  # 부모 최댓값을 워커의 실제 사용량보다 확실히 크게
+    del blob
+    parent_peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+    monkeypatch.setattr(pdf_worker, "_RECYCLE_RSS_BYTES", parent_peak - (16 << 20))
+    pids = [pdf_worker.run("pdf_worker_tasks:pid", timeout=30) for _ in range(3)]
+    assert len(set(pids)) == 1
+    ocr = pdf_worker.pool_stats()["pools"]["ocr"]
+    assert ocr["spawned"] == 1 and ocr["recycled"] == 0
+
+
 def test_each_task_arms_a_self_destruct_alarm(pdf_worker_processes):
     """부모가 SIGKILL로 사라져도 적대적 작업이 영원히 돌지 않게 — 커널이 끝내는 SIGALRM."""
     remaining = pdf_worker.run("pdf_worker_tasks:alarm_remaining", timeout=5)

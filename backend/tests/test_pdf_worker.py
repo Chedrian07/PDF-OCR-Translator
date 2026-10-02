@@ -473,3 +473,17 @@ def test_workers_do_not_see_credentials(pdf_worker_processes, monkeypatch):
     names = set(pdf_worker.run("pdf_worker_tasks:env_names", timeout=30))
     assert not {"OPENAI_API_KEY", "LLM_OPENAI_API_KEY", "HF_TOKEN", "SOME_DB_PASSWORD"} & names
     assert {"PDF_PAGE_TIMEOUT_S", "PATH"} <= names  # 실행 환경과 노브는 그대로
+
+
+def test_worker_children_do_not_inherit_credentials(pdf_worker_processes, monkeypatch):
+    """지우는 범위는 파이썬 os.environ과 워커가 띄우는 손자 프로세스다(tesseract 등) — 커널의
+    초기 환경 블록(/proc/self/environ)에는 남는다는 것이 문서화된 한계다(감사 security-3)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-for-workers")
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    script = "import os; print(' '.join(sorted(os.environ)))"
+    output = pdf_worker.run(
+        "subprocess:check_output", ([sys.executable, "-c", script],), timeout=30,
+    ).decode()
+    names = set(output.split())
+    assert not {"OPENAI_API_KEY", "HF_TOKEN"} & names
+    assert "PATH" in names

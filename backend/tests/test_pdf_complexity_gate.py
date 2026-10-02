@@ -29,17 +29,18 @@ def _fitz():
     return pymupdf
 
 
-def _form_chain(doc, levels: int, fanout: int) -> int:
+def _form_chain(doc, levels: int, fanout: int, name: str = "X") -> int:
     """리프(사각형 1개)부터 levels단계 — 단계마다 아래 단계를 fanout번 부르는 Form 체인.
-    맨 위 Form의 xref를 돌려준다(펼친 그리기 = fanout^levels)."""
+    맨 위 Form의 xref를 돌려준다(펼친 그리기 = fanout^levels). name은 콘텐츠의 `/name Do`와
+    리소스 키에 똑같이 쓰는 PDF 이름 토큰이다(`#hh` 이스케이프 그대로)."""
     below = None
     for level in range(levels + 1):
         xref = doc.get_new_xref()
         if level == 0:
             stream, resources = b"0 0 1 1 re f", ""
         else:
-            stream = b" ".join([b"q /X Do Q"] * fanout)
-            resources = f"/Resources << /XObject << /X {below} 0 R >> >>"
+            stream = b" ".join([b"q /" + name.encode("ascii") + b" Do Q"] * fanout)
+            resources = f"/Resources << /XObject << /{name} {below} 0 R >> >>"
         doc.update_object(
             xref, f"<< /Type /XObject /Subtype /Form /BBox [0 0 595 842] {resources} >>",
         )
@@ -214,7 +215,9 @@ def test_bombs_hidden_behind_other_entry_points_are_counted(tmp_path, small_limi
 
 def test_escaped_names_and_cycles_are_handled(tmp_path, small_limits):
     fitz = _fitz()
-    # 이름 이스케이프(/X#31 = /X1)로 부른 체인도 센다
+    # ASCII 이스케이프(/X#31 = /X1)로 부른 체인도 센다 — 비ASCII 바이트 이스케이프는 아래
+    # test_non_ascii_escaped_names_are_counted가 따로 본다(ASCII는 어떤 디코딩이든 같아 그
+    # 경로를 운동시키지 못한다 — 감사 isolation-2)
     doc = fitz.open()
     top = _form_chain(doc, 4, 10)
     _page_with_content(doc, b"q /X#31 Do Q", f"<< /XObject << /X1 {top} 0 R >> >>")
@@ -238,6 +241,57 @@ def test_escaped_names_and_cycles_are_handled(tmp_path, small_limits):
     doc.save(cycle)
     doc.close()
     assert probe_pdf(cycle, max_pages=10) == 1
+
+
+# 비ASCII 바이트를 #hh로 이스케이프한 이름 — 콘텐츠의 `/이름 Do`와 리소스 키가 같은 바이트라
+# MuPDF는 그대로 찾아 그린다(실측: 아래 체인 get_drawings 10,000개). 게이트가 두 쪽 이름을
+# 서로 다르게 디코딩하면(콘텐츠 latin-1 · 리소스 키 UTF-8) 호출도 바이트도 0으로 세어 통과시켰다.
+_NON_ASCII_NAMES = pytest.mark.parametrize("name", ["Fm#E9", "Fm#C3#A9", "#FF#FE"])
+_ISOLATION_1 = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "감사 isolation-1(pipeline/pdf_complexity.py): 콘텐츠 이름을 latin-1로, 리소스 키를 "
+        "pdf_to_name(UTF-8·surrogateescape)으로 읽어 비ASCII 이름이 서로 맞지 않는다 — "
+        "그 수정과 함께 이 표식을 지운다"
+    ),
+)
+
+
+@_ISOLATION_1
+@_NON_ASCII_NAMES
+def test_non_ascii_escaped_names_are_counted(tmp_path, small_limits, name):
+    """콘텐츠·리소스 양쪽을 비ASCII 이름으로 부른 10^4회 체인 → 호출 수 게이트가 거부한다."""
+    doc = _fitz().open()
+    top = _form_chain(doc, 4, 10, name)
+    _page_with_content(
+        doc, b"q /" + name.encode("ascii") + b" Do Q", f"<< /XObject << /{name} {top} 0 R >> >>",
+    )
+    path = tmp_path / "non_ascii_chain.pdf"
+    doc.save(path)
+    doc.close()
+    with pytest.raises(ValueError, match="중첩 그리기 호출"):
+        probe_pdf(path, max_pages=10)
+
+
+@_ISOLATION_1
+@_NON_ASCII_NAMES
+def test_content_behind_a_non_ascii_name_is_measured(tmp_path, small_limits, name):
+    """비ASCII 이름 뒤에 숨긴 ~1.5MB 평면 콘텐츠 Form → 콘텐츠 바이트 게이트(1MB)가 거부한다."""
+    doc = _fitz().open()
+    form = doc.get_new_xref()
+    doc.update_object(form, "<< /Type /XObject /Subtype /Form /BBox [0 0 595 842] >>")
+    doc.update_stream(form, b"".join(
+        b"%d %d m %d %d l S\n" % (i % 500, i % 800, i % 500 + 3, i % 800 + 2)
+        for i in range(60_000)
+    ))
+    _page_with_content(
+        doc, b"/" + name.encode("ascii") + b" Do", f"<< /XObject << /{name} {form} 0 R >> >>",
+    )
+    path = tmp_path / "non_ascii_flat.pdf"
+    doc.save(path, deflate=True)
+    doc.close()
+    with pytest.raises(ValueError, match="압축 해제"):
+        probe_pdf(path, max_pages=10)
 
 
 # ── 통과하는 모양 ─────────────────────────────────────────────────────────

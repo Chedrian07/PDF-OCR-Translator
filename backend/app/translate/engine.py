@@ -250,6 +250,9 @@ class _TranslationRun:
     # 대표 메시지. 이전 run의 캐시가 있는 재개 run에서만 미룬다(_may_degrade 참조).
     unverified_rejects: int = 0     # gate_lock으로 보호 (worker 스레드에서 증가)
     unverified_msg: str = ""
+    # 마지막 API 성공 이후 최초 패스가 시간 초과로 끝난 유닛 수(gate_lock으로 보호) —
+    # 성공 없이 임계에 닿으면 엔드포인트 고장으로 보고 잡을 실패시킨다(_note_timeout).
+    timeout_streak: int = 0
     # 이전 run이 남긴 캐시 중 현재 출력 게이트를 통과하지 못해 버리고 다시 번역한 수
     # (gate_lock으로 보호). 종전 코드가 채택·캐시한 루프·잘림 흔적·캔드 응답을 재사용하지
     # 않기 위한 재검증이다(probe:MLX-02 — 재실행해도 같은 손상이 재사용됐다).
@@ -362,9 +365,35 @@ class _TranslationRun:
         # API 왕복 하나가 성공했다 = 엔드포인트·인증·설정은 정상. step-0의 결정적
         # 4xx를 유닛 단위로 강등해도 되는지 판단하는 신호(워커 안에서 즉시 세운다).
         self.progressed.set()
+        with self.gate_lock:
+            self.timeout_streak = 0  # 엔드포인트가 살아 있다 — 연속 시간 초과 집계를 되돌린다
         clean, sc = sanitize_translation(raw)
         restored, missing, dup = unmask(clean, mapping, masked)
         return restored, missing, dup, sc, clean
+
+    def _note_timeout(self, exc: TranslateTimeout) -> None:
+        """최초 패스의 시간 초과 하나를 세고, 성공 없이 임계에 닿으면 잡을 실패시킨다.
+
+        시간 초과가 유닛 단위 거부가 된 뒤로는(TranslateTimeout ⊂ TranslateUnitRejected)
+        첫 성공 뒤 응답을 멈춘 엔드포인트에서도 유닛마다 최초 패스와 분할 반쪽의 시간
+        초과를 모두 태운 뒤 영어 원문으로 done이 됐다 — 기본값이면 유닛당 ~12분, 그동안
+        전역 번역 슬롯도 붙잡는다(translate-2). 최초 패스는 유닛마다 한 번이므로 이 수는
+        '성공 없이 시간 초과로 끝난 서로 다른 유닛 수'다. 유닛 하나가 반쪽까지 멈추는 것은
+        그 유닛의 문제로 보고(래더가 원문 유지로 처리), 동시 실행 한 파도(concurrency개)가
+        모두 멈춰야 엔드포인트 고장으로 본다. 어떤 API 왕복이든 성공하면 _run_pass가 0으로
+        되돌린다.
+        """
+        limit = max(2, self.cfg.concurrency)
+        with self.gate_lock:
+            self.timeout_streak += 1
+            streak = self.timeout_streak
+        if streak >= limit:
+            raise TranslateAPIError(
+                f"번역 API가 응답하지 않습니다 — 성공 없이 유닛 {streak}개가 연속으로 시간"
+                f" 초과됐습니다(TRANSLATE_TIMEOUT_S={self.cfg.timeout_s:g}초). 서버가 멈췄거나"
+                " 대기열이 막혔는지 확인하세요(느린 서버라면 TRANSLATE_TIMEOUT_S를 늘리거나"
+                " TRANSLATE_CONCURRENCY를 줄이세요)"
+            ) from exc
 
     def _accepted(self, src: str, restored: str, missing: list, dup: list, mapping: dict) -> bool:
         """유닛 출력 채택 판정 — 플레이스홀더 정합 + 비어있지 않음 + 출력 측 검증.
@@ -566,6 +595,8 @@ class _TranslationRun:
         except TranslateUnitRejected as e:
             if not self._may_degrade(e):
                 raise
+            if isinstance(e, TranslateTimeout):
+                self._note_timeout(e)  # 성공 없이 임계면 잡 전체 실패(TranslateAPIError)
             rejection = _rejection_reason(e)
             logger.warning("번역 유닛 최초 패스 거부(%s) — 래더로 강등: %s", rejection, u.id)
             restored, missing, dup, sc, clean = "", [], [], 0, ""

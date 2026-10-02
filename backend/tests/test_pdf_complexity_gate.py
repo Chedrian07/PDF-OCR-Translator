@@ -247,17 +247,8 @@ def test_escaped_names_and_cycles_are_handled(tmp_path, small_limits):
 # MuPDF는 그대로 찾아 그린다(실측: 아래 체인 get_drawings 10,000개). 게이트가 두 쪽 이름을
 # 서로 다르게 디코딩하면(콘텐츠 latin-1 · 리소스 키 UTF-8) 호출도 바이트도 0으로 세어 통과시켰다.
 _NON_ASCII_NAMES = pytest.mark.parametrize("name", ["Fm#E9", "Fm#C3#A9", "#FF#FE"])
-_ISOLATION_1 = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "감사 isolation-1(pipeline/pdf_complexity.py): 콘텐츠 이름을 latin-1로, 리소스 키를 "
-        "pdf_to_name(UTF-8·surrogateescape)으로 읽어 비ASCII 이름이 서로 맞지 않는다 — "
-        "그 수정과 함께 이 표식을 지운다"
-    ),
-)
 
 
-@_ISOLATION_1
 @_NON_ASCII_NAMES
 def test_non_ascii_escaped_names_are_counted(tmp_path, small_limits, name):
     """콘텐츠·리소스 양쪽을 비ASCII 이름으로 부른 10^4회 체인 → 호출 수 게이트가 거부한다."""
@@ -273,7 +264,6 @@ def test_non_ascii_escaped_names_are_counted(tmp_path, small_limits, name):
         probe_pdf(path, max_pages=10)
 
 
-@_ISOLATION_1
 @_NON_ASCII_NAMES
 def test_content_behind_a_non_ascii_name_is_measured(tmp_path, small_limits, name):
     """비ASCII 이름 뒤에 숨긴 ~1.5MB 평면 콘텐츠 Form → 콘텐츠 바이트 게이트(1MB)가 거부한다."""

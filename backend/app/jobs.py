@@ -744,6 +744,10 @@ class Worker(threading.Thread):
         # 진행하지 않는 상태)를 관측할 수 있게 한다. worker_alive는 스레드 생존만 본다.
         self.current_job_id: str | None = None
         self._last_beat: float | None = None
+        # 종료 요청(stop) 표식과, 그것과 '잡 맡기'를 한 번에 판정하는 락 — stop() 뒤에는
+        # current_job_id가 None에서 잡으로 바뀌지 않는다(앱 종료가 이 값을 믿고 판단한다).
+        self._stopping = False
+        self._state_lock = threading.Lock()
 
     def _settings_for(self, job: Job) -> "Settings":
         """이 잡을 실행할 설정 — 페이지 구분자는 잡에 고정된 값을 쓴다(재시작으로 다시
@@ -759,6 +763,14 @@ class Worker(threading.Thread):
         self._queue.put(job.id)
 
     def stop(self) -> None:
+        """새 잡을 더 맡지 않게 하고 스레드를 끝낸다 — 진행 중인 잡은 끝까지 둔다.
+
+        큐에 남은 대기 잡은 꺼내지 않는다(제출 표식이 meta에 남아 다음 기동이 다시 제출한다).
+        예전에는 sentinel 앞의 대기 잡을 이어서 맡아, 종료 직후 프로세스가 끝나면 그 잡까지
+        running으로 남아 '서버 재시작으로 중단' 오류가 됐다. 이 호출 뒤 current_job_id는
+        진행 중이던 잡 → None으로만 바뀐다."""
+        with self._state_lock:
+            self._stopping = True
         self._queue.put(None)
 
     def _beat(self) -> None:
@@ -797,8 +809,10 @@ class Worker(threading.Thread):
 
         while True:
             job_id = self._queue.get()
-            if job_id is None:
-                return
+            with self._state_lock:
+                if job_id is None or self._stopping:
+                    return
+                self.current_job_id = job_id
             # 잡 단위 예외 방벽 — execute_job이나 마감 경로(store.save의 OSError 등)에서
             # 예외가 새어 나와도 워커 스레드가 죽으면 안 된다. 죽으면 이후 제출되는
             # 모든 잡이 영구 queued로 남고 프로세스 재시작 외에 복구 수단이 없다.
@@ -812,7 +826,6 @@ class Worker(threading.Thread):
                     # 대기 중에 API가 이미 취소로 마감했다(종료 이벤트도 그쪽이 발행)
                     continue
                 cancel = self.cancel_events.setdefault(job_id, threading.Event())
-                self.current_job_id = job_id
                 self._beat()
                 if job.delete_requested or cancel.is_set():
                     job.mark_finished("canceled", "사용자에 의해 취소되었습니다")

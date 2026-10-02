@@ -114,26 +114,33 @@ export function applyViewerIntent() {
   openViewer({ restore: true });
 }
 
+// 전체 화면 뷰어(aria-modal) 밖의 모든 것을 inert·aria-hidden으로 둔다 — 뷰어에서 body까지
+// 올라가며 각 조상의 형제를 고른다. 예전에는 선택자를 하나씩 나열해, 나중에 생긴 결과 아래
+// details(번역 참고 사항·PDF 생성 리포트)가 빠지고 키보드 포커스가 가려진 배경으로 샜다
+// (frontend-3). 알림(#toast)은 뷰어 위에서도 읽혀야 하므로 남긴다.
+const VIEWER_INERT_SKIP = new Set(['SCRIPT', 'STYLE', 'TEMPLATE', 'LINK', 'META']);
+
 export function setViewerBackgroundInert(on) {
-  for (const node of document.querySelectorAll([
-    '.app-header',
-    '.sidebar',
-    '.job-head',
-    '.job-warnings',
-    '.progress-section',
-    '.live-details',
-    '.error-section',
-    '.result-actions',
-    '.tabs',
-    '.tab-panel:not(#production-viewer)',
-  ].join(','))) {
-    node.inert = on;
-    if (on) {
-      if (!node.hasAttribute('aria-hidden')) node.dataset.viewerAriaHidden = '1';
-      node.setAttribute('aria-hidden', 'true');
-    } else if (node.dataset.viewerAriaHidden) {
-      node.removeAttribute('aria-hidden');
-      delete node.dataset.viewerAriaHidden;
+  if (!on) {
+    for (const node of document.querySelectorAll('[data-viewer-inert]')) {
+      node.inert = false;
+      delete node.dataset.viewerInert;
+      if (node.dataset.viewerAriaHidden) {
+        node.removeAttribute('aria-hidden');
+        delete node.dataset.viewerAriaHidden;
+      }
+    }
+    return;
+  }
+  const root = el.viewerRoot || document.getElementById('production-viewer');
+  for (let node = root; node && node.parentElement && node !== document.body; node = node.parentElement) {
+    for (const sibling of node.parentElement.children) {
+      if (sibling === node || VIEWER_INERT_SKIP.has(sibling.tagName) || sibling.id === 'toast') continue;
+      if (sibling.dataset.viewerInert) continue;
+      sibling.dataset.viewerInert = '1';
+      sibling.inert = true;
+      if (!sibling.hasAttribute('aria-hidden')) sibling.dataset.viewerAriaHidden = '1';
+      sibling.setAttribute('aria-hidden', 'true');
     }
   }
 }

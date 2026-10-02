@@ -1,8 +1,11 @@
 .git/
 .gitignore
 docs/
+# 런타임 잡 데이터 — 루트 실행(data/)과 make dev(backend/에서 실행 → 기본 DATA_DIR이 backend/data:
+# 개발 서버의 실잡 저장소 — 사용자 PDF·번역문, 수 GB 가능). 앱 내장 데이터(backend/app/translate/data)는
+# 이미지에 필요하므로 `**/data/`로 넓히지 않는다.
 data/
-hf-cache/
+backend/data/
 **/__pycache__/
 **/.venv/
 **/node_modules/
@@ -10,18 +13,22 @@ hf-cache/
 **/dist/
 **/build/
 **/_skbuild/
-*.log
-.env
-.env.*
+# 비밀·로그·캐시는 어느 깊이에서든 뺀다 — .dockerignore 패턴은 .gitignore와 달리 컨텍스트 루트
+# 기준이라 `.env`는 루트 .env만 걸렀다(make dev는 backend/에서 backend/.env를 먼저 찾는다).
+# 지금은 BuildKit이 COPY 대상만 보내지만, 레거시 빌더·넓은 COPY에서는 그대로 이미지에 실린다.
+**/hf-cache/
+**/*.log
+**/.env
+**/.env.*
 .env.example
-*.pem
-*.key
-*.p12
-*.pfx
-*.jks
-credentials/
-secrets/
-tmp/
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/credentials/
+**/secrets/
+**/tmp/
 output/
 frontend/tests/e2e/shots/
 # OCR 벤치마크 출력(엔진별 문서 OCR 전문) — 빌드 컨텍스트로도 보내지 않는다

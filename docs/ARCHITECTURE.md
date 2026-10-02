@@ -418,7 +418,8 @@ born-digital PDF에서는 PyMuPDF가 뽑는 텍스트가 **공짜 정답**이다
 `layout.json`도 같은 이유로 청크의 **모든** 페이지를 채운다 — raw_pages.json이 없거나
 페이지 수가 모자라면 빈 블록 페이지로 메워 result.md의 페이지와 1:1을 유지한다.
 텍스트 블록을 한 번도 받지 못한 잡은 아예 `layout.json`을 만들지 않는다 — figure_only
-엔진(OvisOCR2)은 `raw_pages.json`도 쓰지 않고(materializer `write_raw`), 전면 스캔을 처리한
+엔진(OvisOCR2)은 `raw_pages.json`에 좌표를 싣지 않고(materializer `write_raw` — 페이지마다 빈
+원출력만 남겨 merge가 원출력 개수로 페이지 수를 맞춰 본다), 전면 스캔을 처리한
 textlayer 잡도 layout이 생기지 않는다. 판정은 파일 존재가 아니라
 `artifacts.has_usable_layout(job_dir, lang)` — **image 아닌 블록이 하나 이상**인 layout만
 좌표 기능에 쓴다(파일 mtime·크기로 캐시, 1024개). 이전 버전이 만든 image 블록뿐인 layout(옛
@@ -487,7 +488,10 @@ OvisOCR2 잡)도 같은 규칙으로 '레이아웃 없음'이다: `has_layout=fa
   수집만으로 개발 서버의 실행 중 잡이 error로 덮였다).
 - **sidecar 재시작/모델 재로드 대기**: sidecar 엔진은 페이지 요청이 `SidecarUnavailableError`
   (HTTP 503·연결 끊김)로 실패하면 health 캐시를 무효화하고 `wait_until_ready()`로
-  컨테이너 복귀를 기다린 뒤 **그 페이지만 1회 재시도**한다. 기다리지 않으면 재기동 +
+  컨테이너 복귀를 기다린 뒤 **그 페이지만 1회 재시도**한다. 재요청도 503·연결 끊김이면
+  `SidecarRestartLoopError`(`retry_same_page=False`)로 runner 재시도 없이 페이지 격리로 넘기고,
+  페이지별 복구가 그 페이지를 한 번 더 보낼 때는 또 내려가도 기다려 다시 보내지 않는다. 복귀
+  경위는 잡 참고(notices) 한 줄로만 남는다(엔진 `drain_notices`). 기다리지 않으면 재기동 +
   모델 로드 시간 동안의 페이지가 전부 플레이스홀더로 확정된다. 대기 예산
   (`OCR_SIDECAR_MODEL_WAIT_S`)은 장애 한 번에 하나다 — 그 장애의 모든 페이지가 같은 데드라인을
   공유한다. 대기 문구는 health의 `load_retry`·`restarting`으로 첫 로드·로드 재시도·재시작을

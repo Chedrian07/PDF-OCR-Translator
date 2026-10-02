@@ -840,6 +840,11 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   디스크에서 열어도 정상 렌더되고, OCR 텍스트 속 추적·LAN 이미지를 포함한 어떤 외부 요청도
   나가지 않는다(Chromium은 img-src 위반만 기록). KaTeX 옵션은 앱과 같다(maxSize 10,
   maxExpand 1000, strict 'ignore', trust false — `test_layout`이 `constants.js`와 동기화를 고정).
+- 인라인 상한: facsimile은 페이지 PNG 원본 합이 64MB를 넘으면 좌표 텍스트 렌더로 폴백하고,
+  의미 기반은 크롭 인라인 원본 합을 64MB까지만 채운다(`_DOCUMENT_MAX_INLINE_BYTES`) — 그림
+  참조는 비신뢰 마크다운(`![](images/…)`)에서 와 같은 크롭을 수천 번 가리킬 수 있으므로, 상한을
+  넘는 참조는 결측 크롭과 같은 빈 이미지(`data:,`)가 되고 경고 로그가 남는다. 예전에는 참조마다
+  base64 사본을 붙여 1MB 크롭 100번이 140MB 문서·서버 피크 약 500MB였다.
 - 레거시 `/layout.html`은 이 경로로 307 리다이렉트한다.
 
 ### GET /api/jobs/{id}/page/{page}?lang=ko

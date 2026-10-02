@@ -83,6 +83,14 @@ def test_layout_font_estimate_counts_text_between_angle_brackets():
     # 내적 괄호 — 예전에는 'langle y, xrangle'처럼 명령 이름이 그대로 찍혔다
     (r"\( \langle y, x \rangle \)", "⟨ y, x ⟩"),
     (r"\(\left|\langle \boldsymbol{y}, \boldsymbol{x}\rangle\right|^2\)", "|⟨ y, x⟩|²"),
+    # 기호 명령 바로 뒤의 감싸개·분수 — 예전에는 'langley'·'acdotx/y'·'alphaW'처럼 달라붙었다
+    (r"\(\langle\boldsymbol{y},\boldsymbol{x}\rangle\)", "⟨y,x⟩"),
+    (r"\(a\cdot\frac{x}{y}\)", "a·x/y"),
+    (r"\(\alpha\mathbf{W}\)", "αW"),
+    (r"\(\nabla\mathcal{L}\)", "∇L"),
+    # 인자를 받는 명령 뒤의 명령은 인자다 — 끊지 않는다
+    (r"\( \frac\alpha\beta \)", "α/β"),
+    (r"\( \hat\theta \)", "θ\u0302"),
 ])
 def test_plain_text_converts_structural_latex(raw, expected):
     """이름만 남기던 처리('frac1N', 'mathbbR^(d)', '3\\,GB')를 읽을 수 있는 평문으로."""

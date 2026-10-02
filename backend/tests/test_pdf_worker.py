@@ -375,6 +375,67 @@ def test_orphan_worker_temp_dirs_are_swept_once(monkeypatch, tmp_path):
     assert alive.exists()  # 살아 있는 프로세스의 것은 건드리지 않는다
 
 
+def test_worker_scratch_dir_is_fresh_private_and_unpredictable(pdf_worker_processes):
+    """예전에는 워커가 `pdfocr-worker-<풀>-<pid>`를 mkdir(exist_ok=True)로 만들어, 공유 /tmp에서
+    다른 사용자가 그 이름으로 미리 심어 둔 심볼릭 링크를 검사 없이 tempfile 경로로 채택했다
+    (감사 security-4). 부모가 워커마다 mkdtemp로 새로 만들어 넘긴다."""
+    import stat
+    import tempfile
+
+    first = Path(pdf_worker.run("tempfile:gettempdir", timeout=30))
+    prefix = f"pdfocr-worker-ocr-{os.getpid()}-"
+    assert first.parent == Path(tempfile.gettempdir())
+    assert first.name.startswith(prefix) and len(first.name) > len(prefix)  # 임의 꼬리
+    info = first.lstat()
+    assert stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+    assert stat.S_IMODE(info.st_mode) == 0o700
+
+    pdf_worker.shutdown_pools()  # 다음 워커는 새 디렉터리를 받는다 — 이전 것은 지워진다
+    second = Path(pdf_worker.run("tempfile:gettempdir", timeout=30))
+    assert second != first and second.name.startswith(prefix)
+    assert not first.exists()
+
+
+def test_a_planted_or_shared_scratch_path_is_never_adopted(monkeypatch, tmp_path):
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    loot = tmp_path / "attacker-loot"
+    loot.mkdir()
+    link = tmp_path / "pdfocr-worker-export-1-planted"
+    link.symlink_to(loot, target_is_directory=True)
+    shared = tmp_path / "pdfocr-worker-export-1-shared"
+    shared.mkdir(mode=0o755)
+    shared.chmod(0o755)
+    assert pdf_worker._use_scratch_dir(str(link)) is None
+    assert pdf_worker._use_scratch_dir(str(shared)) is None
+    assert tempfile.tempdir == str(tmp_path)  # 그대로다
+    mine = pdf_worker._make_scratch_dir("export")
+    assert mine is not None and mine.parent == tmp_path
+    assert pdf_worker._use_scratch_dir(str(mine)) == mine
+    assert tempfile.tempdir == str(mine)
+
+
+def test_orphan_sweep_leaves_planted_links_alone(monkeypatch, tmp_path):
+    import subprocess
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(pdf_worker, "_SWEPT_SCRATCH", False)
+    finished = subprocess.Popen([sys.executable, "-c", "pass"])
+    finished.wait()
+    target = tmp_path / "victim"
+    (target / "keep").mkdir(parents=True)
+    (tmp_path / f"pdfocr-worker-ocr-{finished.pid}-planted").symlink_to(
+        target, target_is_directory=True,
+    )
+    orphan = tmp_path / f"pdfocr-worker-ocr-{finished.pid}-abc123"
+    (orphan / "font").mkdir(parents=True)
+    pdf_worker._sweep_orphan_scratch()
+    assert not orphan.exists()           # 새 형식(서버 pid-임의)의 고아도 지운다
+    assert (target / "keep").is_dir()    # 심볼릭 링크를 따라가지 않는다
+
+
 def test_workers_do_not_rerun_the_parents_main_script(tmp_path):
     """spawn은 기본적으로 자식에서 부모의 메인 스크립트를 다시 실행한다 — uvicorn 콘솔 스크립트면
     워커마다 uvicorn·click·watchfiles·anyio를 싣고, 가드 없는 스크립트면 자식이 부팅 중 다시

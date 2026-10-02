@@ -126,8 +126,7 @@ docker compose --profile paddle up -d --build paddleocr-vl ocr-paddle  # → htt
 - 모델 로딩 여부는 헤더 배지 또는 `GET /api/health`의 `model_loaded`로 확인.
   같은 응답의 `worker_alive`(잡 처리 스레드 생존) · `worker_job_id`·`worker_progress_age_s`
   (실행 중 잡과 마지막 진행 뒤 경과 초 — 잡이 있는데 계속 늘면 멈춘 것) ·
-  `translate_available` · `qa_available` · `config_warnings`(이 앱이 읽지 않는 `.env` 키)로
-  나머지 구성 상태도 볼 수 있습니다.
+  `translate_available` · `qa_available`로 나머지 구성 상태도 볼 수 있습니다.
 - 한국어 번역·페이지 Q&A를 쓰려면 `cp .env.example .env` 후 키를 설정합니다 — 번역은
   `OPENAI_API_KEY`, Q&A는 **별도의** `LLM_OPENAI_API_KEY`입니다(`.env.example`에서
   주석 처리돼 있으니 `#`을 지우고 값을 넣으세요). 아래 §한국어 번역 · §페이지 Q&A 참조.
@@ -136,6 +135,19 @@ docker compose --profile paddle up -d --build paddleocr-vl ocr-paddle  # → htt
   망가뜨리지 않도록 기동을 거부하니, 스택을 바꿀 때는 먼저 `docker compose stop ocr-cpu`
   처럼 떠 있는 backend를 멈추세요. 로컬(uv) 실행도 같은 `DATA_DIR`로 서버를 둘 띄우거나
   `--workers`를 2 이상으로 줄 수 없습니다.
+- `.env` 값은 `docker-compose.yml`의 `environment:`에 적힌 키로만 컨테이너에 들어가고, `.env`
+  파일 자체는 컨테이너에 없습니다. 그래서 `/api/health`의 `config_warnings`는 Docker에서 늘 빈
+  목록이고, 이 앱이 읽지 않는 키(예: `REASONING_EFFORT`)는 경고 없이 버려집니다. `.env`를
+  고쳤으면 아래 명령으로 키 이름을 점검하세요 — 떠 있는 backend의 판정 코드를 그대로 쓰고 값은
+  출력하지 않습니다(다른 스택이면 `ocr-cpu`를 그 서비스명으로 바꿉니다).
+
+```bash
+docker compose exec -T ocr-cpu python -c '
+import sys
+from dotenv import dotenv_values
+from app.config import unknown_dotenv_key_warnings as check
+print("\n".join(check(dotenv_values(stream=sys.stdin))) or "모르는 키 없음")' < .env
+```
 
 Docker 없이 로컬(uv)로 바로 시작할 수도 있습니다:
 

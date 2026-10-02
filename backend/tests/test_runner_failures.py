@@ -488,6 +488,24 @@ def test_failed_attempt_tensors_are_released_before_the_retry(tmp_path):
     assert engine.retry_alive == [False, False], "재시도 시점에 실패 시도의 텐서가 살아 있다"
 
 
+def test_failed_chunk_tensors_are_released_before_per_page_recovery(tmp_path):
+    """multi가 재시도까지 실패하면(8쪽 prefill OOM) 페이지별 single로 내리는데, 그 전에 실패 시도의
+    텐서를 놓아야 한다. 예외를 쥔 채 복구를 돌리면 traceback이 붙잡은 KV·활성화가 단독 재처리 내내
+    살아 있어 '1쪽씩이면 통과'해야 할 OOM이 재발한다(감사 pipeline-2)."""
+    import gc
+
+    engine = TensorPinningEngine(fail_calls={1, 2})  # multi 최초·재시도 실패 → single 1·2쪽
+    gc.disable()
+    try:
+        job = _run_job(tmp_path, engine, pages=2, pages_per_chunk=2)
+    finally:
+        gc.enable()
+
+    assert job.status == "done"
+    assert engine.calls == 4
+    assert engine.retry_alive == [False] * 4, "단독 재처리 시점에 실패한 multi 시도의 텐서가 살아 있다"
+
+
 def test_final_chunk_errors_do_not_pin_tensors_after_the_job(tmp_path):
     import gc
 

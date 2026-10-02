@@ -2555,8 +2555,10 @@ spawn 방식 상주 워커 프로세스가 이름 붙은 작업(`'모듈:함수'
 - SIGINT는 무시하고(개발 서버 Ctrl+C는 부모가 정리) 로그는 프로세스 이름(`pdf-ocr-1` 등)을 붙여
   stderr로 낸다.
 - **자격 증명 제거**: 이름에 `KEY`·`TOKEN`·`SECRET`·`PASSWORD`·`CREDENTIAL`이 든 환경 변수(번역·
-  Q&A API 키, HF 토큰)를 기동 즉시 `os.environ`에서 지운다 — 워커가 띄우는 자식 프로세스에는
-  키가 가지 않는다. 다만 커널이 보관하는 처음 환경 블록(`/proc/self/environ`)과 같은 사용자가
+  Q&A API 키, HF 토큰)와 값에 키가 실릴 수 있는 변수(`…_URL`·`…_URI` — `OPENAI_BASE_URL` 쿼리·
+  userinfo, `…PROXY` — 프록시 user:pass, `TRANSLATE_EXTRA_BODY`)를 기동 즉시 `os.environ`에서
+  지운다 — PDF 작업은 네트워크를 쓰지 않고, 워커가 띄우는 자식 프로세스에는 키가 가지 않는다
+  (Tesseract는 워커가 아니라 서버 프로세스가 띄운다). 다만 커널이 보관하는 처음 환경 블록(`/proc/self/environ`)과 같은 사용자가
   읽을 수 있는 서버 프로세스의 환경에는 남으므로, 워커가 장악됐다면 키는 노출된 것으로 보고
   교체한다.
 - **임시 파일**: 부모가 워커마다 `mkdtemp`로 `$TMPDIR/pdfocr-worker-<풀>-<서버 pid>-<기동 토큰>-<임의>`

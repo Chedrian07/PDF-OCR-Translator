@@ -228,3 +228,86 @@ def test_backfill_cut_short_by_shutdown_is_not_saved(
     _wait_until(_no_backfill_in_flight)
     assert _stamps(target) == stale
     assert not list(job.dir.glob(".layout.*.tmp"))
+
+
+# ── migration-1: 번역된 옛 잡의 첫 내보내기는 번역 PDF를 한 번만 만든다 ─────────────────
+
+
+def _legacy_translated_job(client, sample_pdf) -> tuple[str, object, list[Path]]:
+    """번역까지 끝난 옛 잡 — layout.json·layout.ko.json 둘 다 구버전 폰트 메타(fonts_v=1)."""
+    jid, job, source = _stale_job(client, sample_pdf)
+    (job.dir / "result.ko.md").write_text(
+        (job.dir / "result.md").read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    translated = job.dir / "layout.ko.json"
+    translated.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    return jid, job, [source, translated]
+
+
+def _count_builds(monkeypatch) -> list[str]:
+    import app.api as api_mod
+
+    real = api_mod.build_translated_pdf
+    builds: list[str] = []
+
+    def _counting(job_dir, lang, **kwargs):
+        builds.append(lang)
+        return real(job_dir, lang, **kwargs)
+
+    monkeypatch.setattr(api_mod, "build_translated_pdf", _counting)
+    return builds
+
+
+def _settle(job) -> None:
+    from app.pipeline import derived
+
+    _wait_until(_no_backfill_in_flight)
+    _wait_until(lambda: (job.id, "ko") not in derived._WARM_INFLIGHT)
+
+
+def _cache_current(client, job) -> bool:
+    from app.pipeline import derived
+
+    font_id = derived._pdf_export_font_id(client.app.state.settings)
+    return derived._translated_pdf_cache(job, "ko", font_id)[0]
+
+
+def test_first_pdf_download_of_a_legacy_job_builds_once(client, sample_pdf, monkeypatch):
+    """업그레이드 직후 '/pdf → 한국어 리더' 순서로 열면 번역 PDF를 두 번 만들었다 — /pdf는
+    폰트 백필 없이 낡은 레이아웃의 지문을 떠서 빌드했고, 뒤이은 리더가 백필로 layout을 바꿔
+    방금 만든 빌드 표식을 무효화해 재예열이 전체를 다시 만들었다(migration-1)."""
+    from app.pipeline.pdf_fonts import ENRICH_VERSION
+
+    jid, job, layouts = _legacy_translated_job(client, sample_pdf)
+    builds = _count_builds(monkeypatch)
+    r = client.get(f"/api/jobs/{jid}/pdf?lang=ko&view=dual")
+    assert r.status_code == 200, r.text
+    for layout in layouts:                     # 빌드 전에 두 입력이 모두 최신 폰트 메타다
+        assert set(_stamps(layout)) == {ENRICH_VERSION}, layout.name
+    assert client.get(f"/api/jobs/{jid}/viewer/pages?lang=ko").status_code == 200
+    assert client.get(f"/api/jobs/{jid}/viewer/pages").status_code == 200
+    _settle(job)
+    assert builds == ["ko"]
+    assert _cache_current(client, job)
+
+
+def test_warm_waits_until_both_layouts_are_backfilled(client, sample_pdf, monkeypatch):
+    """번역 layout의 백필이 먼저 끝나도 원본 layout이 낡았으면 예열하지 않고, 원본 백필이
+    끝날 때 한 번 예열한다. 예전에는 번역 백필이 원본이 낡은 채로 예열해 만든 PDF를 원본
+    백필이 곧 무효화했고, 원본 백필은 예열을 띄우지 않아 다음 /pdf가 다시 만들었다."""
+    import app.api as api_mod
+
+    jid, job, (source, translated) = _legacy_translated_job(client, sample_pdf)
+    builds = _count_builds(monkeypatch)
+    st = client.app.state
+    task = api_mod._start_font_backfill(job, "ko", st, translated)     # 한국어 리더만 연 상태
+    assert task is not None and task.done.wait(30)
+    _settle(job)
+    assert builds == []                        # 원본 layout이 아직 낡았다 — 예열하지 않는다
+    task = api_mod._start_font_backfill(job, None, st, source)         # 원문 리더
+    assert task is not None and task.done.wait(30)
+    _settle(job)
+    assert builds == ["ko"]                    # 두 입력이 최신이 된 뒤 한 번
+    assert _cache_current(client, job)
+    assert client.get(f"/api/jobs/{jid}/pdf?lang=ko").status_code == 200
+    assert builds == ["ko"]                    # 다운로드는 그 캐시를 그대로 쓴다

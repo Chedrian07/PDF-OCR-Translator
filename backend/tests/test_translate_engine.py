@@ -2098,6 +2098,25 @@ def test_이전_실행이_캐시한_지어낸_달러도_재사용할_때_걷어�
     assert out.rstrip() == ko_expected(md).rstrip() + " x"
 
 
+class _TagTailClient(EchoClient):
+    """잘린 수식 미리보기를 본 모델이 태그를 한 번 더 닫는다(실앱 4B: '<m1 v="\\( [50, 6, 1"/>">')."""
+
+    def complete(self, system, user, *, max_tokens):
+        self._count(_marker(user) is not None)
+        src = _marker(user)
+        if src is None:
+            return ""
+        return re.sub(r"(<m\d+\b[^>]*>)", r'\1">', koreanize(src), count=1)
+
+
+def test_태그_뒤에_모델이_덧붙인_꼬리는_결과에_남지_않는다(tmp_path, cfg):
+    """unmask는 '<m1'·'</m1>' 잔여만 봐서 '">' 꼬리는 그대로 통과해 번역 PDF에 'x(i:j) >'가 찍혔다."""
+    md = "Several approaches were proposed \\( [50, 6, 15] \\). They restructure the model.\n"
+    res, _report, out = _run_md(tmp_path, cfg, md, _TagTailClient())
+    assert res.status == "done" and res.kept_original == []
+    assert '">' not in out and "\\( [50, 6, 15] \\)." in out
+
+
 # ── 분할 결합 출력 속의 캔드 응답 (verify_e2e 25쪽 실측) ───────────────────────
 
 class _CannedEverywhere(EchoClient):

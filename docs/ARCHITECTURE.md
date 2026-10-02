@@ -1166,7 +1166,11 @@ auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은
   - `OCR_SDPA=1`(P16)은 옵트인: M4 Max에서 붕괴 없이 15–28% 빨랐지만 출력이 비트 동일하지 않다.
   - 청크 크기에 따른 디코드 속도 차이는 작다(캡 기준 1쪽 약 95, 8쪽 85–90 tok/s) —
     `PAGES_PER_CHUNK`는 Phase 4의 종단 간 재측정 전까지 8을 유지한다.
-- `PYTORCH_ENABLE_MPS_FALLBACK=1`을 엔진 생성 시 `setdefault` — 미구현 op는 CPU 폴백 (안전망)
+- `PYTORCH_ENABLE_MPS_FALLBACK=1`을 macOS에서 torch 엔진 모듈(`engine/unlimited.py`) 임포트 때
+  `setdefault` — 미구현 op는 CPU 폴백 (안전망). torch는 이 값을 첫 `import torch` 때만 읽으므로
+  auto 판정(registry의 torch 조회 — `unlimited_mlx`가 이 모듈을 먼저 임포트한다)보다 먼저 둔다.
+  그보다 먼저 torch를 올린 호출자에서는 적용되지 않아 metal 엔진 생성 때 경고한다. 운영자가 둔
+  값(0 포함)은 덮어쓰지 않는다
 - **메모리**: 청크(infer 호출) 종료마다 `torch.mps.empty_cache()`로 유니파이드 메모리를 반환한다.
   그와 별개로 CPU/ObjC 힙 — MPS가 autorelease로 넘기는 임시 객체 — 은 끝나지 않는 워커 스레드에서
   회수 지점이 없어 생성 토큰당 약 25 KB씩 쌓였다. 디코드 스텝·생성 구간·모델 로드·재시도 전 캐시
@@ -1260,7 +1264,7 @@ auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은
 | `OVIS_MAX_UPLOAD_MB` / `PADDLEOCR_MAX_UPLOAD_MB` | `128` / `128` | (compose → sidecar) `/v1/parse` 페이지 이미지 업로드 상한 |
 | `OVIS_*` / `PADDLEOCR_*` | (sidecar 문서) | (compose → sidecar) 모델 ID·revision·dtype·VRAM·픽셀 상한·디바이스 — `OVIS_MODEL_ID`·`OVIS_MODEL_REVISION`·`OVIS_DTYPE`·`OVIS_GPU_MEMORY_UTILIZATION`·`OVIS_MAX_MODEL_LEN`·`OVIS_MAX_OUTPUT_TOKENS`·`OVIS_MAX_NUM_SEQS`·`OVIS_MIN_PIXELS`·`OVIS_MAX_PIXELS`·`OVIS_GDN_PREFILL_BACKEND`, `PADDLEOCR_MODEL_ID`·`PADDLEOCR_MODEL_REVISION`·`PADDLEOCR_DEVICE`·`PADDLEOCR_MIN_PIXELS`·`PADDLEOCR_MAX_PIXELS` (OVISOCR2_CUDA_5070TI.md·PADDLEOCR_VL_BLACKWELL_5070TI.md·`.env.example`) |
 | `HF_TOKEN` | (빈 값) | (compose) 프라이빗 미러용 Hugging Face 토큰 — 런타임 env로만 전달(빌드 레이어 미포함). PDF 워커는 기동 때 지운다 |
-| `PYTORCH_ENABLE_MPS_FALLBACK` | `1` (엔진이 `setdefault`) | torch MPS 미구현 op의 CPU 폴백 — 안전망(§6) |
+| `PYTORCH_ENABLE_MPS_FALLBACK` | `1` (macOS에서 torch 엔진 모듈이 첫 torch 임포트 전에 `setdefault`) | torch MPS 미구현 op의 CPU 폴백 — 안전망(§6) |
 | `CUDA_LAUNCH_BLOCKING` | (빈 값) | (compose → ocr-cpu·ocr-cuda) CUDA 디버깅용 동기 실행 — 운영에서는 비워 둔다 |
 | `JOB_TTL_DAYS` | `0` | 터미널 잡(done/error/canceled) 자동 GC 보존 일수(0 이상) — `0`=비활성(기본, opt-in). 시작 시 1회 + 6시간 주기 (§15) |
 | `OCR_LANGUAGES` | `eng+kor` | (textlayer) Tesseract 언어 조합 — `tesseract -l` 인자 (§16) |

@@ -338,15 +338,97 @@ class _PageVisuals:
     image_infos: list = field(default_factory=list)
 
 
-def _page_visual_obstacles(fitz, page, block_rects, oblocks) -> _PageVisuals:
-    """래스터 인스턴스·그림 영역·확장 장애물·가로 선분. 리댁션 전에 1회만 수집한다."""
-    # 래스터 인스턴스는 리댁션 '이전'에 1회만 수집한다 — apply_redactions
-    # 이후의 get_image_info()는 스테일 캐시를 반환할 수 있다(실측).
+def _page_image_infos(page) -> list:
+    """페이지의 래스터 인스턴스(get_image_info). 리댁션 '이전'에 1회만 읽는다 —
+    apply_redactions 이후의 get_image_info()는 스테일 캐시를 반환할 수 있다(실측)."""
     try:
-        image_infos = list(page.get_image_info())
-        raster_rects = [fitz.Rect(info["bbox"]) for info in image_infos]
+        return list(page.get_image_info())
     except Exception:  # noqa: BLE001 — 이미지 목록 실패가 텍스트 교체를 막지 않는다
-        image_infos, raster_rects = [], []
+        return []
+
+
+# 여러 장으로 나뉜 스캔(가로 띠·타일)을 한 장으로 본다 — 이 거리 안에서 맞닿거나 겹치는
+# 래스터는 한 덩어리다.
+_SCAN_TILE_GAP_PT = 2.0
+# 덩어리가 자기 bbox를 이만큼 채워야 한 장의 스캔이다(띠 사이 틈·떨어져 놓인 그림 제외).
+_SCAN_FILL_RATIO = 0.9
+# 여백을 두고 놓인 스캔(이미지→PDF 변환기의 인쇄 여백 — 30pt 여백이면 A4의 84%)은 85%
+# 규칙에 걸리지 않는다. 페이지의 이만큼 이상을 채운 덩어리가 레이아웃 그림 블록이 아니고
+# 그 안에 보이는 텍스트가 하나도 없으면 스캔 배경이다.
+_SCAN_MARGIN_FRACTION = 0.5
+
+
+def _scan_backgrounds(fitz, page, raster_rects, block_rects, oblocks, source_records) -> list:
+    """스캔 배경으로 볼 래스터 덩어리 — `(덩어리 bbox, 구성 래스터 인덱스들)` 목록.
+
+    예전에는 래스터 **한 장**이 페이지의 85% 이상일 때만 스캔으로 봤다. 페이지 이미지를
+    가로 띠 여러 장으로 나눠 넣은 스캔과 여백을 두고 놓인 스캔은 그 규칙을 피해 그림으로
+    분류됐고, 모든 블록이 '그림 위 텍스트'로 보존돼 번역이 하나도 들어가지 않았다(감사 pdf-9).
+    맞닿은 래스터를 한 덩어리로 묶어 (a) 덩어리가 페이지의 85% 이상을 채우거나 (b) 50%
+    이상을 채우면서 레이아웃 그림이 아니고 안에 보이는 글자가 없으면 스캔 배경이다.
+    """
+    count = len(raster_rects)
+    if not count:
+        return []
+    parent = list(range(count))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    for first in range(count):
+        grown = +raster_rects[first]
+        grown += (-_SCAN_TILE_GAP_PT, -_SCAN_TILE_GAP_PT, _SCAN_TILE_GAP_PT, _SCAN_TILE_GAP_PT)
+        for second in range(first + 1, count):
+            if grown.intersects(raster_rects[second]):
+                parent[find(first)] = find(second)
+    clusters: dict[int, list[int]] = {}
+    for index in range(count):
+        clusters.setdefault(find(index), []).append(index)
+    page_area = page.rect.width * page.rect.height or 1.0
+    figures = [
+        rect for rect, block in zip(block_rects, oblocks)
+        if rect is not None
+        and isinstance(block, dict)
+        and (str(block.get("type") or "") == "image" or block.get("image"))
+    ]
+    out = []
+    for members in clusters.values():
+        bounds = +raster_rects[members[0]]
+        for index in members[1:]:
+            bounds.include_rect(raster_rects[index])
+        area = bounds.width * bounds.height
+        if area <= 0:
+            continue
+        filled = sum(raster_rects[i].width * raster_rects[i].height for i in members)
+        if min(1.0, filled / area) < _SCAN_FILL_RATIO:
+            continue
+        if area >= page_area * _SCAN_RASTER_FRACTION:
+            out.append((bounds, members))
+            continue
+        if area < page_area * _SCAN_MARGIN_FRACTION:
+            continue
+        if sum(_rect_overlap_area(bounds, figure) for figure in figures) >= area * 0.5:
+            continue                          # 레이아웃이 그림으로 본 큰 이미지
+        if any(
+            span.visible and bounds.contains((span.rect.tl + span.rect.br) / 2)
+            for span in source_records
+        ):
+            continue                          # 이미지 위·옆에 보이는 글자가 있는 born-digital 쪽
+        out.append((bounds, members))
+    return out
+
+
+def _page_visual_obstacles(
+    fitz, page, block_rects, oblocks, *, image_infos: list | None = None,
+    source_records: list | None = None,
+) -> _PageVisuals:
+    """래스터 인스턴스·그림 영역·확장 장애물·가로 선분. 리댁션 전에 1회만 수집한다."""
+    if image_infos is None:
+        image_infos = _page_image_infos(page)
+    raster_rects = [fitz.Rect(info["bbox"]) for info in image_infos]
     # 벡터 표·그래프·구분선도 번역문 확장 영역의 장애물이다. path의 rect가
     # 수평/수직 0폭 선이면 먼저 1pt 패딩해 유효한 사각형으로 만든다.
     #
@@ -383,10 +465,15 @@ def _page_visual_obstacles(fitz, page, block_rects, oblocks) -> _PageVisuals:
         drawing_rects = []
         horizontal_segments = None
     # 그림 위 텍스트 방어용 영역: layout image 블록 ∪ 래스터 인스턴스.
-    # 페이지의 85% 이상을 덮는 영역은 전면 스캔 배경으로 간주해 제외한다
-    # — 스캔 문서에서 모든 블록 교체가 생략되는 사고 방지. 대신 그 래스터는
-    # scan_rasters로 따로 넘겨, 그 위 블록을 교체할 때 원문 픽셀을 덮게 한다.
+    # 스캔 배경(페이지의 85% 이상을 덮는 래스터 — 띠로 나뉜 스캔이면 그 덩어리, 여백 있는
+    # 스캔도 포함: _scan_backgrounds)은 제외한다 — 스캔 문서에서 모든 블록 교체가 생략되는
+    # 사고 방지. 대신 그 덩어리는 scan_rasters로 따로 넘겨, 그 위 블록을 교체할 때 원문
+    # 픽셀을 덮게 한다.
     page_area = page.rect.width * page.rect.height or 1.0
+    backgrounds = _scan_backgrounds(
+        fitz, page, raster_rects, block_rects, oblocks, source_records or [],
+    )
+    scan_members = {index for _bounds, members in backgrounds for index in members}
     image_regions = [
         r
         for r, b in zip(block_rects, oblocks)
@@ -398,12 +485,11 @@ def _page_visual_obstacles(fitz, page, block_rects, oblocks) -> _PageVisuals:
         )
     ]
     image_regions += [
-        r for r in raster_rects if 0 < r.width * r.height < page_area * 0.85
+        r for index, r in enumerate(raster_rects)
+        if index not in scan_members and 0 < r.width * r.height < page_area * 0.85
     ]
     fixed_visuals = image_regions + drawing_rects
-    scan_rasters = [
-        r for r in raster_rects if r.width * r.height >= page_area * _SCAN_RASTER_FRACTION
-    ]
+    scan_rasters = [bounds for bounds, _members in backgrounds]
     return _PageVisuals(
         raster_rects, image_regions, fixed_visuals, drawing_rects, horizontal_segments,
         scan_rasters, image_infos,
@@ -1872,14 +1958,18 @@ def _process_page(
     oblocks = opage.get("blocks", [])
     tblocks = tpage.get("blocks", [])
     block_rects = [_block_rect(fitz, page, b.get("bbox")) for b in oblocks]
-    visuals = _page_visual_obstacles(fitz, page, block_rects, oblocks)
+    image_infos = _page_image_infos(page)
     # 나중에 그린 이미지에 가려진 글자는 원문이 아니라 그 이미지 픽셀이다(이미지 아래 텍스트
     # 형식의 스캔) — 소유권을 정하기 전에 고쳐야 래스터 원문 판정·경고가 같은 span을 본다.
     source_records = _hide_occluded_spans(
-        fitz, page, _source_span_records(fitz, page), visuals.image_infos,
+        fitz, page, _source_span_records(fitz, page), image_infos,
     )
     source_ownership, unowned_source, ambiguous_blocks = _assign_source_spans(
         page, block_rects, oblocks, source_records,
+    )
+    visuals = _page_visual_obstacles(
+        fitz, page, block_rects, oblocks,
+        image_infos=image_infos, source_records=source_records,
     )
     base_ctx = _PageContext(
         fitz, page, pno, aspect, oblocks, tblocks, block_rects,

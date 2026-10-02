@@ -346,3 +346,90 @@ def test_translated_bullet_leaves_no_extension_pieces(tmp_path):
     with fitz.open(result.path) as exported:
         assert _cmex_pieces(exported[0], fitz.Rect(85, 660, 495, 700)) == []
         assert "성립한다" in exported[0].get_text()
+
+
+# ── 줄 위로 튀어나온 기호 (근호) — 맞닿은 블록 하나에만 붙인다 ─────────────────────
+# 실앱(P4) MLX OCR 레이아웃의 25쪽 논문 10쪽 글머리표 블록. `\sqrt{3}`의 근호 CMSY8 '√'
+# [388.0, 670.9, 395.1, 678.9]가 이 bbox와 32.5%만 겹치고 가운데가 bbox 위 1.4pt라 어느 블록의
+# 원문도 아니었다 — 블록을 번역으로 바꾸면 근호만 남아 번역문('에√대해') 위에 찍혔다.
+_RADICAL_BBOX = [137, 853, 808, 876]
+_RADICAL_KO = (
+    r"MSE 는 \( D_{\mathrm{mse}} := \mathbb{E}_{\tilde{\boldsymbol{x}}}[\|\boldsymbol{x} - "
+    r"\tilde{\boldsymbol{x}}\|_2^2] \) 로 정의되며, 임의의 \( b \geq 0 \) 에 대해 "
+    r"\( D_{\mathrm{mse}} \leq \frac{\sqrt{3}\pi}{2} \cdot \frac{1}{4^b} \) 에 의해 상한이 있다."
+)
+
+
+def _radicals(page, clip) -> list[fitz.Rect]:
+    return [
+        fitz.Rect(span["bbox"])
+        for block in page.get_text("rawdict", clip=clip)["blocks"]
+        for line in block.get("lines", [])
+        for span in line["spans"]
+        if span["font"].startswith("CMSY") and "√" in "".join(c["c"] for c in span["chars"])
+    ]
+
+
+@pytest.mark.skipif(not _SAMPLE_PDF.is_file(), reason="sample/2504.19874v1.pdf 없음")
+def test_translated_bullet_takes_its_protruding_radical_with_it(tmp_path):
+    job_dir = tmp_path / "radical"
+    job_dir.mkdir()
+    with fitz.open(_SAMPLE_PDF) as doc:
+        single = fitz.open()
+        single.insert_pdf(doc, from_page=9, to_page=9)
+        single.save(job_dir / "source.pdf")
+        single.close()
+        source_text = doc[9].get_text(clip=fitz.Rect(85, 668, 496, 695)).replace("\n", " ")
+        assert _radicals(doc[9], fitz.Rect(380, 665, 400, 680))      # 원문에는 근호가 있다
+    original = [{"page": 1, "width": 1700, "height": 2200, "blocks": [
+        {"type": "text", "bbox": _RADICAL_BBOX, "content": "- " + source_text, "fs": 1.78},
+    ]}]
+    translated = json.loads(json.dumps(original))
+    translated[0]["blocks"][0]["content"] = _RADICAL_KO
+    (job_dir / "layout.json").write_text(json.dumps(original), encoding="utf-8")
+    (job_dir / "layout.ko.json").write_text(
+        json.dumps(translated, ensure_ascii=False), encoding="utf-8",
+    )
+
+    result = build_translated_pdf(job_dir, "ko")
+
+    assert result.replaced == 1, result.report()
+    with fitz.open(result.path) as exported:
+        page = exported[0]
+        assert _radicals(page, fitz.Rect(380, 665, 400, 680)) == []
+        assert "상한이 있다" in page.get_text().replace("\xa0", " ")
+        # 블록 밖 윗줄(정리 1 본문 — 레이아웃에 없어 원문 그대로)은 남는다
+        assert "Theorem 1" in page.get_text(clip=fitz.Rect(60, 600, 560, 668))
+
+
+def _symbol(text: str, rect: tuple, *, direction=(1.0, 0.0)) -> _SourceSpan:
+    box = fitz.Rect(rect)
+    return _SourceSpan(box, text, 8.0, 0, (box.x0, box.y1 - 1.6), dir=direction)
+
+
+@pytest.mark.parametrize(
+    ("span", "rects", "texts", "owner"),
+    [
+        # 근호처럼 위로 튀어나옴: 가로 100%, 세로 32.5% — 닿는 블록 하나
+        (_symbol("√", (388.0, 670.9, 395.1, 678.9)), [(83.9, 676.3, 495.0, 694.5)], ["a"], 0),
+        # 다른 블록에도 닿으면(윗줄 블록) 누구 것인지 모른다 — 남긴다
+        (_symbol("√", (388.0, 670.9, 395.1, 678.9)),
+         [(83.9, 676.3, 495.0, 694.5), (67.0, 610.0, 545.0, 671.5)], ["a", "b"], None),
+        # 세로 겹침 20% 미만 — 윗줄 글자일 수 있다
+        (_symbol("√", (388.0, 670.9, 395.1, 678.9)), [(83.9, 677.5, 495.0, 694.5)], ["a"], None),
+        # 가로로 블록 밖에 걸친 기호
+        (_symbol("√", (490.0, 670.9, 497.1, 678.9)), [(83.9, 676.3, 495.0, 694.5)], ["a"], None),
+        # 글자 셋 이상은 기호가 아니라 단어 조각이다
+        (_symbol("abc", (388.0, 670.9, 405.1, 678.9)), [(83.9, 676.3, 495.0, 694.5)], ["a"], None),
+        # 세로로 쓴(회전) 줄은 '위로 튀어나옴'의 방향이 다르다 — 건드리지 않는다
+        (_symbol("√", (388.0, 670.9, 395.1, 678.9), direction=(0.0, -1.0)),
+         [(83.9, 676.3, 495.0, 694.5)], ["a"], None),
+        # 내용 없는 컨테이너 블록은 글리프를 소유하지 않는다
+        (_symbol("√", (388.0, 670.9, 395.1, 678.9)), [(83.9, 676.3, 495.0, 694.5)], [""], None),
+    ],
+    ids=["radical", "two-blocks", "thin-overlap", "outside-x", "word", "rotated", "empty-block"],
+)
+def test_edge_symbol_owner_only_takes_an_unambiguous_protruding_symbol(span, rects, texts, owner):
+    from app.pipeline.pdf_export.spans import _edge_symbol_owner
+
+    assert _edge_symbol_owner(span, [fitz.Rect(r) for r in rects], texts) == owner

@@ -40,7 +40,10 @@ _WARNINGS_SAMPLE = 50
 #     같은 버전에서: 그림 영역 안의 두께 0 선(범례 등)을 겹친 캡션이 소유해 지우지 않음
 #     (delta-pdf-translate-6), 회전 쪽(/Rotate 90·270)의 분수선·근호 윗선 소유와 튀어나온
 #     기호(√) 부착을 화면 좌표로 판정(delta-pdf-translate-2). 조판 결과가 달라진다.
-PDF_EXPORT_FORMAT_VERSION = 17
+# 18: 리댁션이 걷어낸 링크 annotation(인용·절·URL)을 다시 달고 번역문의 같은 글자 위로 옮김,
+#     글자 크기 없는 스캔 블록의 크기를 번역문이 아니라 원문 글자로 추정(쪽 본문 중앙값 상한).
+#     캐시된 PDF에 링크가 빠져 있으므로 올린다. 조판 결과가 달라진다.
+PDF_EXPORT_FORMAT_VERSION = 18
 
 
 class PdfExportError(RuntimeError):

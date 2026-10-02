@@ -57,8 +57,9 @@ _WIDTH_PER_CHAR_RATIO = 3.0
 _WIDTH_CHECK_MIN_CHARS = 3
 # 덮개 여유 — 안티앨리어싱 가장자리와 임계값 아래의 옅은 획 끝까지 덮는다.
 _INK_PAD_PT = 1.0
-# 번역 글자와 괘선·열 경계 사이에 남길 간격.
-_RULE_TEXT_GAP_PT = 0.5
+# 번역 글자와 괘선·열 경계 사이에 남길 간격. 조판 충돌 판정이 글자 상자를 위아래로
+# 0.5pt 넓혀 보므로 그보다 커야 괘선 바로 아래 셀이 늘 '충돌'로 떨어지지 않는다.
+_RULE_TEXT_GAP_PT = 0.75
 _CELL_EDGE_PAD_PT = 2.0
 # baseline: 줄 띠에서 가로 투영이 정점의 이 비율 이상인 마지막 픽셀 줄. 그 아래는
 # 디센더(g·p·y의 가는 획)뿐이라 투영이 뚝 떨어진다.
@@ -393,15 +394,22 @@ def _estimate_grid(page, table_rect, cells, rows: int, cols: int) -> RasterTable
         lo_x = float(x0) + (edge if cell.col > 0 else 0.0)
         hi_x = float(x1) - (edge if cell.col + cell.colspan < cols else 0.0)
         lo_y, hi_y = float(y0), float(y1)
+        # 셀 경계(빈 띠 가운데)가 괘선 가장자리에 딱 붙는 경우도 있다 — 간격 안에 든 괘선도 민다.
         for rx0, ry0, rx1, ry1 in hrules:
-            if min(rx1, x1) - max(rx0, x0) < (x1 - x0) * 0.5 or ry1 <= lo_y or ry0 >= hi_y:
+            if (
+                min(rx1, x1) - max(rx0, x0) < (x1 - x0) * 0.5
+                or ry1 + rule_gap <= lo_y or ry0 - rule_gap >= hi_y
+            ):
                 continue
             if (ry0 + ry1) / 2 < center_y:
                 lo_y = max(lo_y, ry1 + rule_gap)
             else:
                 hi_y = min(hi_y, ry0 - rule_gap)
         for rx0, ry0, rx1, ry1 in vrules:
-            if min(ry1, y1) - max(ry0, y0) < (y1 - y0) * 0.5 or rx1 <= lo_x or rx0 >= hi_x:
+            if (
+                min(ry1, y1) - max(ry0, y0) < (y1 - y0) * 0.5
+                or rx1 + rule_gap <= lo_x or rx0 - rule_gap >= hi_x
+            ):
                 continue
             if (rx0 + rx1) / 2 < center_x:
                 lo_x = max(lo_x, rx1 + rule_gap)

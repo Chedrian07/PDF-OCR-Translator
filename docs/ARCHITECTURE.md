@@ -1062,7 +1062,11 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 - 마지막 번역 PDF 빌드의 생성 리포트(`export.{lang}.report.json`)를
   `{"job_id","lang", …report}`로 반환한다 — `format_version`, `replaced`, `kept`, `relocated`,
   `table_cells_replaced`, `listing_lines_replaced`, `raster_blocks_erased`, `specialist_kept`,
-  `kept_reasons`, `warning_count`, `warnings`(앞 50건). 경로·문서 본문은 없다.
+  `kept_reasons`, `kept_pages`(`[[페이지, 보존 블록 수], …]` — 자르지 않음), `warning_pages`(경고가
+  있는 페이지 전부), `warning_count`, `warnings`(앞 50건 표본). 경로·문서 본문은 없다.
+  `verify_e2e`는 '사유 없이 번역이 사라진 페이지' 판정에 `kept_pages`를 쓴다 — 경고 표본으로
+  읽으면 51번째 이후 경고의 페이지가 무성 유실로 보였고, 무관한 경고 하나가 그 페이지의 유실을
+  모두 설명된 것으로 만들었다.
 - 단일·대조 PDF는 같은 번역 PDF 빌드에서 나오므로 리포트는 하나다. 프런트는 다운로드 뒤 이
   JSON으로 '스캔 원문 N개 블록 지움'을 포함한 토스트와 'PDF 생성 리포트 · 주의 N건' 목록을
   그린다.

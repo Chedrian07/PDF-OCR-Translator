@@ -239,6 +239,50 @@ def test_removed_img_tag_cannot_rejoin_a_literal_placeholder():
     assert any("비정상 img 태그 1개" in w for w in page["warnings"])
 
 
+_REAL_FIGURE = '<img src="images/bbox_100_100_500_500.jpg" />'
+
+
+@pytest.mark.parametrize("rejected,warning", [
+    ('<img src="images/bbox_0_0_1_1.jpg" />', "좌표 이상"),           # 퇴화 bbox
+    ('<img src="images/bbox_0_0_2000_2000.jpg" />', "좌표 이상"),     # 좌표 범위 밖
+    ('<img src="images/bbox_0_0_1_1.jpg"' + " " * 600 + "/>", "좌표 이상"),  # 일반 img 정규식 상한 밖
+    (_REAL_FIGURE, "중복"),                                            # 뒤 진짜 그림과 같은 bbox
+], ids=["degenerate", "out_of_range", "long_whitespace", "duplicate"])
+def test_rejected_figure_tag_cannot_rejoin_a_literal_placeholder(rejected, warning):
+    """검증에서 거부된 figure 태그를 조각 경계에서 지우면, 이스케이프가 끝난 양쪽 조각의 `[`와
+    `[FIGURE:0]]`이 이어져 placeholder가 위조된다 — 진짜 그림이 앞쪽 위조 자리로 옮겨 붙고
+    실제 자리는 리터럴이 됐다(감사 sidecar-4). 거부된 태그는 조각 안에서 지운다."""
+    if warning == "중복":
+        raw = f"{_REAL_FIGURE}\n\nx [{rejected}[FIGURE:0]] y\n\nmid"
+        real_line = 0
+    else:
+        raw = f"x [{rejected}[FIGURE:0]] y\n\nmid\n\n{_REAL_FIGURE}\n\nz"
+        real_line = 4
+    page = parse_page(raw)
+    md = page["markdown"]
+
+    assert _placeholders(md) == [(0, "[[FIGURE:0]]")]
+    assert md.split("\n")[real_line] == "[[FIGURE:0]]"  # 그림은 제자리에만 있다
+    assert "x &#91;&#91;FIGURE:0]] y" in md            # 이어 붙은 글자는 리터럴로 남는다
+    assert "<img" not in md and "bbox_" not in md
+    assert [b["bbox"] for b in page["blocks"]] == [[100, 100, 500, 500]]
+    assert any(warning in w for w in page["warnings"]), page["warnings"]
+
+
+def test_figure_over_the_cap_cannot_rejoin_a_literal_placeholder():
+    tags = "\n".join(
+        f'<img src="images/bbox_0_{i * 10}_500_{i * 10 + 9}.jpg" />' for i in range(MAX_FIGURES)
+    )
+    over = '<img src="images/bbox_600_600_900_900.jpg" />'
+    page = parse_page(f"{tags}\n\nx [{over}[FIGURE:3]] y")
+    md = page["markdown"]
+
+    assert [i for i, _ in _placeholders(md)] == list(range(MAX_FIGURES))
+    assert "x &#91;&#91;FIGURE:3]] y" in md
+    assert len(page["blocks"]) == MAX_FIGURES
+    assert any("상한" in w for w in page["warnings"])
+
+
 def test_unclosed_img_remnant_does_not_swallow_the_following_figure():
     """`<img alt="…` 잔여물 정리가 바로 뒤의 진짜 placeholder까지 지우면 그림이 페이지 끝으로 밀린다."""
     page = parse_page('Text <img alt="broken <img src="images/bbox_100_200_800_700.jpg" />')

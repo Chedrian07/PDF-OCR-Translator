@@ -94,6 +94,7 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 - The Docker build context excludes `backend/data` and `.env`, key and log files at any depth.
 - CI audits dependencies and builds and smoke-tests the CPU image on amd64 and arm64. Releases wait for CI, gate images on `trivy`, and attach offline image tarballs with `SHA256SUMS`. Actions are pinned to commit SHAs and Dependabot proposes updates.
 - Services in `docker-compose.yml` drop all capabilities, the backends have a process limit, and the CPU-image backends run with a read-only root filesystem and a `/tmp` tmpfs. The optional Ollama overlay keeps the upstream image's root user and default capabilities. Application code in the image is root-owned, and uvicorn shuts down within 5 seconds.
+- Stopping the server while OCR is running (for example `docker stop`) exits with code 0 instead of aborting (exit 133 in containers): after cleanup, the native runtime teardown under the still-running inference thread is skipped. The interrupted job is still marked as interrupted on the next start, and jobs still waiting in the queue are no longer started during shutdown, so they run after the restart.
 - New `make test-mps`, `make test-mlx-real` and `make audit` targets. `make test-mlx-real` reads the Hugging Face cache location from `.env` like `make dev` and stops with exit code 2 before pytest when the pinned snapshot is missing.
 
 ### Breaking and behaviour changes

@@ -597,6 +597,43 @@ const freshContext = (options = {}) => browser.newContext({ viewport: { width: 1
   await imgCtx.close();
 }
 
+// (a2) 수식 TeX의 음수 크기(\raisebox{-4000em}·\rule[-3000em])는 KaTeX maxSize가 묶지 않는다 —
+//      조판 전에 묶고, 매크로로 만든 거대 박스는 원문 TeX로 되돌려 미리보기 문단이 수만 px로
+//      늘어나지 않는다(frontend-4). 텍스트 레이어·OCR 수식은 서버가 .math-inline으로 그대로 준다.
+{
+  const mathCtx = await freshContext();
+  await mathCtx.route((url) => url.pathname === `/api/jobs/${jobId}/html`, async (route) => {
+    const res = await route.fetch();
+    const body = await res.text();
+    await route.fulfill({
+      response: res,
+      body: body.replace('</section>',
+        '<p id="e2e-neg-raise">앞 <span class="math-inline">\\raisebox{-4000em}{x}</span> 뒤</p>'
+        + '<p id="e2e-neg-rule">앞 <span class="math-inline">\\rule[-3000em]{1em}{1em}</span> 뒤</p>'
+        + '<div class="math-display" id="e2e-neg-macro">\\def\\x{-4000em}\\raisebox{\\x}{y}</div></section>'),
+    });
+  });
+  const mathPage = await mathCtx.newPage();
+  await mathPage.goto(`${BASE}/${jobHash}`, { waitUntil: 'domcontentloaded' });
+  await mathPage.waitForSelector('#result-section:not([hidden])', { timeout: 20_000 });
+  await mathPage.click('button[data-tab="preview"]');
+  await mathPage.waitForFunction(() => document.querySelector('#e2e-neg-raise .katex'), null, { timeout: 15_000 })
+    .catch(() => {});
+  const mathSizes = await mathPage.evaluate(() => {
+    const height = (id) => Math.round(document.getElementById(id)?.getBoundingClientRect().height || 0);
+    return {
+      raise: height('e2e-neg-raise'), rule: height('e2e-neg-rule'), macro: height('e2e-neg-macro'),
+      rendered: !!document.querySelector('#e2e-neg-raise .katex') && !!document.querySelector('#e2e-neg-rule .katex'),
+      fallback: document.getElementById('e2e-neg-macro')?.dataset.mathFallback || '',
+      previewHeight: document.getElementById('preview-body')?.scrollHeight || 0,
+    };
+  });
+  check('수식 음수 크기: 미리보기 문단이 수만 px로 늘어나지 않고, 매크로로 만든 거대 박스는 원문 TeX로',
+    mathSizes.rendered && mathSizes.raise > 0 && mathSizes.raise < 600 && mathSizes.rule < 600
+      && mathSizes.macro < 600 && mathSizes.fallback === 'oversized', JSON.stringify(mathSizes));
+  await mathCtx.close();
+}
+
 // (b) 5초 목록 폴링이 목록을 다시 그려도 키보드 포커스·2단계 삭제 무장이 유지된다(frontend-4).
 {
   const kept = await page.evaluate(async () => {

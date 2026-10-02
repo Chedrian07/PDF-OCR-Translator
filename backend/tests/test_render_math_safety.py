@@ -17,8 +17,12 @@ from app.pipeline.render import (
 )
 
 _SIZE = 200 * 1024
-# 선형이면 수 ms~수백 ms. 느린 CI를 감안해 넉넉히 잡되, 2차 비용(수십 초)은 확실히 잡는다.
+# 선형이면 수 ms~수백 ms(M4 Max 0.7s 이하) — 이 안이면 바로 통과한다.
 _BUDGET_S = 3.0
+# 느린 러너나 커버리지 추적(CI backend 잡의 pytest --cov는 순수 파이썬 렌더를 수 배 느리게
+# 한다 — x86_64 CI 근사 실측 3.8~4.2s)에서 절대 시간을 넘으면, 같은 입력의 1/4 크기와 걸린
+# 시간의 비로 판정한다. 선형이면 ~4배, 예전 2차 비용이면 ~16배다(200KiB 61s).
+_MAX_SCALING = 8.0
 
 _PATHOLOGICAL = {
     "짝 없는 디스플레이": "\\[ a ",
@@ -31,21 +35,62 @@ _PATHOLOGICAL = {
 }
 
 
-@pytest.mark.parametrize("unit", list(_PATHOLOGICAL.values()), ids=list(_PATHOLOGICAL))
-def test_pathological_preview_input_renders_in_linear_time(unit):
-    text = "\\[" + unit * (_SIZE // len(unit))
-    start = time.perf_counter()
+def _seconds(render, text: str, clock) -> float:
+    start = clock()
+    render(text)
+    return clock() - start
+
+
+def _assert_linear(render, build, clock=time.perf_counter) -> None:
+    """절대 예산 안이면 통과, 넘으면 1/4 크기 대비 시간 비로 2차 비용만 잡는다."""
+    elapsed = _seconds(render, build(_SIZE), clock)
+    if elapsed < _BUDGET_S:
+        return
+    quarter = _seconds(render, build(_SIZE // 4), clock)
+    ratio = elapsed / max(quarter, 1e-6)
+    assert ratio < _MAX_SCALING, (
+        f"{_SIZE}B 렌더 {elapsed:.2f}s, 1/4 크기 {quarter:.2f}s(×{ratio:.1f}) — 2차 비용 회귀"
+    )
+
+
+def _render_preview(text: str) -> None:
     _normalize_math_delimiters(text)
     render_markdown_html(text, "/api/jobs/x/files")
-    elapsed = time.perf_counter() - start
-    assert elapsed < _BUDGET_S, f"{len(text)}B 렌더에 {elapsed:.2f}s — 2차 비용 회귀"
+
+
+@pytest.mark.parametrize("unit", list(_PATHOLOGICAL.values()), ids=list(_PATHOLOGICAL))
+def test_pathological_preview_input_renders_in_linear_time(unit):
+    _assert_linear(_render_preview, lambda size: "\\[" + unit * (size // len(unit)))
 
 
 def test_layout_text_math_spans_are_linear_too():
-    text = "\\( a " * (_SIZE // 5)
-    start = time.perf_counter()
-    text_with_math_html(text)
-    assert time.perf_counter() - start < _BUDGET_S
+    _assert_linear(text_with_math_html, lambda size: "\\( a " * (size // 5))
+
+
+def test_linearity_check_still_catches_quadratic_cost():
+    """예산을 넘는 환경에서도 2차 비용은 비로 잡힌다 — 판정 장치 자체의 회귀 방지."""
+    sizes: list[int] = []
+
+    def _record(text: str) -> None:
+        sizes.append(len(text))
+
+    def _fake_clock(*readings: float):
+        return iter(readings).__next__
+
+    # 200KiB 61s(실측 2차 회귀) · 50KiB 3.8s — 비 16배
+    with pytest.raises(AssertionError, match="2차 비용 회귀"):
+        _assert_linear(_record, lambda size: "x" * size, _fake_clock(0.0, 61.0, 100.0, 103.8))
+    assert sizes == [_SIZE, _SIZE // 4]
+
+    # 커버리지 추적으로 느려진 선형 렌더(4.2s · 1.05s, 비 4배)는 통과한다
+    sizes.clear()
+    _assert_linear(_record, lambda size: "x" * size, _fake_clock(0.0, 4.2, 10.0, 11.05))
+    assert sizes == [_SIZE, _SIZE // 4]
+
+    # 예산 안이면 1/4 크기를 다시 재지 않는다
+    sizes.clear()
+    _assert_linear(_record, lambda size: "x" * size, _fake_clock(0.0, 0.7))
+    assert sizes == [_SIZE]
 
 
 def test_unmatched_inline_opener_does_not_swallow_prose():

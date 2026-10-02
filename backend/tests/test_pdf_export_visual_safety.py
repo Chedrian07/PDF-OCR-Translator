@@ -1349,24 +1349,37 @@ def test_표_셀마다_페이지_텍스트를_재추출하지_않는다(
     assert calls == [0], calls
 
 
-def test_텍스트레이어_없는_스캔표는_균등격자로도_계속_번역된다(
+def test_텍스트레이어_없는_스캔표는_픽셀_격자로_계속_번역된다(
     tmp_path: Path,
     real_cjk_fontfile: str,
 ):
-    """격자 신뢰도 게이트가 이 프로젝트의 주 대상인 스캔 표를 막으면 안 된다."""
+    """격자 신뢰도 게이트가 이 프로젝트의 주 대상인 스캔 표를 막으면 안 된다.
+
+    스캔 표에는 원문 검색으로 찾을 텍스트가 없다. 예전에는 '지울 원문이 없으니 균등
+    격자가 무해하다'며 균등 분할로 강행했는데, 스캔 표는 바뀐 셀을 바탕색으로 덮으므로
+    균등 격자가 이웃 셀 글자와 괘선까지 지웠다(감사 pdf-1). 이제는 픽셀의 빈 띠로 실제
+    열 경계를 찾는다 — 열 폭이 크게 다른(350/70/70pt) 표도 계속 번역되고, 바뀌지 않은
+    'Acc'·'F1' 머리글 픽셀은 그대로다.
+    """
     import fitz
 
     job_dir = tmp_path / "table-scanned-grid"
     job_dir.mkdir()
+    # 열 폭이 다른 표를 그린 뒤 150dpi로 래스터화해 텍스트 레이어 없는 스캔으로 만든다.
+    drawn = fitz.open()
+    drawn_page = drawn.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    for (x, y), value in zip(
+        ((65, 95), (400, 95), (470, 95), (65, 115), (400, 115), (470, 115)),
+        ("Method", "Acc", "F1", "Ours", "12.3", "45.6"),
+    ):
+        drawn_page.insert_text((x, y), value, fontsize=9)
+    for y in (85, 100, 122):
+        drawn_page.draw_line((60, y), (530, y))
+    scan = drawn_page.get_pixmap(dpi=150).tobytes("png")
+    drawn.close()
     source = fitz.open()
     page = source.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
-    # 스캔 표: 지울 원문 글리프가 없으므로 균등 격자가 무해하다.
-    pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 16, 16))
-    pixmap.clear_with(230)
-    page.insert_image(
-        fitz.Rect(60, 82, 530, 122), stream=pixmap.tobytes("png"),
-        keep_proportion=False,
-    )
+    page.insert_image(page.rect, stream=scan)
     source.save(job_dir / "source.pdf")
     source.close()
 
@@ -1385,12 +1398,27 @@ def test_텍스트레이어_없는_스캔표는_균등격자로도_계속_번역
     _write_layout_pair(job_dir, original, [translated_html])
 
     result = build_translated_pdf(job_dir, "ko", fontfile=real_cjk_fontfile)
-    with fitz.open(result.path) as exported:
+    headers = fitz.Rect(395, 86, 500, 99)
+    with fitz.open(job_dir / "source.pdf") as before_doc, fitz.open(result.path) as exported:
         text = exported[0].get_text().replace("\xa0", " ")
+        before = sum(
+            1 for value in before_doc[0].get_pixmap(
+                dpi=100, clip=headers, colorspace=fitz.csGRAY,
+            ).samples if value < 110
+        )
+        after = sum(
+            1 for value in exported[0].get_pixmap(
+                dpi=100, clip=headers, colorspace=fitz.csGRAY,
+            ).samples if value < 110
+        )
 
     assert result.table_cells_replaced == 2, result.report()
-    assert not any("격자 추정 실패" in warning for warning in result.warnings), result.warnings
+    assert result.raster_blocks_erased == 1, result.report()
+    assert "table_grid_untrusted" not in result.kept_reasons, result.report()
+    assert not result.warnings, result.warnings
     assert "방법" in text and "제안" in text, text
+    # 바뀌지 않은 머리글('Acc'·'F1')은 덮이지 않았다.
+    assert before > 20 and abs(after - before) <= before * 0.03, (before, after)
 
 
 # ── CropBox/회전 페이지 가드 ─────────────────────────────────────────────

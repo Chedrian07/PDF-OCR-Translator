@@ -95,7 +95,9 @@ def quantize_decoder(
 
     대상: embed_tokens·q/k/v/o·dense MLP·shared experts·switch_mlp(전문가 스택)·lm_head.
     제외: SAM·CLIP·projector(비전 경로 — 스파이크 변환본은 projector도 양자화했지만
-    여기서는 bf16 유지), MoE 게이트(fp32 라우팅, M6)·RMSNorm(Linear가 아님)."""
+    여기서는 bf16 유지), MoE 게이트·RMSNorm(Linear가 아니라 to_quantized가 없다). 게이트
+    라우팅은 업스트림대로 모델 dtype(기본 bf16) matmul이다 — fp32 라우팅 패치 M6은 측정 후
+    기각했다(language.py MoEGate·PROVENANCE.md M6)."""
     if bits not in SUPPORTED_QUANT_BITS:
         raise ValueError(
             f"OCR MLX 양자화는 {SUPPORTED_QUANT_BITS}비트만 지원합니다 (요청 {bits}) — "

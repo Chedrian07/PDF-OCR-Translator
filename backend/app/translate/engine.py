@@ -40,6 +40,7 @@ from .masking import (
 from .segment import (
     apply_layout,
     assemble_markdown,
+    layout_covers_unit,
     layout_line_map,
     layout_line_sources,
     layout_units,
@@ -150,11 +151,10 @@ def _repair_worthy(masked: str, clean: str, missing: list, dup: list) -> bool:
 
 def _fully_covered(src: str, covered: set[str]) -> bool:
     """유닛이 layout 번역으로 완전히 덮이는가 — 유닛 전체가 블록 하나와 같거나(여러 줄
-    블록 포함) 비어있지 않은 모든 줄이 단일 줄 블록과 같다(map_unit_lines와 같은 규칙)."""
-    if src.strip() in covered:
-        return True
-    lines = [ln.strip() for ln in src.split("\n") if ln.strip()]
-    return bool(lines) and all(ln in covered for ln in lines)
+    블록 포함) 비어있지 않은 모든 줄이 단일 줄 블록 또는 여러 줄 블록의 연속 줄 묶음과 같다
+    (map_unit_lines와 같은 규칙). 저자 블록 넷(각 3줄)이 섞인 1쪽 md 유닛(19줄)은 묶음을 못 봐
+    지연되지 않고 따로 번역됐다가 실패해 1쪽 전체가 영어로 남았다(실앱 4B)."""
+    return layout_covers_unit(src, covered)
 
 
 _SIGNATURE_PUNCT_RE = re.compile(r"[^\w\s]")
@@ -1158,14 +1158,24 @@ class _TranslationRun:
         건너뛴 md 유닛(참고문헌·코드)은 md 쪽 보존 정책을 따른다.
         """
         out: dict[str, str] = {}
+        kept = set(self.kept_original)
         for u in self.md_units:
             if u.skip_reason or u.id in self.md_skipped:
                 continue
             mapped = map_unit_lines(u.src, mapping) if mapping else None
             if mapped is not None:
                 out[u.id] = mapped
-            elif u.id in self.results:
+            elif u.id in self.results and u.id not in kept:
                 out[u.id] = self.results[u.id]
+            else:
+                # 자기 번역이 실패(원문 유지·축퇴)한 유닛도 layout 번역이 덮는 줄은 옮긴다 — 1쪽 md
+                # 유닛(19줄)이 실패하자 같은 문장의 layout 번역(제목·초록·서론)까지 버려 한국어
+                # 미리보기·result.ko.md의 1·6·12·20쪽이 통째로 영어였다(실앱 4B, PDF·리더는 한국어).
+                partial = map_unit_lines(u.src, mapping, partial=True) if mapping else None
+                if partial is not None:
+                    out[u.id] = partial
+                elif u.id in self.results:
+                    out[u.id] = self.results[u.id]
         return out
 
     def _finish(self) -> TranslateResult:

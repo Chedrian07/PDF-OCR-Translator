@@ -22,6 +22,13 @@ from app.main import create_app
 
 
 # ── 페이크 run_translation ────────────────────────────────────────────────
+# 페이크가 취소·게이트를 기다리는 상한. 테스트는 늘 직접 취소하거나 게이트를 열므로 이 값은
+# '테스트가 실패했을 때 스레드가 남는 시간'일 뿐이어야 한다. 예전 10초는 숨은 시간 조건이었다 —
+# 느린 러너(x86_64 에뮬레이션 + 커버리지)에서 두 번째 잡 준비에 14초가 걸리자 첫 번역이 기다림을
+# 끝내고 완료돼 동시 번역 상한 테스트가 429 대신 202를 받았다(P4 Linux 재현).
+_FAKE_WAIT_S = 60.0
+
+
 def _make_fake(*, gate: threading.Event | None = None, wait_cancel: bool = False,
                total: int = 2, gate_timeouts: list | None = None):
     """계약을 지키는 페이크 run_translation을 만든다.
@@ -53,13 +60,13 @@ def _make_fake(*, gate: threading.Event | None = None, wait_cancel: bool = False
 
         if wait_cancel:
             if cancel is not None:
-                cancel.wait(timeout=10)
+                cancel.wait(timeout=_FAKE_WAIT_S)
                 if cancel.is_set():
                     write_state(status="canceled", current=0, error="번역이 취소되었습니다",
                                 finished_at="2026-07-07T00:00:01+00:00")
                     return TranslateResult(status="canceled", total=total)
 
-        if gate is not None and not gate.wait(timeout=10) and gate_timeouts is not None:
+        if gate is not None and not gate.wait(timeout=_FAKE_WAIT_S) and gate_timeouts is not None:
             gate_timeouts.append("gate")
 
         if progress is not None:
@@ -507,7 +514,7 @@ def test_translate_events_open_right_after_202(client, sample_pdf, provider_env,
 
     def _slow_start(job_dir, lang, cfg, **kwargs):
         started.set()
-        assert release.wait(timeout=10)   # state.json을 쓰기 전에 멈춰 있는다
+        assert release.wait(timeout=_FAKE_WAIT_S)   # state.json을 쓰기 전에 멈춰 있는다
         return _make_fake()(job_dir, lang, cfg, **kwargs)
 
     monkeypatch.setattr("app.api.run_translation", _slow_start)

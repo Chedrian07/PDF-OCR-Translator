@@ -457,6 +457,30 @@ def test_원문_일부가_남는_정상_번역은_echo가_아니다(src, out):
     assert untranslated_reason(src, out, mask(src)[1]) == ""
 
 
+_KEYWORDS_SRC = (
+    "Keywords: large language models, retrieval augmented generation, long context, "
+    "instruction tuning, data synthesis"
+)
+
+
+def test_역어_원어_병기로_번역한_키워드는_echo가_아니다():
+    """프롬프트 규칙 4의 '역어(원어)' 병기로 Keywords·Index Terms를 옮기면 원어가 원문 순서대로
+    모두 남는다. 영단어만 뽑아 연속을 보던 때는 사이에 낀 한글 역어가 연속을 끊지 못해 원문
+    단어 100%가 한 덩어리로 보여 echo로 거부됐고, 문장 경계가 없어 분할도 못 하고 영어
+    원문으로 남았다(delta-pdf-translate-4). 한글 어절은 연속을 끊는다."""
+    from app.translate.masking import untranslated_reason
+
+    out = (
+        "키워드: 대규모 언어 모델(large language models), 검색 증강 생성(retrieval augmented "
+        "generation), 긴 문맥(long context), 지시 튜닝(instruction tuning), "
+        "데이터 합성(data synthesis)"
+    )
+    assert untranslated_reason(_KEYWORDS_SRC, out, mask(_KEYWORDS_SRC)[1]) == ""
+    # 한국어 메타 문장 사이에 원문을 통째로 넣은 진짜 echo는 그대로 잡는다
+    echo = f"다음 키워드는 번역하지 않습니다. {_KEYWORDS_SRC} 이상입니다."
+    assert untranslated_reason(_KEYWORDS_SRC, echo, mask(_KEYWORDS_SRC)[1]) == "echo"
+
+
 # ── 축퇴(반복 루프) 게이트 (probe:MLX-02, mlx-integration-4) ─────────────────
 
 _LOOP_SRC = (

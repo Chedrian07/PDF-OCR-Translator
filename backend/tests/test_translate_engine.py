@@ -1145,6 +1145,18 @@ def test_reasoning_전달방식이_요청을_바꿀_때만_캐시를_무효화�
     assert _state(job)["request_variant"] == "reasoning_style=chat_template_kwargs"
 
 
+def test_state_json에는_extra_body_원문이_실리지_않는다(job, cfg):
+    """state.json은 무인증 /translate/state로 그대로 나간다 — request_variant에 실린
+    TRANSLATE_EXTRA_BODY 원문(게이트웨이 키·테넌트 토큰 등)이 노출됐다(translate-10)."""
+    from dataclasses import replace
+
+    secret = '{"metadata":{"tenant_token":"tt-SECRET"}}'
+    run_translation(job, "ko", replace(cfg, extra_body=secret), client=EchoClient())
+    raw = (job / "translations" / "ko" / "state.json").read_text(encoding="utf-8")
+    assert "tt-SECRET" not in raw and "tenant_token" not in raw
+    assert _state(job)["request_variant"].startswith("extra_body=sha256:")
+
+
 # ── 관측: 사유별 skip/kept 집계 + 참고문헌 규칙 불일치 ──────────────────────
 
 def test_report에_skip_사유별_집계가_남는다(tmp_path, cfg):

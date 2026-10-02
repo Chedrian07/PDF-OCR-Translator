@@ -36,6 +36,39 @@ def test_identity_골든_바이트_동일():
     assert assemble_markdown(MD, SEP, translations) == MD
 
 
+# 같은 페이지에서 목록 뒤에 문단이 오는 문서(논문 대부분) — markdown-it은 목록 토큰의 줄 범위에
+# 뒤따르는 빈 줄까지 넣는다. 예전에는 그 범위를 통째로 번역문(앞뒤 빈 줄을 다듬은 것)으로 바꿔
+# 구분 빈 줄이 사라졌고, 다음 문단이 마지막 목록 항목에 흡수돼 한국어 미리보기·flow·Markdown
+# 다운로드에서 <li> 안으로 들어갔다(감사 fresh-user-1).
+_LIST_THEN_PARAGRAPH = [
+    "Intro paragraph.\n\n- first bullet\n- second bullet\n\nEnd of sample document.\n",
+    "Intro.\n\n1. one\n2. two\n\nNext para.\n",
+    "- loose a\n\n- loose b\n\n\nAfter two blank lines.",
+    "1. Introduction\n\nBody text right after a numbered heading.",
+    "- a\n- b\n" + SEP + "- c\n- d\n\nPara on page two.\n",
+]
+
+
+def test_identity_골든_목록_뒤_문단도_바이트_동일():
+    for md in _LIST_THEN_PARAGRAPH:
+        units = split_markdown(md, SEP)
+        assert assemble_markdown(md, SEP, {u.id: u.src for u in units}) == md, repr(md)
+
+
+def test_번역된_목록_뒤_문단이_목록_항목에_흡수되지_않는다():
+    from app.pipeline.render import render_markdown_html
+
+    md = "Intro paragraph.\n\n- first bullet\n- second bullet\n\nEnd of sample document.\n"
+    units = {u.kind: u for u in split_markdown(md, SEP)}
+    out = assemble_markdown(md, SEP, {
+        units["list"].id: "- 첫째 항목\n- 둘째 항목\n",   # 모델은 끝 빈 줄을 흔히 빼거나 더한다
+        "md:0:2": "샘플 문서의 끝.",
+    })
+    assert out == "Intro paragraph.\n\n- 첫째 항목\n- 둘째 항목\n\n샘플 문서의 끝.\n"
+    html = render_markdown_html(out, "/api/jobs/x/files")
+    assert "<li>둘째 항목</li>" in html and "<p>샘플 문서의 끝.</p>" in html, html
+
+
 def test_유닛_종류와_id():
     units = split_markdown(MD, SEP)
     kinds = {u.id: u.kind for u in units}

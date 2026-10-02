@@ -26,16 +26,18 @@ enrichment은 절대 잡·렌더를 깨뜨리면 안 된다.
 
 텍스트 추출(get_text)은 PDF 워커 프로세스에서 페이지마다 돈다(pdf_worker — 호출 맥락의
 풀: 병합은 ocr, API 백필은 export, 빌드 안에서는 그 워커 그대로). 시간 상한을 넘거나
-워커를 죽인 페이지가 나오면 그 호출의 나머지 페이지는 실측 없이 스탬프만 한다. API 백필은
-빈 export 워커를 오래 기다리지 않는다(`_EXPORT_POOL_WAIT_S`) — 빌드가 워커를 모두 쥐고
-있으면 이번 요청은 아무것도 찍지 않고 돌아가고 다음 요청이 다시 시도한다.
+워커를 죽인 페이지가 나오면 그 호출의 나머지 페이지는 실측 없이 스탬프만 한다.
+
+빈 워커는 상한 없이 기다린다. API 백필은 요청 밖, 산출물마다 하나뿐인 백그라운드
+스레드에서 돌고 요청은 짧은 유예만 기다리므로(api._backfill_layout_fonts, 감사 api-1),
+빌드가 export 워커를 모두 쥐어도 요청은 멈추지 않는다. 여기서 대기를 끊으면 그 백필은
+빌드 뒤에도 끝나지 못하고 다음 요청이 처음부터 다시 띄워야 한다.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
-import time
 from pathlib import Path
 from statistics import median
 
@@ -48,14 +50,6 @@ _BOLD_FLAG = 16  # fitz span flags: bit 4 == bold
 #    표시 공간 bbox와 비회전 공간 span을 섞어 fs·정렬이 전멸하고 가로 글을 세로쓰기로
 #    오판했다 — 기존 잡의 회전 페이지 메타를 다시 계산하려고 올린다.
 ENRICH_VERSION = 6
-
-# API 요청 경로(export 풀)의 백필이 빈 워커를 기다리는 총 시간 상한(초). export 풀은 번역 PDF
-# 빌드가 한 건에 수십 초~PDF_EXPORT_BUILD_TIMEOUT_S까지 워커를 쥐는 풀이라, 상한 없이
-# 기다리면 빌드 두 건이 도는 동안 /layout·/viewer/pages·/alignment·/outline·/page가 빌드가
-# 끝날 때까지 멈췄다(감사 pdf-6: 25쪽 백필 0.23s → 54s). 이 안에 워커를 못 얻으면 이번
-# 요청은 스탬프 없이 폴백 휴리스틱으로 응답하고 다음 요청이 다시 시도한다.
-_EXPORT_POOL_WAIT_S = 3.0
-_ENRICH_PAGE_TARGET = "app.pipeline.pdf_fonts:enrich_page_local"
 
 
 def _weighted_median(pairs: list[tuple[float, int]]) -> float:
@@ -149,18 +143,9 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
     페이지마다 PDF 워커 작업 하나로 돈다(enrich_page_local) — 페이지 dict는 피클로 오가므로
     결과를 원래 dict에 제자리로 되돌려 호출자가 쥔 참조(병합기의 layout_pages)를 지킨다.
     시간 상한·워커 비정상 종료가 나면 그 페이지부터는 실측을 포기하고 스탬프만 찍는다 —
-    건너뛴 페이지를 스탬프하지 않으면 백필이 매 요청 같은 상한을 다시 기다린다.
-
-    API 백필(export 풀 맥락)은 빈 워커를 `_EXPORT_POOL_WAIT_S`까지만 기다린다. 그 안에 못
-    얻으면 False — 이번 호출이 찍은 것은 저장하지 말라는 뜻이다(다음 요청이 처음부터 다시
-    한다). 병합(ocr 풀)은 자기 잡의 일이라 기다리고, 빌드 안(워커)은 inline이라 대기가 없다."""
+    건너뛴 페이지를 스탬프하지 않으면 백필이 매 요청 같은 상한을 다시 기다린다."""
     from . import pdf_worker
 
-    deadline = (
-        time.monotonic() + _EXPORT_POOL_WAIT_S
-        if pdf_worker.current_pool() == pdf_worker.POOL_EXPORT
-        else None
-    )
     changed = False
     gave_up = False
     for page in pages:
@@ -176,12 +161,9 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
         except (TypeError, ValueError):
             page_index = -1
         try:
-            result = _run_enrich_page(pdf_worker, pdf_path, page_index, page, deadline)
-        except pdf_worker.PdfWorkerBusy:
-            # 빌드가 export 워커를 모두 쥐고 있다 — 빌드가 끝날 때까지 요청을 붙잡지 않는다.
-            logger.info("폰트 실측 백필 보류 — export 워커가 모두 사용 중(%d페이지에서 멈춤, "
-                        "다음 요청이 다시 시도)", page_index + 1)
-            return False
+            result = pdf_worker.run_page(
+                "app.pipeline.pdf_fonts:enrich_page_local", pdf_path, page_index, (page,),
+            )
         except pdf_worker.PdfPageQuarantined:
             # 앞서 렌더·분석이 상한을 넘은 페이지 — 기다리지 않았으니 이 페이지만 건너뛴다
             result = (False, page)
@@ -208,28 +190,6 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
             page["fonts_v"] = ENRICH_VERSION
             changed = True
     return changed
-
-
-def _run_enrich_page(pdf_worker, pdf_path: Path, page_index: int, page: dict, deadline):
-    """페이지 하나의 실측 작업 — `deadline`이 있으면 빈 워커 대기에 그 시각까지만 쓴다.
-
-    대기 상한이 없으면 `run_page` 그대로다. 있으면 `run_page`와 같은 격리 계약(격리된 페이지는
-    돌리지 않고, 시간 상한·워커 사망이면 격리)을 지키며 `run(wait=...)`로 부른다 — `run_page`는
-    대기 상한을 받지 않는다. 대기 안에 워커가 없으면 PdfWorkerBusy.
-    """
-    if deadline is None:
-        return pdf_worker.run_page(_ENRICH_PAGE_TARGET, pdf_path, page_index, (page,))
-    if pdf_worker.is_quarantined(pdf_path, page_index):
-        raise pdf_worker.PdfPageQuarantined(page_index)
-    try:
-        return pdf_worker.run(
-            _ENRICH_PAGE_TARGET, (pdf_path, page_index, page),
-            timeout=pdf_worker.page_timeout(),
-            wait=max(0.0, deadline - time.monotonic()),
-        )
-    except (pdf_worker.PdfWorkerTimeout, pdf_worker.PdfWorkerCrashed):
-        pdf_worker.quarantine(pdf_path, page_index)
-        raise
 
 
 def enrich_page_local(pdf_path: Path, page_index: int, page: dict) -> tuple[bool, dict] | None:

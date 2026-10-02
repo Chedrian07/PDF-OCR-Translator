@@ -1039,6 +1039,62 @@ def test_쪽번호_블록이_붙은_md문단도_지연된다(tmp_path, cfg):
     assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(md)
 
 
+_FIRST_PAGE = [
+    "TurboQuant: Online Vector Quantization With Distortion",
+    "Amir Zandieh",
+    "Google Research",
+    "zandieh@google.com",
+    "Vector quantization aims to quantize vectors. It keeps the geometry of the data.",
+]
+
+
+def _first_page_job(tmp_path):
+    """1쪽 md 유닛 하나 = 제목(단일 줄 블록) + 저자(3줄 블록) + 초록(단일 줄 블록)."""
+    md = "\n".join(_FIRST_PAGE) + "\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    blocks = [_FIRST_PAGE[0], "\n".join(_FIRST_PAGE[1:4]), _FIRST_PAGE[4]]
+    lay = [{"page": 1, "width": 1000, "height": 1400, "blocks": [
+        {"type": "text", "bbox": [0, i * 100, 999, i * 100 + 80], "content": b}
+        for i, b in enumerate(blocks)
+    ]}]
+    (tmp_path / "layout.json").write_text(json.dumps(lay, ensure_ascii=False), encoding="utf-8")
+    return md
+
+
+def test_여러_줄_블록이_섞인_md유닛도_지연돼_layout_번역을_쓴다(tmp_path, cfg):
+    """저자 블록(3줄)을 줄 단위로 못 덮어 1쪽 md 유닛이 따로 번역됐다(같은 문장 이중 과금)."""
+    md = _first_page_job(tmp_path)
+    client = EchoClient()
+    res = run_translation(tmp_path, "ko", cfg, client=client)
+    assert res.status == "done" and res.kept_original == []
+    assert client.unit_calls == 3 and res.total == 3            # layout 블록 3개뿐
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == ko_expected(md)
+
+
+def test_자기_번역이_실패한_md유닛도_layout이_덮는_줄은_한국어로_쓴다(tmp_path, cfg):
+    """1쪽 md 유닛이 번역에 실패하자 같은 문장의 layout 번역(제목·초록)까지 버려 result.ko.md·
+    한국어 미리보기의 1쪽이 통째로 영어였다(실앱 4B: 1·6·12·20쪽, PDF·리더는 한국어)."""
+    _first_page_job(tmp_path)
+
+    class AuthorEcho(EchoClient):
+        """저자 줄이 든 원문은 영문 그대로 돌려준다 — layout 저자 블록과 md 유닛 모두 게이트 거부."""
+
+        def complete(self, system, user, *, max_tokens):
+            src = _marker(user)
+            if src is not None and "Google Research" in src:
+                self._count(True)
+                return src
+            return super().complete(system, user, max_tokens=max_tokens)
+
+    res = run_translation(tmp_path, "ko", cfg, client=AuthorEcho())
+
+    assert "lay:1:1" in res.kept_original and "md:0:0" in res.kept_original
+    out = (tmp_path / "result.ko.md").read_text(encoding="utf-8").splitlines()
+    assert out[0] == koreanize(_FIRST_PAGE[0])                   # 제목: layout 번역
+    assert out[1:4] == _FIRST_PAGE[1:4]                          # 저자: 번역 실패 → 원문
+    assert out[4] == koreanize(_FIRST_PAGE[4])                   # 초록: layout 번역
+
+
 # ── step-0 결정적 4xx 강등 ──────────────────────────────────────────────────
 
 def test_성공유닛_이후_결정적_4xx는_해당_유닛만_원문유지(tmp_path, cfg):

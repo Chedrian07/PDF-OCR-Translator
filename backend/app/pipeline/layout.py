@@ -22,6 +22,7 @@ import base64
 import functools
 import logging
 import math
+import stat
 import sys
 from pathlib import Path
 
@@ -622,6 +623,22 @@ main[lang="ko"] { word-break: keep-all; }
 # `..%2F`류 트래버설 문자열은 매치 자체가 안 되고, 이름은 images/ 하위에서만 조회된다.
 _DOC_IMG_SRC = re.compile(r'src="[^"]*/images/([^"/]+)"')
 
+# document.html에 인라인하는 그림 원본 바이트 총량 상한 — facsimile과 같은 64MB. 그림 참조는
+# 마크다운 본문(OCR 모델·텍스트 레이어가 옮겨 적은 비신뢰 입력 — render._SAFE_IMAGE_SRC)에서
+# 오므로 같은 크롭을 수천 번 가리킬 수 있다. 참조마다 base64 사본을 붙이면 1MB 크롭 100번이
+# 140MB 문서·서버 피크 약 500MB였고(실측), 페이지당 출력 상한 안에서도 수만 번이 가능해 서버
+# 프로세스를 OOM으로 죽일 수 있었다. 상한을 넘는 참조부터는 결측 크롭과 같은 빈 이미지로 둔다.
+_DOCUMENT_MAX_INLINE_BYTES = 64 * 1024 * 1024
+
+
+def _image_file_size(job_dir: Path, name: str) -> int:
+    """images/{name}의 크기 — 일반 파일이 아니거나 없으면 0(_image_data_uri가 빈 이미지로 둔다)."""
+    try:
+        info = (job_dir / "images" / name).stat()
+    except OSError:
+        return 0
+    return info.st_size if stat.S_ISREG(info.st_mode) else 0
+
 
 def render_document_standalone(
     inner_html: str, job_dir: Path, title: str, frontend_dir: Path | None,
@@ -629,10 +646,29 @@ def render_document_standalone(
 ) -> str:
     """문서 뷰(/html과 동일 렌더 결과)를 완전 자립형 HTML로 — 이미지 base64·KaTeX
     인라인, 바깥 출처는 meta CSP(STANDALONE_CSP)로 차단. inner_html은 신뢰 경로
-    (render_document_html 출력)만 받는다."""
-    body = _DOC_IMG_SRC.sub(
-        lambda m: f'src="{_image_data_uri(job_dir, m.group(1))}"', inner_html,
-    )
+    (render_document_html 출력)만 받는다. 인라인 총량은 _DOCUMENT_MAX_INLINE_BYTES까지다."""
+    remaining = _DOCUMENT_MAX_INLINE_BYTES
+    uris: dict[str, str] = {}
+    dropped = 0
+
+    def inline(match: re.Match) -> str:
+        nonlocal remaining, dropped
+        name = match.group(1)
+        size = _image_file_size(job_dir, name)
+        if size > remaining:
+            dropped += 1
+            return 'src="data:,"'
+        remaining -= size
+        if name not in uris:
+            uris[name] = _image_data_uri(job_dir, name)
+        return f'src="{uris[name]}"'
+
+    body = _DOC_IMG_SRC.sub(inline, inner_html)
+    if dropped:
+        logger.warning(
+            "document.html 그림 인라인 상한(%dMB) 초과 — 그림 참조 %d개를 빈 이미지로 둠",
+            _DOCUMENT_MAX_INLINE_BYTES // (1024 * 1024), dropped,
+        )
     katex = _katex_inline_bundle(str(frontend_dir)) if frontend_dir else ""
     lang_attr = f' lang="{lang}"' if lang else ""
     return (

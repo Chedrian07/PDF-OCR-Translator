@@ -1580,7 +1580,12 @@ def test_api_get_routes_answer_head_like_get_without_a_body(settings, sample_pdf
             assert head.status_code == 200, (path, head.status_code)
             assert head.content == b"", path
             assert head.headers["content-type"] == get.headers["content-type"], path
-            if "content-length" in get.headers:
+            if path == "/api/health":
+                # 헬스는 살아 있는 상태(워커 현재 잡·진행 경과 초·PDF 워커 집계)를 그대로 보고해
+                # 두 요청 사이에 길이가 바뀔 수 있다 — 잡이 done으로 저장된 직후 워커가 current
+                # job id를 비우기 전후로 GET·HEAD가 갈려 647 대 635바이트로 간헐 실패했다(CI 1~2.5%).
+                assert int(head.headers["content-length"]) > 0, path
+            elif "content-length" in get.headers:
                 assert head.headers["content-length"] == get.headers["content-length"], path
         # 없는 잡은 HEAD도 GET처럼 404다(정적 마운트가 아니라 라우트가 답한다)
         missing = client.head("/api/jobs/j_000000000000")

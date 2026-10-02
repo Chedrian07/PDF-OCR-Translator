@@ -60,7 +60,8 @@ Performance figures below were measured on an Apple M4 Max during this work, par
 - Rotated pages lay out multi-line translations in screen orientation.
 - List items left untranslated (the unit kept its original text) keep their original typesetting instead of being redrawn as plain text with stray fraction bars.
 - Inline math rules (fraction bars, root overlines) inside a translated paragraph are removed with its text and no longer block its space, so translations are not shrunk below readable size and no stray bars remain (a 25-page paper went from seven shrink/no-fit warnings to one).
-- Inner-product brackets (`\langle`, `\rangle`) are drawn as ⟨ ⟩ (〈 〉 on fonts without them) instead of the words `langle`/`rangle`. Export format version 13 rebuilds cached PDFs.
+- Inner-product brackets (`\langle`, `\rangle`) are drawn as ⟨ ⟩ (〈 〉 on fonts without them) instead of the words `langle`/`rangle`.
+- Every piece of a large TeX delimiter (stacked `|`/`‖` bars) is removed with its paragraph, so no stray bars overlap the translation. Export format version 14 rebuilds cached PDFs.
 - Scan covers leave overlapping figures and kept blocks intact; tiled and margined scans and searchable scans with the text layer under the image are recognised; narrow multi-line scan columns are no longer kept as vertical text; lines set in fonts with degenerate metrics are removed.
 - `PDF_EXPORT_FORMAT_VERSION` is now 11 and `ENRICH_VERSION` 6.
 

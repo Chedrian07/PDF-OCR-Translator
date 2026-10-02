@@ -236,8 +236,9 @@ class UnlimitedEngine(OCREngine):
                 f"(설치된 torch {torch.__version__.split('+')[0]}의 MPS 요구사항 — "
                 f"현재 macOS {_macos_version()})."
                 if torch.backends.mps.is_built()
-                else "설치된 torch가 MPS 없이 빌드되었습니다 — macOS arm64용 휠로 재설치하세요 "
-                     "(backend에서 `uv sync --extra metal`). Docker/Linux에서는 Metal을 쓸 수 없습니다."
+                else "설치된 torch가 MPS 없이 빌드되었습니다 — Apple Silicon Mac의 저장소 루트에서 "
+                     "`make setup-mlx`로 다시 설치하세요(`uv sync --extra metal` 단독은 mlx와 C++ "
+                     "모듈을 지웁니다). Docker/Linux에서는 Metal을 쓸 수 없습니다."
             )
             raise EngineError(f"OCR_DEVICE=metal 이지만 MPS를 사용할 수 없습니다. {hint}")
         if self.device == "cuda":

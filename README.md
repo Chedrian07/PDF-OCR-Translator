@@ -169,9 +169,13 @@ Docker 없이 로컬(uv)로 바로 시작할 수도 있습니다:
 
 ```bash
 make setup-mlx && make dev    # Apple Silicon — MLX 엔진 (아래 §Apple Silicon)
-make setup && make dev        # 그 밖(Linux·Intel Mac) — torch CPU. http://127.0.0.1:8000
+make setup && make dev        # Linux — torch CPU. http://127.0.0.1:8000
 make dev-textlayer            # 모델 없이 textlayer 엔진으로 기동
 ```
+
+Intel Mac: 고정한 torch 2.10에 macOS x86_64 휠이 없어 `make setup`(Unlimited-OCR 엔진)은
+설치되지 않습니다 — Docker CPU 이미지(`docker compose up -d --build`)나, 의존성만 받는
+`cd backend && uv sync` 뒤 `make dev-textlayer`(torch 불필요)를 쓰세요.
 
 전체 타깃은 §Makefile에 있습니다. 로컬 실행은 실행 디렉터리, 없으면 리포 루트의 `.env`
 하나를 직접 읽습니다 — 이미 설정된 환경변수가 우선이고, 이 앱이 읽지 않는 키는 기동 로그와

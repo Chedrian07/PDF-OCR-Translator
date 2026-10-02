@@ -55,6 +55,7 @@ from .report import PdfExportError, PdfExportResult
 from .spans import (
     _assign_source_spans,
     _block_rect,
+    _hide_occluded_spans,
     _leading_bold_prefix,
     _listing_segments,
     _ownership_text,
@@ -333,6 +334,8 @@ class _PageVisuals:
     # 페이지 대부분을 덮는 래스터 — 스캔 배경. image_regions에서는 빠지지만 그 위
     # 블록의 원문은 이 픽셀이다.
     scan_rasters: list = field(default_factory=list)
+    # get_image_info() 원본(상자·소프트 마스크 여부) — 이미지에 가려진 span 판정이 쓴다.
+    image_infos: list = field(default_factory=list)
 
 
 def _page_visual_obstacles(fitz, page, block_rects, oblocks) -> _PageVisuals:
@@ -340,9 +343,10 @@ def _page_visual_obstacles(fitz, page, block_rects, oblocks) -> _PageVisuals:
     # 래스터 인스턴스는 리댁션 '이전'에 1회만 수집한다 — apply_redactions
     # 이후의 get_image_info()는 스테일 캐시를 반환할 수 있다(실측).
     try:
-        raster_rects = [fitz.Rect(info["bbox"]) for info in page.get_image_info()]
+        image_infos = list(page.get_image_info())
+        raster_rects = [fitz.Rect(info["bbox"]) for info in image_infos]
     except Exception:  # noqa: BLE001 — 이미지 목록 실패가 텍스트 교체를 막지 않는다
-        raster_rects = []
+        image_infos, raster_rects = [], []
     # 벡터 표·그래프·구분선도 번역문 확장 영역의 장애물이다. path의 rect가
     # 수평/수직 0폭 선이면 먼저 1pt 패딩해 유효한 사각형으로 만든다.
     #
@@ -402,7 +406,7 @@ def _page_visual_obstacles(fitz, page, block_rects, oblocks) -> _PageVisuals:
     ]
     return _PageVisuals(
         raster_rects, image_regions, fixed_visuals, drawing_rects, horizontal_segments,
-        scan_rasters,
+        scan_rasters, image_infos,
     )
 
 
@@ -1868,11 +1872,15 @@ def _process_page(
     oblocks = opage.get("blocks", [])
     tblocks = tpage.get("blocks", [])
     block_rects = [_block_rect(fitz, page, b.get("bbox")) for b in oblocks]
-    source_records = _source_span_records(fitz, page)
+    visuals = _page_visual_obstacles(fitz, page, block_rects, oblocks)
+    # 나중에 그린 이미지에 가려진 글자는 원문이 아니라 그 이미지 픽셀이다(이미지 아래 텍스트
+    # 형식의 스캔) — 소유권을 정하기 전에 고쳐야 래스터 원문 판정·경고가 같은 span을 본다.
+    source_records = _hide_occluded_spans(
+        fitz, page, _source_span_records(fitz, page), visuals.image_infos,
+    )
     source_ownership, unowned_source, ambiguous_blocks = _assign_source_spans(
         page, block_rects, oblocks, source_records,
     )
-    visuals = _page_visual_obstacles(fitz, page, block_rects, oblocks)
     base_ctx = _PageContext(
         fitz, page, pno, aspect, oblocks, tblocks, block_rects,
         source_records, source_ownership, unowned_source, ambiguous_blocks,

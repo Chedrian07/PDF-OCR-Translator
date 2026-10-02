@@ -36,3 +36,7 @@ frontend/tests/e2e/shots/
 # 프런트엔드 테스트·픽스처 — `COPY frontend`가 정적 서빙 루트(/srv/frontend)에 그대로
 # 실어 무인증으로 공개되던 개발 산출물이다(런타임 미사용)
 frontend/tests/
+# Node 테스트 러너 전용 매니페스트 — 같은 이유로 /package.json·/package-lock.json이 공개됐다
+# (브라우저·서버는 읽지 않는다, 감사 security-4)
+frontend/package.json
+frontend/package-lock.json

@@ -1711,6 +1711,25 @@ def test_성공_뒤_응답을_멈춘_엔드포인트는_잡을_실패시킨다(t
     assert not (tmp_path / "result.ko.md").exists()
 
 
+def test_state_json의_오류_문구는_500자로_자른다(tmp_path, cfg):
+    """state.json의 error는 무인증 /translate/state로 그대로 나간다 — api.py의 실패 기록과
+    같은 500자 상한을 엔진의 기록에도 건다(security-2)."""
+    from app.translate.types import TranslateAPIError
+
+    class Verbose(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            if _marker(user) is None:
+                return ""
+            raise TranslateAPIError("번역 API 오류 (HTTP 500): " + "x" * 5000)
+
+    (tmp_path / "result.md").write_text("The model is fast.\n", encoding="utf-8")
+    with pytest.raises(TranslateAPIError):
+        run_translation(tmp_path, "ko", cfg, client=Verbose())
+    state = _state(tmp_path)
+    assert state["status"] == "error" and state["error"].startswith("번역 API 오류")
+    assert len(state["error"]) <= 500
+
+
 def test_성공이_끼어드는_간헐적_시간_초과는_잡을_실패시키지_않는다(tmp_path, cfg):
     from dataclasses import replace
 

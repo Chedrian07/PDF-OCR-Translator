@@ -532,9 +532,9 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 
 | 라우트 | 레이트리밋 키 | 상한 초과 응답 |
 |---|---|---|
-| `POST /jobs/{id}/qa` | `qa:job:{id}` · `qa:ip:{client}` | 429 + `Retry-After`(남은 윈도우 초) |
+| `POST /jobs/{id}/qa` | `qa:job:{id}` · `qa:ip:{client}` | 429 + `Retry-After`(남은 윈도우 초, 올림) |
 | `POST /jobs/{id}/qa` (동시 실행) | 전역 슬롯 | 429 + `Retry-After: 5` |
-| `POST /jobs/{id}/translate` | `translate:job:{id}` · `translate:ip:{client}` | 429 + `Retry-After`(남은 윈도우 초) |
+| `POST /jobs/{id}/translate` | `translate:job:{id}` · `translate:ip:{client}` | 429 + `Retry-After`(남은 윈도우 초, 올림) |
 | `POST /jobs/{id}/translate` (동시 번역 수) | 실행 중 번역 태스크 수 | 429 + `Retry-After: 30` |
 
 - 조정 변수(§7): `QA_RATE_LIMIT_PER_MIN`(30)·`QA_MAX_CONCURRENT`(4)·
@@ -548,7 +548,11 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 - 클라이언트 IP: `TRUSTED_PROXY_HOPS>0`이어도 `X-Forwarded-For`는 직접 연결 피어가
   `TRUSTED_PROXY_IPS`(IP·CIDR, 비우면 루프백 `127.0.0.0/8`·`::1`)에 있을 때만 믿는다. IP가
   아닌 피어(유닉스 소켓·프로세스 내 하네스)는 로컬 전송이라 믿는다. 목록 밖 피어는 헤더를
-  위조로 보고 피어 IP로 레이트리밋한다(한 번 경고 로그).
+  위조로 보고 피어 IP로 레이트리밋한다(한 번 경고 로그). uvicorn 기본 프록시 헤더 처리
+  (`FORWARDED_ALLOW_IPS`, 기본 127.0.0.1)가 이미 client를 XFF 항목으로 바꾼 요청(포트 0)은 그
+  서버가 믿은 홉으로 보고 같은 홉 수를 헤더 체인 전체에 적용한다 — `--no-proxy-headers` 여부와
+  무관하게 같은 키다. `X-Forwarded-For` 필드 줄이 여럿이면 순서대로 잇는다(RFC 9110).
+  레이트리밋 429의 `Retry-After`는 남은 윈도우를 올림한 초다 — 그만큼 기다리면 통과한다.
 - 같은 가드가 **`POST /render-preview`**도 묶는다: 크기 가중 비용(16 KiB당 1단위, 잡·IP
   키마다 분당 600단위)과 동시 렌더 4건. 넘으면 429 + `Retry-After`(동시 상한은 1초).
 
@@ -996,7 +1000,12 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   (`pipeline/pdf_export/report.py`, 현재 **11**)과 다르면 캐시를 무시하고 재생성한다 —
   내보내기 동작이 바뀐 사이클에서는 기존 export 캐시가 전부 한 번 재생성된다(§15.1).
 - 레이아웃 폰트 백필(`ENRICH_VERSION`이 오른 layout을 처음 읽을 때 실측 폰트를 다시 주입)은
-  export 워커 풀에서 돌고, 직렬화 결과가 기존 파일과 같으면 다시 쓰지도 예열하지도 않는다.
+  산출물(layout[.lang].json)마다 하나뿐인 백그라운드 스레드가 export 워커 풀에서 돌린다. 요청은
+  그 백필이 시작된 뒤 최대 2초만 기다리고(빈 풀의 보통 문서는 그 안에 끝나 실측 메타로 답한다),
+  넘으면 지금 layout(폴백 휴리스틱)으로 답한다 — 빌드가 export 워커를 모두 쥐고 있어도 리더
+  라우트가 멈추지 않는다. 백필 스레드는 빈 워커를 상한 없이 기다려 빌드 뒤에 끝낸다. `/page/{n}`은
+  기다리지 않는다. 이미 최신이면 다시 쓰지도 예열하지도 않고, 기다리는 사이 파일이 바뀌었거나
+  종료 중이면 저장하지 않는다.
 
 ### GET /api/jobs/{id}/pdf/report?lang=ko
 - 마지막 번역 PDF 빌드의 생성 리포트(`export.{lang}.report.json`)를
@@ -1225,6 +1234,7 @@ auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은
 | `ALLOWED_HOSTS` | config.py `localhost,127.0.0.1` / **compose `*`** | Host 헤더 화이트리스트(콤마 구분) — DNS rebinding 방어, 포트는 비교 시 무시. compose는 외부 노출 기본과 정합을 위해 `*`(모든 Host 허용)을 넘긴다 (§14) |
 | `OCR_CPU_MEM_LIMIT` / `OCR_CUDA_MEM_LIMIT` / `OCR_WEB_MEM_LIMIT` | `24g` / `16g` / `8g` | (compose) backend 서비스별 메모리 상한 (§8) |
 | `OVIS_MEM_LIMIT` / `PADDLE_MEM_LIMIT` | `24g` / `24g` | (compose) sidecar 컨테이너 메모리 상한 |
+| `OLLAMA_MEM_LIMIT` | `16g` | (compose.ollama.yaml) ollama 컨테이너 메모리 상한 — 큰 모델이면 .env로 올린다 |
 | `OVIS_MAX_UPLOAD_MB` / `PADDLEOCR_MAX_UPLOAD_MB` | `128` / `128` | (compose → sidecar) `/v1/parse` 페이지 이미지 업로드 상한 |
 | `OVIS_*` / `PADDLEOCR_*` | (sidecar 문서) | (compose → sidecar) 모델 ID·revision·dtype·VRAM·픽셀 상한·디바이스 — `OVIS_MODEL_ID`·`OVIS_MODEL_REVISION`·`OVIS_DTYPE`·`OVIS_GPU_MEMORY_UTILIZATION`·`OVIS_MAX_MODEL_LEN`·`OVIS_MAX_OUTPUT_TOKENS`·`OVIS_MAX_NUM_SEQS`·`OVIS_MIN_PIXELS`·`OVIS_MAX_PIXELS`·`OVIS_GDN_PREFILL_BACKEND`, `PADDLEOCR_MODEL_ID`·`PADDLEOCR_MODEL_REVISION`·`PADDLEOCR_DEVICE`·`PADDLEOCR_MIN_PIXELS`·`PADDLEOCR_MAX_PIXELS` (OVISOCR2_CUDA_5070TI.md·PADDLEOCR_VL_BLACKWELL_5070TI.md·`.env.example`) |
 | `HF_TOKEN` | (빈 값) | (compose) 프라이빗 미러용 Hugging Face 토큰 — 런타임 env로만 전달(빌드 레이어 미포함). PDF 워커는 기동 때 지운다 |
@@ -2269,7 +2279,7 @@ spawn 방식 상주 워커 프로세스가 이름 붙은 작업(`'모듈:함수'
 | 풀 | 워커 수 | 작업 |
 |---|---|---|
 | `ocr` | 1 | OCR 입력 페이지 렌더, 충실도 분석·재처리 채점, 텍스트 레이어 복구, 페이지 정렬 텍스트, 병합 때 폰트 실측 주입, textlayer 엔진 추출 |
-| `export` | `PDF_EXPORT_MAX_CONCURRENT`(0 이하면 min(8, CPU)) | 번역·대조 PDF 빌드, facsimile 래스터, API 레이아웃 폰트 백필(`pool_scope('export')`) |
+| `export` | `PDF_EXPORT_MAX_CONCURRENT`(0 이하면 min(8, CPU)) | 번역·대조 PDF 빌드, facsimile 래스터, API 레이아웃 폰트 백필(백그라운드 스레드, `pool_scope('export')`) |
 | `probe` | 2 | 업로드 검증(`probe_pdf` + 복잡도 게이트) |
 
 - 풀을 셋으로 나눈 이유: 업로드가 15분짜리 빌드나 적대적 OCR 페이지 뒤에 줄서지 않게 한다.

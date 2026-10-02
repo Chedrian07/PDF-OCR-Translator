@@ -469,7 +469,13 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
     # 모델 로드 오류 — 프리로드 스레드와 워커(잡 시작 시 로드)가 함께 기록하고
     # /api/health의 model_load_error가 읽는다.
     load_state: dict = {"error": None}
-    worker = Worker(store, broker, engine, settings, cancel_events, load_state=load_state)
+    # 종료 요청 표식 — 신호 처리기가 세우고 SSE 루프와 워커가 읽는다(_install_shutdown_hooks)
+    shutdown = ShutdownSignal()
+    worker = Worker(
+        store, broker, engine, settings, cancel_events, load_state=load_state,
+        # 신호 뒤 uvicorn의 연결 정리(drain) 동안에도 대기 잡을 새로 맡지 않는다
+        stop_requested=lambda: shutdown.requested,
+    )
     # 재시작 전 대기열에 들어갔지만 시작하지 못한 잡을 생성 순서대로 다시 제출한다
     # (실행 중이던 잡은 load_existing이 오류로 마감 — 크래시 루프를 피해 자동 재실행하지
     # 않는다). 워커는 lifespan에서 시작되므로 그때부터 차례로 처리된다.
@@ -505,8 +511,6 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
             except Exception:  # noqa: BLE001 — GC 실패가 다음 주기를 막지 않게
                 logger.exception("잡 GC 실패")
             await asyncio.sleep(_GC_INTERVAL_S)
-
-    shutdown = ShutdownSignal()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):

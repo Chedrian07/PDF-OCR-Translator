@@ -4,6 +4,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -57,15 +59,31 @@ def make_pdf_bytes(pages: int = 3, with_image: bool = True) -> bytes:
     return data
 
 
+# 번역 완료 예열 스레드 이름 접두(app.pipeline.derived.warm_translated_pdf_async)와 테스트 끝에서
+# 기다리는 상한 — 테스트 PDF의 예열 빌드는 1초 안팎이고, 느린 CI(에뮬레이션·커버리지)에도 넉넉하다.
+_PREWARM_THREAD_PREFIX = "pdf-warm-"
+_PREWARM_JOIN_TIMEOUT_S = 60.0
+
+
+def _prewarm_threads() -> set[threading.Thread]:
+    return {t for t in threading.enumerate() if t.name.startswith(_PREWARM_THREAD_PREFIX)}
+
+
 @pytest.fixture(autouse=True)
-def _fresh_pdf_export_slots():
-    """테스트마다 PDF 내보내기 빌드·예열 슬롯을 새로 만든다.
+def _fresh_pdf_export_slots(monkeypatch):
+    """테스트마다 PDF 내보내기 빌드·예열 슬롯을 새로 만들고, 그 테스트가 띄운 예열 스레드를 거둔다.
 
     슬롯은 app.pipeline.derived의 모듈 전역이고 번역 완료 예열은 데몬 스레드라 TestClient보다
     오래 산다. 앞 테스트의 예열 빌드가 아직 돌면 예열 몫(PDF_EXPORT_MAX_CONCURRENT-1 = 1)을
     쥔 채 다음 테스트로 넘어와, 새 예열이 대기 없이 포기했다(CI 러너 속도에서 '번역 직후에
     PDF가 준비돼 있어야 한다'가 간헐 실패). 남은 스레드는 자기가 잡은 옛 세마포어에
     반납하므로 새 슬롯과 섞이지 않는다.
+
+    끝날 때는 이 테스트 동안 새로 뜬 예열 스레드(pdf-warm-*)가 끝나기를 기다린다. 번역 API
+    테스트가 남긴 예열 빌드가 다음 테스트까지 살아 build_translated_pdf를 돌리면, 그 테스트가
+    pdf_export 내부에 건 monkeypatch(호출 횟수 세기 등)로 남의 3쪽 PDF 호출이 섞였다(무작위
+    순서에서 [0] 대신 [0, 0, 1, 2]). monkeypatch를 받아 두는 것은 순서 때문이다 — 패치 되돌리기가
+    이 정리 **뒤에** 일어나, 남은 예열이 자기 테스트의 패치 아래에서 끝난다.
     """
     from app.pipeline import derived
 
@@ -74,7 +92,17 @@ def _fresh_pdf_export_slots():
         derived._PDF_EXPORT_SLOTS_SIZE = 0
         derived._WARM_SLOTS = None
         derived._WARM_SLOTS_SIZE = 0
+    before = _prewarm_threads()
     yield
+    started = _prewarm_threads() - before
+    deadline = time.monotonic() + _PREWARM_JOIN_TIMEOUT_S
+    for thread in started:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    stuck = sorted(t.name for t in started if t.is_alive())
+    if stuck:
+        pytest.fail(
+            f"이 테스트가 띄운 PDF 예열 스레드가 {_PREWARM_JOIN_TIMEOUT_S:g}초 안에 끝나지 않음: {stuck}"
+        )
 
 
 @pytest.fixture

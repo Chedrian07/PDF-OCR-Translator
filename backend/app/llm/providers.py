@@ -441,8 +441,10 @@ class LocalOpenAIClient:
                 response = await client.post(f"{self.base_url}/chat/completions", json=payload)
                 response.raise_for_status()
         except httpx.ConnectError as exc:
+            # 문구는 /qa 응답으로 그대로 나간다 — 주소 대신 설정 이름만 안내한다(security-2).
             raise LlmError(
-                f"Local OpenAI-compatible server is not running at {self.base_url}."
+                "Local OpenAI-compatible server is not running "
+                "(check LLM_LOCAL_OPENAI_BASE_URL)."
             ) from exc
         except httpx.HTTPStatusError as exc:
             raise LlmError(

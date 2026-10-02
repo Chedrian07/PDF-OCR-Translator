@@ -893,6 +893,29 @@ if (layoutCap !== 'figure_only') {
     shown.badges.includes('모델 로드 실패') && shown.badges.includes('작업 처리기 중지됨')
       && !shown.badges.some((b) => b.includes('로딩 중')) && shown.notice && shown.noticeError
       && shown.noticeText.includes('모델 가중치를 찾을 수 없습니다'), JSON.stringify(shown));
+  // 상시 폴링이 같은 응답을 다시 받으면 aria-live 배지 영역과 role=alert 안내를 건드리지 않는다 —
+  // 예전에는 매번 비우고 다시 붙여 스크린리더가 같은 배지·경고를 되풀이해 읽었다(frontend-2).
+  const repolled = await healthPage.evaluate(async () => {
+    const records = [];
+    const note = (list) => {
+      for (const r of list) records.push(`${r.type}:${r.target.id || r.target.className || r.target.nodeName}`);
+    };
+    const observer = new MutationObserver(note);
+    for (const id of ['health-badges', 'upload-model-notice']) {
+      observer.observe(document.getElementById(id),
+        { subtree: true, childList: true, characterData: true, attributes: true });
+    }
+    const { loadHealth } = await import('/js/health.js');
+    await loadHealth();
+    await loadHealth();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    note(observer.takeRecords());
+    observer.disconnect();
+    return { records: records.slice(0, 8), count: records.length,
+      badges: document.querySelectorAll('#health-badges .badge').length };
+  });
+  check('health: 같은 응답을 다시 받으면 배지·경고 안내를 다시 쓰지 않는다(반복 낭독 없음)',
+    repolled.count === 0 && repolled.badges === shown.badges.length, JSON.stringify(repolled));
   await healthCtx.close();
 }
 

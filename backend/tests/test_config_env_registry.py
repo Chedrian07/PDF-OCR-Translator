@@ -4,7 +4,8 @@ load_dotenv_file은 레지스트리 밖의 .env 키를 '이 앱이 읽지 않는
 translate-llm-13·infra-docs-7·mlx-integration-8). 레지스트리가 코드보다 늦으면 진짜
 노브에 거짓 경고가, 앞서면 사라진 키가 조용히 통과한다 — 그래서 양방향으로 대조한다.
 - 코드가 읽는 키(test_ci_ops_contracts의 스캐너 + 앱 전체의 os.environ 직접 조회) ⊆ 앱 키
-- .env.example 키 줄·docker-compose.yml의 ${…} ⊆ 레지스트리 (.env를 복사한 사용자에게 거짓 경고 금지)
+- .env.example 키 줄·compose 파일 전부(docker-compose.yml·오버레이 compose.ollama.yaml)의 ${…}
+  ⊆ 레지스트리 (.env를 복사한 사용자에게 거짓 경고 금지)
 - 반대로 레지스트리의 키는 저마다 실제 출처(코드·배포 파일·하네스)가 있어야 한다.
 """
 
@@ -36,10 +37,18 @@ def _keys_read_by_app() -> set[str]:
     return _env_keys_read_by_code() | _direct_env_reads()
 
 
+def _compose_files() -> list[Path]:
+    """리포 루트의 compose 파일 전부 — 기본 파일과 오버레이. docker-compose.yml만 읽으면
+    오버레이(compose.ollama.yaml의 OLLAMA_MEM_LIMIT)가 레지스트리에서 빠져도 통과했다(api-4)."""
+    return sorted({*REPO.glob("docker-compose*.y*ml"), *REPO.glob("compose*.y*ml")})
+
+
 def _deploy_file_keys() -> set[str]:
     example = (REPO / ".env.example").read_text(encoding="utf-8")
-    compose = (REPO / "docker-compose.yml").read_text(encoding="utf-8")
-    return set(_ENV_EXAMPLE_KEY.findall(example)) | set(_COMPOSE_VAR.findall(compose))
+    keys = set(_ENV_EXAMPLE_KEY.findall(example))
+    for compose in _compose_files():
+        keys |= set(_COMPOSE_VAR.findall(compose.read_text(encoding="utf-8")))
+    return keys
 
 
 def test_scanners_still_find_the_known_readers():
@@ -49,6 +58,8 @@ def test_scanners_still_find_the_known_readers():
     assert {"OCR_DEVICE", "OPENAI_BASE_URL", "BIND_HOST", "OVIS_MODEL_ID"} <= (
         _env_keys_read_by_code() | _deploy_file_keys()
     )
+    assert {"docker-compose.yml", "compose.ollama.yaml"} <= {p.name for p in _compose_files()}
+    assert "OLLAMA_MEM_LIMIT" in _deploy_file_keys()  # 오버레이의 ${…}도 읽는다
 
 
 def test_every_key_the_code_reads_is_registered_as_an_app_key():
@@ -79,6 +90,24 @@ def test_registered_keys_still_have_a_source():
         key for key in config._HARNESS_ENV_KEYS if not re.search(rf"\b{key}\b", harness_text)
     )
     assert not stale_harness, f"하네스·테스트가 더는 읽지 않는 키: {stale_harness}"
+
+
+def test_keys_read_by_tools_sharing_the_process_are_not_flagged():
+    """api-4: Apple Silicon 기본 OCR 엔진(MLX)·Metal 디버그·ObjC fork 안전성 키는 같은
+    프로세스가, TESSDATA_PREFIX는 textlayer의 tesseract(자식)가 실제로 읽는다. 오버레이
+    compose 키도 같은 .env에 둔다 — 이들을 '이 앱이 읽지 않는 키'로 거짓 경고했다."""
+    shared = {
+        "MLX_MAX_OPS_PER_BUFFER": "4", "MLX_METAL_FAST_SYNCH": "1", "MLX_DISABLE_COMPILE": "1",
+        "MTL_DEBUG_LAYER": "1", "METAL_DEVICE_WRAPPER_TYPE": "1",
+        "OBJC_DISABLE_INITIALIZE_FORK_SAFETY": "YES", "TESSDATA_PREFIX": "/opt/tessdata",
+        "OLLAMA_MEM_LIMIT": "24g",
+    }
+    assert config.unknown_dotenv_key_warnings(shared) == []
+    # 다른 도구의 접두사와 겹쳐도, 이 앱의 키에서 OCR_만 빠뜨린 이름은 오타로 안내한다
+    typos = config.unknown_dotenv_key_warnings({"MLX_QUANT_BITS": "8", "CUDA_GRAPHS": "1"})
+    assert [w.split(":", 1)[0] for w in typos] == ["MLX_QUANT_BITS", "CUDA_GRAPHS"]
+    assert "OCR_MLX_QUANT_BITS의 오타" in typos[0]
+    assert "OCR_CUDA_GRAPHS의 오타" in typos[1]
 
 
 def test_categories_do_not_overlap_and_the_registry_is_not_scanned_as_reads():

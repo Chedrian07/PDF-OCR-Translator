@@ -754,9 +754,12 @@ def _plan_text_block(
     if block_type != "title":
         new = _protect_trailing_words(new)
     if block_type == "title":
+        # 줄 폭은 화면 폭이다 — 회전 페이지에서 비회전 폭은 화면의 높이다.
+        shown = rect * ctx.page.rotation_matrix
+        shown.normalize()
         new = _balance_title_text(
             new,
-            rect.width,
+            shown.width,
             base_pt,
             block_fontname,
             block_fontfile,
@@ -994,14 +997,123 @@ def _plan_page_targets(ctx: _PageContext, result: PdfExportResult):
     return targets, flow_candidates, repeated_scheme_link_rects
 
 
+class _DisplaySpace:
+    """회전 페이지의 flow 계획을 표시(화면) 공간에서 한다.
+
+    flow 계획(`_flow_components`·`_plan_flow_group`)은 '아래로 자란다'·'같은 단'을
+    비회전 y·x축으로 계산한다. /Rotate 90·270 페이지에서 비회전 y는 화면의 가로라,
+    번역 문단이 아래로 자라지 않고 옆 여백·옆 단으로 밀리고 쓸데없이 줄었다(감사
+    pdf-5). 그래서 화면 크기와 같은 회전 없는 임시 페이지에서 표시 공간 좌표로
+    계획하고, 결과의 사각형·원점만 비회전 좌표로 되돌린다.
+
+    PyMuPDF textbox의 줄바꿈은 rotate=90·270이면 상자의 높이를 줄 폭으로, 폭을 쓸 수
+    있는 높이로 쓴다 — 표시 공간 상자를 rotate=0으로 시험한 결과와 그 상자를 되돌린
+    비회전 상자를 rotate=page.rotation으로 넣은 결과의 줄바꿈·남는 공간이 같다. 한 줄
+    경로(`_plan_single_line`)는 원래부터 표시 공간에서 원점을 계산해 되돌린다.
+    """
+
+    def __init__(self, fitz, page) -> None:
+        self.to_display = page.rotation_matrix
+        self.to_page = page.derotation_matrix
+        self._doc = fitz.open()
+        self.page = self._doc.new_page(width=page.rect.width, height=page.rect.height)
+
+    @classmethod
+    def for_page(cls, fitz, page) -> "_DisplaySpace | None":
+        return cls(fitz, page) if page.rotation % 360 else None
+
+    def close(self) -> None:
+        self._doc.close()
+
+    def shown(self, rect):
+        out = rect * self.to_display
+        out.normalize()
+        return out
+
+    def unshown(self, rect):
+        out = rect * self.to_page
+        out.normalize()
+        return out
+
+    def unshown_point(self, x: float, y: float) -> tuple[float, float]:
+        matrix = self.to_page
+        return (
+            float(x * matrix.a + y * matrix.c + matrix.e),
+            float(x * matrix.b + y * matrix.d + matrix.f),
+        )
+
+    def candidate(self, candidate: _FlowCandidate) -> _FlowCandidate:
+        # 배치 기하만 옮긴다 — 지울 원문(source_rect·redact_rects)은 비회전 좌표 그대로다.
+        return replace(candidate, rect=self.shown(candidate.rect))
+
+    def replacement(self, target: _Replacement) -> _Replacement:
+        plan = target.plan
+        return replace(target, plan=replace(
+            plan,
+            rect=self.unshown(plan.rect),
+            ink_rect=None if plan.ink_rect is None else self.unshown(plan.ink_rect),
+            origin=None if plan.origin is None else self.unshown_point(*plan.origin),
+            first_origin=(
+                None if plan.first_origin is None else self.unshown_point(*plan.first_origin)
+            ),
+            rich_runs=tuple(
+                (*self.unshown_point(x, y), text, prefix)
+                for x, y, text, prefix in plan.rich_runs
+            ),
+        ))
+
+
+def _shown_flow_components(space: _DisplaySpace | None, candidates: list[_FlowCandidate]):
+    """`_flow_components`를 화면 기준으로 — 같은 단·위아래 이웃은 화면에서 정한다."""
+    if space is None:
+        return _flow_components(candidates)
+    shown = [space.candidate(candidate) for candidate in candidates]
+    original = {id(item): candidate for item, candidate in zip(shown, candidates)}
+    return [[original[id(item)] for item in component] for component in _flow_components(shown)]
+
+
+def _shown_flow_group(
+    page, space: _DisplaySpace | None, candidates: list[_FlowCandidate],
+    fixed_rects: list, *, decorative_rects=None, **kwargs,
+) -> list[_Replacement] | None:
+    """`_plan_flow_group`을 화면 기준으로 — 회전 페이지면 표시 공간 임시 페이지에서 계획한다."""
+    if space is None:
+        return _plan_flow_group(
+            page, candidates, fixed_rects, decorative_rects=decorative_rects, **kwargs,
+        )
+    planned = _plan_flow_group(
+        space.page,
+        [space.candidate(candidate) for candidate in candidates],
+        [space.shown(rect) for rect in fixed_rects if rect is not None],
+        decorative_rects=[space.shown(rect) for rect in decorative_rects or () if rect is not None],
+        **kwargs,
+    )
+    return None if planned is None else [space.replacement(target) for target in planned]
+
+
 def _plan_flow_targets(
     ctx: _PageContext, flow_candidates: list[_FlowCandidate],
     targets: list[_Replacement], result: PdfExportResult,
 ) -> None:
-    """같은 단의 인접 본문을 원자적으로 reflow하고, 실패하면 단계적으로 회수한다."""
+    """같은 단의 인접 본문을 원자적으로 reflow하고, 실패하면 단계적으로 회수한다.
+
+    회전 페이지는 화면(표시 공간) 기준으로 계획한다(`_DisplaySpace`).
+    """
+    space = _DisplaySpace.for_page(ctx.fitz, ctx.page) if flow_candidates else None
+    try:
+        _plan_flow_components(ctx, flow_candidates, targets, result, space)
+    finally:
+        if space is not None:
+            space.close()
+
+
+def _plan_flow_components(
+    ctx: _PageContext, flow_candidates: list[_FlowCandidate],
+    targets: list[_Replacement], result: PdfExportResult, space: _DisplaySpace | None,
+) -> None:
     # 일반 텍스트는 페이지에서 모두 수집한 뒤 같은 단의 인접 블록을
     # 원자적으로 reflow한다. 이 단계 전에는 어떤 원문도 redaction하지 않는다.
-    for component in _flow_components(flow_candidates):
+    for component in _shown_flow_components(space, flow_candidates):
         component_indices = {candidate.block_index for candidate in component}
         fixed_rects = [span.rect for span in ctx.unowned_source]
         # 이번 패스에서 지워질 블록의 원문은 장애물이 아니다 — 남을 블록만 센다.
@@ -1027,8 +1139,8 @@ def _plan_flow_targets(
             ])
         planned = None
         for variant in variants:
-            planned = _plan_flow_group(
-                ctx.page, variant, fixed_rects, decorative_rects=decorative,
+            planned = _shown_flow_group(
+                ctx.page, space, variant, fixed_rects, decorative_rects=decorative,
             )
             if planned is not None:
                 break
@@ -1069,8 +1181,8 @@ def _plan_flow_targets(
                 for text in (candidate.text, candidate.reflow_text):
                     if text is None:
                         continue
-                    single = _plan_flow_group(
-                        ctx.page, [replace(candidate, text=text)], obstacles,
+                    single = _shown_flow_group(
+                        ctx.page, space, [replace(candidate, text=text)], obstacles,
                         decorative_rects=decorative,
                     )
                     if single:
@@ -1113,8 +1225,8 @@ def _plan_flow_targets(
                 for text in (candidate.text, candidate.reflow_text):
                     if text is None:
                         continue
-                    single = _plan_flow_group(
-                        ctx.page, [replace(candidate, text=text)], obstacles,
+                    single = _shown_flow_group(
+                        ctx.page, space, [replace(candidate, text=text)], obstacles,
                         scales=_LASTRESORT_SHRINK_STEPS,
                         min_pt=_LASTRESORT_MIN_FONT_PT,
                         decorative_rects=decorative,

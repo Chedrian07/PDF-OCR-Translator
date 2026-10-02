@@ -133,11 +133,14 @@ def test_render_preview_concurrency_is_capped(client, sample_pdf, monkeypatch):
 
 
 # ── api-jobs-10: X-Forwarded-For는 신뢰 프록시가 붙인 것만 믿는다 ─────────────────
-def _req(host: str, xff: str | None = None):
+def _req(host: str, *xff: str, port: int = 40123):
+    """직접 연결 피어(host:port)와 X-Forwarded-For 필드 줄들 — 실제 TCP 피어라 포트는 0이 아니다."""
     from types import SimpleNamespace
 
-    headers = {"x-forwarded-for": xff} if xff is not None else {}
-    return SimpleNamespace(client=SimpleNamespace(host=host), headers=headers)
+    from starlette.datastructures import Headers
+
+    raw = [(b"x-forwarded-for", line.encode("latin-1")) for line in xff]
+    return SimpleNamespace(client=SimpleNamespace(host=host, port=port), headers=Headers(raw=raw))
 
 
 def test_forged_forwarded_for_from_a_direct_client_is_ignored(monkeypatch, caplog):
@@ -176,3 +179,96 @@ def test_trusted_proxy_ips_accepts_addresses_and_cidrs(monkeypatch):
     assert api_mod._client_key(_req("unknown", "203.0.113.9")) == "203.0.113.9"
     monkeypatch.setenv("TRUSTED_PROXY_HOPS", "0")                 # 홉 0이면 목록과 무관하게 무시
     assert api_mod._client_key(_req("172.17.0.1", "203.0.113.7")) == "172.17.0.1"
+
+
+# ── api-2: uvicorn 기본 ProxyHeadersMiddleware가 이미 소비한 루프백 홉 ───────────────
+def _key_behind_uvicorn(peer: str, *xff: str) -> tuple[tuple, str]:
+    """uvicorn 기본 구성이 앱을 감싸는 ProxyHeadersMiddleware(127.0.0.1)를 실제로 거쳐
+    _client_key를 부른다 → (앱이 본 client, 키). 위 _req는 미들웨어를 건너뛰어, 실배포의
+    루프백 피어가 앱에 그대로 보인다고 잘못 가정했다."""
+    import asyncio
+
+    from starlette.requests import Request
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    import app.api as api_mod
+
+    seen: dict = {}
+
+    async def _app(scope, receive, send):
+        seen["client"] = tuple(scope["client"])
+        seen["key"] = api_mod._client_key(Request(scope))
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET",
+        "scheme": "http", "path": "/", "raw_path": b"/", "query_string": b"", "root_path": "",
+        "headers": [(b"x-forwarded-for", line.encode("latin-1")) for line in xff],
+        "client": (peer, 51234), "server": ("127.0.0.1", 8000),
+    }
+    asyncio.run(ProxyHeadersMiddleware(_app, trusted_hosts="127.0.0.1")(scope, None, None))
+    return seen["client"], seen["key"]
+
+
+def test_uvicorn_wraps_the_app_and_rewrites_loopback_peers_by_default(monkeypatch):
+    """아래 테스트들의 전제 — `uvicorn app.main:app`(Dockerfile·make dev)은 --no-proxy-headers
+    없이 뜨고, 그 기본 구성은 앱을 127.0.0.1 피어를 믿는 ProxyHeadersMiddleware로 감싼다."""
+    from uvicorn.config import Config
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    async def _app(scope, receive, send):
+        return None
+
+    monkeypatch.delenv("FORWARDED_ALLOW_IPS", raising=False)
+    config = Config(app=_app, log_config=None)
+    config.load()
+    assert isinstance(config.loaded_app, ProxyHeadersMiddleware)
+    assert "127.0.0.1" in config.loaded_app.trusted_hosts
+    assert "192.168.1.66" not in config.loaded_app.trusted_hosts
+
+
+def test_hops_count_the_loopback_proxy_that_uvicorn_already_consumed(monkeypatch, caplog):
+    """api-2: uvicorn이 루프백 피어의 client를 XFF 항목으로 바꿔 넘기는데 앱이 그것을 직접
+    피어로 봐 홉을 두 번 셌다 — CDN + 같은 호스트 nginx(HOPS=2)는 같은 엣지를 거친 모든
+    사용자가 엣지 IP 한 버킷을 나눠 썼고, nginx만(HOPS=1)은 실제 클라이언트를 '목록 밖
+    피어'로 지목하는 거짓 경고를 남겼다."""
+    import logging
+
+    import app.api as api_mod
+
+    monkeypatch.delenv("TRUSTED_PROXY_IPS", raising=False)            # 기본 = 루프백
+    monkeypatch.setattr(api_mod, "_trusted_proxy_warned", set())      # 경고는 프로세스당 한 번
+
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "2")
+    client, key = _key_behind_uvicorn("127.0.0.1", "203.0.113.5, 198.51.100.10")
+    assert client == ("198.51.100.10", 0)        # uvicorn이 루프백 홉을 이미 소비했다
+    assert key == "203.0.113.5"
+    assert _key_behind_uvicorn("127.0.0.1", "203.0.113.77, 198.51.100.10")[1] == "203.0.113.77"
+    # uvicorn이 바꾸지 않은 요청(--no-proxy-headers·::1 피어)과 같은 답이다
+    assert api_mod._client_key(_req("127.0.0.1", "203.0.113.5, 198.51.100.10")) == "203.0.113.5"
+
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+    with caplog.at_level(logging.WARNING, logger="app.api"):
+        assert _key_behind_uvicorn("127.0.0.1", "6.6.6.6, 192.168.1.50")[1] == "192.168.1.50"
+    assert not [r for r in caplog.records if "TRUSTED_PROXY_IPS" in r.getMessage()]
+
+
+def test_proxy_rewrite_handling_keeps_forged_headers_out(monkeypatch, caplog):
+    """서버의 판정을 따르는 것이 위조 경로를 새로 열지 않는다 — uvicorn이 믿지 않는 LAN 피어는
+    그대로 피어 IP다. 새 줄을 덧붙이는 프록시(HAProxy option forwardfor) 뒤에서는 클라이언트가
+    보낸 첫 줄이 아니라 줄 전체의 체인으로 센다(첫 줄만 읽어 위조 값을 키로 썼다)."""
+    import logging
+
+    import app.api as api_mod
+
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+    monkeypatch.delenv("TRUSTED_PROXY_IPS", raising=False)
+    monkeypatch.setattr(api_mod, "_trusted_proxy_warned", set())
+    with caplog.at_level(logging.WARNING, logger="app.api"):
+        client, key = _key_behind_uvicorn("192.168.1.66", "10.9.9.1")
+    assert client == ("192.168.1.66", 51234) and key == "192.168.1.66"
+    assert any("TRUSTED_PROXY_IPS" in r.getMessage() for r in caplog.records)
+
+    assert api_mod._client_key(_req("127.0.0.1", "6.6.6.6", "192.168.1.50")) == "192.168.1.50"
+    assert _key_behind_uvicorn("127.0.0.1", "6.6.6.6", "192.168.1.50")[1] == "192.168.1.50"
+    # 포트 0은 서버가 헤더로 바꾼 표식일 뿐 — XFF가 없으면 그 피어를 그대로 쓴다
+    assert api_mod._client_key(_req("192.168.1.66", port=0)) == "192.168.1.66"

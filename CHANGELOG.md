@@ -60,6 +60,7 @@ Performance figures below were measured on an Apple M4 Max on a quiet machine on
 - Builds run in separate worker processes, truly in parallel, without slowing OCR (a 25-page translated PDF builds in about 8 s; MLX decoding stays at about 290 tok/s meanwhile). Export failures return 409 with a reason instead of 500, and caches are validated by a build stamp.
 - Scanned tables are translated from a pixel grid: only the changed cells' text is covered, rules and untouched cells stay intact, and a table whose columns cannot be located is kept with a warning.
 - Rotated pages lay out multi-line translations in screen orientation.
+- Translated PDF builds are about a third faster on dense papers (25-page paper 40 s → 26 s): layout trials run on a blank page with the same geometry instead of rescanning the source page's fonts on every attempt. The output is unchanged.
 - List items left untranslated (the unit kept its original text) keep their original typesetting instead of being redrawn as plain text with stray fraction bars.
 - Inline math rules (fraction bars, root overlines) inside a translated paragraph are removed with its text and no longer block its space, so translations are not shrunk below readable size and no stray bars remain (a 25-page paper went from seven shrink/no-fit warnings to one).
 - Inner-product brackets (`\langle`, `\rangle`) are drawn as ⟨ ⟩ (〈 〉 on fonts without them) instead of the words `langle`/`rangle`, and a symbol command right before `\boldsymbol{…}` or `\frac{…}{…}` no longer fuses with it (`langley`, `cdotx`).

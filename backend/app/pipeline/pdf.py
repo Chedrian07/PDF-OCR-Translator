@@ -164,6 +164,9 @@ def probe_pdf(pdf_path: Path, max_pages: int) -> int:
             "손상된 PDF입니다"
         ) from error
     except pdf_worker.PdfWorkerCrashed as error:
+        # 빈 작업도 못 끝내는 워커면 서버 환경 탓이다 — 사용자 파일을 '손상'으로 몰지 않는다
+        if not pdf_worker.workers_can_start(pdf_worker.POOL_PROBE):
+            raise pdf_worker.PdfWorkerUnavailable() from error
         raise ValueError(
             "PDF 검증 중 처리 프로세스가 비정상 종료했습니다 — 손상되었거나 지원하지 않는 "
             "PDF입니다"

@@ -624,6 +624,24 @@ def test_build_keeps_unchanged_blocks(tmp_path):
     assert "Original English sentence" in _pdf_text(result.path.read_bytes())
 
 
+def test_build_keeps_unchanged_list_item_blocks(tmp_path):
+    """원문 그대로 남은 목록 블록(번역 실패 → 원문 유지)은 다시 조판하지 않는다.
+
+    OCR content의 '- ' 글머리표는 번역문 쪽 정규화에서만 '• '로 바뀐다. 예전에는 그
+    차이 때문에 내용이 같은 블록이 '바뀐 블록'으로 교체돼, 실서버 25쪽 논문(MLX 엔진 +
+    로컬 MLX 번역)에서 목록 12개가 인라인 수식 대신 평문('1.57/d')으로 다시 찍히고
+    원문 분수선만 남았다.
+    """
+    src_text = "- Bullet item kept in English because its translation failed"
+    job_dir = _unit_job(tmp_path, src_text=src_text)
+    (job_dir / "layout.ko.json").write_text(
+        (job_dir / "layout.json").read_text(encoding="utf-8"), encoding="utf-8")
+    result = build_translated_pdf(job_dir, "ko")
+    assert result.replaced == 0, result.kept_reasons
+    assert result.kept_reasons == {"unchanged": 1}
+    assert "Bullet item kept in English" in _pdf_text(result.path.read_bytes())
+
+
 def test_build_missing_inputs(tmp_path):
     job_dir = _unit_job(tmp_path)
     (job_dir / "layout.ko.json").unlink()

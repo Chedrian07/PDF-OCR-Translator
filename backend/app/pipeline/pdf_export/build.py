@@ -356,6 +356,9 @@ _SCAN_FILL_RATIO = 0.9
 # 규칙에 걸리지 않는다. 페이지의 이만큼 이상을 채운 덩어리가 레이아웃 그림 블록이 아니고
 # 그 안에 보이는 텍스트가 하나도 없으면 스캔 배경이다.
 _SCAN_MARGIN_FRACTION = 0.5
+# 묶기는 래스터 쌍을 모두 비교한다 — 이보다 많은 이미지 인스턴스(글자마다 이미지를 쓰는
+# 생성기 등)가 있는 쪽은 묶지 않고 예전 규칙(한 장이 85% 이상)만 쓴다.
+_SCAN_CLUSTER_MAX = 400
 
 
 def _scan_backgrounds(fitz, page, raster_rects, block_rects, oblocks, source_records) -> list:
@@ -370,6 +373,12 @@ def _scan_backgrounds(fitz, page, raster_rects, block_rects, oblocks, source_rec
     count = len(raster_rects)
     if not count:
         return []
+    page_area = page.rect.width * page.rect.height or 1.0
+    if count > _SCAN_CLUSTER_MAX:
+        return [
+            (+rect, [index]) for index, rect in enumerate(raster_rects)
+            if rect.width * rect.height >= page_area * _SCAN_RASTER_FRACTION
+        ]
     parent = list(range(count))
 
     def find(index: int) -> int:
@@ -387,7 +396,6 @@ def _scan_backgrounds(fitz, page, raster_rects, block_rects, oblocks, source_rec
     clusters: dict[int, list[int]] = {}
     for index in range(count):
         clusters.setdefault(find(index), []).append(index)
-    page_area = page.rect.width * page.rect.height or 1.0
     figures = [
         rect for rect, block in zip(block_rects, oblocks)
         if rect is not None

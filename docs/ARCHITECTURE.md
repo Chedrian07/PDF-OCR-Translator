@@ -59,9 +59,14 @@
    MPS의 `index_copy_`가 KV 길이에 비례해 8쪽 청크 디코드를 34 tok/s로 떨어뜨리던 것을 되돌렸다)
 9. P22 — 모델 bbox를 픽셀로 바꾼 뒤 **페이지 안으로 clamp**하고 퇴화 상자는 건너뛰되 크롭 번호는
    소비한다(마크다운 참조·boxes.json 정렬 유지). 거대·음수 좌표가 페이지보다 큰 크롭이나 Pillow
-   좌표 산술 오버플로에 닿지 않게 하는 보안 패치이며 MLX 포팅도 같은 규칙을 쓴다
+   좌표 산술 오버플로에 닿지 않게 하는 보안 패치이며 MLX 포팅도 같은 규칙을 쓴다. 좌표를 못 읽은
+   image 매치(쉼표 누락·이름·정수 자릿수 상한)와 상자 목록이 아닌 det 값(문자열·빈 목록·None)·
+   기형 평평 목록도 image 매치당 번호 1개를 쓰고, image 판정은 마크다운 치환과 같은 기준
+   (`_is_image_ref`, 공백 라벨 포함)이다. layout.json의 `crop_index`도 같은 규칙으로 센다
+   (`pipeline/layout.py::_image_slots`) — 레이아웃 뷰·이동 페이지 재크롭이 벤더 파일과 같은 번호를 쓴다
 10. P23 — `infer_multi`의 페이지 분할은 첫 `<PAGE>` 앞이 **공백일 때만** 버린다(마커 0개면 전체가
     1쪽) — 업스트림은 늘 버려 선행 마커를 생략한 출력의 1쪽이 사라졌다. `merge.split_pages`와 같은 규칙
+    (MLX 포팅도 같은 규칙)
 
 ### MLX 포팅 패치 (backend/app/vendor/unlimited_ocr_mlx/)
 
@@ -73,7 +78,7 @@ mlx-vlm 0.7.4 원본 대비 로컬 패치(전체 내역·sha256·측정은 그 �
 | M1 | CLIP MLP를 `quick_gelu`, LayerNorm eps 1e-5로 | mlx-vlm 버그 — 원본(torch)과 달라 CLIP 출력 상대오차 0.309, 1쪽 det 블록 19 → 11 |
 | M2 | 원샷 프리필(`prefill_length = P`) | mlx-vlm chunked prefill은 P-1을 기록해 마지막 프롬프트 토큰이 링 캐시에서 밀려났다(8쪽 출력이 토큰 105에서 갈림) |
 | M3 | 생성 모듈 — GPU no-repeat-ngram, 토큰 콜백, 토큰마다 취소·반복 확인, `hit_max_length` | 엔진의 스트리밍·취소·반복 감지·`OutputLimitError` 계약 |
-| M4 | torch 없는 후처리(`ast.literal_eval`만 — P9) + P22 bbox clamp | 산출물(마크다운·크롭·boxes.json·raw_pages.json)이 torch 흐름과 바이트 동일 |
+| M4 | torch 없는 후처리(`ast.literal_eval`만 — P9) + torch P22(bbox clamp, 쓸 수 없는 image 상자·좌표를 못 읽은 image ref·상자 목록이 아닌 det 값도 크롭 번호 소비)·P23(첫 `<PAGE>` 앞 보존) | 산출물(마크다운·크롭·boxes.json·raw_pages.json)이 torch 흐름과 바이트 동일 — tests/test_mlx_postprocess.py가 모서리·무작위 입력으로 대조 |
 | M5 | 인메모리 8비트 양자화 — 디코더만(group 64), 8 이외 비트 거부 | 처리량 약 1.44배·재현율 동일, 4비트는 숫자 오인식(2504 → 2304) |
 | M6 | **기각** — MoE 게이트 fp32 계산 | 측정상 스파이크·MPS 출력에서 오히려 멀어짐 |
 | M7 | gundam 크롭의 위치 임베딩 리샘플을 torch `F.interpolate`와 같은 가중치로 | mlx-vlm이 CLIP 채널 축을 리샘플하고 SAM rel_pos 좌표가 틀렸다 |

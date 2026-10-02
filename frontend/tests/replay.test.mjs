@@ -1202,3 +1202,46 @@ test('replayExtendsRaw: 이어받은 replay의 확정 페이지 경계는 그대
   const newPages = splitPreviewPages(after).pages;
   assert.deepEqual(newPages.slice(0, oldPages.length), oldPages);
 });
+
+/* ===== 질문(Q&A) 첫 공급자·Thinking 기본값 (P4 실앱: local-openai만 쓸 수 있는 배포) ===== */
+import { pickQaProvider, qaThinkingDefault } from '../app.js';
+
+const LOCAL_ONLY = {
+  default_provider: 'openai-responses', // LLM_PROVIDER 미설정 = 서버 기본
+  providers: [
+    { id: 'openai-responses', available: false, remote: true, models: ['gpt-5-mini'] },
+    { id: 'openai-chat', available: false, remote: true, models: ['gpt-5-mini'] },
+    { id: 'ollama', available: false, remote: false, models: [] },
+    { id: 'local-openai', available: true, remote: false, models: ['qwen3.5-0.8b'] },
+  ],
+};
+
+test('pickQaProvider: 서버 기본이 설정 필요면 쓸 수 있는 공급자를 고른다', () => {
+  assert.equal(pickQaProvider(LOCAL_ONLY, null), 'local-openai', '예전에는 openai-responses(설정 필요)');
+  assert.equal(pickQaProvider(LOCAL_ONLY, 'openai-chat'), 'local-openai', '저장값도 못 쓰면 가용 공급자');
+  const both = {
+    ...LOCAL_ONLY,
+    providers: LOCAL_ONLY.providers.map((p) => ({ ...p, available: p.id !== 'ollama' })),
+  };
+  assert.equal(pickQaProvider(both, 'openai-chat'), 'openai-chat', '쓸 수 있는 저장값은 그대로');
+  assert.equal(pickQaProvider(both, null), 'openai-responses', '쓸 수 있는 서버 기본은 그대로');
+  assert.equal(pickQaProvider(both, 'gone'), 'openai-responses', '카탈로그에 없는 저장값은 무시');
+});
+
+test('pickQaProvider: 아무것도 못 쓰면 예전 순서(설정 안내가 보이는 공급자), 비정상 카탈로그 방어', () => {
+  const none = { ...LOCAL_ONLY, providers: LOCAL_ONLY.providers.map((p) => ({ ...p, available: false })) };
+  assert.equal(pickQaProvider(none, 'ollama'), 'ollama');
+  assert.equal(pickQaProvider(none, null), 'openai-responses');
+  assert.equal(pickQaProvider(null, 'x'), '');
+  assert.equal(pickQaProvider({ providers: 'evil' }, 'x'), '');
+  assert.equal(pickQaProvider({ providers: [null, { id: 'a' }] }, null), 'a');
+});
+
+test('qaThinkingDefault: 고른 적 없으면 원격만 켜고 로컬은 끈다, 고른 값은 그대로', () => {
+  assert.equal(qaThinkingDefault(LOCAL_ONLY, 'local-openai', null), false, '로컬 사고 모델은 예산 잘림');
+  assert.equal(qaThinkingDefault(LOCAL_ONLY, 'ollama', null), false);
+  assert.equal(qaThinkingDefault(LOCAL_ONLY, 'openai-responses', null), true, '원격은 예전처럼 켜짐');
+  assert.equal(qaThinkingDefault(LOCAL_ONLY, 'local-openai', 'true'), true, '사용자가 켠 값 존중');
+  assert.equal(qaThinkingDefault(LOCAL_ONLY, 'openai-chat', 'false'), false, '사용자가 끈 값 존중');
+  assert.equal(qaThinkingDefault(null, 'local-openai', null), true, '카탈로그 없으면 예전 기본(켜짐)');
+});

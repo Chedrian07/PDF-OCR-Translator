@@ -149,8 +149,9 @@ Uploaded PDFs, and the text an OCR model produces from them, are treated as host
   (additional actions), document-level JavaScript, XFA forms, embedded files and file
   attachments, and link or outline actions that run JavaScript, launch programs, submit
   or import form data, open other files (`GoToR`/`GoToE`) or play rich media. Internal
-  links, URI links and the outline stay. The side-by-side export is a new document and
-  never had any.
+  links, URI links and the outline stay. Links over translated text are removed by the
+  text redaction and then re-attached as the same annotation objects, so they go through
+  the same action filtering. The side-by-side export is a new document and never had any.
 - **External images are never loaded automatically.** The server renderer only turns
   `images/<file>` and `data:image/(png|jpeg|gif|webp)` into `<img>`; any other source
   (remote URLs, LAN addresses, absolute paths) becomes a click-only link. The SPA also

@@ -1135,11 +1135,60 @@ def _font_backfill_once(job, lang: str | None, st, target: Path) -> None:
         return  # 잡이 지워졌다 — 쓸 곳이 없다
     finally:
         tmp.unlink(missing_ok=True)
-    # 방금 layout.{lang}.json의 mtime이 올라가 export.{lang}.pdf 캐시가
+    # 방금 layout[.lang].json의 mtime이 올라가 export.{lang}.pdf 캐시가
     # 무효해졌다. 그 무효화 자체는 옳다(내보내기의 입력이 실제로 바뀌었다)
     # — 다만 다음 다운로드 클릭이 그 빌드를 통째로 기다리게 두지 않는다.
-    if st is not None and lang is not None:
-        _warm_export_pdf(st, job, lang)
+    # 예열은 빌드의 두 입력(layout.json·layout.{lang}.json)이 **모두** 최신일 때만 한다:
+    # 한쪽이 낡은 채 만든 PDF는 그쪽 백필이 곧 무효화해 같은 PDF를 두 번 만들었다. 그래서
+    # 원본 백필이 끝난 때도(lang=None) 번역된 언어마다 예열한다(migration-1).
+    if st is not None:
+        langs = [lang] if lang is not None else [
+            code for code in SUPPORTED_LANGS if artifacts.layout(job.dir, code).is_file()
+        ]
+        for code in langs:
+            if _layout_fonts_stale(job, None) is False and _layout_fonts_stale(job, code) is False:
+                _warm_export_pdf(st, job, code)
+
+
+def _layout_fonts_stale(job, lang: str | None) -> bool | None:
+    """layout[.lang].json의 폰트 메타가 ENRICH_VERSION보다 낮은가 — 읽을 수 없으면 None."""
+    from .pipeline.pdf_fonts import ENRICH_VERSION
+
+    try:
+        pages = json.loads(artifacts.layout(job.dir, lang).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(pages, list):
+        return None
+    return _has_stale_font_pages(pages, ENRICH_VERSION)
+
+
+def _await_export_layout_fonts(job, lang: str | None, st, settings) -> None:
+    """번역 PDF를 만들기 전에 두 입력(layout.json·layout.{lang}.json)의 폰트 백필을 끝낸다.
+
+    빌드는 입력 지문(inode·크기·mtime)을 빌드 표식에 남긴다. 낡은 레이아웃으로 빌드한 뒤
+    리더의 지연 백필이 layout을 교체하면 표식이 어긋나 번역 PDF 전체를 다시 만들었다 —
+    업그레이드 직후 옛 잡마다 첫 내보내기가 두 번 빌드됐다(migration-1). 캐시가 이미 최신이면
+    아무것도 하지 않고(파일을 파싱하지 않는다), 아니면 낡은 레이아웃의 백필을 시작해(이미 도는
+    백필에는 붙는다) 내보내기 대기 상한(PDF_EXPORT_QUEUE_TIMEOUT_S) 안에서 기다린다. 그 안에
+    못 끝나면 예전처럼 지금 layout으로 빌드한다(백필이 끝나면 다시 예열된다)."""
+    if lang is None or not artifacts.source_pdf(job.dir).exists():
+        return
+    try:
+        font_id = derived._pdf_export_font_id(settings)
+        if derived._translated_pdf_cache(job, lang, font_id)[0]:
+            return
+    except Exception:  # noqa: BLE001 — 판정 실패는 백필 대기만 건너뛴다(빌드가 다시 판정)
+        return
+    deadline = time.monotonic() + derived._export_queue_timeout()
+    tasks = [
+        task
+        for which in (None, lang)
+        if _layout_fonts_stale(job, which)
+        and (task := _start_font_backfill(job, which, st, artifacts.layout(job.dir, which)))
+    ]
+    for task in tasks:
+        task.done.wait(max(0.0, deadline - time.monotonic()))
 
 
 # 좌표 텍스트 블록이 하나도 없는 layout(그림 전용 엔진의 옛 잡·전면 스캔)의 404 문구
@@ -1184,7 +1233,8 @@ def _load_layout_pages(
 # ── 파생 산출물 보장(derived) 어댑터 ──────────────────────────────────────
 # 빌더를 이 모듈 전역에서 읽어 넘긴다 — 라우트 계층이 어떤 구현으로 내보내는지의
 # 단일 진입점이자, 회귀 테스트가 느린 빌드를 가로채는 이음매(seam)다.
-def _ensure_translated_pdf(job, lang: str, settings) -> tuple[Path, dict]:
+def _ensure_translated_pdf(job, lang: str, settings, st=None) -> tuple[Path, dict]:
+    _await_export_layout_fonts(job, lang, st, settings)
     return derived._ensure_translated_pdf(job, lang, settings, build=build_translated_pdf)
 
 
@@ -1192,14 +1242,20 @@ def _ensure_dual_pdf(job, lang: str, translated_pdf: Path) -> Path:
     return derived._ensure_dual_pdf(job, lang, translated_pdf, build=build_dual_pdf)
 
 
-def _ensure_facsimile_pages(job, page_numbers: list[int], lang: str | None, settings) -> Path:
+def _ensure_facsimile_pages(
+    job, page_numbers: list[int], lang: str | None, settings, st=None,
+) -> Path:
+    _await_export_layout_fonts(job, lang, st, settings)
     return derived._ensure_facsimile_pages(
         job, page_numbers, lang, settings,
         render=render_pdf_pages, build=build_translated_pdf,
     )
 
 
-def _try_facsimile_pages(job, pages: list, lang: str | None, settings) -> Path | None:
+def _try_facsimile_pages(
+    job, pages: list, lang: str | None, settings, st=None,
+) -> Path | None:
+    _await_export_layout_fonts(job, lang, st, settings)
     return derived._try_facsimile_pages(
         job, pages, lang, settings,
         render=render_pdf_pages, build=build_translated_pdf,
@@ -1296,7 +1352,7 @@ def job_document_download(request: Request, job_id: str, lang: str | None = None
     if job.status == "done" and artifacts.has_usable_layout(job.dir, lang):
         pages = _load_layout_pages(job, lang, _state(request))
         try:
-            pages_dir = _try_facsimile_pages(job, pages, lang, st.settings)
+            pages_dir = _try_facsimile_pages(job, pages, lang, st.settings, st)
         except PdfExportBusyError as e:
             raise _busy_as_503(e) from e
         if pages_dir is not None:
@@ -1343,7 +1399,7 @@ def job_layout(request: Request, job_id: str, lang: str | None = None) -> HTMLRe
     pages = _load_layout_pages(job, lang, _state(request))
     st = _state(request)
     try:
-        pages_dir = _try_facsimile_pages(job, pages, lang, st.settings)
+        pages_dir = _try_facsimile_pages(job, pages, lang, st.settings, st)
     except PdfExportBusyError as e:
         raise _busy_as_503(e) from e
     page_src = None
@@ -1393,7 +1449,7 @@ def job_page_image(
 
     def _prepare() -> Path:
         try:
-            return _ensure_facsimile_pages(job, page_numbers, lang, settings)
+            return _ensure_facsimile_pages(job, page_numbers, lang, settings, _state(request))
         except PdfExportBusyError as e:
             raise _busy_as_503(e) from e
         except PdfExportError as e:
@@ -1915,7 +1971,7 @@ def job_pdf(
         # 이 요청 하나가 상한의 2배까지 스레드풀 토큰을 물고 매달릴 수 있다.
         with derived.export_wait_budget():
             translated_pdf, report = _ensure_translated_pdf(
-                job, lang, _state(request).settings,
+                job, lang, _state(request).settings, _state(request),
             )
             out = (
                 _ensure_dual_pdf(job, lang, translated_pdf)

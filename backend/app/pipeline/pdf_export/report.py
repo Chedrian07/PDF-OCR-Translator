@@ -22,7 +22,9 @@ from pathlib import Path
 #     흐름 배치를 화면 공간에서 계획, 스캔 덮개가 겹친 그림·보존 블록을 피함, 띠·여백 스캔과
 #     '이미지 아래 텍스트' 스캔 인식, 좁은 다줄 스캔 단 번역, 퇴화 메트릭 폰트 리댁션.
 #     조판 결과가 달라진다(감사 pdf-1~5·8·9).
-PDF_EXPORT_FORMAT_VERSION = 11
+# 12: 원문 그대로 남은 목록 블록을 다시 조판하지 않음, 교체한 문단의 인라인 수식 선(분수선·
+#     근호 윗선)을 함께 지우고 계획의 장애물에서 뺌. 조판 결과가 달라진다.
+PDF_EXPORT_FORMAT_VERSION = 12
 
 
 class PdfExportError(RuntimeError):

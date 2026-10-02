@@ -1932,31 +1932,79 @@ export function exportReaderNotes() {
     readerNotesMarkdown(readerNotesTitle(), state.readerNotes));
 }
 
+// 저장 목록의 줄 하나. 메모 내용은 id마다 바뀌지 않으므로 id가 곧 줄의 키다.
+function readerNoteItem(note) {
+  const go = h('button', {
+    class: 'reader-note-page', type: 'button', text: `${note.page}페이지`,
+    title: `${note.page}페이지로 이동`,
+  });
+  go.addEventListener('click', () => setReaderPage(note.page));
+  const del = h('button', {
+    class: 'reader-note-del icon-btn-sm', type: 'button',
+    'aria-label': `${readerNoteLabel(note)} 삭제`, title: '삭제', html: ICON.x,
+  });
+  del.addEventListener('click', () => deleteReaderNote(note.id));
+  return h('li', { class: `reader-note kind-${note.kind}`, 'data-note-id': note.id },
+    h('span', { class: 'reader-note-meta' },
+      h('span', { class: 'reader-note-kind', text: note.kind === 'citation' ? '인용' : '하이라이트' }),
+      go,
+      h('span', { class: 'reader-note-lang muted', text: note.lang === 'ko' ? '한국어' : '원문' })),
+    h('q', { class: 'reader-note-text', text: note.text }),
+    del);
+}
+
+// 목록 안 포커스를 (메모, 버튼 종류, 위치)로 기억한다 — 줄이 지워지거나 옮겨지면 브라우저가
+// 포커스를 body로 보내므로, 렌더 뒤 돌려준다.
+function captureNoteFocus(list, items) {
+  const active = typeof document !== 'undefined' ? document.activeElement : null;
+  if (!active || active === list || !list.contains(active)) return null;
+  const item = active.closest('li[data-note-id]');
+  if (!item) return null;
+  const role = active.classList.contains('reader-note-del') ? 'reader-note-del' : 'reader-note-page';
+  return { node: active, id: item.dataset.noteId, role, index: items.indexOf(item) };
+}
+
+function restoreNoteFocus(list, focus) {
+  if (!focus) return;
+  if (focus.node.isConnected && document.activeElement === focus.node) return;
+  const items = [...list.children];
+  // 같은 메모가 남았으면 그 줄로, 지워졌으면 같은 자리(마지막이었으면 바로 앞) 줄의 같은 버튼으로.
+  const item = items.find((li) => li.dataset.noteId === focus.id)
+    || items[Math.min(Math.max(0, focus.index), items.length - 1)];
+  const tools = list.closest('details');
+  const target = item ? item.querySelector(`.${focus.role}`) : tools && tools.querySelector('summary');
+  if (target) target.focus({ preventScroll: true });
+}
+
 // 선택 문장 도구 안의 저장 목록 — 페이지 순, 페이지 링크·삭제 버튼, 요약 배지.
+// 메모 id로 키를 둔 증분 렌더다. 예전에는 목록을 통째로 다시 만들어, 삭제 버튼으로 메모를
+// 지우면 키보드 포커스가 body로 날아가 다음 메모를 이어서 지울 수 없었다(frontend-6).
+// 남는 줄은 그대로 두고(다른 탭의 변경을 맞출 때도 포커스가 그대로다), 지운 줄에 있던
+// 포커스는 이웃 줄의 같은 버튼으로, 목록이 비면 [선택 문장 도구] 제목으로 옮긴다.
 export function renderReaderNotes() {
   const list = el.readerNotesList;
   if (!list) return;
   const notes = [...(state.readerNotes || [])].sort((a, b) => a.page - b.page || a.at - b.at);
-  list.textContent = '';
+  const items = [...list.children];
+  const focus = captureNoteFocus(list, items);
+  const byId = new Map(items.map((li) => [li.dataset.noteId, li]));
+  const wanted = new Set(notes.map((n) => n.id));
+  // 곧 지워질 줄은 기준점에서 건너뛴다 — 남는 줄을 불필요하게 옮기지 않게.
+  const skipStale = (node) => {
+    let cur = node;
+    while (cur && !wanted.has(cur.dataset.noteId)) cur = cur.nextElementSibling;
+    return cur;
+  };
+  let cursor = skipStale(list.firstElementChild);
   for (const note of notes) {
-    const go = h('button', {
-      class: 'reader-note-page', type: 'button', text: `${note.page}페이지`,
-      title: `${note.page}페이지로 이동`,
-    });
-    go.addEventListener('click', () => setReaderPage(note.page));
-    const del = h('button', {
-      class: 'reader-note-del icon-btn-sm', type: 'button',
-      'aria-label': `${readerNoteLabel(note)} 삭제`, title: '삭제', html: ICON.x,
-    });
-    del.addEventListener('click', () => deleteReaderNote(note.id));
-    list.appendChild(h('li', { class: `reader-note kind-${note.kind}`, 'data-note-id': note.id },
-      h('span', { class: 'reader-note-meta' },
-        h('span', { class: 'reader-note-kind', text: note.kind === 'citation' ? '인용' : '하이라이트' }),
-        go,
-        h('span', { class: 'reader-note-lang muted', text: note.lang === 'ko' ? '한국어' : '원문' })),
-      h('q', { class: 'reader-note-text', text: note.text }),
-      del));
+    let item = byId.get(note.id);
+    if (item) byId.delete(note.id);
+    else item = readerNoteItem(note);
+    if (item === cursor) cursor = skipStale(cursor.nextElementSibling);
+    else list.insertBefore(item, cursor);
   }
+  for (const stale of byId.values()) stale.remove();
+  restoreNoteFocus(list, focus);
   const count = notes.length;
   if (el.readerNotesEmpty) el.readerNotesEmpty.hidden = count > 0;
   if (el.readerNotesCopy) el.readerNotesCopy.disabled = !count;

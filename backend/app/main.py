@@ -7,13 +7,16 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import base64
 import contextlib
 import hashlib
 import json
 import logging
+import os
 import re
 import signal
+import sys
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -326,6 +329,8 @@ class ShutdownSignal:
 
     def __init__(self) -> None:
         self.requested = False
+        # 종료를 시작한 신호 번호(서버가 신호를 받았을 때만) — 그 밖의 종료(TestClient 등)는 None
+        self.signum: int | None = None
 
 
 def _install_shutdown_hooks(flag: ShutdownSignal) -> dict:
@@ -344,6 +349,7 @@ def _install_shutdown_hooks(flag: ShutdownSignal) -> dict:
 
         def _hook(signum, frame, _previous=previous) -> None:
             flag.requested = True
+            flag.signum = signum
             _previous(signum, frame)
 
         signal.signal(sig, _hook)
@@ -358,6 +364,46 @@ def _remove_shutdown_hooks(installed: dict) -> None:
     for sig, (previous, hook) in installed.items():
         if signal.getsignal(sig) is hook:
             signal.signal(sig, previous)
+
+
+def _signal_exit_code(signum: int) -> int:
+    """신호로 끝난 정상 종료의 종료 코드 — SIGTERM은 0(유휴 종료와 같다), 나머지는 128+신호."""
+    return 0 if signum == signal.SIGTERM else 128 + signum
+
+
+def _exit_without_native_teardown(code: int) -> None:
+    """(atexit) 로그·표준 출력만 비우고 끝낸다 — C/C++ 정적 소멸자를 건너뛴다.
+
+    마지막에 등록되므로 다른 atexit 처리기보다 먼저 돈다. 앱 정리(PDF 워커 풀·소유 락)는
+    lifespan 종료에서 이미 끝났다."""
+    logging.shutdown()
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.flush()
+    os._exit(code)
+
+
+def _skip_native_teardown_if_inferring(
+    signum: int | None, worker: Worker, preload: threading.Thread | None,
+) -> bool:
+    """신호로 끝나는데 OCR 추론이 데몬 스레드에서 아직 돌면 종료 때 네이티브 정리를 건너뛴다.
+
+    토치·MLX 커널을 도는 데몬 스레드가 남은 채 인터프리터가 끝나면 C++ 정적 소멸자(OpenMP·
+    oneDNN 스레드 풀)가 그 밑에서 부서져 std::terminate → abort가 된다 — 컨테이너 PID 1
+    (uvicorn이 다시 올린 SIGTERM을 커널이 무시)에서 OCR 중 docker stop이 exit 133으로 끝났다.
+    stop() 뒤 워커는 새 잡을 맡지 않으므로 이 판정은 뒤집히지 않는다. 진행 중이던 잡은 예전처럼
+    다음 기동이 '서버 재시작으로 중단'으로 마감한다. 등록했으면 True."""
+    if signum is None:
+        return False
+    inferring = worker.current_job_id is not None or (preload is not None and preload.is_alive())
+    if not inferring:
+        return False
+    logger.warning(
+        "종료 신호(%d) 때 OCR 추론이 진행 중입니다(잡 %s) — 종료 시 네이티브 정리를 건너뜁니다",
+        signum, worker.current_job_id or "모델 로딩",
+    )
+    atexit.register(_exit_without_native_teardown, _signal_exit_code(signum))
+    return True
 
 
 _PDF_WORKER_CONFIG_LOGGED: set[str] = set()
@@ -465,10 +511,12 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         shutdown_hooks = _install_shutdown_hooks(shutdown)
+        preload: threading.Thread | None = None
         try:
             worker.start()
             if settings.preload_model and not engine.loaded:
-                threading.Thread(target=_preload, name="model-preload", daemon=True).start()
+                preload = threading.Thread(target=_preload, name="model-preload", daemon=True)
+                preload.start()
             # JOB_TTL_DAYS>0일 때만 기동 — 기본 0 = 사용자 데이터 자동 삭제 비활성(opt-in)
             gc_task = asyncio.create_task(_gc_loop(_app)) if settings.job_ttl_days > 0 else None
             yield
@@ -476,8 +524,9 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
                 gc_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await gc_task
-            worker.stop()
         finally:
+            # 예외로 끝난 수명에서도 워커가 새 잡을 맡지 않게 한다(아래 네이티브 정리 판단의 전제).
+            worker.stop()
             # 신호 없이 끝나는 수명(TestClient 등)에서도 남은 스트림이 끝나게 한다.
             shutdown.requested = True
             _remove_shutdown_hooks(shutdown_hooks)
@@ -487,6 +536,7 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
             # 닫힌 앱은 잡 디렉터리 소유권을 바로 놓는다 — 같은 DATA_DIR로 다음 앱
             # (재시작·테스트의 재생성)이 뜰 수 있게. 예외로 끝난 수명도 마찬가지다.
             owner_lock.release()
+            _skip_native_teardown_if_inferring(shutdown.signum, worker, preload)
 
     app = FastAPI(
         title="Unlimited-OCR — PDF → Markdown", version=__version__, lifespan=lifespan,

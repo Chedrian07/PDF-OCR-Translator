@@ -204,6 +204,14 @@ make dev          # http://127.0.0.1:8000 — OCR_DEVICE=auto → mlx
 make dev PORT=8010   # 8000을 다른 서버가 쓰고 있으면 포트만 바꾼다(dev-metal·dev-textlayer도 같다)
 ```
 
+다른 LAN/Tailscale 기기에서 접속하려면 `backend` 디렉터리에서
+`OCR_DEVICE=metal uv run uvicorn app.main:app --host 0.0.0.0`처럼 실행하세요
+(이미 `backend` 안이면 `cd backend`는 생략). `ALLOWED_HOSTS`를 설정하지 않으면
+`localhost,127.0.0.1`과 요청을 받은 서버 IP를 허용하므로 `http://<서버의 VPN/LAN IP>:8000`으로
+접속할 수 있습니다. `.env`에 `ALLOWED_HOSTS`가 있으면 그 목록만 허용합니다.
+`400 Invalid host header`가 나오면 **서버** IP나 접속 도메인을 해당 목록에 추가하세요
+(예: `ALLOWED_HOSTS=localhost,127.0.0.1,100.x.y.z`). 설정 변경 후 서버를 다시 실행하세요.
+
 - **기본 엔진은 in-process MLX**입니다(`backend/app/vendor/unlimited_ocr_mlx` — mlx-vlm 0.7.4의
   Unlimited-OCR 모델 코드를 mlx 단독 의존으로 옮긴 것, MIT). mlx-vlm·torch에 의존하지 않고,
   torch 경로와 **같은 고정 스냅샷**(`ee63731b`)을 변환 없이 읽습니다(HF 캐시도 공유).

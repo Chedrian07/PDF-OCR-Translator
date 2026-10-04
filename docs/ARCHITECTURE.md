@@ -1381,7 +1381,7 @@ auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은
 | `GPU_DEVICE` | `0` | (compose) CUDA_VISIBLE_DEVICES로 전달 — 두 번째 GPU는 `1` |
 | `HOST`/`PORT` | `0.0.0.0`/`8000` | 컨테이너 내부 uvicorn 바인드 (Dockerfile CMD 고정값) |
 | `BIND_HOST` | `0.0.0.0` | (compose) 호스트 쪽 포트 바인딩 주소 — **기본은 외부 노출**. 루프백 전용으로 되돌리려면 `127.0.0.1` (§8·§14) |
-| `ALLOWED_HOSTS` | config.py `localhost,127.0.0.1` / **compose `*`** | Host 헤더 화이트리스트(콤마 구분) — DNS rebinding 방어, 포트는 비교 시 무시. compose는 외부 노출 기본과 정합을 위해 `*`(모든 Host 허용)을 넘긴다 (§14) |
+| `ALLOWED_HOSTS` | 로컬 미설정: `localhost,127.0.0.1` + 실제 목적지 IP / **compose `*`** | Host 헤더 화이트리스트(콤마 구분) — 명시하면 목록만 허용, 미설정이면 요청을 받은 서버 IP도 허용(LAN/Tailscale). 포트는 비교 시 무시. compose는 외부 노출 기본과 정합을 위해 `*`(모든 Host 허용)을 넘긴다 (§14) |
 | `OCR_CPU_MEM_LIMIT` / `OCR_CUDA_MEM_LIMIT` / `OCR_WEB_MEM_LIMIT` | `24g` / `16g` / `8g` | (compose) backend 서비스별 메모리 상한 (§8) |
 | `OVIS_MEM_LIMIT` / `PADDLE_MEM_LIMIT` | `24g` / `24g` | (compose) sidecar 컨테이너 메모리 상한 |
 | `OLLAMA_MEM_LIMIT` | `16g` | (compose.ollama.yaml) ollama 컨테이너 메모리 상한 — 큰 모델이면 .env로 올린다 |
@@ -2244,10 +2244,15 @@ load_existing)과 같은 사상 — 좀비 running을 사용자에게 보이지 
   1. `BIND_HOST=127.0.0.1` — 포트를 루프백에만 바인딩
   2. `ALLOWED_HOSTS=localhost,127.0.0.1` — Host 헤더 화이트리스트 복원
      (도메인/IP로 접속한다면 그 값을 목록에 추가)
-- **Host 헤더 화이트리스트**: `TrustedHostMiddleware`가 `ALLOWED_HOSTS` 밖의 Host를
+- **Host 헤더 화이트리스트**: `DirectIPTrustedHostMiddleware`(Starlette의 `TrustedHostMiddleware` 확장)가 `ALLOWED_HOSTS` 밖의 Host를
   400으로 거부 — 악성 웹페이지가 DNS rebinding으로 same-origin을 획득해 인스턴스의
   문서를 읽어가는 것을 차단한다. `config.py`의 **코드 기본값은 `localhost,127.0.0.1`**
-  이지만(로컬 `make dev` 실행에 적용) compose는 위 노출 정책에 맞춰 `*`를 넘긴다 —
+  이며, `Settings.from_env()`에서 `ALLOWED_HOSTS`를 설정하지 않은 경우에만
+  Host의 IP와 ASGI `scope['server']`의 실제 목적지 IP가 같은 요청도 허용한다.
+  `uvicorn --host 0.0.0.0`으로 띄운 로컬 서버의 LAN/Tailscale IP 접속이 이에 해당한다.
+  DNS 조회·client IP·Forwarded 헤더로 허용 호스트를 늘리지 않고, 명시한 목록에는 이 예외를
+  적용하지 않는다(`Settings` 직접 생성도 기본적으로 목록만 허용).
+  compose는 위 노출 정책에 맞춰 `*`를 넘긴다 —
   와일드카드가 들어오면 `main.py`가 기동 시 경고 로그를 남긴다.
   Starlette는 포트를 떼고 비교하므로 `localhost:8000`도 통과하고, 컨테이너 내부
   healthcheck(`curl http://localhost:8000/api/health`)도 동작한다.

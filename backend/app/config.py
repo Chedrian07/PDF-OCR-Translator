@@ -494,6 +494,8 @@ class Settings:
     sidecar_model_wait_s: float = 900.0
     # Host 헤더 화이트리스트 (DNS rebinding 방어) — 포트는 비교 시 무시됨 (localhost:8000 → localhost)
     allowed_hosts: list[str] = field(default_factory=lambda: _split_hosts(_DEFAULT_ALLOWED_HOSTS))
+    # from_env에서 ALLOWED_HOSTS 미설정 시에만 켠다. 직접 지정한 목록은 그대로 제한한다.
+    allow_server_ip_host: bool = False
     # ── Localight 통합: 페이지 텍스트 추출 + LLM 프로바이더 ──
     ocr_languages: str = "eng+kor"          # tesseract -l 인자 (textlayer 엔진이 소비)
     native_text_threshold: int = 120        # auto 추출이 텍스트 레이어를 신뢰할 최소 영숫자 수 (0 이상)
@@ -544,6 +546,7 @@ class Settings:
         # 바뀌는 것은 로컬 실행뿐: Apple Silicon의 `make dev`가 조용히 CPU fp32로 돌던 함정
         # 대신 MLX(없으면 torch MPS)를 쓴다. .env의 OCR_DEVICE는 그대로 존중된다.
         device = (_env_raw("OCR_DEVICE") or "auto").strip().lower()
+        allowed_hosts = _env_raw("ALLOWED_HOSTS")
         return cls(
             device="metal" if device == "mps" else device,
             dtype=os.environ.get("OCR_DTYPE", "auto").strip().lower(),
@@ -578,7 +581,8 @@ class Settings:
             decode_block=_env_int("OCR_DECODE_BLOCK", 8, lo=1),
             fake_delay=_env_float("FAKE_DELAY", 0.02, lo=0),
             job_ttl_days=_env_int("JOB_TTL_DAYS", 0, lo=0),
-            allowed_hosts=_split_hosts(os.environ.get("ALLOWED_HOSTS") or _DEFAULT_ALLOWED_HOSTS),
+            allowed_hosts=_split_hosts(allowed_hosts or _DEFAULT_ALLOWED_HOSTS),
+            allow_server_ip_host=allowed_hosts is None,
             sidecar_url=os.environ.get("OCR_SIDECAR_URL", "").strip().rstrip("/"),
             sidecar_connect_timeout_s=_env_float(
                 "OCR_SIDECAR_CONNECT_TIMEOUT_S", 10.0, positive=True,

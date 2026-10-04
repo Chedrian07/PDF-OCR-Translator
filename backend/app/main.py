@@ -24,7 +24,6 @@ from pathlib import Path
 from http import HTTPMethod
 
 from fastapi import FastAPI, Request
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import MutableHeaders
@@ -39,6 +38,7 @@ from .llm import build_router
 from .owner_lock import JobsDirLock, acquire_jobs_dir_lock
 from .pipeline import pdf_worker
 from .pipeline.runner import chunk_length_budget_note
+from .trusted_host import DirectIPTrustedHostMiddleware
 
 # 스레드 이름을 포맷에 포함한다 — 번역은 잡별 데몬 스레드로 **병렬** 실행되고
 # (api.py: name=f"translate-{job_id}-{lang}") OCR 워커·sidecar 요청 스레드도 함께
@@ -571,8 +571,14 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
         max_mb=settings.max_upload_mb,
     )
     # Host 헤더 화이트리스트 — DNS rebinding 방어 (무인증 서비스, README §보안).
-    # Starlette가 포트를 떼고 비교하므로 localhost:8000도 localhost로 통과한다.
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
+    # ALLOWED_HOSTS 미설정이면 실제 목적지 IP로 들어온 LAN/Tailscale 요청도 허용한다.
+    app.add_middleware(
+        DirectIPTrustedHostMiddleware,
+        allowed_hosts=settings.allowed_hosts,
+        allow_server_ip=settings.allow_server_ip_host,
+    )
+    if settings.allow_server_ip_host:
+        logger.info("Host 검증: 기본 허용 호스트 + 요청을 받은 서버 IP (LAN/Tailscale)")
     # 와일드카드는 Host 검증을 사실상 끈다 — 무인증 서비스이므로 운영자가 신뢰 경계를
     # 인지하도록 기동 시 1회 경고한다 (compose 기본값이 '*'라 조용히 켜지기 쉽다).
     if any("*" in host for host in settings.allowed_hosts):

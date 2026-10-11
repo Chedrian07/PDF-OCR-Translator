@@ -1508,11 +1508,30 @@ if (VERIFY_MOCK_LLM) {
     }
     await route.continue();
   });
+  // 안내는 중복 최초 배치가 곧바로 성공하면 수십 ms만 산다(아래 gap 주석) — 그 사이에
+  // waitForSelector가 폴링하지 못하면 15초 타임아웃으로 떨어졌다(CI 간헐 실패). 지금
+  // 보이는지 대신 "한 번이라도 붙었는지"를 페이지 스크립트보다 먼저 심은 관찰자로 기록한다.
+  await recoveryCtx.addInitScript(() => {
+    window.__retryNoteSeen = false;
+    new MutationObserver((records) => {
+      if (window.__retryNoteSeen) return;
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (node.nodeType === 1 && (node.matches('.reader-rail-retry-note')
+            || node.querySelector('.reader-rail-retry-note'))) {
+            window.__retryNoteSeen = true;
+            return;
+          }
+        }
+      }
+    }).observe(document, { childList: true, subtree: true });
+  });
   const recoveryPage = await recoveryCtx.newPage();
   await recoveryPage.goto(`${BASE}/${jobHash}`, { waitUntil: 'domcontentloaded' });
-  await recoveryPage.waitForSelector('.reader-rail-retry-note', { timeout: 15_000 });
+  await recoveryPage.waitForFunction(() => window.__retryNoteSeen === true, null, { timeout: 15_000 });
   await recoveryPage.waitForSelector('.reader-map-card', { timeout: 15_000 });
   const recovered = await recoveryPage.evaluate(() => ({
+    noteSeen: window.__retryNoteSeen === true,
     note: !!document.querySelector('.reader-rail-retry-note'),
     cards: document.querySelectorAll('.reader-rail-page[data-page="1"] .reader-map-card').length,
     boxes: document.querySelectorAll('.reader-page[data-page="1"] .reader-map-box').length,
@@ -1524,7 +1543,7 @@ if (VERIFY_MOCK_LLM) {
   // 여기서는 호출 수 상한만 함께 본다. 간격은 진단용으로 detail에만 남긴다.
   const recoveryGap = recoveryBatchAt.length > 1 ? recoveryBatchAt[1] - recoveryBatchAt[0] : -1;
   check('정렬 API 일시 장애: 재시도에서 정렬 카드·bbox로 회복',
-    !recovered.note && recovered.cards > 0 && recovered.cards === recovered.boxes
+    recovered.noteSeen && !recovered.note && recovered.cards > 0 && recovered.cards === recovered.boxes
       && recoveryBatchCalls >= 2 && recoveryBatchCalls <= 4 && recoverySingleCalls >= 1,
     `${JSON.stringify(recovered)}, batch=${recoveryBatchCalls}, single=${recoverySingleCalls}, gap=${recoveryGap}ms`);
   await recoveryCtx.close();

@@ -1017,9 +1017,13 @@ if (health.engine === 'fake') {
         && data.job_id && data.job_id !== jobId) {
       fakedRunning = true;
       uploadedId = data.job_id;
+      // 단계는 OCR 전(render)으로 꾸민다. 'ocr'로 꾸미면 라이브 패널이 렌더 완료 신호로 받아
+      // pages/page_0001.png를 요청하는데, 실제 서버는 그때 아직 PNG를 쓰는 중일 수 있어
+      // 404가 시나리오 오류 게이트에 걸렸다(CI 간헐 실패). 스트림은 단계와 무관하게
+      // status만 보고 열린다(jobs.js) — 강등 경로 검증은 그대로다.
       await route.fulfill({ response: res, json: {
         ...data, status: 'running', result: null,
-        progress: { phase: 'ocr', current_page: 1, total_pages: 2 },
+        progress: { phase: 'render', current_page: 0, total_pages: 2 },
       } });
       return;
     }

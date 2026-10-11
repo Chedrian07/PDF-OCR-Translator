@@ -330,15 +330,17 @@ Docker 밖에서 돌리면 프로세스는 그냥 종료되고 backend는 `OCR_S
   `pip install --require-hashes --no-deps --only-binary :all: -r requirements.lock`으로만
   설치한다 — 해시 불일치·lock 밖 패키지·소스 빌드는 빌드 실패다.
   - PaddleOCR-VL: 전이 의존성까지 고정한 실제 잠금이다. RTX 5070 Ti 검증 이미지의 빌드
-    시점(`--exclude-newer 2026-07-27`)으로 버전을 맞추고 보안 수정판(urllib3 2.8.0)만
-    예외로 올렸다. `paddlepaddle-gpu`는 PyPI에 없는 cu129 빌드라 공식 CDN 휠 URL과 해시를
+    시점(`--exclude-newer 2026-07-27`)으로 버전을 맞추고 보안 수정판(urllib3 2.8.0·
+    multidict 6.9.1)만 예외로 올렸다. `paddlepaddle-gpu`는 PyPI에 없는 cu129 빌드라 공식 CDN 휠 URL과 해시를
     직접 고정한다(추가 인덱스 없음) — 그래서 이 이미지는 **linux/amd64 전용**이다.
   - OvisOCR2: digest로 고정한 vLLM 이미지 위에 웹 계층(fastapi·starlette·python-multipart·
     uvicorn·anyio·h11·annotated-doc)만 `--no-deps`로 덧씌운다. 빌드가 `import app.main`으로
     베이스와 맞물리는지 확인한다.
-  - 두 sidecar의 웹 계층은 backend와 같은 버전(fastapi 0.139.0·starlette 1.3.1·
-    python-multipart 0.0.32·uvicorn 0.50.2)이라 폼 파서 상한도 같다 — 필드 1000개를 넘는
-    폼은 파싱 전에 400이다(예전 starlette 0.41은 수십만 필드를 다 파싱했다).
+  - 폼 파서를 정하는 웹 계층(starlette 1.3.1·python-multipart 0.0.32·uvicorn 0.50.2)은
+    두 sidecar와 backend가 같은 버전이라 폼 파서 상한도 같다 — 필드 1000개를 넘는
+    폼은 파싱 전에 400이다(예전 starlette 0.41은 수십만 필드를 다 파싱했다). fastapi는
+    sidecar가 GPU 검증 버전 0.139.0에 머물고 backend만 Dependabot으로 올라간다(0.142.4 —
+    그 사이 폼·업로드 처리 변경 없음, 추가된 OpenTelemetry는 OTEL_* 미설정 시 동작 없음).
   - `services/*/uv.lock`은 없다(지웠고 gitignore). CI `dependency-audit` 잡이 두 lock을
     pip-audit로 검사한다.
 - **로그 로테이션·메모리 상한**: compose가 전 서비스에 json-file 10MB×3 로테이션을

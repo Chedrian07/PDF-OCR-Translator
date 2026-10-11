@@ -44,9 +44,10 @@ python -m pip install "paddleocr[doc-parser]==3.6.0"
   (예전 인덱스 설치는 aarch64도 허용했다).
 - 날짜 창: RTX 5070 Ti 실측 검증 이미지의 빌드 시점(`--exclude-newer 2026-07-27`,
   huggingface_hub 1.24.0)으로 전이 버전을 맞춘다. 그 뒤에 나온 보안 수정판만 예외로
-  올린다(urllib3 2.8.0). 다시 만드는 명령은 lock 머리말에 있다.
-- 웹 계층(fastapi 0.139.0·starlette 1.3.1·python-multipart 0.0.32·uvicorn 0.50.2)은
-  backend와 같은 버전이라 폼 파서 상한도 같다(필드 1000개 초과 → 400). CI
+  올린다(urllib3 2.8.0·multidict 6.9.1). 다시 만드는 명령은 lock 머리말에 있다.
+- 웹 계층(fastapi 0.139.0·starlette 1.3.1·python-multipart 0.0.32·uvicorn 0.50.2) 중
+  폼 파서를 정하는 starlette·python-multipart·uvicorn은 backend와 같은 버전이라 폼 파서
+  상한도 같다(필드 1000개 초과 → 400). fastapi는 GPU 재검증 전까지 0.139.0에 둔다. CI
   `dependency-audit` 잡이 lock을 pip-audit로, `paddlepaddle==3.3.1`을 OSV로 검사한다.
   Dependabot은 이 lock을 같은 방식으로 다시 만들 수 없어 대상에서 뺐다 — 갱신은 사람이 한다.
 - ⚠ 이 잠금은 2026-07-27 해석을 재현한 것이지 검증 이미지의 `pip freeze`가 아니다

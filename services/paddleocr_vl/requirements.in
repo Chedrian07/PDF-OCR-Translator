@@ -8,7 +8,8 @@
 paddlepaddle-gpu @ https://paddle-whl.cdn.bcebos.com/stable/cu129/paddlepaddle-gpu/paddlepaddle_gpu-3.3.1-cp312-cp312-linux_x86_64.whl
 # paddleocr 3.6.x = PaddleOCR-VL-1.6 동봉 버전 (paddlex[ocr,genai-client]>=3.6,<3.7)
 paddleocr[doc-parser]==3.6.0
-# 웹 계층 — backend/uv.lock과 같은 버전으로 맞춘다(업로드·폼 파서 상한 동작을 서비스 간 일치)
+# 웹 계층 — 폼 파서를 정하는 starlette·python-multipart·uvicorn은 backend/uv.lock과 같은
+# 버전으로 맞춘다(업로드·폼 파서 상한 동작을 서비스 간 일치). fastapi는 GPU 검증 버전에 둔다.
 fastapi==0.139.0
 uvicorn==0.50.2
 python-multipart==0.0.32

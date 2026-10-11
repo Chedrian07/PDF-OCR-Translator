@@ -98,9 +98,14 @@ explicit = true
 
 [tool.ruff]
 # .python-version(3.12) 기준. app/vendor는 업스트림 벤더 코드 — 린트 대상 아님.
-# 규칙은 ruff 기본(E4/E7/E9/F)만 사용: I(임포트 정렬)·E501(라인 길이)은 diff 노이즈 방지로 미활성.
+# 규칙은 E4/E7/E9/F만 사용: I(임포트 정렬)·E501(라인 길이)은 diff 노이즈 방지로 미활성.
+# select를 명시한다 — ruff 0.16이 기본 규칙셋을 B·S·UP·RUF 등으로 넓혀, 기본값에 기대면
+# Dependabot의 ruff 범프만으로 lint 잡이 449건으로 깨졌다. services/*/pyproject.toml도 같다.
 target-version = "py312"
 extend-exclude = ["app/vendor"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

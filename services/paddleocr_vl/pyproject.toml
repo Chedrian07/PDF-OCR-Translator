@@ -10,3 +10,7 @@ addopts = "-q"
 
 [tool.ruff]
 target-version = "py310"
+
+# 규칙은 backend/pyproject.toml과 같게 명시한다(ruff 기본값 변경에 끌려가지 않게).
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

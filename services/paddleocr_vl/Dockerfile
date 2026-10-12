@@ -16,7 +16,7 @@
 # 갱신: `docker buildx imagetools inspect python:3.12-slim-bookworm`의 Digest로 교체한다
 # (backend/Dockerfile과 같은 값을 쓴다). 고정만 하면 OS 보안 패치가 멈추므로 아래
 # apt-get upgrade와 반드시 함께 간다.
-FROM python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
+FROM python:3.12-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258
 
 RUN apt-get update \
     && apt-get upgrade -y \

@@ -29,7 +29,7 @@
           <path d="M9 13h6M9 17h4"/>
         </svg>
       </span>
-      <h1 class="app-title">PDF OCR Translator <span class="title-sep" aria-hidden="true">—</span> <span class="title-sub">PDF → HTML · 한국어</span></h1>
+      <h1 class="app-title">PDF OCR Translator <span class="title-sep" aria-hidden="true">—</span> <span class="title-sub">PDF → HTML · 한국어 · Markdown</span></h1>
     </div>
     <div class="header-right">
       <div id="health-badges" class="badges" aria-live="polite" aria-label="서버 상태"></div>
@@ -39,6 +39,14 @@
 
   <div class="layout">
     <aside class="sidebar" aria-label="업로드 및 작업 목록">
+      <section class="panel service-menu" aria-label="서비스 선택">
+        <fieldset class="field-group">
+          <legend>서비스 선택</legend>
+          <label class="radio"><input type="radio" name="workflow" value="reader" checked><span>읽기 · 번역</span></label>
+          <label class="radio"><input type="radio" name="workflow" value="markdown_zip"><span>PDF → Markdown ZIP</span></label>
+        </fieldset>
+        <p id="workflow-help" class="muted service-help" hidden>Markdown ZIP에는 원문 Markdown, 추출 이미지, 모든 원본 페이지 이미지가 포함됩니다.</p>
+      </section>
       <!-- Upload -->
       <section class="panel">
         <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="PDF 파일을 선택하거나 여기에 드래그하세요 (여러 개 가능)">
@@ -135,9 +143,9 @@
             <path d="M9 13h6M9 17h4"/>
           </svg>
         </span>
-        <h2>PDF 구조를 그대로 읽고 번역하세요</h2>
-        <p class="es-desc">로컬 <strong>baidu/Unlimited-OCR</strong> 모델이 PDF를 실시간으로 분석하고, 원본 레이아웃을 보존한 HTML과 선택적 한국어 PDF까지 만듭니다.</p>
-        <ul class="es-features">
+        <h2 id="service-heading">PDF 구조를 그대로 읽고 번역하세요</h2>
+        <p id="service-description" class="es-desc">로컬 <strong>baidu/Unlimited-OCR</strong> 모델이 PDF를 실시간으로 분석하고, 원본 레이아웃을 보존한 HTML과 선택적 한국어 PDF까지 만듭니다.</p>
+        <ul id="reader-features" class="es-features">
           <li>
             <span class="esf-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h7l-1 8 10-12h-7z"/></svg></span>
             <span><strong>실시간 스트리밍</strong> — 모델이 생성하는 텍스트를 그대로 지켜보기</span>
@@ -253,6 +261,7 @@
 
         <!-- Result -->
         <section id="result-section" class="result-section" hidden>
+          <p id="markdown-zip-help" class="muted" hidden>원문 Markdown과 추출 이미지, 모든 원본 페이지 이미지를 ZIP으로 받으세요. 번역 없이 변환합니다.</p>
           <div class="result-actions">
             <button id="viewer-open" class="btn btn-viewer-open" type="button" aria-expanded="false" aria-controls="production-viewer">
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

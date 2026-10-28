@@ -1526,7 +1526,7 @@ export function jobRowSignature(job, active) {
   const j = job || {};
   return JSON.stringify([
     String(j.job_id || ''), String(j.filename || ''), j.status || 'queued', statusLabel(j),
-    String(j.created_at || ''), !!active, jobNotices(j).warnings.length,
+    String(j.created_at || ''), j.workflow || 'reader', !!active, jobNotices(j).warnings.length,
   ]);
 }
 

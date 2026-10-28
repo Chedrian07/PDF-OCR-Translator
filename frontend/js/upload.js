@@ -1,3 +1,5 @@
+import { readWorkflow, renderWorkflowChoice } from './workflow.js';
+export { readWorkflow } from './workflow.js';
 import { ICON } from './constants.js';
 import { classifyFiles, fileSizeError, selectionSummary, summarizeIssues } from './core.js';
 import { el, state } from './state.js';
@@ -71,6 +73,7 @@ export function setUploading(on) {
   el.uploadBtn.disabled = on || !state.selectedFiles.length;
   el.uploadBtn.textContent = on ? '업로드 중…' : '변환 시작';
   el.dropzone.classList.toggle('disabled', on);
+  if (!on) renderWorkflowChoice();
 }
 
 // 업로드 진행바 (progress-track/fill 재사용). frac=null이면 총량을 알 수 없는
@@ -132,6 +135,7 @@ export async function handleUpload() {
 
   const selectionAtStart = state.selectedFiles;
   const mode = readMode();
+  const workflow = readWorkflow();
   const dpi = readDpi();
   const failures = skipped.slice(); // {file, name, reason} — 뒤늦게 걸러진 파일도 요약에 포함
   let successCount = 0;
@@ -146,6 +150,7 @@ export async function handleUpload() {
     const form = new FormData();
     form.append('file', file);
     form.append('mode', mode);
+    form.append('workflow', workflow);
     form.append('dpi', String(dpi));
 
     let res;
@@ -173,6 +178,7 @@ export async function handleUpload() {
       filename: file.name,
       status: data.status || 'queued',
       mode,
+      workflow: data.workflow || workflow,
       created_at: new Date().toISOString(),
       progress: {},
       result: null,

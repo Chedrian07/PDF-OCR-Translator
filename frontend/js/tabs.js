@@ -10,6 +10,7 @@ import { loadReader, readerViewportFocus } from './reader.js';
 /* ============================ Tabs ============================ */
 
 export function activateTab(name) {
+  if (state.currentWorkflow === 'markdown_zip' && !['preview', 'markdown'].includes(name)) name = 'preview';
   // 전체화면 닫기/패널 변경의 anchor-rAF가 대기 중이면 DOM은 이미 새 폭인데 bands는
   // 아직 이전 폭이다. 그 짧은 창에서 재측정한 값을 lastFocus에 덮지 않는다.
   if (name !== 'reader' && !state.readerAnchorRaf) {
@@ -252,14 +253,15 @@ export function setupTabs() {
   if (tablist) {
     tablist.addEventListener('keydown', (ev) => {
       if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(ev.key)) return;
-      const idx = el.tabs.findIndex((t) => t.classList.contains('active'));
+      const tabs = el.tabs.filter((tab) => !tab.hidden);
+      const idx = tabs.findIndex((t) => t.classList.contains('active'));
       if (idx === -1) return;
       let next;
-      if (ev.key === 'Home') next = el.tabs[0];
-      else if (ev.key === 'End') next = el.tabs[el.tabs.length - 1];
+      if (ev.key === 'Home') next = tabs[0];
+      else if (ev.key === 'End') next = tabs[tabs.length - 1];
       else {
         const dir = ev.key === 'ArrowRight' ? 1 : -1;
-        next = el.tabs[(idx + dir + el.tabs.length) % el.tabs.length];
+        next = tabs[(idx + dir + tabs.length) % tabs.length];
       }
       ev.preventDefault();
       activateTab(next.dataset.tab);

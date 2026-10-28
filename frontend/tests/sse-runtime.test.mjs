@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { readerNotesKey, readerPosKey } from '../js/constants.js';
 import { EL_IDS, el, state } from '../js/state.js';
 import {
-  handleSseConnError, startFallbackPolling, startStream, teardownConnections,
+  handleSseConnError, onJobDone, onJobError, startFallbackPolling, startStream, teardownConnections,
 } from '../js/sse.js';
 import { deleteJob, refreshJobs, requestCancel } from '../js/jobs.js';
 import { connectTranslateEvents, teardownTranslate } from '../js/translate.js';
@@ -423,4 +423,32 @@ test('목록 창 밖(has_more)이거나 상세가 살아 있으면 열린 잡을
   for (let i = 0; i < 5; i += 1) await flush();
   assert.ok(calls.includes('/api/jobs/job-a'));
   assert.equal(state.currentJobId, 'job-a', '상세가 있으면(목록 경합) 그대로 둔다');
+});
+
+
+test('Markdown done event keeps original export when final snapshot fails', async (t) => {
+  const { calls } = setup(t, { fetchImpl: (url) => {
+    if (url === '/api/jobs/job-a') return response(503, { detail: 'temporary' });
+    return response(200, { jobs: [] });
+  } });
+  state.currentWorkflow = 'markdown_zip';
+  await onJobDone('job-a', { markdown_url: '/api/jobs/job-a/markdown', archive_url: '/api/jobs/job-a/archive' });
+  await flush();
+  assert.equal(state.currentWorkflow, 'markdown_zip');
+  assert.equal(state.currentLang, 'orig');
+  assert.equal(el.dlZip.href, '/api/jobs/job-a/archive?scope=original');
+  assert.equal(el.viewerOpen.hidden, true);
+  assert.equal(el.translateBtn.hidden, true);
+  assert.ok(!calls.some((url) => /translate|providers|viewer-manifest|reader/.test(url)));
+});
+
+test('Markdown cancellation preserves compact service and disables ZIP', async (t) => {
+  setup(t);
+  state.currentWorkflow = 'markdown_zip';
+  onJobError('job-a', { canceled: true, message: 'canceled' });
+  await flush();
+  assert.equal(state.currentWorkflow, 'markdown_zip');
+  assert.equal(el.dlZip.getAttribute('href'), null);
+  assert.equal(el.dlDoc.hidden, true);
+  assert.equal(el.viewerOpen.hidden, true);
 });

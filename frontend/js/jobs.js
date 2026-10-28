@@ -1,3 +1,4 @@
+import { renderWorkflowChoice } from './workflow.js';
 import { ICON, readerPosKey } from './constants.js';
 import {
   JOB_LIST_LIMIT_MAX, JOB_LIST_PAGE, appendJobPage, armTransition, clampReaderPage, fmtTime,
@@ -290,7 +291,7 @@ export function jobListItem(job) {
 
   const name = h('span', { class: 'ji-name', text: fname, title: job.filename || '' });
   const chip = h('span', { class: `chip chip-${status}`, text: statusLabel(job) });
-  const time = h('span', { class: 'ji-time muted', text: fmtTime(job.created_at) });
+  const time = h('span', { class: 'ji-time muted', text: `${job.workflow === 'markdown_zip' ? 'Markdown ZIP · ' : ''}${fmtTime(job.created_at)}` });
   const sub = h('span', { class: 'ji-sub' }, chip, time);
   const warn = jobListWarnBadge(jobNotices(job).warnings.length);
   if (warn) sub.appendChild(warn);
@@ -302,7 +303,7 @@ export function jobListItem(job) {
   open.addEventListener('click', () => openJob(job.job_id));
 
   // 완료된 잡은 목록에서 한 번에 논문 뷰어로 — 잡 열기 → 뷰어 열기 2단계를 없앤다.
-  const read = status === 'done' ? jobReadButton(job, fname) : null;
+  const read = status === 'done' && job.workflow !== 'markdown_zip' ? jobReadButton(job, fname) : null;
 
   const del = h('button', {
     class: 'ji-del icon-btn-sm', type: 'button',
@@ -343,16 +344,16 @@ export function updateJobListItem(item, job) {
   row.name.title = job.filename || '';
   row.chip.className = `chip chip-${status}`;
   row.chip.textContent = statusLabel(job);
-  row.time.textContent = fmtTime(job.created_at);
+  row.time.textContent = `${job.workflow === 'markdown_zip' ? 'Markdown ZIP · ' : ''}${fmtTime(job.created_at)}`;
   const warnCount = jobNotices(job).warnings.length;
   if (row.warn) row.warn.remove();
   row.warn = jobListWarnBadge(warnCount);
   if (row.warn) row.sub.appendChild(row.warn);
   row.del.setAttribute('aria-label', `"${fname}" 삭제`);
-  if (status === 'done' && !row.read) {
+  if (status === 'done' && job.workflow !== 'markdown_zip' && !row.read) {
     row.read = jobReadButton(job, fname);
     item.insertBefore(row.read, row.del);
-  } else if (status !== 'done' && row.read) {
+  } else if ((status !== 'done' || job.workflow === 'markdown_zip') && row.read) {
     row.read.remove();
     row.read = null;
   } else if (row.read) {
@@ -562,6 +563,7 @@ export async function openJob(id, options = {}) {
   // 늦게 도착한 stale 스냅샷이 새 UI에 주입되지 않게 세대까지 확인한다.
   if (state.currentJobId !== id || state.openGen !== gen) return; // user switched away during await
 
+  renderWorkflowChoice(job.workflow === 'markdown_zip' ? 'markdown_zip' : 'reader');
   syncJobHash(id); // 성공 경로에서만 해시 동기화 — 새로고침 복원·링크 공유
   renderJob(job);
   if (job.status === 'queued' || job.status === 'running') startStream(id);
@@ -587,6 +589,7 @@ export async function syncOpenJob() {
 }
 
 export function renderJob(job) {
+  state.currentWorkflow = job.workflow === 'markdown_zip' ? 'markdown_zip' : 'reader';
   state.displayedStatus = job.status;
   noteQueuePosition(job.status, job.queue_position);
 

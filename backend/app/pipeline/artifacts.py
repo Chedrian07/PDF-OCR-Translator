@@ -216,14 +216,15 @@ def export_font_marker_tmp(job_dir: Path, lang: str) -> Path:
 
 
 # ── 아카이브 ──────────────────────────────────────────────────────────────
-def archive(job_dir: Path) -> Path:
-    return job_dir / "archive.zip"
+def archive(job_dir: Path, scope: str = "all") -> Path:
+    return job_dir / ("archive.original.zip" if scope == "original" else "archive.zip")
 
 
-def archive_tmp(job_dir: Path) -> Path:
+def archive_tmp(job_dir: Path, scope: str = "all") -> Path:
     """요청별 고유 tmp — 동시 요청 둘이 같은 tmp에 겹쳐 써 손상 zip이 캐시되는
     레이스 차단(sync 핸들러는 스레드풀 병렬)."""
-    return job_dir / f".archive.{uuid.uuid4().hex}.tmp"
+    label = "archive.original" if scope == "original" else "archive"
+    return job_dir / f".{label}.{uuid.uuid4().hex}.tmp"
 
 
 # ── 번역 진행 상태 ────────────────────────────────────────────────────────

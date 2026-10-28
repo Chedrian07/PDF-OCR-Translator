@@ -680,11 +680,14 @@ async def create_job(
     request: Request,
     file: UploadFile = File(...),
     mode: str = Form("multi"),
+    workflow: str = Form("reader"),
     dpi: int | None = Form(None),
 ) -> dict:
     st = _state(request)
     settings = st.settings
 
+    if workflow not in ("reader", "markdown_zip"):
+        raise HTTPException(400, "workflow는 reader 또는 markdown_zip이어야 합니다")
     if mode not in ("multi", "per_page"):
         raise HTTPException(400, "mode는 multi 또는 per_page 여야 합니다")
     dpi = dpi if dpi is not None else settings.render_dpi
@@ -696,7 +699,7 @@ async def create_job(
 
     caps = st.engine.capabilities()
     job = st.store.create(
-        filename=filename, mode=mode, dpi=dpi,
+        filename=filename, mode=mode, dpi=dpi, workflow=workflow,
         engine_info={
             "engine": st.engine.name,
             "model_id": caps.model_id or settings.model_id,
@@ -845,6 +848,7 @@ async def job_events(request: Request, job_id: str) -> StreamingResponse:
                 yield _sse_format("done", {
                     "markdown_url": f"/api/jobs/{job_id}/markdown",
                     "archive_url": f"/api/jobs/{job_id}/archive",
+                    "original_archive_url": f"/api/jobs/{job_id}/archive?scope=original",
                 })
                 return
             if job.status in ("error", "canceled"):
@@ -1847,6 +1851,46 @@ def job_file(request: Request, job_id: str, file_path: str) -> FileResponse:
     return _JobFileResponse(full)
 
 
+def _original_archive_members(job) -> list[tuple[Path, str]]:
+    """원문 Markdown, 본문 그림, 모든 페이지 PNG. 누락된 결과는 내보내지 않는다."""
+    if not job.dir.is_dir():
+        raise HTTPException(404, "잡을 찾을 수 없습니다")
+    md = artifacts.markdown(job.dir)
+    total = job.progress.get("total_pages", 0)
+    if not isinstance(total, int) or total < 1 or not md.is_file():
+        raise HTTPException(409, "원문 아카이브에 필요한 결과가 없습니다")
+    members = [(md, "result.md")]
+    images = artifacts.images_dir(job.dir)
+    if images.is_dir():
+        members.extend(
+            (image, f"images/{image.name}")
+            for image in sorted(images.iterdir())
+            if image.is_file() and image.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".gif")
+        )
+    # Markdown parser handles inline/reference images while ignoring code examples.
+    from markdown_it import MarkdownIt
+
+    try:
+        tokens = list(MarkdownIt("commonmark").parse(md.read_text(encoding="utf-8")))
+    except FileNotFoundError:
+        raise HTTPException(409, "원문 Markdown이 없습니다") from None
+    available = {name for _, name in members}
+    while tokens:
+        token = tokens.pop()
+        tokens.extend(token.children or [])
+        if token.type == "image":
+            source = token.attrGet("src") or ""
+            if source.startswith("images/") and source not in available:
+                raise HTTPException(409, "원문 Markdown에서 참조하는 본문 이미지가 없습니다")
+    for number in range(1, total + 1):
+        name = f"page_{number:04d}.png"
+        page = job.dir / "pages" / name
+        if not page.is_file():
+            raise HTTPException(409, f"원문 페이지 이미지가 없습니다: {name}")
+        members.append((page, f"pages/{name}"))
+    return members
+
+
 def _archive_members(job) -> list[tuple[Path, str]]:
     """archive.zip에 담을 (파일, zip 안 이름) — 순서가 곧 zip 순서다."""
     members: list[tuple[Path, str]] = []
@@ -1896,7 +1940,7 @@ def _archive_current(zip_path: Path, stamp: bytes) -> bool:
 
 
 @router.get("/jobs/{job_id}/archive")
-def job_archive(request: Request, job_id: str) -> FileResponse:
+def job_archive(request: Request, job_id: str, scope: str = "all") -> FileResponse:
     """결과 마크다운·메타·번역본·그림 묶음(zip).
 
     캐시는 존재 여부가 아니라 **내용 지문**으로 판정한다. 예전에는 파일이 있으면
@@ -1907,15 +1951,18 @@ def job_archive(request: Request, job_id: str) -> FileResponse:
     job = _get_job(request, job_id)
     if job.status != "done":
         raise HTTPException(409, "아직 변환이 완료되지 않았습니다")
-    zip_path = artifacts.archive(job.dir)
+    if scope not in ("all", "original"):
+        raise HTTPException(400, "scope는 all 또는 original이어야 합니다")
+    members_for_job = _original_archive_members if scope == "original" else _archive_members
+    zip_path = artifacts.archive(job.dir, scope)
     for _attempt in range(3):
-        members = _archive_members(job)
+        members = members_for_job(job)
         stamp = _archive_stamp(members)
         if _archive_current(zip_path, stamp):
             break
         # 요청별 고유 tmp — 동시 요청 둘이 같은 tmp에 겹쳐 써 손상 zip이 캐시되는
         # 레이스 차단(sync 핸들러는 스레드풀 병렬). 둘 다 완주하면 마지막 replace가 승자.
-        tmp = artifacts.archive_tmp(job.dir)
+        tmp = artifacts.archive_tmp(job.dir, scope)
         try:
             with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
                 zf.comment = stamp
@@ -1923,14 +1970,21 @@ def job_archive(request: Request, job_id: str) -> FileResponse:
                     try:
                         zf.write(path, name)
                     except FileNotFoundError:
+                        if scope == "original":
+                            if not job.dir.is_dir():
+                                raise HTTPException(404, "잡을 찾을 수 없습니다") from None
+                            raise HTTPException(409, "아카이브 파일이 변경되었습니다. 다시 시도해주세요") from None
                         continue  # 그 사이 교체·삭제 — 지문이 달라져 다음 회차가 다시 만든다
             tmp.replace(zip_path)
         except FileNotFoundError:
             raise HTTPException(404, "잡을 찾을 수 없습니다") from None  # 삭제 경합
         finally:
             tmp.unlink(missing_ok=True)
-        if _archive_stamp(_archive_members(job)) == stamp:
+        if _archive_stamp(members_for_job(job)) == stamp:
             break  # 빌드 중 입력이 그대로였다 — 방금 만든 zip이 최신이다
+    else:
+        if scope == "original":
+            raise HTTPException(409, "아카이브 파일이 변경 중입니다. 다시 시도해주세요")
     stem = Path(job.filename).stem or "result"
     # 확인과 전송 사이에 무효화(번역 완료)·삭제가 끼면 500이 아니라 404다.
     return _JobFileResponse(

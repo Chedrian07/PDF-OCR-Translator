@@ -2284,3 +2284,5 @@ body.viewer-mode .toast { z-index: 220; }
   .production-viewer:not(.is-open) .reader-map-source { display: none; }
   .reader-map-target { font-size: 13.5px; }
 }
+
+.service-menu .service-help { margin: 12px 0 0; font-size: 12px; line-height: 1.6; }

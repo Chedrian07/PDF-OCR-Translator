@@ -657,7 +657,10 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 
 ### POST /api/jobs — PDF 업로드
 - `multipart/form-data`: `file`(필수, PDF), `mode`(`multi`|`per_page`, 기본 `multi`),
-  `dpi`(72–400, 기본 200). 페이지 상한은 서버의 `MAX_PAGES`로 일괄 적용한다.
+  `dpi`(72–400, 기본 200), `workflow`(`reader`|`markdown_zip`, 기본 `reader`).
+  `workflow`는 화면의 서비스 종류이며 OCR 처리 `mode`와 독립적이다. 작업 메타·목록·상세에
+  저장하고, 필드가 없는 이전 작업은 `reader`로 복원한다. 두 종류 모두 번역 없이 OCR을 완료한다.
+  페이지 상한은 서버의 `MAX_PAGES`로 일괄 적용한다.
 - 202 → `{"job_id": "j_1a2b3c4d5e6f", "status": "queued"}`
 - 400(비PDF/손상/복잡도 게이트 초과), 413(MAX_UPLOAD_MB 초과),
   **503 + `Retry-After: 5`**(업로드 검증 워커가 모두 다른 업로드를 검사 중 — 파일 문제가 아니다),
@@ -700,6 +703,7 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   "filename": "sample.pdf",
   "status": "running",              // queued|running|done|error|canceled
   "mode": "multi",
+  "workflow": "reader",           // reader | markdown_zip
   "created_at": "2026-07-06T10:00:00+00:00",
   "queue_position": 2,              // 선택 — status=queued일 때만: 대기열 위치(1-base, 워커 큐 제출 순서 — 아래 설명)
   "progress": {
@@ -722,6 +726,7 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
     "markdown_url": "/api/jobs/{id}/markdown",
     "html_url": "/api/jobs/{id}/html",
     "archive_url": "/api/jobs/{id}/archive",
+    "original_archive_url": "/api/jobs/{id}/archive?scope=original",
     "viewer_manifest_url": "/api/jobs/{id}/viewer-manifest",
     "images": ["/api/jobs/{id}/files/images/p0001_0.jpg"],
     "layouts": ["/api/jobs/{id}/files/layout/page_0001.jpg"],
@@ -893,6 +898,11 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 - 허용 밖 경로·존재하지 않는 파일·디렉터리는 모두 404(존재 여부를 구분해 흘리지 않는다).
 
 ### GET /api/jobs/{id}/archive
+- 선택 쿼리 `scope=all|original` (기본 `all`). `original`은 원문 `result.md`, 이미지 파일만
+  담은 `images/`, 모든 원본 렌더 페이지 `pages/page_NNNN.png`를 제공한다. 번역본·원본 PDF·
+  내부 메타는 제외한다. `archive.original.zip`으로 별도 캐시하며 번역 결과에 영향받지 않는다.
+  필수 Markdown·페이지 PNG가 없으면 409, 잡이 삭제됐으면 404다. 결과·SSE 완료 이벤트의
+  `original_archive_url`이 이 주소를 가리킨다.
 - `result.md` + `meta.json` + `result.*.md`(번역본) + `images/`를 담은 zip. 미완료 시 409
 - 다운로드 파일명은 **`{원본이름}.markdown.zip`**(`Path(job.filename).stem` 기준,
   비면 `result`). 잡 디렉터리에는 `archive.zip`으로 캐시되며, 번역 완료 시 무효화돼
@@ -2444,8 +2454,12 @@ Localight의 "텍스트 레이어 우선 + OCR 폴백" 추출기를 기존 엔�
 - **raw_pages.json 합성**: 블록 좌표(0–999 정규화)를 담은 raw_pages.json을 벤더
   P14와 같은 스키마로 합성한다 → 기존 pipeline/layout.py 경로로 **레이아웃 뷰
   (`GET /layout`)가 그대로 동작**한다.
-- **figure 크롭 없음**: capabilities는 `figures: false` — `images/` 산출물이 없고
-  마크다운에 이미지 참조도 넣지 않는다 (health의 `capabilities`로 프론트가 안내).
+- **내장 래스터 그림 추출**: PDF 워커에서 표시된 이미지 좌표를 조사하고, 회전·페이지 경계를
+  반영해 이미 렌더된 페이지 PNG를 크롭한다. 기존 엔진의 파일명·boxes.json 규약을 사용하고
+  그림 링크를 해당 페이지 본문 뒤에 붙인다. capabilities는 `figures: true`다.
+  페이지 면적의 95% 이상인 전체 페이지 이미지는 중복 크롭하지 않는다. 벡터 도표와 스캔
+  내부 그림의 의미별 분리는 수행하지 않으며 `scope=original` ZIP의 전체 페이지 PNG로 보존한다.
+  그림 추출 실패는 텍스트를 보존하고 작업 경고에 기록한다.
 - 모델 로딩이 없어 `model_loaded`는 즉시 `true` — GPU·HF 캐시·sidecar 불필요.
 - **Tesseract 런타임**: Docker 이미지에 `tesseract-ocr` + `eng`/`kor` 데이터 포함
   (backend/Dockerfile 2단계 apt). 로컬(uv) 실행은 별도 설치 —

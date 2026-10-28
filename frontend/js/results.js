@@ -13,6 +13,19 @@ export function baseName(filename) {
   return String(filename || 'document').replace(/\.pdf$/i, '') || 'document';
 }
 
+export function applyWorkflowResult(job) {
+  const compact = job.workflow === 'markdown_zip';
+  state.currentWorkflow = compact ? 'markdown_zip' : 'reader';
+  if (el.markdownZipHelp) el.markdownZipHelp.hidden = !compact;
+  el.tabs.forEach((tab) => { tab.hidden = compact && !['preview', 'markdown'].includes(tab.dataset.tab); });
+  el.dlDoc.hidden = compact;
+  el.dlMd.textContent = compact ? '원문 Markdown' : 'Markdown';
+  el.dlZip.textContent = compact ? 'Markdown + 이미지 ZIP' : '전체 ZIP';
+  el.dlZip.classList.toggle('btn-primary', compact);
+  el.dlZip.classList.toggle('btn-secondary', !compact);
+  return compact;
+}
+
 export function renderResult(job) {
   const r = job.result || {};
   const base = baseName(job.filename);
@@ -20,6 +33,7 @@ export function renderResult(job) {
   // 결과를 새로 렌더할 때마다 번역 UI를 원문 상태로 리셋한다
   // (이전 잡의 ko 선택/EventSource 구독 정리 + 언어 속성 제거).
   resetTranslateUI();
+  const compact = applyWorkflowResult(job);
 
   state.currentBaseName = base;
   // 리더 총 페이지 힌트 — 결과의 원본 페이지 목록 우선, 없으면 진행 스냅샷 (0 = 미상)
@@ -34,7 +48,7 @@ export function renderResult(job) {
   state.resultHasLayout = (noLayoutData || figOnlyLayout) ? false : r.has_layout;
   state.resultUrls = {
     markdown: r.markdown_url,
-    archive: r.archive_url,
+    archive: compact ? (r.original_archive_url || `/api/jobs/${job.job_id}/archive?scope=original`) : r.archive_url,
     documentHtml: `/api/jobs/${job.job_id}/document.html`,
     pdf: `/api/jobs/${job.job_id}/pdf?lang=ko&view=dual`,
     viewerManifest: r.viewer_manifest_url || `/api/jobs/${job.job_id}/viewer-manifest`,
@@ -52,6 +66,12 @@ export function renderResult(job) {
   el.previewBody.innerHTML = '';
   el.doclayoutBody.innerHTML = '';
   el.mdCode.textContent = '';
+
+  if (compact) {
+    el.viewerOpen.hidden = true;
+    activateTab('preview');
+    return;
+  }
 
   // 이어 읽기 — 이 잡에서 마지막으로 보던 페이지에서 시작한다 (주소창 ?page= 가 있으면
   // applyViewerIntent가 그 값으로 덮어쓴다). 논문은 한 번에 다 읽지 않는다.
@@ -76,6 +96,7 @@ export function renderResult(job) {
 export function renderPartialResult(job) {
   const id = job.job_id;
   const base = baseName(job.filename);
+  applyWorkflowResult(job);
   resetTranslateUI(); // 취소본은 번역 대상이 아니다 (컨트롤 숨김 + PDF 내보내기 숨김)
   el.viewerOpen.hidden = true;
   showQaPlaceholder(); // 질문도 완료(done) 잡 전용 — 플레이스홀더 안내

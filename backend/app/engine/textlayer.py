@@ -16,7 +16,8 @@ Localight의 auto 추출(app/services/documents.py의 _native_text/_meaningful_l
 출력 규약은 FakeEngine과 동일(base.py 모듈 docstring 참조):
 - run_multi는 ``<PAGE>`` 마커로 페이지를 구분해 스트림/반환 (진행률·병합 계약)
 - raw_pages.json: 텍스트 블록 bbox(0–999 정규화)로 det 문법을 합성 → 레이아웃 뷰
-- figure 크롭 없음 — images/는 빈 디렉터리, boxes.json은 빈 dict
+- 표시된 래스터 그림은 렌더 PNG에서 크롭하며 images/·boxes.json에 기록한다
+  (전면 이미지·벡터 도형은 제외; 원본 페이지 PNG는 별도로 보존한다)
 - result_with_boxes 오버레이는 만들지 않는다 (merge가 결측을 조용히 스킵)
 
 문서에서 추출한 텍스트는 스트림 계약을 지키도록 정화한다: 리터럴 ``<PAGE>``와
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import shutil
 import subprocess
@@ -240,6 +242,66 @@ def native_blocks_local(source_pdf: Path, page_index: int) -> list:
         _drain_mupdf("textlayer 추출")
 
 
+_MAX_PAGE_FIGURES = 256
+
+
+def native_page_figures(fitz, page) -> list[tuple[float, float, float, float]]:
+    """Displayed raster occurrences in rotated page space, normalized to [0, 1].
+
+    Rendered-page crops preserve masks, transparency and rotation. This is not
+    vector figure detection. Full-page scans are represented by the page PNG.
+    """
+    rect = page.rect
+    figures = []
+    seen = set()
+    for info in page.get_image_info(hashes=False, xrefs=False):
+        bbox = info.get("bbox", ())
+        if len(bbox) != 4 or not all(math.isfinite(float(v)) for v in bbox):
+            continue
+        box = (fitz.Rect(bbox) * page.rotation_matrix) & rect
+        if box.is_empty or box.is_infinite or not all(math.isfinite(v) for v in box):
+            continue
+        if box.get_area() >= rect.get_area() * 0.95:
+            continue
+        normalized = ((box.x0 - rect.x0) / rect.width,
+                      (box.y0 - rect.y0) / rect.height,
+                      (box.x1 - rect.x0) / rect.width,
+                      (box.y1 - rect.y0) / rect.height)
+        key = tuple(round(v, 7) for v in normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        figures.append(normalized)
+        if len(figures) > _MAX_PAGE_FIGURES:
+            raise ValueError(f"페이지 그림 수가 상한({_MAX_PAGE_FIGURES})을 초과했습니다")
+    return figures
+
+
+def native_page_local(source_pdf: Path, page_index: int) -> dict:
+    """Inspect text and raster placement together inside the bounded PDF worker."""
+    from ..pipeline import pdf_worker
+
+    result = {"blocks": [], "figures": [], "figure_warning": None}
+    try:
+        with pdf_worker.open_document(source_pdf) as doc:
+            if doc.needs_pass or not 0 <= page_index < doc.page_count:
+                return result
+            fitz = _fitz()
+            try:
+                result["blocks"] = native_page_blocks(fitz, doc, page_index + 1)
+            except Exception as exc:
+                logger.warning("텍스트 레이어 추출 실패: %s", exc)
+            try:
+                result["figures"] = native_page_figures(fitz, doc[page_index])
+            except Exception:
+                result["figure_warning"] = "내장 이미지 위치를 추출하지 못했습니다"
+    except Exception:
+        result["figure_warning"] = "원본 PDF에서 내장 이미지를 확인하지 못했습니다"
+    finally:
+        _drain_mupdf("textlayer 페이지 검사")
+    return result
+
+
 class TextLayerEngine(OCREngine):
     """PDF 텍스트 레이어 우선 + Tesseract 폴백 — CPU 전용, 모델 로드 없음."""
 
@@ -281,7 +343,7 @@ class TextLayerEngine(OCREngine):
             preferred_chunk_size=None,      # settings.pages_per_chunk 그대로 사용
             stream_granularity="page",      # 페이지 완료 시 일괄 발행 (가짜 토큰 스트림 없음)
             layout_capability="full",       # 텍스트 레이어 bbox로 raw_pages.json 합성
-            figure_capability=False,        # figure 크롭 없음 (boxes.json은 빈 dict)
+            figure_capability=True,         # 표시된 내장 래스터 이미지 크롭
         )
 
     def _tesseract_revision(self) -> str:
@@ -343,25 +405,25 @@ class TextLayerEngine(OCREngine):
                            page_number, e.__class__.__name__, str(e)[:200])
             return []
 
-    def _isolated_blocks(
+    def _isolated_page(
         self, source_pdf: Path | None, image_path: Path, cancel: threading.Event,
-    ) -> list[tuple[tuple[int, int, int, int] | None, str]]:
-        """_native_blocks와 같은 결과를 PDF 워커 프로세스에서 얻는다(잡 실행 경로).
+    ) -> dict:
+        """텍스트 블록과 표시된 래스터 위치를 PDF 워커 프로세스에서 얻는다.
 
         텍스트 레이어 추출도 MuPDF가 내용 스트림을 해석하는 작업이라, 적대적 페이지가 OCR
         워커 스레드와 서버 GIL을 붙잡지 않게 페이지 작업(시간 상한 PDF_PAGE_TIMEOUT_S)으로
         돌린다. 상한을 넘었거나 앞서 넘은 페이지는 경고를 남기고 OCR 경로로 보낸다."""
         if source_pdf is None:
-            return []
+            return {"blocks": [], "figures": [], "figure_warning": None}
         match = _PAGE_NAME.match(image_path.name)
         if match is None:  # 규약 밖 파일명 — 텍스트 레이어 매칭 불가, OCR 경로로
             logger.warning("페이지 번호를 파일명에서 파싱하지 못했습니다: %s", image_path.name)
-            return []
+            return {"blocks": [], "figures": [], "figure_warning": None}
         from ..pipeline import pdf_worker
 
         try:
             return pdf_worker.run_page(
-                "app.engine.textlayer:native_blocks_local", source_pdf,
+                "app.engine.textlayer:native_page_local", source_pdf,
                 int(match.group(1)) - 1, cancel=cancel.is_set,
             )
         except pdf_worker.PdfWorkerCanceled:
@@ -371,7 +433,7 @@ class TextLayerEngine(OCREngine):
                 f"{image_path.name} 텍스트 레이어 추출을 건너뛰었습니다 ({e}) — "
                 "이 페이지는 OCR 경로로 처리합니다"
             )
-            return []
+            return {"blocks": [], "figures": [], "figure_warning": "내장 이미지 검사를 완료하지 못했습니다"}
 
     def _extract_page(self, doc, image_path: Path, job_dir: Path) -> tuple[str, str]:
         """페이지 1장 → (페이지 마크다운 텍스트, 레이아웃 뷰용 raw det 문법) — 열린 문서에서."""
@@ -431,8 +493,6 @@ class TextLayerEngine(OCREngine):
         cancel: threading.Event,
         single: bool,
     ) -> list[str]:
-        # figure를 만들지 않지만 산출물 규약은 유지: 빈 images/ + 빈 boxes.json
-        # (merge._move_chunk_files/_load_chunk_boxes가 조용히 스킵한다)
         (out_dir / "images").mkdir(parents=True, exist_ok=True)
         (out_dir / "boxes.json").write_text("{}", encoding="utf-8")
 
@@ -450,12 +510,50 @@ class TextLayerEngine(OCREngine):
 
         texts: list[str] = []
         raws: list[str] = []
-        for image_path in image_paths:
+        boxes: dict = {}
+        for page_index, image_path in enumerate(image_paths):
             if cancel.is_set():
                 raise JobCanceled()
+            inspection = self._isolated_page(source, image_path, cancel)
             page_text, raw = self._page_from_blocks(
-                self._isolated_blocks(source, image_path, cancel), image_path, job_dir,
+                inspection["blocks"], image_path, job_dir,
             )
+            warning = inspection["figure_warning"]
+            if cancel.is_set():
+                raise JobCanceled()
+            if inspection["figures"]:
+                try:
+                    from PIL import Image
+
+                    with Image.open(image_path) as rendered:
+                        rendered = rendered.convert("RGB")
+                        width, height = rendered.size
+                        for k, bbox in enumerate(inspection["figures"]):
+                            if cancel.is_set():
+                                raise JobCanceled()
+                            x1, y1, x2, y2 = bbox
+                            crop = (max(0, math.floor(x1 * width)),
+                                    max(0, math.floor(y1 * height)),
+                                    min(width, math.ceil(x2 * width)),
+                                    min(height, math.ceil(y2 * height)))
+                            if crop[2] <= crop[0] or crop[3] <= crop[1]:
+                                continue
+                            name = f"{k}.jpg" if single else f"page_{page_index}_{k}.jpg"
+                            rendered.crop(crop).save(out_dir / "images" / name, quality=90)
+                            boxes[name] = dict(zip(("x1", "y1", "x2", "y2"), crop))
+                            boxes[name].update(image_width=width, image_height=height)
+                            page_text += f"\n\n![](images/{name})"
+                            coords = ", ".join(str(round(v * 999)) for v in bbox)
+                            raw += f"\n<|det|>image [{coords}]<|/det|>"
+                except JobCanceled:
+                    raise
+                except Exception:
+                    warning = "일부 내장 이미지를 저장하지 못했습니다"
+            if warning:
+                self._note(f"{image_path.name}: {warning}")
+                page_text += f"\n\n> ⚠️ {warning}. 원본 페이지 PNG를 확인하세요."
+            if cancel.is_set():
+                raise JobCanceled()
             if single:
                 sink.on_text(page_text)
             else:
@@ -464,6 +562,7 @@ class TextLayerEngine(OCREngine):
                 sink.on_text("<PAGE>\n" + page_text + "\n")
             texts.append(page_text)
             raws.append(raw)
+        (out_dir / "boxes.json").write_text(json.dumps(boxes), encoding="utf-8")
         (out_dir / "raw_pages.json").write_text(
             json.dumps({"pages": raws}, ensure_ascii=False), encoding="utf-8"
         )

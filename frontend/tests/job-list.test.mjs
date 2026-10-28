@@ -324,3 +324,19 @@ test("'더 보기'로 끝까지 받으면 포커스를 새로 붙은 첫 줄로 
   assert.equal(el.jobListMore.hidden, true);
   assertSameNode(assert, doc.activeElement, control('j0050', 'ji-open'), '새 첫 줄의 열기 버튼');
 });
+
+
+test('Markdown ZIP history has a service label and no reader shortcut; legacy restores it', (t) => {
+  setup(t, [job('a', 'done', { workflow: 'markdown_zip' })]);
+  renderJobList();
+  assert.equal(control('a', 'ji-read'), null);
+  assert.match(rows()[0]._row.time.textContent, /Markdown ZIP/);
+  assert.equal(rows()[0]._row.read, null);
+  state.jobs = [job('a')];
+  renderJobList();
+  assert.ok(rows()[0]._row.read);
+  assert.doesNotMatch(rows()[0]._row.time.textContent, /Markdown ZIP/);
+  state.jobs = [job('a', 'done', { workflow: 'markdown_zip' })];
+  renderJobList();
+  assert.equal(rows()[0]._row.read, null);
+});

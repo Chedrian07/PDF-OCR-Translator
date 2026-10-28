@@ -146,7 +146,7 @@ export function setViewerBackgroundInert(on) {
 }
 
 export function openViewer(options = {}) {
-  if (!state.currentJobId || state.displayedStatus !== 'done') return;
+  if (state.currentWorkflow === 'markdown_zip' || !state.currentJobId || state.displayedStatus !== 'done') return;
   // reader 탭 밖에서 열면 pane은 display:none이라 실측 focus가 없다. 마지막 의미
   // 위치가 현재 페이지와 같을 때 재사용해 페이지 중간에서 맨 위로 튀지 않게 한다.
   const measured = readerViewportFocus();

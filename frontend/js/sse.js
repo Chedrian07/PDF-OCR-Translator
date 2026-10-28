@@ -10,14 +10,10 @@ import {
   applyProgress, closeDeletedJob, hasLiveContent, refreshJobs, removeJobFromList, renderJob,
   setStopButton, showEmptyState, syncJobHash, updateHeaderChip,
 } from './jobs.js';
-import { renderError, renderPartialResult, renderThumbGrid } from './results.js';
-import {
-  applyDownloadLangs, initTranslateForJob, resetTranslateUI, teardownTranslate,
-} from './translate.js';
-import { initQaForJob, teardownQa } from './qa.js';
+import { renderError, renderPartialResult, renderResult } from './results.js';
+import { teardownTranslate } from './translate.js';
+import { teardownQa } from './qa.js';
 import { teardownReader } from './reader.js';
-import { applyViewerIntent } from './viewer.js';
-import { activateTab } from './tabs.js';
 
 /* ============================ SSE + fallback ============================ */
 
@@ -251,32 +247,10 @@ export async function onJobDone(id, data) {
     el.errorSection.hidden = true;
     el.resultSection.hidden = false;
     el.liveDetails.open = false;
-    resetTranslateUI();
-    const base = 'document';
-    state.currentBaseName = base;
-    state.readerTotalHint = 0;       // 총 페이지 미상 — 리더는 섹션 수로 폴백
-    state.resultHasLayout = undefined; // 미상 → PDF 내보내기 fail-open (서버 409가 방어)
-    state.resultUrls = {
-      markdown: data.markdown_url,
-      archive: data.archive_url,
-      documentHtml: `/api/jobs/${id}/document.html`,
-      pdf: `/api/jobs/${id}/pdf?lang=ko&view=dual`,
-      viewerManifest: `/api/jobs/${id}/viewer-manifest`,
-    };
-    applyDownloadLangs();
-    renderThumbGrid(el.layoutsGrid, [], '레이아웃 이미지를 불러오지 못했습니다.');
-    renderThumbGrid(el.pagesGrid, [], '페이지 이미지를 불러오지 못했습니다.');
-    state.previewLoaded = false;
-    state.markdownLoaded = false;
-    state.docLayoutLoaded = false;
-    el.previewBody.innerHTML = '';
-    el.doclayoutBody.innerHTML = '';
-    el.mdCode.textContent = '';
-    activateTab('reader'); // 완료 잡의 기본 뷰 (renderResult와 동일 규칙)
-    el.viewerOpen.hidden = false;
-    initTranslateForJob();
-    initQaForJob(job); // job=null 허용 — 총 페이지 미상으로 폼만 연다
-    applyViewerIntent();
+    renderResult({
+      job_id: id, filename: el.jobFilename.textContent || 'document.pdf',
+      workflow: state.currentWorkflow, status: 'done', result: data,
+    });
   }
   refreshJobs();
 }
@@ -305,7 +279,7 @@ export function onJobError(id, d) {
   if (canceled) {
     // partial markdown stays available → offer the Markdown/미리보기 tabs
     el.resultSection.hidden = false;
-    renderPartialResult({ job_id: id, filename: el.jobFilename.textContent || '' });
+    renderPartialResult({ job_id: id, workflow: state.currentWorkflow, filename: el.jobFilename.textContent || '' });
   } else {
     el.resultSection.hidden = true;
   }

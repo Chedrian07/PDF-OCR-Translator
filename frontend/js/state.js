@@ -10,6 +10,7 @@ export const state = {
   jobsTotal: null,          // 전체 잡 수 (모르면 null)
   jobsLoadingMore: false,   // '더 보기' 요청 중 — 연타·중복 요청 방지
   currentJobId: null,
+  currentWorkflow: 'reader',
   displayedStatus: null,
   displayedPhase: null,   // 마지막 진행 phase — loading→render 전이에서 라이브 뷰 오픈 판정
   queuePos: null, // 열린 잡의 마지막 대기열 위치 — queued가 아니게 되면 해제
@@ -191,6 +192,10 @@ export const EL_IDS = {
   jobListEmpty: 'job-list-empty',
   jobListMore: 'job-list-more',
   emptyState: 'empty-state',
+  workflowHelp: 'workflow-help',
+  serviceHeading: 'service-heading',
+  serviceDescription: 'service-description',
+  readerFeatures: 'reader-features',
   jobView: 'job-view',
   jobChip: 'job-status-chip',
   jobFilename: 'job-filename',
@@ -229,6 +234,7 @@ export const EL_IDS = {
   resultSection: 'result-section',
   dlMd: 'dl-md',
   dlZip: 'dl-zip',
+  markdownZipHelp: 'markdown-zip-help',
   dlDoc: 'dl-doc',
   dlDocKo: 'dl-doc-ko',
   dlPdf: 'dl-pdf',
@@ -317,6 +323,7 @@ export function grabEls() {
   for (const key of Object.keys(EL_IDS)) el[key] = document.getElementById(EL_IDS[key]);
   el.tabs = Array.from(document.querySelectorAll('.tab'));
   el.panels = Array.from(document.querySelectorAll('.tab-panel'));
+  el.workflowRadios = Array.from(document.querySelectorAll('input[name="workflow"]'));
   el.modeRadios = Array.from(document.querySelectorAll('input[name="mode"]'));
   el.qaSuggestions = Array.from(document.querySelectorAll('.qa-suggestion'));
 }

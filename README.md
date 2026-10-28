@@ -34,7 +34,7 @@ Markdown**을 만들어 주는 셀프호스팅 서비스입니다. 기본 엔진
 
 > **textlayer**는 모델 다운로드 없이 PDF 내장 텍스트 레이어를 우선 추출하고,
 > 텍스트가 부족한(스캔) 페이지만 Tesseract OCR로 폴백하는 경량 엔진입니다
-> (레이아웃 뷰 지원 · figure 크롭 없음). 로컬(uv) 실행 시에는 Tesseract 설치가
+> (레이아웃 뷰 · PDF 내장 사진 추출 지원). 로컬(uv) 실행 시에는 Tesseract 설치가
 > 필요합니다 — macOS: `brew install tesseract tesseract-lang`. Docker 이미지에는
 > `eng+kor` 데이터가 포함되어 있습니다.
 
@@ -60,6 +60,29 @@ Markdown**을 만들어 주는 셀프호스팅 서비스입니다. 기본 엔진
 - **한국어 번역 (선택)**: 변환 결과를 OpenAI 호환 API로 한국어 번역 — 로컬 MLX 서버
   (oMLX·LM Studio·mlx_lm.server)도 지원. §한국어 번역 참조
 - **원커맨드 배포**: `docker compose up` 하나로 끝 (Apple Silicon GPU는 로컬 실행 — 아래 참조)
+
+## PDF → Markdown ZIP
+
+왼쪽 **서비스 선택 → PDF → Markdown ZIP**에서 PDF를 선택하고 변환을 시작하세요.
+완료되면 **Markdown + 이미지 ZIP** 버튼으로 `<원본파일명>.markdown.zip`을 받습니다.
+번역 API 키나 Q&A 설정 없이 사용할 수 있으며, 여러 PDF를 올리면 파일별로 ZIP을 제공합니다.
+
+압축 파일에는 원문 `result.md`, 본문에 상대 경로로 연결된 `images/`, 그리고 모든
+페이지의 렌더 이미지 `pages/page_0001.png` 등이 들어갑니다. 번역본이나 원본 PDF는
+포함하지 않습니다. 화면에서 Markdown 미리보기와 원문 Markdown 개별 다운로드도 지원합니다.
+
+현재 설정한 OCR 엔진과 DPI를 사용합니다. CPU `textlayer` 엔진도 PDF에 포함된 사진을
+추출하며, 사진은 해당 페이지 본문 뒤에 연결됩니다. 스캔 안의 개별 그림이나 벡터 도표의
+분리 여부는 엔진에 따라 다르므로 전체 페이지 PNG를 함께 제공합니다. 렌더·OCR·사진 추출에
+문제가 있으면 작업의 품질 경고를 확인하세요. 전체 페이지 이미지는 ZIP 크기를 늘릴 수 있습니다.
+
+API에서는 `POST /api/jobs`의 multipart 필드 `workflow=markdown_zip`으로 생성하고,
+완료 응답의 `result.original_archive_url` 또는
+`GET /api/jobs/{id}/archive?scope=original`로 내려받습니다. `workflow`를 생략하면 기존
+읽기·번역 작업이며, 기존 `/archive`의 번역본 포함 동작도 유지됩니다.
+
+검증: `cd frontend && npm run test:e2e-markdown`은 임시 CPU 서버와 Chromium으로
+데스크톱·모바일 변환 및 ZIP 내부 파일을 검사합니다(backend 가상환경과 Playwright Chromium 필요).
 
 ## 0.1.0 릴리스 이미지
 

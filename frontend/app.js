@@ -46,6 +46,7 @@ import {
 } from './js/reader.js';
 import { applyViewerPanelState, closeViewer, openViewer } from './js/viewer.js';
 import { setupTabs } from './js/tabs.js';
+import { setupWorkflowChoice } from './js/workflow.js';
 import { handleUpload, setupDropzone } from './js/upload.js';
 
 /* ============================================================================
@@ -79,6 +80,7 @@ function init() {
   grabEls();
   setupTheme();
   setupDropzone();
+  setupWorkflowChoice();
   setupTabs();
 
   el.uploadBtn.addEventListener('click', handleUpload);

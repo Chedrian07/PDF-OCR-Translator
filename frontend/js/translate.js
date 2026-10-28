@@ -214,7 +214,7 @@ export async function initTranslateForJob() {
 // [한국어 번역] / 리더 [한국어로 읽기] 클릭 → 번역 시작 (공용 경로).
 export async function startTranslate() {
   const id = state.currentJobId;
-  if (!id || state.displayedStatus !== 'done' || state.translateRequestPending
+  if (state.currentWorkflow === 'markdown_zip' || !id || state.displayedStatus !== 'done' || state.translateRequestPending
       || state.translateState === 'running' || state.translateAvailable === false) return;
   const gen = state.translateGen;
   const waiting = retryLockRemaining('translateRetryAt');

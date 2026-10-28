@@ -98,6 +98,7 @@ class Job:
     mode: str
     dpi: int
     dir: Path
+    workflow: str = "reader"
     status: str = "queued"  # queued|running|done|error|canceled
     created_at: str = field(default_factory=_now_iso)
     progress: dict = field(default_factory=_default_progress)
@@ -186,6 +187,7 @@ class Job:
             "markdown_url": f"{base}/markdown",
             "html_url": f"{base}/html",
             "archive_url": f"{base}/archive",
+            "original_archive_url": f"{base}/archive?scope=original",
             "viewer_manifest_url": f"{base}/viewer-manifest",
             "images": _urls("images"),
             "layouts": _urls("layout"),
@@ -206,6 +208,7 @@ class Job:
             "filename": self.filename,
             "status": self.status,
             "mode": self.mode,
+            "workflow": self.workflow,
             "created_at": self.created_at,
             "progress": dict(self.progress),
             "error": self.error,
@@ -231,6 +234,7 @@ class Job:
             "id": self.id,
             "filename": self.filename,
             "mode": self.mode,
+            "workflow": self.workflow,
             "dpi": self.dpi,
             "status": self.status,
             "created_at": self.created_at,
@@ -274,14 +278,14 @@ class JobStore:
 
     def create(
         self, filename: str, mode: str, dpi: int, engine_info: dict | None = None,
-        page_separator: str | None = None,
+        page_separator: str | None = None, workflow: str = "reader",
     ) -> Job:
         job_id = f"j_{uuid.uuid4().hex[:12]}"
         job_dir = self.jobs_dir / job_id
         job_dir.mkdir(parents=True)
         job = Job(
             id=job_id, filename=filename, mode=mode, dpi=dpi, dir=job_dir,
-            page_separator=page_separator,
+            page_separator=page_separator, workflow=workflow,
         )
         if engine_info:
             job.engine = engine_info.get("engine")
@@ -506,6 +510,7 @@ class JobStore:
                 job = Job(
                     id=m["id"], filename=m["filename"], mode=m.get("mode", "multi"),
                     dpi=int(m.get("dpi", 200)), dir=d, status=m.get("status", "error"),
+                    workflow=m.get("workflow", "reader"),
                     created_at=m.get("created_at", _now_iso()),
                     progress=m.get("progress") or _default_progress(),
                     error=m.get("error"), warnings=warnings, notices=notices,

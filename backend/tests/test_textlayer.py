@@ -70,7 +70,7 @@ def test_textlayer_e2e_native_text(tmp_path):
         assert health["provider"] == "in-process"
         assert health["capabilities"]["layout"] == "full"
         assert health["capabilities"]["stream_granularity"] == "page"
-        assert health["capabilities"]["figures"] is False
+        assert health["capabilities"]["figures"] is True
 
         r = _upload(client, make_pdf_bytes(pages=3))
         assert r.status_code == 202, r.text

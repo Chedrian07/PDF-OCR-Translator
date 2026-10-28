@@ -1174,6 +1174,7 @@ def execute_job(
             {
                 "markdown_url": f"/api/jobs/{job.id}/markdown",
                 "archive_url": f"/api/jobs/{job.id}/archive",
+                "original_archive_url": f"/api/jobs/{job.id}/archive?scope=original",
             },
         )
         logger.info("잡 완료: %s (%d페이지)", job.id, total)

@@ -264,27 +264,6 @@ def test_export_build_time_limit_is_a_409_and_leaves_no_temp_files(
     assert stats["export"]["timeouts"] == 1 and stats["ocr"]["tasks"] > 0
 
 
-def test_textlayer_engine_skips_a_page_that_exceeded_the_limit(
-    pdf_worker_processes, backstop_only, tmp_path, monkeypatch,
-):
-    from fastapi.testclient import TestClient
-
-    from app.config import Settings
-    from app.engine import textlayer as textlayer_mod
-    from app.main import create_app
-
-    monkeypatch.setattr(textlayer_mod, "find_tesseract", lambda: None)
-    settings = Settings(
-        engine="textlayer", device="cpu", data_dir=tmp_path / "data", preload_model=False,
-        frontend_dir=tmp_path / "no-frontend", native_text_threshold=1,
-    )
-    with TestClient(create_app(settings)) as client:
-        jid = _upload(client, _mixed_pdf())
-        body = wait_done(client, jid, timeout=60)
-    assert body["status"] == "done", body
-    md_warnings = " ".join(body["warnings"])
-    assert "렌더 시간 상한" in md_warnings
-    assert "텍스트 레이어 추출을 건너뛰었습니다" in md_warnings
 
 
 def test_upload_blames_the_server_not_the_pdf_when_no_worker_can_start(

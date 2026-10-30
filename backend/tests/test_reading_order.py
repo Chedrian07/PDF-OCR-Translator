@@ -5,7 +5,6 @@
 기준으로 다단을 인식하고, MuPDF 1.28이 잘게 쪼갠 같은 문장·같은 줄 조각을 합친다.
 """
 
-import threading
 from collections import Counter
 from pathlib import Path
 
@@ -191,10 +190,7 @@ def _two_column_pdf(path: Path, interleaved: bool) -> None:
 
 @pytest.mark.parametrize("interleaved", [False, True])
 def test_textlayer_engine_reads_two_column_pdf_in_column_order(tmp_path, interleaved):
-    from app.config import Settings
-    from app.engine.base import NullSink
-    from app.engine.textlayer import TextLayerEngine
-    from app.pipeline.pdf import render_pdf_pages
+    from app.pipeline.pdf import extract_embedded_page_markdown
 
     job = tmp_path / "job"
     job.mkdir()
@@ -205,9 +201,8 @@ def test_textlayer_engine_reads_two_column_pdf_in_column_order(tmp_path, interle
         ]
     assert sorted_order[:2] == ["LEFT-1", "RIGHT-1"]  # 예전 sort=True가 낸 교차 순서
 
-    pages = render_pdf_pages(job / "source.pdf", job / "pages", 72, 10)
-    engine = TextLayerEngine(Settings(engine="textlayer", data_dir=tmp_path / "d"))
-    md = engine.run_multi(pages, job / "work", NullSink(), threading.Event())
+    md = extract_embedded_page_markdown(job / "source.pdf", 1)
+
 
     marks = ["LEFT-1", "LEFT-2", "LEFT-3", "RIGHT-1", "RIGHT-2", "RIGHT-3"]
     positions = [md.index(m) for m in marks]

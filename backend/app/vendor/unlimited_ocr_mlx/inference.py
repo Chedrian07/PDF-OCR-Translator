@@ -1,5 +1,5 @@
 # Ported from baidu/Unlimited-OCR modeling_unlimitedocr.py (MIT, Copyright (c) 2026 Baidu;
-# 라이선스 전문: ../unlimited_ocr/LICENSE) — UnlimitedOCRForCausalLM.infer()/infer_multi()
+# 라이선스 전문: ../unlimited_ocr2/LICENSE) — UnlimitedOCRForCausalLM.infer()/infer_multi()
 # 흐름(전처리 → 생성 → 디코드 → save_results)을 모듈 함수로. 출처·패치 내역: PROVENANCE.md
 # 모듈 이름은 inference — 패키지가 내보내는 infer 함수와 이름이 겹치지 않게(generation.py 참조).
 """torch 메서드와 같은 인자·같은 파일 산출물의 MLX 진입점.
@@ -26,7 +26,7 @@ from PIL import Image
 
 from .generation import GenerationResult, generate
 from .model import Model
-from .postprocess import count_output_tokens, decode_outputs, save_results_multi, save_results_single
+from .postprocess import count_output_tokens, decode_outputs, save_results_multi, save_results_single, _split_multi_pages
 from .processing import prepare_multi, prepare_single
 
 
@@ -112,7 +112,7 @@ def infer(
         should_stop=should_stop,
     )
     outputs = decode_outputs(tokenizer, gen.token_ids)
-    text = save_results_single(outputs, inputs.images[0], output_path) if save_results else None
+    text = save_results_single("\n".join(_split_multi_pages(outputs)), inputs.images[0], output_path) if save_results else None
     return InferResult(text=text, output_tokens=None, raw_text=outputs, generation=gen)
 
 

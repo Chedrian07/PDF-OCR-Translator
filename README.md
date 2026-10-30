@@ -1,289 +1,36 @@
-# PDF OCR Translator — PDF 그대로 읽고 번역하기
+# PDF OCR Translator — Unlimited-OCR-2
 
-> 이 리포는 **Unlimited-OCR(PDF→Markdown)** 와 **Localight(로컬 우선 논문 리더)** 를
-> 병합한 워크스페이스입니다 — textlayer 엔진과 페이지 Q&A('질문' 탭)가 Localight에서 이식되었습니다.
-
-[![CI](https://github.com/Chedrian07/PDF-OCR-Translator/actions/workflows/ci.yml/badge.svg)](https://github.com/Chedrian07/PDF-OCR-Translator/actions/workflows/ci.yml)
-
-CI는 push/PR마다 backend pytest(+커버리지 아티팩트) · backend×네이티브 통합 · ruff(backend·services) ·
-frontend `node --test` · native 패리티 · sidecar 테스트 · 의존성 감사(pip-audit) · CPU 이미지
-빌드와 하드닝 스모크(amd64·arm64) · 실 PDF 전 구간 하네스(`verify-e2e`)를 실행합니다. 러너 시간이
-큰 hermetic 브라우저 E2E(`e2e-mock` — mock LLM + FakeEngine)는 PR을 막지 않고 main
-push·nightly(18:00 UTC)·수동 실행에서만 돕니다 — 릴리스는 태그 커밋의 push CI 성공을 요구하므로
-사실상 릴리스 게이트입니다. 배지 URL은 이 리포의 원격
-(`Chedrian07/PDF-OCR-Translator`) 기준입니다 — 포크·이전했다면 두 URL의 경로를 바꾸세요.
-
-웹에서 PDF를 업로드하면 로컬 비전-언어 OCR 모델로 **이미지(figure)까지 추출된
-Markdown**을 만들어 주는 셀프호스팅 서비스입니다. 기본 엔진은
-[baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR)(3.3B MoE, MIT)이고,
-단일 RTX 5070 Ti(16GB) 기준으로 **엔진을 선택**할 수 있습니다:
-
-| 엔진 | 선택 기준 | 실행 |
-|---|---|---|
-| **Unlimited-OCR** (기본) | 멀티페이지 문맥 · 실시간 토큰 스트리밍 | `docker compose up -d --build ocr-cuda` → :8001 |
-| **OvisOCR2** (0.9B, Apache-2.0) | 속도(25쪽 실문서 3.3 s/p) · figure bbox | `docker compose --profile ovis up -d --build ovisocr2 ocr-ovis` → :8002 |
-| **PaddleOCR-VL-1.6** (0.9B, Apache-2.0) | **한국어 정확도** · 표/수식 · 완전한 layout | `docker compose --profile paddle up -d --build paddleocr-vl ocr-paddle` → :8003 |
-| **textlayer** (모델 불필요, Localight 이식) | **텍스트 PDF 최적** · CPU 전용 · 즉시 시작 | `OCR_ENGINE=textlayer docker compose up -d --build` → :8000 |
-
-> **Apple Silicon Mac**에서는 같은 Unlimited-OCR을 **in-process MLX 엔진**으로 로컬
-> 실행합니다 — `make setup-mlx && make dev` (§Apple Silicon). torch MPS는 폴백입니다.
-
-> RTX 5070 Ti 실측 비교(속도·VRAM·한국어 오독 사례)와 Apple Silicon(M4 Max) 실측은
-> [docs/OCR_BENCHMARK.md](docs/OCR_BENCHMARK.md) 참조 — 한국어 문서는
-> PaddleOCR-VL, 영문·속도 우선은 OvisOCR2가 유리했습니다.
-
-> **textlayer**는 모델 다운로드 없이 PDF 내장 텍스트 레이어를 우선 추출하고,
-> 텍스트가 부족한(스캔) 페이지만 Tesseract OCR로 폴백하는 경량 엔진입니다
-> (레이아웃 뷰 · PDF 내장 사진 추출 지원). 로컬(uv) 실행 시에는 Tesseract 설치가
-> 필요합니다 — macOS: `brew install tesseract tesseract-lang`. Docker 이미지에는
-> `eng+kor` 데이터가 포함되어 있습니다.
-
-⚠ **한 시점에 GPU 스택 하나만** 기동하세요 (단일 16GB GPU — VRAM 경쟁 시 OOM).
-신규 엔진은 GPU 전용 sidecar 컨테이너로 격리되어 메인 backend의 Python 환경을
-오염시키지 않습니다. 상세: [docs/CUDA_5070TI_MULTI_OCR_PLAN.md](docs/CUDA_5070TI_MULTI_OCR_PLAN.md) ·
-[docs/OVISOCR2_CUDA_5070TI.md](docs/OVISOCR2_CUDA_5070TI.md) ·
-[docs/PADDLEOCR_VL_BLACKWELL_5070TI.md](docs/PADDLEOCR_VL_BLACKWELL_5070TI.md)
-
-- **PDF 속 이미지 완벽 처리**: 모델의 그라운딩 박스(`<|ref|>image<|/ref|><|det|>…`)로
-  figure를 원본에서 크롭해 `images/`에 저장하고 마크다운에 `![](images/…)`로 연결
-- **GIF 스타일 3-패널 라이브 뷰**: 변환 중 ① 원본 페이지 위 실시간 레이아웃
-  박스 오버레이(그라운딩 좌표) ② RAW OUTPUT 토큰 스트림 ③ 실시간 렌더 미리보기가
-  동시에 흐르고, STOP 버튼으로 중단해도 부분 결과가 보존됨
-  (공식 데모 GIF의 long-horizon 파싱 경험 재현). 최초 연결이 늦거나 SSE가 자동
-  재연결돼도 서버의 실행 중 토큰 replay로 세 패널을 같은 원문에서 재동기화함
-- **전체 화면 논문 뷰어**: 완료 결과에서 `논문 뷰어 열기`를 누르면 페이지
-  썸네일·목차 / 원문 PDF 좌표면 / 원문 위치와 연결된 번역문을 3열로 표시합니다.
-  `?viewer=1&page=N&lang=ko#잡ID` 딥링크, 키보드 페이지 이동, 패널 접기,
-  원문-번역 블록 1:1 강조를 지원하며 좌측 기준면은 항상 원문 PDF로 고정됩니다.
-- **디바이스 백엔드**: CPU / CUDA / Apple Silicon(**MLX 기본**, torch MPS 폴백) —
-  `OCR_DEVICE`를 비워 두면(auto) 쓸 수 있는 가장 빠른 디바이스를 고릅니다
-- **한국어 번역 (선택)**: 변환 결과를 OpenAI 호환 API로 한국어 번역 — 로컬 MLX 서버
-  (oMLX·LM Studio·mlx_lm.server)도 지원. §한국어 번역 참조
-- **원커맨드 배포**: `docker compose up` 하나로 끝 (Apple Silicon GPU는 로컬 실행 — 아래 참조)
-
-## PDF → Markdown ZIP
-
-왼쪽 **서비스 선택 → PDF → Markdown ZIP**에서 PDF를 선택하고 변환을 시작하세요.
-완료되면 **Markdown + 이미지 ZIP** 버튼으로 `<원본파일명>.markdown.zip`을 받습니다.
-번역 API 키나 Q&A 설정 없이 사용할 수 있으며, 여러 PDF를 올리면 파일별로 ZIP을 제공합니다.
-
-압축 파일에는 원문 `result.md`, 본문에 상대 경로로 연결된 `images/`, 그리고 모든
-페이지의 렌더 이미지 `pages/page_0001.png` 등이 들어갑니다. 번역본이나 원본 PDF는
-포함하지 않습니다. 화면에서 Markdown 미리보기와 원문 Markdown 개별 다운로드도 지원합니다.
-
-현재 설정한 OCR 엔진과 DPI를 사용합니다. CPU `textlayer` 엔진도 PDF에 포함된 사진을
-추출하며, 사진은 해당 페이지 본문 뒤에 연결됩니다. 스캔 안의 개별 그림이나 벡터 도표의
-분리 여부는 엔진에 따라 다르므로 전체 페이지 PNG를 함께 제공합니다. 렌더·OCR·사진 추출에
-문제가 있으면 작업의 품질 경고를 확인하세요. 전체 페이지 이미지는 ZIP 크기를 늘릴 수 있습니다.
-
-API에서는 `POST /api/jobs`의 multipart 필드 `workflow=markdown_zip`으로 생성하고,
-완료 응답의 `result.original_archive_url` 또는
-`GET /api/jobs/{id}/archive?scope=original`로 내려받습니다. `workflow`를 생략하면 기존
-읽기·번역 작업이며, 기존 `/archive`의 번역본 포함 동작도 유지됩니다.
-
-검증: `cd frontend && npm run test:e2e-markdown`은 임시 CPU 서버와 Chromium으로
-데스크톱·모바일 변환 및 ZIP 내부 파일을 검사합니다(backend 가상환경과 Playwright Chromium 필요).
-
-## 0.1.0 릴리스 이미지
-
-> **주의 — 0.1.0은 이 README가 설명하는 보안 수정 이전의 이미지입니다.** PyMuPDF 1.28.2
-> (MuPDF CVE-2026-3308)·Pillow 12.3.0 갱신, PyMuPDF 워커 프로세스 격리, 업로드 복잡도
-> 게이트(압축·중첩 XObject 폭탄 거부)가 없어, 악의적인 PDF 한 장으로 서버가 멈추거나 MuPDF
-> 취약점에 닿을 수 있습니다. MLX 엔진·`local-openai` Q&A 공급자·번역 스트리밍
-> (`TRANSLATE_STREAM`·`TRANSLATE_REASONING_STYLE`)도 없습니다. 출처를 모르는 PDF를 다룬다면
-> 아래 §빠른 시작 (Docker)의 소스 빌드(`docker compose up -d --build`)를 쓰거나 다음 릴리스를
-> 기다리세요.
-
-[v0.1.0 릴리스](https://github.com/Chedrian07/PDF-OCR-Translator/releases/tag/v0.1.0)의
-CPU 이미지는 Linux amd64/arm64를 지원합니다. 모델 없이 PDF 내장 텍스트와
-Tesseract를 사용하는 textlayer 엔진으로 바로 시작할 수 있습니다:
-
-```bash
-docker run -d --name pdf-ocr-translator --restart unless-stopped \
-  -p 127.0.0.1:8000:8000 \
-  -e OCR_ENGINE=textlayer -e ALLOWED_HOSTS=localhost,127.0.0.1 \
-  -v pdf-ocr-translator-data:/data \
-  ghcr.io/chedrian07/pdf-ocr-translator:0.1.0-cpu
-# → http://localhost:8000
-```
-
-릴리스 첨부파일의 `pdf-ocr-translator-0.1.0-cpu-amd64.tar.gz` 또는
-`pdf-ocr-translator-0.1.0-cpu-arm64.tar.gz`를 받아 오프라인으로 설치할 수도 있습니다.
-GHCR 이미지 접근 권한이 없어도 이 방법을 사용할 수 있습니다. 다운로드한
-아키텍처의 이름을 사용해 이미지를 불러오고 위 실행 명령의 공통 태그를 붙입니다:
-
-```bash
-docker load -i pdf-ocr-translator-0.1.0-cpu-amd64.tar.gz
-docker tag ghcr.io/chedrian07/pdf-ocr-translator:0.1.0-cpu-amd64 \
-  ghcr.io/chedrian07/pdf-ocr-translator:0.1.0-cpu
-# arm64를 받았다면 두 명령의 amd64를 arm64로 바꿉니다.
-```
-
-번역·Q&A를 활성화하려면 실행 명령에 `--env-file .env`를 추가합니다. `.env`의
-설정 예시는 아래 한국어 번역·페이지 Q&A 절을 참조하세요 — 단 `LLM_PROVIDER=local-openai`·
-`LLM_LOCAL_OPENAI_*`·`TRANSLATE_STREAM`·`TRANSLATE_REASONING_STYLE`·`TRANSLATE_EXTRA_BODY`는
-0.1.0 이후 설정입니다(0.1.0은 `LLM_PROVIDER=local-openai`면 설정 오류로 기동하지 못해 재시작을
-반복하고, 나머지 키는 무시합니다). `docker run --env-file`은
-따옴표와 줄 끝 주석을 값에 그대로 넣으므로 `KEY=값` 형식으로만 적습니다
-(`.env.example`은 설명을 별도 줄에 둡니다). CPU Unlimited-OCR을
-사용하려면 `OCR_ENGINE=unlimited`로 바꿉니다. CUDA·sidecar 배포는 아래
-소스 빌드용 Compose 프로필을 사용합니다.
-
-버전별 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 있습니다.
-
-### 릴리스 절차 (다음 릴리스부터 — 0.1.0에는 적용되지 않음)
-
-릴리스 워크플로는 같은 커밋의 CI 통과를 확인하고(진행 중이면 최대 90분 기다린다) 각
-아키텍처 이미지에서 실제 PDF 업로드→OCR→Markdown/ZIP 다운로드를 검증한 뒤, `trivy`
-게이트(수정판이 있는 HIGH/CRITICAL이면 중단 — 수용 목록 `.github/trivyignore.yaml`,
-2027-04-01 만료)를 통과한 이미지만 배포합니다. 0.1.0은 이 게이트를 도입하기 전에
-배포됐습니다. 오프라인 설치 tarball과 `SHA256SUMS`는 워크플로가 릴리스에 직접
-첨부합니다(릴리스가 없으면 초안을 만든다). 베이스 이미지 digest는
-`docker buildx imagetools inspect`로 갱신하고, Dependabot이 갱신 PR을 엽니다.
+PDF 업로드 → OCR 스트리밍 → 읽기 뷰·한국어 번역 → HTML/Markdown/ZIP/PDF 내보내기.
+모든 제품 OCR 경로는 **baidu/Unlimited-OCR-2**를 사용합니다. CUDA는 공식 전용 SGLang,
+CPU·Metal은 torch, Apple Silicon 기본 경로는 MLX입니다.
 
 ## 빠른 시작 (Docker)
 
 ```bash
-# CPU (기본 서비스 — 클론 직후 .env 없이 이 한 줄로 기동)
-docker compose up -d --build
-# → http://localhost:8000
-
-# CUDA (NVIDIA GPU + nvidia container toolkit 필요)
-docker compose up -d --build ocr-cuda   # 서비스명 지정 → cuda 프로필 자동 활성화
-# → http://localhost:8001
-
-# 신규 CUDA 엔진 (RTX 5070 Ti — GPU 스택은 한 번에 하나만!)
-python scripts/check_cuda_environment.py               # preflight (드라이버/sm_120/docker GPU)
-docker compose --profile ovis up -d --build ovisocr2 ocr-ovis   # → http://localhost:8002
-docker compose stop ovisocr2 ocr-ovis                          # 전환 전 반드시 정지
-docker compose --profile paddle up -d --build paddleocr-vl ocr-paddle  # → http://localhost:8003
+cp .env.example .env
+# CPU: http://localhost:8000
+docker compose up -d --build ocr-cpu
+# CUDA: http://localhost:8001
+docker compose --profile cuda up -d --build unlimited-ocr2 ocr-cuda
+# Apple Silicon
+make setup-mlx
+make dev
 ```
 
-- 최초 실행 시 모델 가중치(~6.7GB)를 `hf-cache` 볼륨에 1회 다운로드합니다
-  (진행 상황: `docker compose logs -f`). CPU/CUDA 서비스가 캐시를 공유합니다.
-- 모델 로딩 여부는 헤더 배지 또는 `GET /api/health`의 `model_loaded`로 확인.
-  같은 응답의 `worker_alive`(잡 처리 스레드 생존) · `worker_job_id`·`worker_progress_age_s`
-  (실행 중 잡과 마지막 진행 뒤 경과 초 — 잡이 있는데 계속 늘면 멈춘 것) ·
-  `translate_available` · `qa_available`로 나머지 구성 상태도 볼 수 있습니다.
-- 한국어 번역·페이지 Q&A를 쓰려면 `cp .env.example .env` 후 키를 설정합니다 — 번역은
-  `OPENAI_API_KEY`, Q&A는 **별도의** `LLM_OPENAI_API_KEY`입니다(`.env.example`에서
-  주석 처리돼 있으니 `#`을 지우고 값을 넣으세요). 아래 §한국어 번역 · §페이지 Q&A 참조.
-- backend 서비스(`ocr-cpu`·`ocr-cuda`·`ocr-ovis`·`ocr-paddle`)는 잡 저장소(`ocr-data`
-  볼륨)를 공유하므로 **한 번에 하나만** 뜹니다. 두 번째 backend는 실행 중인 잡을
-  망가뜨리지 않도록 기동을 거부하니, 스택을 바꿀 때는 먼저 `docker compose stop ocr-cpu`
-  처럼 떠 있는 backend를 멈추세요. 로컬(uv) 실행도 같은 `DATA_DIR`로 서버를 둘 띄우거나
-  `--workers`를 2 이상으로 줄 수 없습니다.
-- `.env` 값은 `docker-compose.yml`의 `environment:`에 적힌 키로만 컨테이너에 들어가고, `.env`
-  파일 자체는 컨테이너에 없습니다. 그래서 `/api/health`의 `config_warnings`는 Docker에서 늘 빈
-  목록이고, 이 앱이 읽지 않는 키(예: `REASONING_EFFORT`)는 경고 없이 버려집니다. `.env`를
-  고쳤으면 아래 명령으로 키 이름을 점검하세요 — 떠 있는 backend의 판정 코드를 그대로 쓰고 값은
-  출력하지 않습니다(다른 스택이면 `ocr-cpu`를 떠 있는 backend 서비스명으로 바꿉니다 — sidecar
-  `ovisocr2`·`paddleocr-vl` 이미지에는 이 코드가 없습니다).
+호스트 `.env`의 오타를 확인하려면 값 대신 키 이름만 검사합니다.
 
 ```bash
-docker compose exec -T ocr-cpu python -c '
-import sys
-from dotenv import dotenv_values
-from app.config import unknown_dotenv_key_warnings as check
-print("\n".join(check(dotenv_values(stream=sys.stdin))) or "모르는 키 없음")' < .env
+docker compose exec -T ocr-cpu python -c 'import sys; from dotenv import dotenv_values; from app.config import unknown_dotenv_key_warnings; print("\n".join(unknown_dotenv_key_warnings(dotenv_values(stream=sys.stdin))))' < .env
 ```
 
-Docker 없이 로컬(uv)로 바로 시작할 수도 있습니다:
+모델 revision은 `c14071b549f4fcab10909f3c4acc6a2edb366947`로 고정합니다.
+기존 엔진 선택·모델 ID·fast-decode 설정은 제거해야 합니다. 자동 구형 모델 복귀나
+텍스트 레이어/Tesseract 대체 OCR은 없습니다.
+설치·환경변수 이전·VRAM 설정·플랫폼 검증은 [운영 문서](docs/UNLIMITED_OCR_2.md)를 보세요.
+과거 릴리스 이미지에는 v1 모델이 들어 있으므로 이번 전환은 소스에서 새로 빌드합니다.
 
-```bash
-make setup-mlx && make dev    # Apple Silicon — MLX 엔진 (아래 §Apple Silicon)
-make setup && make dev        # Linux — torch CPU. http://127.0.0.1:8000
-make dev-textlayer            # 모델 없이 textlayer 엔진으로 기동
-```
-
-Intel Mac: 고정한 torch 2.10에 macOS x86_64 휠이 없어 `make setup`(Unlimited-OCR 엔진)은
-설치되지 않습니다 — Docker CPU 이미지(`docker compose up -d --build`)나, 의존성만 받는
-`cd backend && uv sync` 뒤 `make dev-textlayer`(torch 불필요)를 쓰세요.
-
-전체 타깃은 §Makefile에 있습니다. 로컬 실행은 실행 디렉터리, 없으면 리포 루트의 `.env`
-하나를 직접 읽습니다 — 이미 설정된 환경변수가 우선이고, 이 앱이 읽지 않는 키는 기동 로그와
-`/api/health`의 `config_warnings`로 알려 줍니다(키 이름만, 값은 남기지 않는다).
-예: `REASONING_EFFORT`는 어떤 코드도 읽지 않습니다 — 번역은 `TRANSLATE_REASONING`,
-Q&A는 `LLM_REASONING_EFFORT`로 바꾸세요.
-
-### 모델 없이 UI/파이프라인만 체험
-
-```bash
-OCR_ENGINE=fake docker compose up -d --build
-```
-
-## macOS · Apple Silicon (MLX 기본 · torch MPS 폴백)
-
-Docker(맥의 Linux VM)에는 GPU 패스스루가 없어 Metal을 쓸 수 없습니다. Apple Silicon
-Mac(macOS 14+, arm64)에서는 로컬(uv)로 실행하세요. 먼저 필요한 것:
-
-- **uv** — `brew install uv` 또는 [docs.astral.sh/uv](https://docs.astral.sh/uv/) 설치 스크립트
-  (없으면 `make setup-mlx`가 `uv: command not found`로 멈춥니다). Python 3.12는 uv가 받습니다.
-- **Xcode Command Line Tools**(`xcode-select --install`) — C++ 가속 모듈(`native/`) 빌드용.
-
-```bash
-make setup-mlx    # = cd backend && uv sync --extra metal --extra mlx && uv pip install ../native
-make dev          # http://127.0.0.1:8000 — OCR_DEVICE=auto → mlx
-make dev PORT=8010   # 8000을 다른 서버가 쓰고 있으면 포트만 바꾼다(dev-metal·dev-textlayer도 같다)
-```
-
-다른 LAN/Tailscale 기기에서 접속하려면 `backend` 디렉터리에서
-`OCR_DEVICE=metal uv run uvicorn app.main:app --host 0.0.0.0`처럼 실행하세요
-(이미 `backend` 안이면 `cd backend`는 생략). `ALLOWED_HOSTS`를 설정하지 않으면
-`localhost,127.0.0.1`과 요청을 받은 서버 IP를 허용하므로 `http://<서버의 VPN/LAN IP>:8000`으로
-접속할 수 있습니다. `.env`에 `ALLOWED_HOSTS`가 있으면 그 목록만 허용합니다.
-`400 Invalid host header`가 나오면 **서버** IP나 접속 도메인을 해당 목록에 추가하세요
-(예: `ALLOWED_HOSTS=localhost,127.0.0.1,100.x.y.z`). 설정 변경 후 서버를 다시 실행하세요.
-
-- **기본 엔진은 in-process MLX**입니다(`backend/app/vendor/unlimited_ocr_mlx` — mlx-vlm 0.7.4의
-  Unlimited-OCR 모델 코드를 mlx 단독 의존으로 옮긴 것, MIT). mlx-vlm·torch에 의존하지 않고,
-  torch 경로와 **같은 고정 스냅샷**(`ee63731b`)을 변환 없이 읽습니다(HF 캐시도 공유).
-  멀티페이지 청크·토큰 스트리밍·레이아웃·figure·충실도 게이트 등 계약은 torch 엔진과 같습니다.
-- 첫 기동은 모델(~6.7GB)을 HF 허브 캐시(`HF_HUB_CACHE`, 기본 `$HF_HOME/hub` =
-  `~/.cache/huggingface/hub`)의 `models--baidu--Unlimited-OCR`에 받습니다. 다른 곳에 받아 둔
-  캐시를 쓰려면 셸이나 `.env`에 `HF_HUB_CACHE=<models--…가 바로 아래 있는 디렉터리>`를 둡니다 —
-  `HF_HOME`만 바꾸면 `<HF_HOME>/hub`를 찾아 다시 받습니다. 다운로드를 막으려면
-  `HF_HUB_OFFLINE=1`(캐시에 없으면 모델 로드 실패로 알립니다).
-  기동 로그의 `OCR_DEVICE=auto → mlx`와 헤더의 `MLX · <칩 이름>` 배지로 확인합니다.
-- **`OCR_DEVICE`** (비우면 `auto`): `auto` | `mlx` | `metal`(=`mps`, torch MPS) | `cpu` |
-  `cuda`. `auto`는 unlimited 엔진에만 적용되며 mlx → cuda → metal → cpu 순으로 쓸 수 있는
-  첫 디바이스를 고릅니다. `make dev OCR_DEVICE=metal`처럼 바꿀 수 있고, `.env`의
-  `OCR_DEVICE`도 그대로 존중됩니다. Apple Silicon에서 `cpu`를 고르면 MLX보다 수십 배 느리다는
-  경고가 기동 로그에 남습니다.
-- **`OCR_MLX_QUANT_BITS`**: `0`(기본, bf16 그대로) | `8`(디코더만 인메모리 8비트 — 파라미터
-  6.7→3.9 GB, 약 1.4배 빠름, 재현율 동일). 다른 값은 기동 시 변수명과 함께 실패합니다
-  (4비트는 숫자를 잘못 읽어 미지원).
-- **torch MPS 폴백**: `make dev-metal`(= `OCR_DEVICE=metal`). mlx가 설치돼 있지 않으면
-  `auto`도 MPS를 고릅니다. 결과 비교·우회용입니다.
-- ⚠ `make setup`(cpu extra)이나 `uv sync --extra metal` 단독은 mlx와 C++ 모듈을 지웁니다 —
-  Apple Silicon에서는 `make setup-mlx`(=`make setup-metal`)를 쓰세요.
-- 청크가 끝날 때마다 MLX/MPS 캐시를 비워 유니파이드 메모리를 돌려줍니다. torch MPS 경로는
-  잡마다 ObjC 오토릴리스 풀을 비워 긴 세션의 메모리 증가도 막습니다.
-- 로컬 번역 서버도 같은 GPU를 씁니다 — OCR과 번역을 동시에 돌리면 둘 다 느려집니다(§한국어 번역).
-
-### 성능 실측 — Apple M4 Max (조용한 머신, 2026-10-02)
-
-다른 측정·빌드 없이 순차로 잰 값입니다(load average 1.8–4.5 — 데스크톱 상주 프로세스만, 앱
-엔진을 프로세스 안에서 직접 호출). 측정 조건·전체 표:
-[docs/OCR_BENCHMARK.md §Apple Silicon 실측](docs/OCR_BENCHMARK.md).
-
-| 경로 | 측정 | 값 |
-|---|---|---|
-| MLX bf16 (기본) | 8쪽 청크 OCR | 3.79–3.80 s/쪽 · 288 tok/s · 청크당 TTFT 1.02 s |
-| MLX bf16 | 25쪽 논문 잡 전체 (렌더·충실도 게이트·병합 포함) | 96.3 s (3.85 s/쪽, 충실도 재처리 0건) |
-| MLX 8비트 (`OCR_MLX_QUANT_BITS=8`) | 8쪽 청크 OCR · 25쪽 잡 전체 | 2.60–2.62 s/쪽 · 427–430 tok/s · 67.0 s (2.68 s/쪽) |
-| MLX | 단독 1쪽 (per_page·충실도 재처리) | 2.9–4.5 s (TTFT 0.62 s · 294 tok/s) |
-| MLX | 모델 준비 (로드 + 워밍업) | 웜 1.8–2.0 s · 외장 볼륨 콜드 8.8 s |
-| MLX | 메모리 | 파라미터 6.67 GB (8비트 3.92 GB) · 8쪽 청크 피크 8.27 GB (8비트 5.52 GB) · 프로세스 phys_footprint 잡 사이 약 7,300 MB, 최고 약 11,600 MB(단독 1쪽 크롭 경로) |
-| MLX | 한 서버 프로세스에서 8쪽 잡 5회 연속 | 잡당 31.0 s · RSS 첫 잡 뒤 +320 MB, 이후 4잡 합계 +5 MB |
-| MLX | 번역 PDF 빌드가 동시에 돌 때 디코드 | 290 tok/s (빌드 없음 288 tok/s · 예전 서버 내 빌드: 약 70 tok/s) |
-| 내보내기 | 25쪽 번역 PDF 빌드 (워커 프로세스, 목 번역 길이비 0.4 — 긴 번역은 1.0 s/쪽까지) | 8.2 s (0.33 s/쪽) |
-| torch MPS 폴백 | 8쪽 청크 OCR · 25쪽 잡 전체 | 9.03–9.13 s/쪽 · 119 tok/s · 231.8 s (9.27 s/쪽) — 개선 전(a9a4400) 34.0 s/쪽 |
-
-품질: 텍스트 레이어 재현율은 MLX bf16·8비트·torch MPS가 모두 0.9748(8쪽 청크)로 같고, 25쪽
-전체는 0.9386–0.9388입니다. MLX bf16 출력은 MPS와 토큰 단위로 같지 않으므로(bf16 반올림 차이)
-비교는 유사도·재현율로 합니다. `PAGES_PER_CHUNK`는 4·12쪽 청크가 같은 품질에서 10% 넘게 빠르지
-않아(최대 3.4%) 기본 8을 유지합니다.
+PDF → Markdown ZIP 작업도 지원합니다. 업로드에서 해당 워크플로를 선택하면 페이지별
+Markdown과 그림을 ZIP으로 내려받습니다. 기존 작업 API와 결과 다운로드 경로는 유지됩니다.
 
 ## 보안
 
@@ -696,193 +443,26 @@ overlay 없이 기본 compose로 충분합니다 — 컨테이너는 `OLLAMA_BAS
 `http://host.docker.internal:11434`로 호스트 Ollama에 접근합니다.
 컨테이너 Ollama의 포트(11434)는 호스트에 공개되지 않습니다.
 
-## E2E 스모크 테스트
+## 개발 및 검증
 
 ```bash
-cd backend && uv run python ../scripts/make_sample_pdf.py ../sample/sample.pdf && cd ..
-./scripts/smoke_e2e.sh                      # CPU (8000)
-./scripts/smoke_e2e.sh http://localhost:8001  # CUDA (8001)
-
-# 신규 엔진 실 GPU smoke (RTX 5070 Ti — 해당 프로필 기동 후)
-cd backend
-uv run python ../scripts/smoke_ovisocr2_5070ti.py        # ovis 프로필 (:8002)
-uv run python ../scripts/smoke_paddleocr_vl_5070ti.py    # paddle 프로필 (:8003)
-
-# 엔진 비교 벤치마크 (스택을 하나씩 띄워 순차 실행 — benchmark_docs/README.md)
-uv run python ../scripts/benchmark_ocr_engines.py \
-  --endpoint ovis=http://127.0.0.1:8002 --input ../benchmark_docs/ --out ../bench_out/
+make setup
+make dev
+make test
+npm --prefix frontend run test:e2e-mock
+E2E_BASE_URL=http://127.0.0.1:8001 npm --prefix frontend run test:e2e
 ```
 
-벤치마크는 모델 준비를 기다리고 첫 문서를 `--warmup`(기본 1회)으로 기록에서 빼며, 잡 상태를
-0.25초 간격으로 폴링해 처리 시간(`process_s`)으로 s/page를 잽니다(예전 2초 폴링 값은 짧은
-문서에서 믿을 수 없었다).
-
-### 전 구간 검증 하네스 (외부 API 없이)
-
-`smoke_e2e.sh`는 업로드→OCR→마크다운/zip에서 끝납니다. 그 뒤의 번역 · 레이아웃 보존
-PDF 내보내기 · 뷰어 계약 · Q&A 키 분리 · 워커 복원력까지 한 번에 점검하려면
-(`make setup` 이후 — Apple Silicon은 `make setup-mlx`. 하네스는 textlayer 엔진만 쓰지만
-`make setup`은 mlx와 C++ 모듈을 지운다):
-
-```bash
-make verify-e2e                          # 기본 sample/2504.19874v1.pdf 전체
-VERIFY_ARGS="--pages 4" make verify-e2e  # 앞 4페이지만 (빠른 확인)
-```
-
-`scripts/verify_e2e.py`가 빈 포트를 골라 mock LLM(`scripts/mock_llm.py`)과
-`OCR_ENGINE=textlayer` 백엔드를 직접 띄우므로 **모델 다운로드도 유료 키도 필요
-없고** 개발 서버(8000)와 충돌하지 않습니다. 셸에 내보낸 앱 설정·자격증명·프록시 변수는
-자식 프로세스에 넘기지 않습니다. 포트를 고정해야 하면 `--mock-port`·`--api-port`를 줍니다
-(서로 달라야 한다). 서버 로그·내보낸 PDF 등 산출물은 `tmp/verify-e2e/`에 남습니다
-(`--work DIR`로 변경, `--skip faults,worker,cropbox`로 단계 생략). 단언은 89개이고,
-M4 Max에서 `--pages 4`는 약 2분(그중 약 1분은 429 백오프 실증), 25쪽 전체는 약 6분입니다.
-
-브라우저까지 포함한 hermetic 전체 흐름(mock OpenAI + FakeEngine)은
-`make e2e-mock`입니다 — playwright chromium을 처음 한 번 내려받습니다. 포트를 고정하려면
-`E2E_MOCK_PORT`·`E2E_BACKEND_PORT`를 줍니다.
-
-## 로컬 개발 (uv)
-
-```bash
-# 백엔드 (Python 3.12, torch CPU)
-cd backend
-uv sync --extra cpu          # CUDA: --extra cu129 · Apple Silicon: --extra metal --extra mlx (= make setup-mlx)
-uv pip install ../native     # C++ 가속 모듈 (선택 — 없어도 동작)
-uv run pytest                # 유닛/통합 테스트 (FakeEngine, 모델 불필요)
-uv run uvicorn app.main:app --reload   # http://localhost:8000 (권장: make dev)
-
-# 네이티브 모듈 단독 테스트
-cd native && uv venv --python 3.12 .venv \
-  && uv pip install -p .venv/bin/python -e . pytest numpy \
-  && .venv/bin/python -m pytest tests/ -v
-
-# 프론트엔드 테스트 (Node 22 필요 — 의존성 설치 불필요, 리포 루트에서 실행)
-npm test --prefix frontend
-```
-
-기기 의존 테스트는 기본 스위트에서 건너뛰고, 명시적으로 켭니다: `make test-mps`
-(`OCR_MPS_TESTS=1` — torch MPS 계약, torch·macOS 업그레이드 전후)와 `make test-mlx-real`
-(`OCR_MLX_REAL_TESTS=1` — MLX 실가중치 패리티, 고정 스냅샷이 로컬 HF 캐시에 있어야 하며
-`make dev`를 한 번 띄우면 받아진다. `.env`의 `HF_HOME`·`HF_HUB_CACHE`도 `make dev`처럼 반영하고,
-가중치가 없으면 pytest 전에 사유를 보이고 종료코드 2로 멈춘다 — `scripts/require_hf_snapshot.py`.
-fp32 MLX·torch 모델을 차례로 올려 최고 메모리가 약 23GiB라 32GB 이상 Mac에서 돌린다).
-둘 다 건너뛴 테스트의 사유를 보여 줍니다(`-rs`).
-
-환경변수 전체 목록: [docs/ARCHITECTURE.md §7](docs/ARCHITECTURE.md) —
-`OCR_DEVICE`(auto/mlx/metal/cpu/cuda), `OCR_DTYPE`, `OCR_MLX_QUANT_BITS`,
-`OCR_ENGINE`(unlimited/fake/textlayer/ovisocr2/paddleocr_vl), `OCR_SIDECAR_URL`,
-`PAGES_PER_CHUNK`, `RENDER_DPI`, `MAX_UPLOAD_MB`, `PDF_PAGE_TIMEOUT_S` 등.
-
-## Makefile
-
-리포 루트의 `make` 타깃 (uv·npm 기반 — 위 명령들의 축약):
-
-| 타깃 | 동작 |
-|---|---|
-| `make setup` | backend 의존성 설치 (`uv sync --extra cpu`) — Apple Silicon에서는 mlx·C++ 모듈을 지우므로 아래를 쓴다 |
-| `make setup-mlx` | **Apple Silicon 권장** — MLX 엔진 + torch MPS 폴백 + C++ 모듈 (`uv sync --extra metal --extra mlx && uv pip install ../native`) |
-| `make setup-metal` | `setup-mlx`와 같다 (예전 metal 단독 sync는 mlx·C++ 모듈을 지웠다) |
-| `make setup-native` | C++ 가속 모듈 설치 (선택) |
-| `make dev` | 개발 서버 — `127.0.0.1:8000`(`make dev PORT=8010`으로 변경), `--reload`, 디바이스 자동 선택(`make dev OCR_DEVICE=cpu`처럼 지정 가능) |
-| `make dev-metal` | torch MPS(Metal) 폴백으로 개발 서버 — MLX와 결과·속도 비교용 |
-| `make dev-textlayer` | `OCR_ENGINE=textlayer`로 개발 서버 (모델 불필요) |
-| `make test` | 핵심 로컬 검사 — backend pytest · ruff · frontend 테스트 |
-| `make test-mps` | Apple Silicon torch MPS 계약 테스트 (`OCR_MPS_TESTS=1`) — torch·macOS 업그레이드 전후 |
-| `make test-mlx-real` | MLX 실가중치 패리티 테스트 (`OCR_MLX_REAL_TESTS=1`) — mlx 업그레이드·MLX 포팅 수정·스냅샷 갱신 전후, 스냅샷이 없으면 종료코드 2 |
-| `make coverage` | backend 커버리지 (`pytest-cov`를 `--with`로 임시 설치 — `uv.lock` 무변경) |
-| `make audit` | 의존성 취약점 감사 — CI `dependency-audit` 잡과 같은 pip-audit·수용 목록 (네트워크 필요) |
-| `make e2e` | `./scripts/smoke_e2e.sh` (기동된 백엔드 필요) |
-| `make verify-e2e` | 실 PDF 전 구간 점검 — 업로드→OCR→번역→PDF→뷰어→보안 (서버를 직접 띄움, 외부 API 없음) |
-| `make e2e-mock` | hermetic 브라우저 E2E — mock OpenAI + FakeEngine (playwright chromium 설치) |
-| `make docker-up` / `make docker-down` | CPU 스택(ocr-cpu) 기동/정리 |
-| `make docker-up-ollama` / `make docker-down-ollama` | ocr-cpu + Ollama 컨테이너 (overlay) |
-| `make docker-pull-model` | 컨테이너 Ollama 모델 다운로드 (`MODEL=qwen3:8b` 기본) |
-
-GPU 스택(cuda/ovis/paddle)은 compose 프로필 함정(서비스명 명시 필수) 때문에
-make로 감싸지 않습니다 — 위 §빠른 시작의 blessed 명령을 그대로 사용하세요.
-개발 서버(`dev`·`dev-metal`·`dev-textlayer`)는 Dockerfile과 같은
-`--timeout-graceful-shutdown 5`로 떠서 열린 SSE가 종료·리로드를 붙잡지 않습니다.
-
-## 동작 방식
-
-```
-PDF 업로드 → 업로드 검증(페이지 수·크기·작업량 게이트 — 검증 워커 프로세스)
-          → 페이지 PNG 렌더(기본 200dpi — OCR 워커 프로세스, 페이지마다 시간 상한)
-          → infer_multi()가 8페이지 청크 단위 one-shot 파싱 (<PAGE> 마커로 페이지 구분)
-          → 충실도 게이트: 원본 텍스트 레이어와 대조해 청크가 놓친 페이지만 단독 재처리
-          → figure 크롭(images/) · 레이아웃 오버레이(layout/) · 참조 재작성
-          → 페이지 병합 result.md → 미리보기/다운로드(.md, .zip)
-```
-
-- 모델 코드는 `backend/app/vendor/unlimited_ocr/`에 **벤더링**되어 있습니다
-  (revision 고정, `trust_remote_code` 불필요). 업스트림은 CUDA 전용이라
-  CPU 지원 패치 + `eval()` 보안 패치를 적용했습니다 — 내역:
-  [PROVENANCE.md](backend/app/vendor/unlimited_ocr/PROVENANCE.md)
-- Apple Silicon의 MLX 엔진은 같은 모델의 MLX 포팅(`backend/app/vendor/unlimited_ocr_mlx/`)을
-  씁니다 — 로컬 패치 M1–M7(CLIP 활성함수·원샷 프리필·위치 임베딩 리샘플 등) 내역:
-  [PROVENANCE.md](backend/app/vendor/unlimited_ocr_mlx/PROVENANCE.md)
-- `per_page` 모드(요청 옵션)는 페이지별 gundam 프리셋(1024/640/crop)으로 처리합니다.
-- **실패 격리**: 청크가 실패하면(출력 상한 `MAX_LENGTH` 도달 포함) 끝까지 생성된 앞 페이지는
-  지키고 나머지만 페이지별로 다시 처리하며, 그래도 안 되면 PDF 텍스트 레이어 → 실패
-  플레이스홀더 순으로 메웁니다. 기본 설정(`MAX_LENGTH` 32,768 < 8쪽 최악 길이)에서는 기동 시
-  안내가 INFO로 한 번 남습니다 — 잘린 청크는 끝까지 생성된 앞 페이지(텍스트 레이어가 있으면
-  원본 본문과 대조해 확인한 페이지)만 지키고 잘린 페이지부터 페이지별로 다시 처리합니다.
-  대조할 텍스트 레이어가 없는 스캔은 모델의 페이지 마커를 그대로 믿습니다.
-- **PyMuPDF 격리**: PDF 렌더·분석·내보내기는 서버 밖 워커 프로세스(ocr 1개 · export
-  `PDF_EXPORT_MAX_CONCURRENT`개 · 업로드 검증 2개)에서 돕니다. MuPDF는 GIL을 쥔 채 돌기
-  때문에 서버 안에서 돌리면 번역 PDF 빌드 동안 OCR 디코드가 멎었습니다(M4 Max 실측 MLX
-  약 290 → 70 tok/s).
-- **수식 렌더링**: 모델의 `\(…\)`/`\[…\]` LaTeX를 렌더 레이어에서 정규화해
-  (mdit-py-plugins dollarmath) 로컬 벤더링된 **KaTeX**(`frontend/vendor/katex/`,
-  외부 CDN 없음)로 타이포셋합니다. 다운로드되는 `result.md`에는 원본 LaTeX가
-  그대로 유지됩니다.
-- **렌더 충실도**: figure는 그라운딩 bbox로 계산한 **원본 페이지 대비 상대
-  폭**으로 표시되고(좁으면 센터링), 최종 미리보기는 페이지별
-  `<section class="doc-page">`로 구분됩니다. 결과 탭의 **레이아웃** 뷰는
-  전 블록의 좌표로 다단 배치까지 근사 재구성합니다 (best-effort — 텍스트
-  리플로우/검색은 마크다운 뷰 담당). 이 모든 변형은 렌더 레이어 전용이며
-  `result.md`는 순수 마크다운으로 유지됩니다.
-- C++ 모듈(`native/`)은 토큰 생성 핫패스(no-repeat-ngram)를 가속합니다.
-  없으면 순수 파이썬 폴백으로 동일하게 동작합니다.
-- no-repeat-ngram 검사는 디바이스별 최적 경로를 탑니다: CUDA/MPS는 **GPU 상주
-  torch 구현**(토큰마다 발생하던 시퀀스 D2H 복사·동기화 제거 — MPS는 창 길이를 고정해
-  길이마다 새 Metal 그래프를 만들지 않는다), MLX는 같은 의미론의 MLX 구현, CPU는 마지막
-  window 토큰만 슬라이스해 C++/파이썬으로 스캔 — 모든 구현이 레퍼런스와
-  패리티 테스트로 검증됩니다. 참고: batch=1 자기회귀 디코드 특성상 GPU
-  사용률은 원래 낮습니다(HF generate 루프가 지배) — 대량 처리 스루풋이
-  필요하면 모델이 공식 지원하는 vLLM/SGLang 서빙을 고려하세요.
-- CPU 스레드 수는 `OCR_CPU_THREADS`, CUDA GPU 선택은 `GPU_DEVICE`(compose)로
-  제어합니다.
-
-## 디바이스 백엔드 현황
-
-| 백엔드 | 상태 | 비고 |
-|---|---|---|
-| CPU | ✅ | 기본 float32 (`OCR_DTYPE=bfloat16` 가능) |
-| CUDA | ✅ | bf16, torch 2.10 cu129 (sm_89·sm_120 확인) |
-| MLX | ✅ | **Apple Silicon 기본**, `OCR_DEVICE=mlx`(또는 auto) — in-process MLX, bf16(선택 8비트), macOS 14+ arm64 로컬 실행 전용 (Docker 불가) |
-| Metal | ✅ | torch MPS 폴백, `OCR_DEVICE=metal`(별칭 `mps`) — bf16, macOS 14+, Apple Silicon 로컬 실행 전용 (Docker 불가) |
-
-`OCR_DEVICE`를 비우면(`auto`) unlimited 엔진이 mlx → cuda → metal → cpu 순으로 고르고
-기동 로그와 `/api/health`의 `device`·`dtype`(예: `bfloat16+q8`)에 결과를 남깁니다. compose는
-서비스마다 `cpu`/`cuda`를 고정하므로 컨테이너 동작은 그대로입니다.
+실모델 측정은 `scripts/benchmark_unlimited2.py`를 사용합니다. 모델 없는 테스트는
+실모델 품질·성능 검증을 대신하지 않습니다. Apple Silicon 실기기 검증은 사용자 측에서 진행합니다.
 
 ## 문서
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 아키텍처, REST/SSE API 계약, 설계 결정
-- [docs/OCR_ENGINE_PROTOCOL.md](docs/OCR_ENGINE_PROTOCOL.md) — backend ↔ GPU sidecar 프로토콜
-- [docs/OCR_BENCHMARK.md](docs/OCR_BENCHMARK.md) — 엔진 비교·Apple Silicon 실측
-- [SECURITY.md](SECURITY.md) — 노출·자격증명·브라우저·업로드 방어 정책
-- [CHANGELOG.md](CHANGELOG.md) — 버전별 변경사항
-- [backend/app/vendor/unlimited_ocr/PROVENANCE.md](backend/app/vendor/unlimited_ocr/PROVENANCE.md) — torch 벤더링/패치 내역
-- [backend/app/vendor/unlimited_ocr_mlx/PROVENANCE.md](backend/app/vendor/unlimited_ocr_mlx/PROVENANCE.md) — MLX 포팅 출처/패치·실측 내역
+- [Unlimited-OCR-2 설치·운영·검증](docs/UNLIMITED_OCR_2.md)
+- [전환 검증 기록](docs/UNLIMITED_OCR_2_VALIDATION.md)
+- [아키텍처](docs/ARCHITECTURE.md)
+- [네이티브 모듈](native/README.md)
 
 ## 라이선스
 
-프로젝트 코드는 [MIT](LICENSE)입니다. 벤더링된 코드는 각자의 라이선스를 따릅니다:
-
-- 모델 가중치·벤더링된 모델 코드 — Baidu MIT
-  ([backend/app/vendor/unlimited_ocr/LICENSE](backend/app/vendor/unlimited_ocr/LICENSE))
-- MLX 포팅 모델 코드 — mlx-vlm MIT
-  ([backend/app/vendor/unlimited_ocr_mlx/LICENSE](backend/app/vendor/unlimited_ocr_mlx/LICENSE))
-- KaTeX — MIT ([frontend/vendor/katex/LICENSE](frontend/vendor/katex/LICENSE))
+MIT. 벤더 코드의 라이선스와 출처는 각 `backend/app/vendor` 디렉터리를 확인하세요.

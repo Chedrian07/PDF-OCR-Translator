@@ -46,7 +46,23 @@ function sourceFromPrompt(input) {
 }
 
 function mockTranslation(input) {
-  const src = sourceFromPrompt(input);
+  // The real OCR fixture is English. Supply actual Korean fixture strings so
+  // untranslated-output checks exercise success instead of rejecting an English echo.
+  let src = sourceFromPrompt(input);
+  const translations = [
+    ['Unlimited-OCR End-to-End Sample', '문서 OCR 전체 흐름 예제'],
+    ['This document validates PDF to Markdown conversion, including embedded figure extraction and table structure.', '이 문서는 그림 추출과 표 구조를 포함한 PDF의 마크다운 변환을 검증합니다.'],
+    ['Table 1. Model configurations', '표 1. 모델 구성'],
+    ['Section 2: Figures and Lists', '제2절: 그림과 목록'],
+    ['First bullet item about long-horizon parsing.', '긴 문서 해석에 관한 첫 번째 항목입니다.'],
+    ['Second bullet item about page markers.', '페이지 구분자에 관한 두 번째 항목입니다.'],
+    ['Third bullet item about figure grounding boxes.', '그림 좌표에 관한 세 번째 항목입니다.'],
+    ['End of sample document. Page 2 of 2.', '예제 문서의 끝입니다. 총 2쪽 중 2쪽입니다.'],
+    ['The pricing follows', '가격은'],
+    ['style notation and includes', '형식의 표기를 따르며'],
+    ['parameters.', '개의 매개변수를 포함합니다.'],
+  ];
+  for (const [source, target] of translations) src = src.replaceAll(source, target);
   if (src.startsWith('#')) {
     const m = src.match(/^(#+\s*)([\s\S]*)$/);
     return `${m[1]}모의 번역: ${m[2]}`;
@@ -124,8 +140,9 @@ const backend = spawn(PYTHON, [
   env: {
     ...process.env,
     // 개발자 .env(실키)를 자동 로드하지 않는다 — 아래에서 덮지 않은 키까지 hermetic하게.
-    DISABLE_DOTENV: '1',
-    OCR_ENGINE: 'fake', OCR_DEVICE: 'cpu', PRELOAD_MODEL: '0', FAKE_DELAY: '0',
+    DISABLE_DOTENV: '1', OCR_TEST_MODE: '1',
+    OCR_ENGINE: process.env.E2E_OCR_ENGINE || 'fake',
+    OCR_DEVICE: process.env.E2E_OCR_DEVICE || 'cpu', PRELOAD_MODEL: '0', FAKE_DELAY: '0',
     DATA_DIR: DATA, ALLOWED_HOSTS: 'localhost,127.0.0.1',
     OPENAI_BASE_URL: mockOrigin, // bare origin 자동 /v1 보완도 함께 검증
     OPENAI_API_KEY: 'mock-only', OPENAI_MODEL: 'mock-translate',

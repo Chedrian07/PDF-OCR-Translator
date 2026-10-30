@@ -1,0 +1,31 @@
+{
+  "reference_text": [
+    "Two-column reading order\nLEFT section 1\nThe reference value is 100.\nThis paragraph belongs to one column.\nLEFT section 2\nThe reference value is 101.\nThis paragraph belongs to one column.\nLEFT section 3\nThe reference value is 102.\nThis paragraph belongs to one column.\nLEFT section 4\nThe reference value is 103.\nThis paragraph belongs to one column.\nLEFT section 5\nThe reference value is 104.\nThis paragraph belongs to one column.\nLEFT section 6\nThe reference value is 105.\nThis paragraph belongs to one column.\nLEFT section 7\nThe reference value is 106.\nThis paragraph belongs to one column.\nLEFT section 8\nThe reference value is 107.\nThis paragraph belongs to one column.\nRIGHT section 1\nThe reference value is 100.\nThis paragraph belongs to one column.\nRIGHT section 2\nThe reference value is 101.\nThis paragraph belongs to one column.\nRIGHT section 3\nThe reference value is 102.\nThis paragraph belongs to one column.\nRIGHT section 4\nThe reference value is 103.\nThis paragraph belongs to one column.\nRIGHT section 5\nThe reference value is 104.\nThis paragraph belongs to one column.\nRIGHT section 6\nThe reference value is 105.\nThis paragraph belongs to one column.\nRIGHT section 7\nThe reference value is 106.\nThis paragraph belongs to one column.\nRIGHT section 8\nThe reference value is 107.\nThis paragraph belongs to one column.\n"
+  ],
+  "expected_figures": [
+    0
+  ],
+  "reference_origin": "Text inserted by the synthetic generator; scan inherits the clean Korean source.",
+  "reading_order_landmarks": [
+    "LEFT section 1",
+    "LEFT section 2",
+    "LEFT section 3",
+    "LEFT section 4",
+    "LEFT section 5",
+    "LEFT section 6",
+    "LEFT section 7",
+    "LEFT section 8",
+    "RIGHT section 1",
+    "RIGHT section 2",
+    "RIGHT section 3",
+    "RIGHT section 4",
+    "RIGHT section 5",
+    "RIGHT section 6",
+    "RIGHT section 7",
+    "RIGHT section 8"
+  ],
+  "table_shapes": [],
+  "figure_boxes": [
+    []
+  ]
+}

@@ -1200,36 +1200,3 @@ def test_gate_breaker_stops_partial_retries_but_keeps_recovering_lost_pages(tmp_
     assert any("재처리를 멈춥니다" in n for n in job.notices), job.notices
     assert not any("측정 한계" in w for w in job.warnings), job.warnings
     assert page_truth(7) in (job.dir / "result.md").read_text(encoding="utf-8")
-
-
-def test_deterministic_engines_skip_the_gate(tmp_path, monkeypatch):
-    """textlayer는 같은 페이지를 다시 돌려도 결과가 같다 — 게이트가 Tesseract(페이지당
-    최대 180초)를 반복하고 거짓 '충실도 미달' 경고를 남기던 문제."""
-    from app.engine import textlayer as textlayer_mod
-    from app.engine.textlayer import TextLayerEngine
-
-    calls = []
-    monkeypatch.setattr(textlayer_mod, "find_tesseract", lambda: "/fake/tesseract")
-
-    def _fake_tesseract(executable, languages, png_bytes):
-        calls.append(1)
-        return "OCR text that does not match the page's dot-leader text layer"
-
-    monkeypatch.setattr(textlayer_mod, "run_tesseract", _fake_tesseract)
-
-    store = JobStore(tmp_path / "jobs")
-    broker = EventBroker()
-    job = store.create("doc.pdf", "multi", dpi=72)
-    (job.dir / "source.pdf").write_bytes(make_texty_pdf(3))
-    settings = Settings(
-        engine="textlayer", device="cpu", data_dir=tmp_path / "data",
-        preload_model=False, pages_per_chunk=3,
-        # NATIVE_TEXT_THRESHOLD를 올린 배포 — 판정 가능한 텍스트 레이어가 있어도 Tesseract
-        # 경로를 타고 raw가 비어 0점이 된다(게이트가 '열화'로 본다)
-        native_text_threshold=100_000,
-    )
-    execute_job(job, store, broker, TextLayerEngine(settings), settings, threading.Event())
-
-    assert job.status == "done", job.error
-    assert len(calls) == 3                     # 페이지당 한 번 — 게이트 재실행 없음
-    assert not any("충실도" in m for m in job.warnings + job.notices), (job.warnings, job.notices)

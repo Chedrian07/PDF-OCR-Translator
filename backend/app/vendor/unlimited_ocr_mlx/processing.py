@@ -1,5 +1,5 @@
 # Ported from baidu/Unlimited-OCR modeling_unlimitedocr.py (MIT, Copyright (c) 2026 Baidu;
-# 라이선스 전문: ../unlimited_ocr/LICENSE) — infer()/infer_multi()의 전처리 부분.
+# 라이선스 전문: ../unlimited_ocr2/LICENSE) — infer()/infer_multi()의 전처리 부분.
 # mlx-vlm processing_unlimitedocr.py 대신 torch 레퍼런스를 직접 옮겼다(앱이 검증한 경로).
 # 출처·패치 내역: PROVENANCE.md
 """프롬프트 토큰·이미지 전처리 (torch-free, numpy/PIL만).
@@ -119,7 +119,7 @@ def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_
     return best_ratio
 
 
-def dynamic_preprocess(image, min_num=2, max_num=32, image_size=640, use_thumbnail=False):
+def dynamic_preprocess(image, min_num=2, max_num=16, image_size=640, use_thumbnail=False):
     orig_width, orig_height = image.size
     aspect_ratio = orig_width / orig_height
 
@@ -196,6 +196,9 @@ def prepare_multi(tokenizer, prompt: str, image_files, image_size: int = 640) ->
     images_seq_mask += [False] * len(tokenized_sep)
 
     for image in images:
+        marker = text_encode(tokenizer, "<PAGE>", bos=False, eos=False)
+        tokenized_str += marker
+        images_seq_mask += [False] * len(marker)
         if image_size <= 640:
             image = image.resize((image_size, image_size))
         global_view = ImageOps.pad(image, (image_size, image_size), color=PAD_COLOR)
@@ -232,7 +235,7 @@ def prepare_single(
     crop_mode: bool = True,
 ) -> OCRInputs:
     """torch ``infer``(prompt + image_file)의 전처리 — gundam: crop_mode=True."""
-    formatted = format_plain_prompt(prompt)
+    formatted = format_plain_prompt(prompt).replace("<image>", "<PAGE><image>")
     images = load_pil_images([str(Path(image_file))])
     text_splits = _split_single_image_prompt(formatted)
 

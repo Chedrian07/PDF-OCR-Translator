@@ -11,6 +11,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from .cache import RingSlidingKVCache
+from .sparse import SparseAttention, SparseCache
 from .config import TextConfig
 from .switch_layers import SwitchGLU, swiglu
 
@@ -87,7 +88,7 @@ class MoEGate(nn.Module):
         # torch MPS/CPU 경로는 fp32 linear, CUDA autocast 경로는 bf16 linear로 계산한다.
         # fp32로 바꾸는 패치(M6)는 8쪽 출력이 스파이크·MPS 모두에서 더 멀어져 기각했다
         # (PROVENANCE.md M6 측정 기록).
-        gates = x @ self.weight.T
+        gates = x.astype(mx.float32) @ self.weight.astype(mx.float32).T
         scores = mx.softmax(gates, axis=-1, precise=True)
         k = self.top_k
         inds = mx.argpartition(scores, kth=-k, axis=-1)[..., -k:]
@@ -118,7 +119,7 @@ class DeepseekV2MoE(nn.Module):
     def __call__(self, x: mx.array) -> mx.array:
         inds, scores = self.gate(x)
         y = self.switch_mlp(x, inds)  # [B, L, K, D] (x.dtype)
-        y = (y * scores[..., None]).sum(axis=-2)
+        y = (y.astype(mx.float32) * scores[..., None]).sum(axis=-2).astype(x.dtype)
         if self.has_shared:
             y = y + self.shared_experts(x)
         return y
@@ -127,7 +128,7 @@ class DeepseekV2MoE(nn.Module):
 class DeepseekV2DecoderLayer(nn.Module):
     def __init__(self, config: TextConfig, layer_idx: int):
         super().__init__()
-        self.self_attn = LlamaAttention(config)
+        self.self_attn = SparseAttention(config, layer_idx)
         self.mlp = (
             DeepseekV2MoE(config)
             if (
@@ -191,6 +192,8 @@ class LanguageModel(nn.Module):
         return self.lm_head(h)
 
     def make_cache(self) -> list[RingSlidingKVCache]:
+        return [SparseCache(self.config.sparse_attention_config) for _ in self.layers]
+
         window = self.config.sliding_window
         if not window:
             raise ValueError("sliding_window_size가 없는 설정은 지원하지 않습니다 (R-SWA 전제)")

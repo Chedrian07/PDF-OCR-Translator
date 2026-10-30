@@ -1,0 +1,17 @@
+{
+  "reference_text": [
+    "2026년 상반기 연구 보고서\n본 문서는 한국어와 English가 혼용된 문단입니다.\n한글 자모 ㄱㄴㄷ, 한자 硏究報告書, 숫자 1,234.56 kg 단위를 포함합니\n각주와 표, 수식 주변의 한글 보존을 확인합니다.\n표 1. 분기별 매출 현황\n항목\n1분기\n2분기\n매출액\n1,234\n2,345\n영업비용\n567\n678\n순이익\n667\n1,667\n표준편차는 다음 식으로 계산합니다:\nsigma = sqrt( (1/N) * sum (x_i - mu)^2 )\n여기서 N은 표본 수, mu는 평균입니다.\n그림 영역 (figure)\n그림 1. 분기별 매출 추이\n1) 각주: 본 자료는 검증용으로 생성되었습니다.\n- 1 -\n"
+  ],
+  "expected_figures": [
+    1
+  ],
+  "reference_origin": "Text inserted by the synthetic generator; scan inherits the clean Korean source.",
+  "reading_order_landmarks": [],
+  "table_shapes": [
+    [
+      4,
+      3
+    ]
+  ],
+  "figure_boxes": null
+}

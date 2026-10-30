@@ -6,7 +6,6 @@
 """
 
 import re
-import threading
 
 import pytest
 
@@ -69,10 +68,7 @@ def test_invisible_text_layer_beacon_does_not_autoload(tmp_path):
     textlayer 엔진을 거쳐 마크다운이 돼도 <img>로 나가지 않는다."""
     import pymupdf as fitz
 
-    from app.config import Settings
-    from app.engine.base import NullSink
-    from app.engine.textlayer import TextLayerEngine
-    from app.pipeline.pdf import render_pdf_pages
+    from app.pipeline.pdf import extract_embedded_page_markdown
 
     job = tmp_path / "job"
     job.mkdir()
@@ -84,9 +80,8 @@ def test_invisible_text_layer_beacon_does_not_autoload(tmp_path):
     )
     doc.save(str(job / "source.pdf"))
     doc.close()
-    pages = render_pdf_pages(job / "source.pdf", job / "pages", 72, 10)
-    engine = TextLayerEngine(Settings(engine="textlayer", data_dir=tmp_path / "d"))
-    md = engine.run_multi(pages, job / "work", NullSink(), threading.Event())
+    md = extract_embedded_page_markdown(job / "source.pdf", 1)
+
 
     assert "tracker.example" in md  # 텍스트 레이어는 그대로 옮겨진다(원문 보존)
     html = render_markdown_html(md, BASE)

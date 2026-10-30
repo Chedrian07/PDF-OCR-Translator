@@ -1,5 +1,5 @@
 # Vendored from mlx-vlm 0.7.4 (MIT): mlx_vlm/models/deepseekocr/vision.py
-# 레퍼런스: app/vendor/unlimited_ocr/deepencoder.py (VitModel, torch).
+# 레퍼런스: app/vendor/unlimited_ocr2/deepencoder.py (VitModel, torch).
 # 로컬 패치: [local patch M1] quick_gelu + LayerNorm eps 1e-5,
 #            [local patch M7] 위치 임베딩 리샘플을 torch 가중치로.
 # 출처·패치 내역: PROVENANCE.md

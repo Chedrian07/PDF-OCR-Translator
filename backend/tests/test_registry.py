@@ -24,7 +24,7 @@ def test_unknown_device_rejected():
 
 def test_metal_unlimited_engine_constructs_without_torch():
     # 생성 시점엔 torch가 필요 없다 — MPS 가용성 검증은 load()에서 수행
-    eng = build_engine(Settings(engine="unlimited", device="metal"))
+    eng = build_engine(Settings(engine="unlimited2", device="metal"))
     assert eng.device == "metal"
     assert eng.torch_device == "mps"
     assert not eng.loaded
@@ -135,7 +135,7 @@ def test_load_concurrent_calls_load_once(monkeypatch):
     import transformers
 
     from app.engine.unlimited import UnlimitedEngine
-    from app.vendor.unlimited_ocr import UnlimitedOCRForCausalLM
+    from app.vendor.unlimited_ocr2 import UnlimitedOCRForCausalLM
 
     calls: list[int] = []
 
@@ -155,7 +155,7 @@ def test_load_concurrent_calls_load_once(monkeypatch):
     monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained",
                         lambda *a, **k: object())
 
-    eng = UnlimitedEngine(Settings(engine="unlimited", device="cpu", preload_model=False))
+    eng = UnlimitedEngine(Settings(engine="unlimited2", device="cpu", preload_model=False))
     errors: list[Exception] = []
 
     def _load():
@@ -206,9 +206,9 @@ def test_mlx_device_builds_the_mlx_engine_without_probing(monkeypatch):
         raise AssertionError("명시 mlx는 생성 시점에 가용성을 탐지하지 않는다 (load()에서 검증)")
 
     monkeypatch.setattr(unlimited_mlx, "mlx_unavailable_reason", boom)
-    eng = build_engine(Settings(engine="unlimited", device="mlx", mlx_quant_bits=8))
+    eng = build_engine(Settings(engine="unlimited2", device="mlx", mlx_quant_bits=8))
     assert isinstance(eng, UnlimitedMLXEngine)
-    assert (eng.name, eng.device, eng.dtype_name, eng.loaded) == ("unlimited", "mlx", "bfloat16+q8", False)
+    assert (eng.name, eng.device, eng.dtype_name, eng.loaded) == ("unlimited2", "mlx", "bfloat16+q8", False)
 
 
 def _stub_probes(monkeypatch, *, mlx: bool, cuda: bool = False, mps: bool = False) -> list[str]:
@@ -248,20 +248,22 @@ def test_auto_resolves_mlx_then_cuda_then_metal_then_cpu(
     from app.engine.unlimited_mlx import UnlimitedMLXEngine
 
     calls = _stub_probes(monkeypatch, mlx=mlx, cuda=cuda, mps=mps)
-    settings = Settings(engine="unlimited", device="auto", preload_model=False)
+    settings = Settings(engine="unlimited2", device="auto", preload_model=False)
     with caplog.at_level(logging.INFO, logger="app.engine.registry"):
         eng = build_engine(settings)
     assert eng.device == expected
     if expected == "mlx":
         assert isinstance(eng, UnlimitedMLXEngine) and calls == ["mlx"]
     else:
-        assert isinstance(eng, UnlimitedEngine) and eng.torch_device == torch_device
+        from app.engine.sglang import SGLangEngine
+        expected_type = SGLangEngine if expected == "cuda" else UnlimitedEngine
+        assert isinstance(eng, expected_type) and getattr(eng, "torch_device", "cuda") == torch_device
         assert calls == ["mlx", "torch"]
     assert f"OCR_DEVICE=auto → {expected}" in caplog.text  # 결정을 남긴다
     assert settings.device == "auto"  # 호출자의 설정은 바꾸지 않는다
 
 
-@pytest.mark.parametrize("engine", ["fake", "textlayer", "ovisocr2"])
+@pytest.mark.parametrize("engine", ["fake"])
 def test_auto_does_not_probe_hardware_for_engines_without_a_local_model(monkeypatch, engine):
     calls = _stub_probes(monkeypatch, mlx=True, cuda=True, mps=True)
     eng = build_engine(
@@ -284,7 +286,7 @@ def test_auto_on_linux_never_imports_mlx():
         "from app.config import Settings\n"
         "from app.engine import registry\n"
         "registry._torch_accelerators = lambda: (False, False, '')\n"
-        "eng = registry.build_engine(Settings(engine='unlimited', device='auto'))\n"
+        "eng = registry.build_engine(Settings(engine='unlimited2', device='auto'))\n"
         "print(eng.device, 'mlx' in sys.modules, 'mlx.core' in sys.modules)\n"
     )
     out = subprocess.run(
@@ -302,12 +304,12 @@ def test_health_reports_the_resolved_device(monkeypatch, tmp_path, mlx, expected
 
     _stub_probes(monkeypatch, mlx=mlx, cuda=False, mps=True)
     settings = Settings(
-        engine="unlimited", device="auto", preload_model=False,
+        engine="unlimited2", device="auto", preload_model=False,
         data_dir=tmp_path / "data", frontend_dir=tmp_path / "no-frontend",
     )
     with TestClient(create_app(settings)) as c:
         body = c.get("/api/health").json()
-    assert (body["engine"], body["device"], body["dtype"]) == ("unlimited", expected, dtype)
+    assert (body["engine"], body["device"], body["dtype"]) == ("unlimited2", expected, dtype)
     assert body["model_loaded"] is False
 
 
@@ -340,7 +342,7 @@ def test_containers_pin_their_device_so_auto_stays_a_local_default():
         value = str(svc["environment"]["OCR_DEVICE"])
         m = re.fullmatch(r"\$\{OCR_DEVICE:-(\w+)\}", value)
         effective[name] = m.group(1) if m else value
-    assert effective == {"ocr-cpu": "cpu", "ocr-cuda": "cuda", "ocr-ovis": "cpu", "ocr-paddle": "cpu"}
+    assert effective == {"ocr-cpu": "cpu", "ocr-cuda": "cuda"}
     assert "OCR_DEVICE" not in (repo / "backend" / "Dockerfile").read_text(encoding="utf-8")
 
 
@@ -376,7 +378,7 @@ def test_dev_leaves_the_device_to_auto_and_dotenv_while_dev_metal_pins_mps():
 
 @pytest.mark.parametrize(
     "plat,machine,engine,warns",
-    [("darwin", "arm64", "unlimited", True), ("linux", "x86_64", "unlimited", False),
+    [("darwin", "arm64", "unlimited2", True), ("linux", "x86_64", "unlimited2", False),
      ("darwin", "arm64", "fake", False)],
 )
 def test_explicit_cpu_on_apple_silicon_warns_at_startup(monkeypatch, caplog, plat, machine, engine, warns):

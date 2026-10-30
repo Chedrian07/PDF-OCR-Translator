@@ -258,27 +258,27 @@ class _LoopingModel:
 
     def _emit_loop(self, **kwargs) -> None:
         streamer = kwargs["streamer"]
-        criteria = kwargs["stopping_criteria"]
+        criteria = kwargs["should_stop"]
         for index in range(1, SEMANTIC_REPEAT_THRESHOLD + 1):
             streamer.on_finalized_text(_loop_line(index))
-        assert bool(criteria[0](None, None)) is True
+        assert criteria() is True
         if self.cancel is not None:
             self.cancel.set()
 
     def infer_multi(self, tokenizer, **kwargs):
         self._emit_loop(**kwargs)
-        return "<PAGE>\npartial", 10
+        return {"text": "<PAGE>\npartial", "finish_reason": "stop"}
 
     def infer(self, tokenizer, **kwargs):
         self._emit_loop(**kwargs)
-        return "partial"
+        return {"text": "partial", "finish_reason": "stop"}
 
 
 class _OverBudgetModel:
-    def infer_multi(self, tokenizer, **kwargs):
+    def infer(self, tokenizer, **kwargs):
         kwargs["streamer"].on_finalized_text("<PAGE>\n123456")
-        assert bool(kwargs["stopping_criteria"][0](None, None)) is True
-        return "<PAGE>\npartial", 10
+        assert kwargs["should_stop"]() is True
+        return {"text": "<PAGE>\npartial", "finish_reason": "stop"}
 
 
 def _engine_with_model(monkeypatch, model) -> UnlimitedEngine:
@@ -286,12 +286,10 @@ def _engine_with_model(monkeypatch, model) -> UnlimitedEngine:
         engine="unlimited",
         device="cpu",
         preload_model=False,
-        fast_decode=False,
     )
     engine = UnlimitedEngine(settings)
     engine._model = model
     engine._tokenizer = _Tokenizer()
-    monkeypatch.setattr("app.engine.unlimited.make_ngram_logits_processor", lambda *args: [])
     return engine
 
 
@@ -330,45 +328,11 @@ def test_user_cancel_takes_precedence_over_repetition_error(tmp_path, monkeypatc
     cancel = threading.Event()
     engine = _engine_with_model(monkeypatch, _LoopingModel(cancel))
 
-    result = engine.run_multi([Path("page.png")], tmp_path / "out", _Sink(), cancel)
-
-    assert result == "<PAGE>\npartial"
+    from app.engine.base import JobCanceled
+    with pytest.raises(JobCanceled):
+        engine.run_multi([Path("page.png")], tmp_path / "out", _Sink(), cancel)
     assert cancel.is_set()
 
-
-def test_streamer_counts_tokens_after_page_marker_reset(monkeypatch):
-    import torch
-
-    settings = Settings(
-        engine="unlimited",
-        device="cpu",
-        preload_model=False,
-        fast_decode=False,
-    )
-    engine = UnlimitedEngine(settings)
-    engine._tokenizer = _BudgetTokenizer()
-    monkeypatch.setattr("app.engine.unlimited.make_ngram_logits_processor", lambda *args: [])
-    detector = SemanticRepetitionDetector(
-        max_page_chars=None,
-        max_page_tokens=4,
-    )
-    extras = engine._gen_extras(_Sink(), threading.Event(), 128, detector)
-    streamer = extras["streamer"]
-
-    streamer.put(torch.tensor([[0]]))  # prompt: 생성 예산에서 제외
-    streamer.put(torch.tensor([[10, 11]]))  # leading <PAGE> + 첫 내용
-    streamer.put(torch.tensor([[12, 12]]))
-    assert detector.page_index == 0 and detector.page_tokens == 4
-    assert detector.detected is False
-
-    # 이전 페이지가 상한에 정확히 닿았어도 marker가 든 다음 block을 먼저
-    # 디코딩/reset하고 새 페이지에 계수하므로 경계 오탐이 없어야 한다.
-    streamer.put(torch.tensor([[10, 11]]))
-    assert detector.page_index == 1 and detector.page_tokens == 2
-    assert detector.detected is False
-
-
-# ── 병합 후 리뷰 반영 회귀 테스트 (page_flood·열거형 오탐) ──────────────
 
 
 def test_enumeration_form_does_not_false_positive_at_default_threshold():

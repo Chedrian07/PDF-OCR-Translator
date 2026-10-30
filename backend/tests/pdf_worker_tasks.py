@@ -109,7 +109,7 @@ TASK_MODULES = (
     "app.pipeline.pdf_fonts",
     "app.pipeline.reading_order",
     "app.pipeline.pdf_export.build",
-    "app.engine.textlayer",
+    "app.pipeline.text_reference",
 )
 
 

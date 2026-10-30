@@ -1,0 +1,82 @@
+── 기동: unlimited-ocr2-web:verified (127.0.0.1:18014, compose와 같은 하드닝)
+curl: (56) Recv failure: Connection reset by peer
+── 이미지 계약 (엔진·네이티브 모듈·버전·실행 사용자)
+  engine=fake native_ops=True version=0.1.0
+  uid=1000 · 코드 소유자 root · 정적 루트에 개발 산출물 없음
+── 업로드→OCR→markdown/zip (scripts/smoke_e2e.sh)
+── 1. 헬스 체크 (http://127.0.0.1:18014)
+{
+    "status": "ok",
+    "engine": "fake",
+    "device": "cpu",
+    "dtype": "none",
+    "model_id": "fake-engine",
+    "model_loaded": true,
+    "model_load_error": null,
+    "gpu_name": null,
+    "native_ops": true,
+    "worker_alive": true,
+    "worker_job_id": null,
+    "worker_last_progress_at": null,
+    "worker_progress_age_s": null,
+    "pdf_workers": {
+        "mode": "process",
+        "pools": {
+            "export": {
+                "size": 2,
+                "workers": 0,
+                "in_use": 0,
+                "tasks": 0,
+                "timeouts": 0,
+                "crashes": 0,
+                "canceled": 0,
+                "spawned": 0,
+                "recycled": 0,
+                "rejected_busy": 0
+            },
+            "probe": {
+                "size": 2,
+                "workers": 0,
+                "in_use": 0,
+                "tasks": 0,
+                "timeouts": 0,
+                "crashes": 0,
+                "canceled": 0,
+                "spawned": 0,
+                "recycled": 0,
+                "rejected_busy": 0
+            }
+        }
+    },
+    "max_upload_mb": 100,
+    "translate_available": false,
+    "model_revision": null,
+    "provider": "in-process",
+    "runtime": "fake",
+    "capabilities": {
+        "multi_page_context": true,
+        "stream_granularity": "token",
+        "layout": "full",
+        "figures": true
+    },
+    "provider_health": null,
+    "qa_available": false,
+    "llm_default_provider": "openai-responses",
+    "config_warnings": []
+}
+── 2. 모델 로딩 대기 (engine=fake)
+  모델 준비 완료
+── 3. 업로드: /home/kch3dri4n/project/PDF-OCR-Translator/sample/sample.pdf
+  {"job_id":"j_bac219101a18","status":"queued"}
+── 4. 완료 대기 (job=j_bac219101a18, timeout=120s)
+  [0s] running — render 0/0 (청크 0/0)
+  [5s] done — merge 2/2 (청크 1/1)
+── 5. 결과 검증
+  910 /tmp/uocr2-image-smoke/result.md
+54986 /tmp/uocr2-image-smoke/result.zip
+55896 total
+  markdown 558자, zip 항목 5개 (figure 3개)
+  figure 추출 확인: images/p0001_0.jpg
+  페이지 2개 · 레이아웃 좌표 True · figure 2개
+── E2E 성공 ✔  (결과: /tmp/uocr2-image-smoke)
+── 이미지 스모크 성공 ✔

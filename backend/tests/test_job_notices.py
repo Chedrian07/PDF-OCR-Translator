@@ -87,7 +87,7 @@ def test_runner_puts_process_notes_in_notices_and_degradation_in_warnings(tmp_pa
     assert has(notices, "측정 한계로 판단해 원래 결과 유지")
     assert has(notices, "재처리를 멈춥니다")
     # 남은 품질 문제 = 경고
-    assert has(warnings, "텍스트 레이어로 복구")
+    assert has(warnings, "플레이스홀더")
     for text in ("페이지별", "채택", "측정 한계"):
         assert not has(warnings, text), (text, warnings)
 

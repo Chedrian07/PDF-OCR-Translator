@@ -1,3 +1,22 @@
+# Unlimited-OCR-2 MLX port
+
+The vision encoder, MoE and safetensors conversion retain the MIT-licensed mlx-vlm
+sources documented below. `sparse.py` is a port of Baidu revision
+`c14071b549f4fcab10909f3c4acc6a2edb366947` (`modeling_deepseekv2.py`,
+`dash_attention.py`, `_sparse_base_impl.py`).
+
+The decoder now uses page2d RoPE, head_cls block summaries, Gemma-style router RMSNorm,
+top-16 entmax / 12 remote blocks plus a 128-token local window. KV, router keys, page
+counters and per-page token offsets belong to each request. Remote/local overlap is
+removed before attention. Learned indexer parameters are unused by the official DASH
+inference path and are explicitly excluded from MLX loading; all active weights load strictly.
+Generation uses per-page prompt markers and generated-token-only ngram suppression.
+No quantization is enabled by default. Linux MLX CPU arithmetic parity is covered by
+`tests/test_unlimited2_sparse.py`; Apple GPU validation is delegated to the user.
+
+The following provenance describes the retained components and historical v1 measurements;
+those measurements do not establish v2 quality or performance.
+
 # 벤더링 출처 및 패치 내역 — Unlimited-OCR MLX 포팅
 
 Apple Silicon in-process OCR 엔진용 baidu/Unlimited-OCR의 MLX 구현이다. 감사

@@ -47,15 +47,7 @@ echo "== backend (uv.lock · cpu extra)"
 sed -E 's/^([A-Za-z0-9._-]+==[^ ;+]+)\+[A-Za-z0-9._]+/\1/' "$tmp/req.raw.txt" > "$tmp/req.txt"
 uvx "$PIP_AUDIT" -r "$tmp/req.txt" --disable-pip --no-deps --strict "${args[@]}"
 
-for svc in ovisocr2 paddleocr_vl; do
+for svc in unlimited_ocr2; do
   echo "== services/$svc"
-  uvx "$PIP_AUDIT" -r "$REPO/services/$svc/requirements.lock" --disable-pip
+  uvx "$PIP_AUDIT" -r "$REPO/services/$svc/requirements.lock" --disable-pip --no-deps
 done
-
-# paddlepaddle-gpu는 PyPI에 없는 CDN 휠 URL이라 위에서 '감사 불가'로 빠진다. 권고는 같은
-# 코드의 CPU 패키지 이름(paddlepaddle)으로 등록되므로 같은 버전을 OSV로 본다.
-ver="$(sed -nE 's#.*/paddlepaddle_gpu-([0-9.]+)-.*#\1#p' "$REPO/services/paddleocr_vl/requirements.lock" | head -1)"
-[[ -n "$ver" ]] || { echo "requirements.lock에서 paddlepaddle_gpu 버전을 찾지 못했다" >&2; exit 1; }
-printf 'paddlepaddle==%s\n' "$ver" > "$tmp/paddle.txt"
-echo "== paddlepaddle==$ver (paddlepaddle-gpu, OSV)"
-uvx "$PIP_AUDIT" -r "$tmp/paddle.txt" --disable-pip --no-deps -s osv

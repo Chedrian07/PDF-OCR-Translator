@@ -272,10 +272,11 @@ let readerRailStyle = '';
     check('연속 스크롤: 개별 모드의 보이는 rail 만 키보드 탐색', await page.evaluate(() => {
       const rail = document.getElementById('reader-content');
       const y = rail.getBoundingClientRect().top + rail.clientHeight * 0.28;
-      const visible = [...rail.querySelectorAll('.reader-rail-page')].find((section) => {
+      const sections = [...rail.querySelectorAll('.reader-rail-page')];
+      const visible = sections.find((section) => {
         const rect = section.getBoundingClientRect();
         return y >= rect.top && y < rect.bottom;
-      });
+      }) || sections.filter((section) => section.getBoundingClientRect().top <= y).at(-1) || sections[0];
       const visiblePage = Number(visible?.dataset.page) || 0;
       const openPages = [...rail.querySelectorAll('.reader-map-locate[tabindex="0"]')]
         .map((node) => Number(node.closest('.reader-map-card')?.dataset.page) || 0);
@@ -298,10 +299,12 @@ let readerRailStyle = '';
   const railOnly = await page.evaluate(() => {
     const rail = document.getElementById('reader-content');
     const y = rail.getBoundingClientRect().top + rail.clientHeight * 0.28;
-    const visible = [...rail.querySelectorAll('.reader-rail-page')].find((section) => {
+    const sections = [...rail.querySelectorAll('.reader-rail-page')];
+    // Match readerFocusAt: a gap belongs to the preceding page.
+    const visible = sections.find((section) => {
       const rect = section.getBoundingClientRect();
       return y >= rect.top && y < rect.bottom;
-    });
+    }) || sections.filter((section) => section.getBoundingClientRect().top <= y).at(-1) || sections[0];
     const current = Number(document.getElementById('reader-page')?.value) || 1;
     const stage = [...document.querySelectorAll('#reader-page-stage .reader-page[data-page]')];
     return {

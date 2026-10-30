@@ -1,0 +1,31 @@
+{
+  "metric_limits": "CER ignores whitespace, punctuation and common LaTeX wrappers. It is a diagnostic, not a formula-semantic or full layout score. Synthetic reference text includes text within drawn figures. Full quality non-regression needs visual review and additional annotations.",
+  "baseline": {
+    "normalized_alphanumeric_cer": 0.0,
+    "table_shapes": [],
+    "table_shapes_match": true,
+    "formula_markup_count": 0,
+    "reading_order_landmarks_found": 16,
+    "reading_order_landmarks_total": 16,
+    "reading_order_pair_accuracy": 1.0,
+    "page_markers": 1,
+    "figures": 0,
+    "expected_figures": 0,
+    "median_ocr_s": 6.902205922990106,
+    "figure_mean_iou": null
+  },
+  "candidate": {
+    "normalized_alphanumeric_cer": 0.0,
+    "table_shapes": [],
+    "table_shapes_match": true,
+    "formula_markup_count": 0,
+    "reading_order_landmarks_found": 16,
+    "reading_order_landmarks_total": 16,
+    "reading_order_pair_accuracy": 1.0,
+    "page_markers": 1,
+    "figures": 0,
+    "expected_figures": 0,
+    "median_ocr_s": 2.9036029040580615,
+    "figure_mean_iou": null
+  }
+}

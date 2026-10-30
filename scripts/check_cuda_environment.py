@@ -23,7 +23,7 @@ FAIL = "\033[31m✗\033[0m"
 
 def _run(cmd: list[str], timeout: float = 15.0) -> str | None:
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
         return out.stdout.strip() if out.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -110,35 +110,14 @@ def check_docker_gpu() -> None:
 
 
 def sidecar_compat_warnings(info: dict) -> None:
-    print("\n── sidecar 호환성 ─────────────────────────────")
-    cc = info.get("compute_cap", "")
-    major = cc.split(".")[0] if cc else ""
-    if major == "12":
-        print(f"{OK} Blackwell(sm_120) 감지 — CUDA 12.8+ 스택 필요:")
-        print("   · OvisOCR2 sidecar: vllm/vllm-openai:v0.22.1-cu129 (충족)")
-        print("   · PaddleOCR-VL sidecar: paddlepaddle-gpu cu129 wheel (충족)")
-        print("   · cu118/torch<2.7 기반 스택(DeepSeek-OCR-2 공식 경로 등)은 동작 불가")
-        if info.get("gpu_index", 0) != 0:
-            print(f"{WARN} 서빙 대상 GPU(sm_120)가 인덱스 {info['gpu_index']}입니다 — "
-                  f".env에 GPU_DEVICE={info['gpu_index']} 를 설정하세요 (기본 0)")
-    elif cc:
-        print(f"{WARN} compute capability {cc} — 이 저장소의 sidecar 기본값은 "
-              "RTX 5070 Ti(sm_120) 기준입니다. 다른 GPU는 문서의 VRAM 정책을 조정하세요")
-    dc = info.get("driver_cuda", "")
-    try:
-        if dc and float(dc) < 12.9:
-            print(f"{WARN} 드라이버 CUDA {dc} < 12.9 — PaddleOCR-VL Blackwell 가이드는 "
-                  "CUDA 12.9+ 지원 드라이버를 요구합니다. 드라이버를 업데이트하세요")
-    except ValueError:
-        pass
-    total = info.get("vram_total_mb", 0)
-    used = info.get("vram_used_mb", 0)
-    if total and total < 15_000:
-        print(f"{WARN} VRAM {total}MB < 16GB — 기본값(OVIS_GPU_MEMORY_UTILIZATION=0.80 등)을 낮추세요")
-    if used > 2_000:
-        print(f"{WARN} 이미 {used}MB 사용 중 — 데스크톱/다른 프로세스가 VRAM을 점유하고 "
-              "있습니다. sidecar OOM 시 먼저 이를 확인하세요")
-    print(f"{WARN} 한 시점에 GPU 스택 하나만 기동하세요 (ocr-cuda | --profile ovis | --profile paddle)")
+    print("\n── Unlimited-OCR-2 SGLang ─────────────────────")
+    print("   Official wheel: 0.5.20.dev13+g75b9b06b02; torch 2.13 / CUDA 13")
+    print("   Default: SGLANG_CONCURRENCY=1, SGLANG_MEM_FRACTION=0.65")
+    print("   GPU_DEVICE selects the serving GPU; run one OCR runtime per GPU.")
+    if info.get("vram_total_mb", 0) < 15000:
+        print(f"{WARN} VRAM below 16GB: validate the memory budget before serving")
+    print("   WSL SIGSEGV: inspect the loaded libnvidia-ml.so.1 and the installed")
+    print("   /usr/lib/wsl/drivers/nv* libraries. See docs/UNLIMITED_OCR_2.md.")
 
 
 def main() -> int:

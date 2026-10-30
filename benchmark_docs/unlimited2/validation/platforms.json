@@ -1,0 +1,27 @@
+{
+  "cpu": {
+    "host": "real inference passed",
+    "container": "real inference passed",
+    "sample_output": "Hello OCR 2"
+  },
+  "cuda": {
+    "host": "real inference and benchmark passed",
+    "container_torch": "passed with explicit WSL device/driver mounts",
+    "standard_docker_nvidia_hook": "SIGSEGV loading NVML",
+    "container_service": "real inference passed on RTX 5060 Ti with explicit WSL device/driver mounts"
+  },
+  "mlx": {
+    "arithmetic": "MLX CPU / torch parity passed",
+    "active_checkpoint_parameters_strict_loaded": 691,
+    "apple_gpu": "delegated to user; not run"
+  },
+  "metal": {
+    "implementation": "ported",
+    "apple_gpu": "delegated to user; not run"
+  },
+  "live_translation": {
+    "status": "blocked",
+    "error": "provider authentication failed"
+  },
+  "quality_acceptance": "not met"
+}

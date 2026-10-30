@@ -28,7 +28,7 @@ def _recipe(target: str, *variables: str) -> str:
     return out.stdout
 
 
-@pytest.mark.parametrize("target", ["dev", "dev-metal", "dev-textlayer"])
+@pytest.mark.parametrize("target", ["dev", "dev-metal"])
 def test_dev_servers_bound_their_graceful_shutdown(target):
     """열린 SSE·keep-alive 연결이 Ctrl+C·--reload 재시작을 무기한 붙잡지 않게 한다
     (Dockerfile의 uvicorn과 같은 5초)."""
@@ -37,7 +37,7 @@ def test_dev_servers_bound_their_graceful_shutdown(target):
     assert re.search(r"--timeout-graceful-shutdown\s+5\b", recipe), recipe
 
 
-@pytest.mark.parametrize("target", ["dev", "dev-metal", "dev-textlayer"])
+@pytest.mark.parametrize("target", ["dev", "dev-metal"])
 def test_dev_servers_take_the_port_from_make(target):
     """8000을 다른 개발 서버가 쓰고 있으면 make dev가 'address already in use'로 실패하는데,
     포트가 레시피에 박혀 있어 Makefile을 고치거나 명령을 옮겨 적어야 했다(fresh-user-6).

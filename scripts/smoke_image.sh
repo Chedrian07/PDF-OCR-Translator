@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 빌드한 CPU 이미지 스모크 — 모델 다운로드 없이(textlayer) 이미지 자체를 검증한다.
+# 빌드한 CPU 이미지 스모크 — 모델 다운로드 없이(테스트 전용 fake) 이미지 자체를 검증한다.
 # CI(docker-image 잡)와 release(publish-images, push 전)가 같은 검사를 쓴다.
 #
 #   scripts/smoke_image.sh IMAGE [EXPECT_VERSION]
@@ -35,7 +35,7 @@ docker run -d --name "$NAME" -p "127.0.0.1:$PORT:8000" \
   --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=2g \
   --mount type=volume,dst=/data \
   --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 1024 \
-  -e OCR_ENGINE=textlayer -e PRELOAD_MODEL=1 \
+  -e OCR_ENGINE=fake -e OCR_TEST_MODE=1 -e FAKE_DELAY=0 -e PRELOAD_MODEL=1 \
   -e ALLOWED_HOSTS=localhost,127.0.0.1 \
   "$IMAGE" >/dev/null
 
@@ -54,7 +54,7 @@ python3 - "$OUT_DIR/health.json" "http://127.0.0.1:$PORT" "$EXPECT_VERSION" <<'P
 import json, sys, urllib.request
 health_path, base, expect_version = sys.argv[1], sys.argv[2], sys.argv[3]
 health = json.load(open(health_path))
-assert health["engine"] == "textlayer" and health["worker_alive"], health
+assert health["engine"] == "fake" and health["worker_alive"], health
 assert health["native_ops"], "이미지에 네이티브 모듈(uocr_native)이 없다"
 schema = json.load(urllib.request.urlopen(f"{base}/openapi.json"))
 if expect_version:

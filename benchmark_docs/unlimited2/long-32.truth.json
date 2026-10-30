@@ -1,0 +1,396 @@
+{
+  "reference_text": [
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 01\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 02\n",
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 03\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 04\n",
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 05\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 06\n",
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 07\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 08\n",
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 09\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 10\n",
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 11\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 12\n",
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 13\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 14\n",
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 15\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 16\n",
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 17\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 18\n",
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 19\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 20\n",
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 21\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 22\n",
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 23\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 24\n",
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 25\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 26\n",
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 27\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 28\n",
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 29\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 30\n",
+    "Unlimited-OCR End-to-End Sample\nThis document validates PDF to Markdown conversion,\nincluding embedded figure extraction and table structure.\nTable 1. Model configurations\nMode\nbase_size\nimage_size\ncrop\ngundam\n1024\n640\ntrue\nbase\n1024\n1024\nfalse\nThe pricing follows E = mc^2 style notation and includes 3.3B parameters.\nPhysical page 31\n",
+    "Section 2: Figures and Lists\n·  First bullet item about long-horizon parsing.\n·  Second bullet item about page markers.\n·  Third bullet item about figure grounding boxes.\nEnd of sample document. Page 2 of 2.\nPhysical page 32\n"
+  ],
+  "expected_figures": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+  ],
+  "reference_origin": "Text inserted by the synthetic generator; scan inherits the clean Korean source.",
+  "reading_order_landmarks": [],
+  "table_shapes": [
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      3,
+      4
+    ]
+  ],
+  "figure_boxes": [
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.17814726840855108,
+        0.8739495798319328,
+        0.47743467933491684
+      ]
+    ],
+    [
+      [
+        0.12100840336134454,
+        0.13143310184433454,
+        0.7226890756302521,
+        0.414885206063966
+      ]
+    ]
+  ]
+}

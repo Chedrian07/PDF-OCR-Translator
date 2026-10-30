@@ -1,0 +1,42 @@
+{
+ "page_0_0.jpg": {
+  "x1": 195,
+  "y1": 409,
+  "x2": 1447,
+  "y2": 1121,
+  "image_width": 1653,
+  "image_height": 2339
+ },
+ "page_1_0.jpg": {
+  "x1": 196,
+  "y1": 304,
+  "x2": 1204,
+  "y2": 971,
+  "image_width": 1653,
+  "image_height": 2339
+ },
+ "page_4_0.jpg": {
+  "x1": 196,
+  "y1": 409,
+  "x2": 1447,
+  "y2": 1114,
+  "image_width": 1653,
+  "image_height": 2339
+ },
+ "page_5_0.jpg": {
+  "x1": 196,
+  "y1": 304,
+  "x2": 1204,
+  "y2": 973,
+  "image_width": 1653,
+  "image_height": 2339
+ },
+ "page_6_0.jpg": {
+  "x1": 196,
+  "y1": 409,
+  "x2": 1444,
+  "y2": 1114,
+  "image_width": 1653,
+  "image_height": 2339
+ }
+}

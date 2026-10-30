@@ -50,8 +50,7 @@ updates:
   - package-ecosystem: docker
     directories:
       - /backend
-      - /services/ovisocr2
-      - /services/paddleocr_vl
+      - /services/unlimited_ocr2
     schedule:
       interval: weekly
       day: monday
@@ -76,8 +75,7 @@ updates:
     open-pull-requests-limit: 1
     ignore:
       - dependency-name: unlimited-ocr-web
-      - dependency-name: ovisocr2-sidecar
-      - dependency-name: paddleocr-vl-sidecar
+      - dependency-name: unlimited-ocr2-sglang
     groups:
       compose-images:
         patterns: ["*"]

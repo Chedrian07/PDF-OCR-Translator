@@ -17,7 +17,7 @@ from .base import EngineCapabilities, JobCanceled, OCREngine, StreamSink
 _PAGE_MD = """## 페이지 {page} — {stem}
 
 이 문서는 FakeEngine이 생성한 데모 출력입니다. 실제 모델을 사용하려면
-`OCR_ENGINE=unlimited`로 실행하세요.
+`OCR_ENGINE=unlimited2`로 실행하세요.
 
 | 항목 | 값 |
 | --- | --- |
@@ -51,12 +51,13 @@ class FakeEngine(OCREngine):
     def capabilities(self) -> EngineCapabilities:
         """청크·스트리밍 의미는 기존 Unlimited와 동일하게 두되 **모델 정체만** 밝힌다.
 
-        model_id를 비워 두면 health/잡 메타가 settings.model_id(baidu/Unlimited-OCR)로
+        model_id를 비워 두면 health/잡 메타가 settings.model_id(baidu/Unlimited-OCR-2)로
         폴백해, 데모 출력이 실제 모델의 결과인 것처럼 기록된다."""
         return EngineCapabilities(
             model_id="fake-engine",
             model_revision="",
             provider="in-process",
+            runtime="fake",
             supports_multi_page=True,
             preferred_chunk_size=None,
             stream_granularity="token",

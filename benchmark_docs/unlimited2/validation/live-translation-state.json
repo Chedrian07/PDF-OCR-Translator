@@ -1,0 +1,5 @@
+{
+  "status": "error",
+  "error": "번역 API 인증 실패 — OPENAI_API_KEY를 확인하세요",
+  "lang": "ko"
+}

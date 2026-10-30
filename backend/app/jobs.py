@@ -114,6 +114,7 @@ class Job:
     model_id: str | None = None
     model_revision: str | None = None
     provider: str | None = None
+    runtime: str | None = None
     # 워커 큐 제출 순번(런타임 전용, meta.json 미기록). 업로드 본문 수신이 끝난 뒤에야
     # submit()되므로 생성 순서와 어긋날 수 있다 — queue_position이 이 값을 쓴다.
     # 아직 제출 전(업로드 중)이면 None.
@@ -221,6 +222,7 @@ class Job:
             "model_id": self.model_id,
             "model_revision": self.model_revision,
             "provider": self.provider,
+            "runtime": self.runtime,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
         }
@@ -246,6 +248,7 @@ class Job:
             "model_id": self.model_id,
             "model_revision": self.model_revision,
             "provider": self.provider,
+            "runtime": self.runtime,
             "submitted": self.submitted,
             "submit_order": self.submit_order,
             "page_separator": self.page_separator,
@@ -292,6 +295,7 @@ class JobStore:
             job.model_id = engine_info.get("model_id")
             job.model_revision = engine_info.get("model_revision")
             job.provider = engine_info.get("provider")
+            job.runtime = engine_info.get("runtime")
         with self._lock:
             self._jobs[job_id] = job
         self.save(job)
@@ -516,7 +520,7 @@ class JobStore:
                     error=m.get("error"), warnings=warnings, notices=notices,
                     # 구버전 meta.json에는 없는 필드 — 없으면 None으로 안전 복원
                     engine=m.get("engine"), model_id=m.get("model_id"),
-                    model_revision=m.get("model_revision"), provider=m.get("provider"),
+                    model_revision=m.get("model_revision"), provider=m.get("provider"), runtime=m.get("runtime"),
                     submitted=bool(m.get("submitted")),
                     submit_order=_int_or_none(m.get("submit_order")),
                     page_separator=m.get("page_separator"),

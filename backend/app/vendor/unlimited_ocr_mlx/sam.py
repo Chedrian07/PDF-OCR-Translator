@@ -1,5 +1,5 @@
 # Vendored from mlx-vlm 0.7.4 (MIT): mlx_vlm/models/deepseekocr/sam.py
-# 레퍼런스: app/vendor/unlimited_ocr/deepencoder.py (ImageEncoderViT, torch).
+# 레퍼런스: app/vendor/unlimited_ocr2/deepencoder.py (ImageEncoderViT, torch).
 # 로컬 패치: [local patch M7] 위치 임베딩·상대 위치표 리샘플을 torch와 같은 가중치로
 # (resample.py). 출처·패치 내역: PROVENANCE.md
 """SAM ViT-B 이미지 인코더 (NHWC 레이아웃 — MLX conv 규약)."""

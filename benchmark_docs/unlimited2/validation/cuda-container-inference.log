@@ -1,0 +1,3 @@
+<PAGE>
+Hello OCR 2
+EngineCapabilities(model_id='baidu/Unlimited-OCR-2', model_revision='c14071b549f4fcab10909f3c4acc6a2edb366947', provider='sglang', runtime='sglang-0.5.20.dev13+g75b9b06b02', supports_multi_page=True, preferred_chunk_size=None, stream_granularity='token', layout_capability='full', figure_capability=True)

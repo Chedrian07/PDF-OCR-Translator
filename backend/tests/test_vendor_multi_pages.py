@@ -14,8 +14,8 @@ import pytest
 pytest.importorskip("torch")
 
 from app.pipeline.merge import split_pages  # noqa: E402
-from app.vendor.unlimited_ocr.modeling_unlimitedocr import (  # noqa: E402
-    UnlimitedOCRForCausalLM,
+from app.engine.postprocess import (  # noqa: E402
+    save_results_multi,
     _split_multi_pages,
 )
 
@@ -44,6 +44,6 @@ def test_split_matches_app_merge_rule():
 
 
 def test_infer_multi_uses_the_p23_split():
-    src = inspect.getsource(UnlimitedOCRForCausalLM.infer_multi)
+    src = inspect.getsource(save_results_multi)
     assert "_split_multi_pages(outputs)" in src
     assert "split('<PAGE>')[1:]" not in src

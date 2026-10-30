@@ -1,3 +1,5 @@
+> 과거 구현 기록입니다. 현재 설치·운영은 [Unlimited-OCR-2](UNLIMITED_OCR_2.md)를 따르세요. 아래 엔진·명령은 현재 제품에서 지원하지 않습니다.
+
 # PaddleOCR-VL-1.6 sidecar — RTX 5070 Ti (NVIDIA Blackwell)
 
 ## 역할

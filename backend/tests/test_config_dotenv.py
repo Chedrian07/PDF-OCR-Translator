@@ -110,41 +110,41 @@ def test_DISABLE_DOTENV는_자동탐색만_끄고_명시_경로는_읽는다(tmp
 
 
 def test_dotenv는_compose와_같은_규칙으로_주석_따옴표_export_CRLF를_읽는다(tmp_path, monkeypatch):
-    """.env.example 줄의 '#'만 지우면 설명 주석까지 값이 돼 OCR_FAST_DECODE=1이
+    """.env.example 줄의 '#'만 지우면 설명 주석까지 값이 돼 PRELOAD_MODEL=1이
     False로 뒤집히고 OCR_DEVICE=metal이 기동에 실패했다(compose에서는 정상)."""
     lines = [
-        "\ufeffOCR_FAST_DECODE=1         # 커스텀 그리디 디코드 루프",  # BOM + 인라인 주석
+        "\ufeffPRELOAD_MODEL=1         # 커스텀 그리디 디코드 루프",  # BOM + 인라인 주석
         "OCR_DEVICE=metal            # cpu | cuda | metal",
         "ALLOWED_HOSTS=localhost,127.0.0.1   # Host 헤더 화이트리스트(콤마 구분, DNS 방어)",
         "LLM_OPENAI_API_KEY='sk-#not-a-comment'   # 따옴표 안의 #은 값이다",
         'OLLAMA_MODEL="qwen3 # tagged"',
         "export MODEL_REVISION=abc123",
         "OPENAI_BASE_URL=http://127.0.0.1:1234/v1?a=b=c",
-        "OCR_LANGUAGES=eng+kor#붙은샵은값",
-        "PRELOAD_MODEL",  # '='가 없는 줄은 건너뛴다
+        "OPENAI_MODEL=eng+kor#붙은샵은값",
+        "UNSET_KEY",  # '='가 없는 줄은 건너뛴다
     ]
     env = tmp_path / ".env"
     env.write_bytes(("\r\n".join(lines) + "\r\n").encode("utf-8"))  # CRLF
     for key in (
-        "OCR_FAST_DECODE", "OCR_DEVICE", "ALLOWED_HOSTS", "LLM_OPENAI_API_KEY",
-        "OLLAMA_MODEL", "MODEL_REVISION", "OPENAI_BASE_URL", "OCR_LANGUAGES", "PRELOAD_MODEL",
+        "PRELOAD_MODEL", "OCR_DEVICE", "ALLOWED_HOSTS", "LLM_OPENAI_API_KEY",
+        "OLLAMA_MODEL", "MODEL_REVISION", "OPENAI_BASE_URL", "OLLAMA_MODEL", "PRELOAD_MODEL",
     ):
         monkeypatch.delenv(key, raising=False)
 
     load_dotenv_file(env)
 
-    assert os.environ["OCR_FAST_DECODE"] == "1"
+    assert os.environ["PRELOAD_MODEL"] == "1"
     assert os.environ["OCR_DEVICE"] == "metal"
     assert os.environ["ALLOWED_HOSTS"] == "localhost,127.0.0.1"
     assert os.environ["LLM_OPENAI_API_KEY"] == "sk-#not-a-comment"
     assert os.environ["OLLAMA_MODEL"] == "qwen3 # tagged"
     assert os.environ["MODEL_REVISION"] == "abc123"
     assert os.environ["OPENAI_BASE_URL"] == "http://127.0.0.1:1234/v1?a=b=c"
-    assert os.environ["OCR_LANGUAGES"] == "eng+kor#붙은샵은값"
-    assert "PRELOAD_MODEL" not in os.environ
+    assert os.environ["OPENAI_MODEL"] == "eng+kor#붙은샵은값"
+    assert "UNSET_KEY" not in os.environ
 
     s = Settings.from_env()  # 주석이 값에 섞였다면 여기서 ValueError나 설정 반전
-    assert s.fast_decode is True
+    assert s.preload_model is True
     assert s.device == "metal"
     assert s.allowed_hosts == ["localhost", "127.0.0.1"]
     assert s.llm_openai_api_key == "sk-#not-a-comment"
@@ -184,13 +184,13 @@ def test_모르는_dotenv_키는_이름과_안내만_한_번_경고한다(tmp_pa
         "HF_HOME=/tmp/hf-cache\n"                 # 다른 도구의 키 — 경고하지 않는다
         "TOKENIZERS_PARALLELISM=false\n"
         "NO_PROXY=localhost\n"
-        "OVIS_MODEL_ID=ATH-MaaS/OvisOCR2\n"       # compose가 읽는 배포 키
+        "MODEL_ID=ATH-MaaS/OvisOCR2\n"       # compose가 읽는 배포 키
         "OCR_MPS_TESTS=1\n"                       # 문서화된 하네스 키
         "sk-proj-pasted-token-must-not-leak\n",   # '=' 없는 줄(붙여 넣은 토큰) — 보지 않는다
         encoding="utf-8",
     )
     for key in ("OPENAI_MODEL", "REASONING_EFFORT", "OPENAI_MODLE", "MY_TOOL_SETTING", "HF_HOME",
-                "TOKENIZERS_PARALLELISM", "NO_PROXY", "OVIS_MODEL_ID", "OCR_MPS_TESTS"):
+                "TOKENIZERS_PARALLELISM", "NO_PROXY", "MODEL_ID", "OCR_MPS_TESTS"):
         monkeypatch.delenv(key, raising=False)
 
     with caplog.at_level(logging.WARNING, logger="app.config"):
@@ -411,7 +411,7 @@ def test_남용_방어_상한의_오타는_기본값으로_강등된다(monkeypa
 
 def test_env_example은_어느_줄을_주석_해제해도_유효한_값이다(tmp_path, monkeypatch):
     """README는 '.env.example에서 #을 지우고 값을 넣으라'고 안내한다. 설명이 같은 줄에
-    있으면 설명까지 값이 돼 OCR_FAST_DECODE=1이 False로 뒤집히고 OCR_DEVICE=metal이
+    있으면 설명까지 값이 돼 PRELOAD_MODEL=1이 False로 뒤집히고 OCR_DEVICE=metal이
     기동에 실패했다 — 설명은 별도 줄에 두고, 전부 주석 해제해도 기동돼야 한다."""
     lines = []
     for line in (REPO / ".env.example").read_text(encoding="utf-8").splitlines():
@@ -428,8 +428,8 @@ def test_env_example은_어느_줄을_주석_해제해도_유효한_값이다(tm
         monkeypatch.delenv(key, raising=False)
     load_dotenv_file(env)
     s = Settings.from_env()  # 설명이 값에 섞였다면 여기서 ValueError나 설정 반전
-    assert s.fast_decode is True and s.preload_model is True
-    assert s.device == "cpu"
+    assert s.preload_model is True and s.preload_model is True
+    assert s.device == "auto"
     assert s.allowed_hosts == ["localhost", "127.0.0.1"]
     TranslateConfig.from_env({
         **os.environ, "OPENAI_BASE_URL": "http://127.0.0.1:9/v1", "OPENAI_MODEL": "m",

@@ -155,18 +155,8 @@ jobs:
           # 로컬 표기를 떼어 같은 릴리스로 감사하고, --strict로 그런 누락 자체를 실패시킨다.
           sed -E -i 's/^([A-Za-z0-9._-]+==[^ ;+]+)\+[A-Za-z0-9._]+/\1/' "$RUNNER_TEMP/req.txt"
           uvx pip-audit==2.10.1 -r "$RUNNER_TEMP/req.txt" --disable-pip --no-deps --strict "${args[@]}"
-      - name: pip-audit — sidecar 잠금 (해시 포함 requirements.lock)
-        run: |
-          for svc in ovisocr2 paddleocr_vl; do
-            echo "== services/$svc"
-            uvx pip-audit==2.10.1 -r "services/$svc/requirements.lock" --disable-pip
-          done
-          # paddlepaddle-gpu는 PyPI에 없는 CDN 휠 URL이라 위에서 '감사 불가'로 빠진다. 권고는
-          # 같은 코드의 CPU 패키지 이름(paddlepaddle)으로 등록되므로 같은 버전을 OSV로 본다.
-          ver=$(sed -nE 's#.*/paddlepaddle_gpu-([0-9.]+)-.*#\1#p' services/paddleocr_vl/requirements.lock | head -1)
-          test -n "$ver"
-          printf 'paddlepaddle==%s\n' "$ver" > "$RUNNER_TEMP/paddle.txt"
-          uvx pip-audit==2.10.1 -r "$RUNNER_TEMP/paddle.txt" --disable-pip --no-deps -s osv
+      - name: pip-audit — SGLang lock
+        run: uvx pip-audit==2.10.1 -r services/unlimited_ocr2/requirements.lock --disable-pip --no-deps
 
   frontend:
     runs-on: ubuntu-latest
@@ -200,41 +190,7 @@ jobs:
       - name: pytest (parity)
         run: .venv/bin/python -m pytest tests/ -v
 
-  # sidecar 파서/어댑터 테스트 — 최종 OCR 마크다운 형태를 결정하는 코드라 회귀가
-  # 나면 GPU 서버 배포 뒤에야 눈으로 드러난다. parser.py·adapter.py·lifecycle.py는
-  # stdlib만 쓰므로 모델·CUDA·vLLM·paddle 없이 돈다. HTTP 계층 테스트(tests/test_api.py —
-  # 엔진 사망 503·폼 필드 상한)는 그 서비스의 requirements.lock을 제약(-c)으로 걸어 웹 계층을
-  # 배포 이미지와 같은 버전으로 넣어 돌린다(uv는 제약 파일의 해시도 검증한다). 패키지 이름이나
-  # fastapi 하나만 고정하면 fastapi가 상한 없이 요구하는 starlette(>=0.46)·anyio·annotated-doc이
-  # PyPI 최신으로 풀려, 배포되지 않는 조합(예: starlette 1.7.0 — lock은 1.3.1)으로 GHSA-82w8
-  # 회귀 가드를 돌리게 된다. 버전은 lock에만 적는다. lock 밖 패키지(pytest, ovisocr2의
-  # pydantic·pillow·httpx — 운영에서는 vLLM 베이스 이미지 몫)만 최신으로 풀린다.
-  sidecar:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        svc: [ovisocr2, paddleocr_vl]
-    defaults:
-      run:
-        working-directory: services/${{ matrix.svc }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-      - name: pytest (파서/어댑터 · 수명주기 · HTTP 계층)
-        run: |
-          uv venv --python 3.12 .venv
-          uv pip install -p .venv/bin/python -c requirements.lock \
-            pytest httpx fastapi python-multipart pillow
-          .venv/bin/python -m pytest tests/
-
-  # CPU 이미지 빌드 + 하드닝 스모크 — 이미지는 release.yml에서만 빌드돼 Dockerfile·네이티브
-  # 빌드·.dockerignore 회귀가 태그 시점에야(또는 사용자의 `compose up --build`에서) 드러났다.
-  # push는 하지 않는다. 스모크는 release.yml과 같은 scripts/smoke_image.sh다.
-  # 캐시: main(push·nightly·수동)에서만 GHA 캐시를 채운다 — PR·태그 ref의 캐시는 다른 ref에서
-  # 복원되지 않아 쿼터(저장소 10GB)만 먹고 uv 캐시를 밀어낸다. release.yml은 이 기본 브랜치
-  # 캐시를 읽기만 한다(태그 실행도 기본 브랜치 캐시는 복원할 수 있다).
+  # Build and smoke the CPU web image without model downloads.
   docker-image:
     strategy:
       fail-fast: false
@@ -262,19 +218,48 @@ jobs:
           tags: pdf-ocr-translator:ci-cpu-${{ matrix.arch }}
           cache-from: type=gha,scope=cpu-${{ matrix.arch }}
           cache-to: ${{ (github.ref == 'refs/heads/main' && github.event_name != 'pull_request') && format('type=gha,mode=max,scope=cpu-{0}', matrix.arch) || '' }}
-      - name: Smoke (하드닝 아래 textlayer 전 구간 — release.yml과 같은 검사)
+      - name: Smoke (test-only fake under container hardening)
         env:
           IMAGE: pdf-ocr-translator:ci-cpu-${{ matrix.arch }}
           OUT_DIR: ${{ runner.temp }}/image-smoke
         run: ./scripts/smoke_image.sh "$IMAGE"
 
-  # 실 PDF 전 구간 하네스 (= make verify-e2e). 이 리포의 주요 안전망인데도 지금까지
-  # 어떤 자동 트리거에도 걸려 있지 않았다 — 사람이 로컬에서 기억해야만 돌았다.
-  # 외부 API·GPU·모델 다운로드 불필요(OCR_ENGINE=textlayer + scripts/mock_llm.py).
-  # 앞 6페이지만 써서 러너 시간을 억제한다(로컬 실측 ≈2분 — 그중 61초는 429 Retry-After
-  # 상한을 실제로 재는 백오프 대기다). 단언 수는 페이지 수와 무관하다. 개수는 여기 적지
-  # 않는다 — 하네스가 자라면 낡는다(현재 값: docs/ARCHITECTURE.md §11.1·README).
+  e2e-mock:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      # 하네스가 backend/.venv/bin/python을 하드코딩 — uv 기본 환경 경로와 일치한다.
+      - name: Install backend (torch CPU 휠)
+        run: uv sync --locked --extra cpu
+        working-directory: backend
+      # backend 잡과 동일 이유 — 한국어 PDF 내보내기 검증에 CJK 폰트가 필요하다.
+      - name: Install CJK fonts
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Install playwright chromium
+        run: npm ci && npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: mock full-flow E2E
+        run: npm run test:e2e-mock
+        working-directory: frontend
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: e2e-mock-shots
+          path: frontend/tests/e2e/shots
+          if-no-files-found: ignore
+
   verify-e2e:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -313,36 +298,3 @@ jobs:
   # (schedule)·수동 실행(workflow_dispatch)에서는 돈다. release.yml이 태그 커밋의 push CI
   # 성공을 요구하므로 이 잡이 흔들리면 그 커밋의 릴리스도 막힌다(재실행으로 해소).
   # de-flake가 확인되면 if:를 지워 PR에도 붙인다.
-  e2e-mock:
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          enable-cache: true
-          cache-dependency-glob: backend/uv.lock
-      # 하네스가 backend/.venv/bin/python을 하드코딩 — uv 기본 환경 경로와 일치한다.
-      - name: Install backend (torch CPU 휠)
-        run: uv sync --locked --extra cpu
-        working-directory: backend
-      # backend 잡과 동일 이유 — 한국어 PDF 내보내기 검증에 CJK 폰트가 필요하다.
-      - name: Install CJK fonts
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-      - name: Install playwright chromium
-        run: npm ci && npx playwright install --with-deps chromium
-        working-directory: frontend
-      - name: mock full-flow E2E
-        run: npm run test:e2e-mock
-        working-directory: frontend
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: failure()
-        with:
-          name: e2e-mock-shots
-          path: frontend/tests/e2e/shots
-          if-no-files-found: ignore

@@ -1,0 +1,10 @@
+F.                                                                       [100%]
+=================================== FAILURES ===================================
+______ test_single_line_dry_run_reserves_actual_cjk_span_bounds[shallow] _______
+tests/test_pdf_export_visual_safety.py:242: in test_single_line_dry_run_reserves_actual_cjk_span_bounds
+    assert plan is not None and plan.origin is not None
+E   assert (None is not None)
+----------------------------- Captured stdout call -----------------------------
+warning: The `fitz` API is deprecated and will be removed in future. Use `import pymupdf` instead.
+=========================== short test summary info ============================
+FAILED tests/test_pdf_export_visual_safety.py::test_single_line_dry_run_reserves_actual_cjk_span_bounds[shallow]

@@ -16,7 +16,7 @@ PIL = pytest.importorskip("PIL")
 
 from PIL import Image  # noqa: E402
 
-from app.vendor.unlimited_ocr.modeling_unlimitedocr import (  # noqa: E402
+from app.engine.postprocess import (  # noqa: E402
     _clamp_box,
     draw_bounding_boxes,
     re_match,

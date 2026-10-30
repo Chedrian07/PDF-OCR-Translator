@@ -1,0 +1,28 @@
+{
+  "generator": "scripts/make_unlimited2_eval.py",
+  "dpi": 200,
+  "concurrency": 1,
+  "pages_per_chunk": 8,
+  "documents": [
+    {
+      "file": "columns.pdf",
+      "sha256": "dcbc5ad799147585e666400d44bb9dd4c37b93515bce424662820f594596d2a2"
+    },
+    {
+      "file": "en-mixed.pdf",
+      "sha256": "147f529a3214c9c832ee7084a2d72275ad8380f874a259031b8c192612336c2c"
+    },
+    {
+      "file": "ko-report.pdf",
+      "sha256": "396ac3ef19082b9df76da15f4e86f3cf82becdb535e18e8668e7035791890427"
+    },
+    {
+      "file": "long-32.pdf",
+      "sha256": "6c057909a98d49d1993b4e5cdb60abcb951a32e8c6cf3b92aa80ef73081175f8"
+    },
+    {
+      "file": "scan.pdf",
+      "sha256": "7c3c17da2181180bbc94bd6ed1ac7f458ce28e4fa38dead9870af66d928620a1"
+    }
+  ]
+}

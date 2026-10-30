@@ -659,6 +659,7 @@ def health(request: Request) -> dict:
         # ── 신규 필드 (추가만 — 기존 필드 의미 불변) ──
         "model_revision": caps.model_revision or None,
         "provider": caps.provider,
+        "runtime": caps.runtime,
         "capabilities": {
             "multi_page_context": caps.supports_multi_page,
             "stream_granularity": caps.stream_granularity,
@@ -705,6 +706,7 @@ async def create_job(
             "model_id": caps.model_id or settings.model_id,
             "model_revision": caps.model_revision or None,
             "provider": caps.provider,
+        "runtime": caps.runtime,
         },
         # 이 잡의 result.md를 조립할 구분자를 지금 값으로 고정한다 — 읽는 쪽(/html·
         # Q&A·번역)이 이후 설정 변경과 무관하게 같은 페이지 경계를 본다.

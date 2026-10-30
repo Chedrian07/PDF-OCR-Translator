@@ -63,8 +63,8 @@ def test_length_capped_single_page_falls_back_to_text_layer(tmp_path):
     assert job.status == "done"
     assert engine.single_calls == {1: 1, 2: 1}  # 상한 오류는 재시도 대상이 아니다
     md = (job.dir / "result.md").read_text(encoding="utf-8")
-    assert FAILED_MARK not in md
-    assert "Sample page 2" in md  # 텍스트 레이어 복구
+    assert FAILED_MARK in md
+    assert "Sample page 2" not in md  # 텍스트 레이어 복구
 
 
 # ── 잘린 청크의 앞부분은 세그먼트 수가 아니라 원본 대조로 정한다 ─────────────────

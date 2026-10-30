@@ -175,7 +175,7 @@ def make_sink_streamer(
 
 
 class UnlimitedMLXEngine(OCREngine):
-    name = "unlimited"
+    name = "unlimited2"
 
     def __init__(self, settings: Settings) -> None:
         # 설정 오류는 기동 시점(create_app)에 바로 드러낸다 — 모델 로드는 프리로드 몫
@@ -210,6 +210,7 @@ class UnlimitedMLXEngine(OCREngine):
             model_id=self._settings.model_id,
             model_revision=self._settings.model_revision,
             provider="in-process",
+            runtime="mlx",
             supports_multi_page=True,
             preferred_chunk_size=None,  # settings.pages_per_chunk 사용
             stream_granularity="token",
@@ -305,6 +306,8 @@ class UnlimitedMLXEngine(OCREngine):
         형식, 산출물은 out_dir에 이미 저장됨)을 partial_output으로 싣는다 — runner가 끝까지
         생성된 앞 페이지를 살린다. single은 페이지가 하나라 살릴 앞 페이지가 없다."""
         self.last_generation = None  # 생성 전에 실패해도 이전 실행의 통계가 남지 않게
+        from .postprocess import BlockStream
+        sink = BlockStream(sink)
         streamer = make_sink_streamer(self._tokenizer, sink, repetition, self._eos_text)
 
         def on_token(token_id: int) -> None:
@@ -319,6 +322,7 @@ class UnlimitedMLXEngine(OCREngine):
                     result = call(on_token, should_stop)
                     # 남은 꼬리 플러시 — 마지막 조각도 감지기를 거친다 (HF generate의 end())
                     streamer.end()
+                    sink.end()
                 except Exception as exc:
                     if repetition.detected and not cancel.is_set():
                         raise RepetitiveOutputError(repetition.message) from exc

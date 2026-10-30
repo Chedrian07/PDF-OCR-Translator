@@ -17,7 +17,7 @@ from .llm.validate import local_openai_url, local_url, openai_url
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_REVISION = "ee63731b6461c8afcdcc7b15352e7d2ffecc2ead"
+_DEFAULT_REVISION = "c14071b549f4fcab10909f3c4acc6a2edb366947"
 _DEFAULT_ALLOWED_HOSTS = "localhost,127.0.0.1"
 # 렌더 dpi 허용 범위 — 업로드의 요청별 dpi 검증(api.py)과 기본값 RENDER_DPI 검증이
 # 같은 범위를 쓴다. 어긋나면 dpi를 안 보내는 클라이언트의 모든 업로드가 400이 된다.
@@ -52,15 +52,15 @@ def _find_dotenv() -> Path | None:
 
 # 앱 코드가 읽는 운영 키 (config·translate/types·api·derived·pdf_worker·엔진·벤더·native_ops)
 _APP_ENV_KEYS = frozenset("""
-    OCR_DEVICE OCR_DTYPE OCR_MLX_QUANT_BITS OCR_ENGINE MODEL_ID MODEL_REVISION PRELOAD_MODEL
+    OCR_TEST_MODE OCR_DEVICE OCR_DTYPE OCR_NGRAM_HOST OCR_MLX_QUANT_BITS OCR_ENGINE MODEL_ID MODEL_REVISION PRELOAD_MODEL
     DATA_DIR FRONTEND_DIR RENDER_DPI PAGES_PER_CHUNK MAX_PAGES MAX_UPLOAD_MB MAX_LENGTH
     MAX_PAGE_OUTPUT_CHARS MAX_PAGE_OUTPUT_TOKENS PAGE_SEPARATOR JOB_TTL_DAYS ALLOWED_HOSTS
-    OCR_FIDELITY_THRESHOLD OCR_FIDELITY_MAX_RETRY_RATIO OCR_CPU_THREADS OCR_FAST_DECODE
-    OCR_DECODE_BLOCK OCR_CUDA_GRAPHS OCR_MOE_FUSED OCR_MOE_FAST OCR_SDPA OCR_NGRAM_HOST
+    OCR_FIDELITY_THRESHOLD OCR_FIDELITY_MAX_RETRY_RATIO OCR_CPU_THREADS
+
     PYTORCH_ENABLE_MPS_FALLBACK FAKE_DELAY DISABLE_DOTENV
     OCR_SIDECAR_URL OCR_SIDECAR_CONNECT_TIMEOUT_S OCR_SIDECAR_READ_TIMEOUT_S
-    OCR_SIDECAR_HEALTH_TIMEOUT_S OCR_SIDECAR_MAX_RESPONSE_MB OCR_SIDECAR_RETRIES
-    OCR_SIDECAR_MODEL_WAIT_S OCR_REMOTE_PAGE_CONCURRENCY OCR_LANGUAGES NATIVE_TEXT_THRESHOLD
+    OCR_SIDECAR_HEALTH_TIMEOUT_S OCR_SIDECAR_MAX_RESPONSE_MB
+    OCR_SIDECAR_MODEL_WAIT_S
     OPENAI_BASE_URL OPENAI_API_KEY OPENAI_MODEL TRANSLATE_MODEL TRANSLATE_API_MODE
     TRANSLATE_CONCURRENCY TRANSLATE_GLOBAL_CONCURRENCY TRANSLATE_TIMEOUT_S TRANSLATE_STREAM
     TRANSLATE_MAX_RESPONSE_MB TRANSLATE_MAX_RETRIES TRANSLATE_TEMPERATURE
@@ -82,17 +82,13 @@ _APP_ENV_KEYS = frozenset("""
 # huggingface_hub가 읽는다 — HF_TOKEN과 같은 처지).
 _DEPLOY_ENV_KEYS = frozenset("""
     BIND_HOST GPU_DEVICE HF_TOKEN HF_HUB_CACHE HF_HUB_OFFLINE CUDA_LAUNCH_BLOCKING
-    OCR_CPU_MEM_LIMIT OCR_CUDA_MEM_LIMIT OCR_WEB_MEM_LIMIT OVIS_MEM_LIMIT PADDLE_MEM_LIMIT
+    OCR_CPU_MEM_LIMIT OCR_CUDA_MEM_LIMIT OCR_WEB_MEM_LIMIT
     OLLAMA_MEM_LIMIT
-    OVIS_MODEL_ID OVIS_MODEL_REVISION OVIS_DTYPE OVIS_GPU_MEMORY_UTILIZATION OVIS_MAX_MODEL_LEN
-    OVIS_MAX_OUTPUT_TOKENS OVIS_MAX_NUM_SEQS OVIS_MIN_PIXELS OVIS_MAX_PIXELS
-    OVIS_GDN_PREFILL_BACKEND OVIS_MAX_UPLOAD_MB
-    PADDLEOCR_MODEL_ID PADDLEOCR_MODEL_REVISION PADDLEOCR_DEVICE PADDLEOCR_MIN_PIXELS
-    PADDLEOCR_MAX_PIXELS PADDLEOCR_MAX_UPLOAD_MB
+    SGLANG_MEM_FRACTION SGLANG_CONCURRENCY
 """.split())
 # 문서화된 테스트·하네스 스위치 (opt-in 실기기 테스트·E2E·모의 LLM)
 _HARNESS_ENV_KEYS = frozenset("""
-    OCR_MPS_TESTS OCR_MLX_REAL_TESTS E2E_MOCK_PORT E2E_BACKEND_PORT E2E_BASE_URL E2E_PDF
+    E2E_OCR_ENGINE E2E_OCR_DEVICE OCR_MPS_TESTS OCR_MLX_REAL_TESTS E2E_MOCK_PORT E2E_BACKEND_PORT E2E_BASE_URL E2E_PDF
     E2E_TIMEOUT_S E2E_VERIFY_MOCK_LLM MOCK_STREAM_DELAY_S MOCK_STREAM_CHUNK MOCK_FINISH
     MOCK_REASONING_CHARS MOCK_TRANSLATE_RATIO FAULT
 """.split())
@@ -452,8 +448,8 @@ class Settings:
     # MLX 엔진(device=mlx) 디코더 인메모리 양자화 비트 — 0=없음(dtype 그대로) | 8.
     # 4비트는 감사 스파이크에서 숫자 오인식(2504→2304)이 측정돼 받지 않는다.
     mlx_quant_bits: int = 0
-    engine: str = "unlimited"           # unlimited | fake | textlayer | ovisocr2 | paddleocr_vl (registry.VALID_ENGINES)
-    model_id: str = "baidu/Unlimited-OCR"
+    engine: str = "unlimited2"           # unlimited2 | fake (test harness only)
+    model_id: str = "baidu/Unlimited-OCR-2"
     model_revision: str = _DEFAULT_REVISION
     preload_model: bool = True
     data_dir: Path = field(default_factory=lambda: Path("data"))
@@ -476,18 +472,14 @@ class Settings:
     max_page_output_tokens: int | None = 6_144  # 페이지별 생성 토큰 hard limit (env 0 이하=비활성)
     page_separator: str = "\n\n---\n\n"
     cpu_threads: int = 0                # 0=torch 기본값 (CPU 백엔드 전용)
-    fast_decode: bool = True            # 커스텀 그리디 디코드 루프 (0이면 HF generate 폴백)
-    decode_block: int = 8               # fast_decode의 호스트 동기화 배칭 크기(토큰)
     fake_delay: float = 0.02            # FakeEngine 페이지당 지연(초)
     job_ttl_days: int = 0               # 터미널 잡(done/error/canceled) 자동 GC 보존 일수 — 0=비활성(opt-in)
-    # ── sidecar 엔진 (OCR_ENGINE=ovisocr2|paddleocr_vl) 공용 클라이언트 설정 ──
-    sidecar_url: str = ""               # 예: http://ovisocr2:8080 — sidecar 엔진 선택 시 필수
+    # ── CUDA SGLang 클라이언트 ──
+    sidecar_url: str = ""               # 예: http://unlimited-ocr2:10000
     sidecar_connect_timeout_s: float = 10.0
     sidecar_read_timeout_s: float = 600.0
     sidecar_health_timeout_s: float = 5.0
     sidecar_max_response_mb: int = 20   # /v1/parse 응답 크기 상한 (response bomb 방어)
-    sidecar_retries: int = 1            # 연결 수립 실패 시 재시도 횟수 (읽기 중 실패는 runner 재시도 몫)
-    remote_page_concurrency: int = 1    # sidecar 페이지 동시 요청 수(=sidecar 엔진의 청크 크기)
     # 잡이 sidecar 모델 준비를 기다리는 상한(초). 최초 기동은 모델 다운로드 + vLLM
     # 그래프 컴파일로 수 분 걸릴 수 있어 넉넉히 잡는다 — 이 시간 안에 업로드하면
     # 잡이 실패하지 않고 대기했다가 처리된다(취소 가능).
@@ -496,9 +488,7 @@ class Settings:
     allowed_hosts: list[str] = field(default_factory=lambda: _split_hosts(_DEFAULT_ALLOWED_HOSTS))
     # from_env에서 ALLOWED_HOSTS 미설정 시에만 켠다. 직접 지정한 목록은 그대로 제한한다.
     allow_server_ip_host: bool = False
-    # ── Localight 통합: 페이지 텍스트 추출 + LLM 프로바이더 ──
-    ocr_languages: str = "eng+kor"          # tesseract -l 인자 (textlayer 엔진이 소비)
-    native_text_threshold: int = 120        # auto 추출이 텍스트 레이어를 신뢰할 최소 영숫자 수 (0 이상)
+    # ── 번역 및 Q&A 프로바이더 ──
     ollama_base_url: str = "http://127.0.0.1:11434"  # local_url 검증 — 온디바이스 allowlist 전용
     ollama_model: str = "qwen3:8b"          # 기본 로컬 Ollama 모델
     llm_provider: str = "openai-responses"  # openai-responses | openai-chat | ollama | local-openai
@@ -539,6 +529,14 @@ class Settings:
         # 로컬 실행(Metal 등)에서도 .env의 번역/OCR 설정이 잡히게 — 모르는 키 안내는 health로.
         # (None을 돌려주는 대역 — 예전 시그니처 — 도 받는다)
         dotenv_warnings = tuple(load_dotenv_file() or ())
+        retired = tuple("""OCR_FAST_DECODE OCR_DECODE_BLOCK OCR_CUDA_GRAPHS
+            OCR_MOE_FUSED OCR_MOE_FAST OCR_SDPA OCR_NGRAM_HOST OCR_LANGUAGES
+            NATIVE_TEXT_THRESHOLD OCR_REMOTE_PAGE_CONCURRENCY OCR_SIDECAR_RETRIES""".split())
+        configured = [key for key in retired if _env_raw(key) is not None]
+        configured += [key for key in os.environ if key.startswith(('OVIS_', 'PADDLEOCR_')) and _env_raw(key)]
+        if configured:
+            raise ValueError("Retired OCR settings: " + ", ".join(configured) +
+                             ". Use Unlimited-OCR-2 settings in .env.example and docs/UNLIMITED_OCR_2.md")
         frontend = os.environ.get("FRONTEND_DIR")
         # 미설정(빈 값 포함) = auto: unlimited 엔진이 mlx → cuda → metal → cpu 중 쓸 수 있는
         # 첫 디바이스를 고른다(registry.resolve_auto_device). compose는 backend 서비스마다
@@ -554,8 +552,8 @@ class Settings:
                 "OCR_MLX_QUANT_BITS", 0, (0, 8),
                 " (0=양자화 없음, 8=MLX 디코더 8비트 — 4비트는 숫자 오인식으로 미지원)",
             ),
-            engine=os.environ.get("OCR_ENGINE", "unlimited").strip().lower(),
-            model_id=os.environ.get("MODEL_ID", "baidu/Unlimited-OCR"),
+            engine=os.environ.get("OCR_ENGINE", "unlimited2").strip().lower(),
+            model_id=os.environ.get("MODEL_ID", "baidu/Unlimited-OCR-2"),
             # `or` 폴백: compose가 ${MODEL_REVISION:-}로 **빈 문자열**을 넘겨도
             # 기본 고정 SHA가 무력화되지 않게 (sidecar들의 _env_str 패턴과 동일)
             model_revision=os.environ.get("MODEL_REVISION") or _DEFAULT_REVISION,
@@ -577,8 +575,6 @@ class Settings:
             max_page_output_tokens=_env_limit("MAX_PAGE_OUTPUT_TOKENS", 6_144),
             page_separator=_env_unescaped("PAGE_SEPARATOR", "\n\n---\n\n"),
             cpu_threads=_env_int("OCR_CPU_THREADS", 0),
-            fast_decode=_env_bool("OCR_FAST_DECODE", True),
-            decode_block=_env_int("OCR_DECODE_BLOCK", 8, lo=1),
             fake_delay=_env_float("FAKE_DELAY", 0.02, lo=0),
             job_ttl_days=_env_int("JOB_TTL_DAYS", 0, lo=0),
             allowed_hosts=_split_hosts(allowed_hosts or _DEFAULT_ALLOWED_HOSTS),
@@ -594,11 +590,7 @@ class Settings:
                 "OCR_SIDECAR_HEALTH_TIMEOUT_S", 5.0, positive=True,
             ),
             sidecar_max_response_mb=max(1, _env_int("OCR_SIDECAR_MAX_RESPONSE_MB", 20)),
-            sidecar_retries=max(0, _env_int("OCR_SIDECAR_RETRIES", 1)),
-            remote_page_concurrency=max(1, _env_int("OCR_REMOTE_PAGE_CONCURRENCY", 1)),
             sidecar_model_wait_s=max(0.0, _env_float("OCR_SIDECAR_MODEL_WAIT_S", 900.0)),
-            ocr_languages=os.environ.get("OCR_LANGUAGES", "eng+kor"),
-            native_text_threshold=max(0, _env_int("NATIVE_TEXT_THRESHOLD", 120)),
             ollama_base_url=local_url(os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")),
             ollama_model=os.environ.get("OLLAMA_MODEL", "qwen3:8b"),
             llm_provider=_llm_provider(),

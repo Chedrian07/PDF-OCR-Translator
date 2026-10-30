@@ -1,8 +1,7 @@
 # 빌드 컨텍스트: 리포 루트 (docker-compose.yml 참조)
-# ARG TORCH_VARIANT=cpu | cu129  → pyproject의 extra 선택
+# ARG TORCH_VARIANT=cpu — CUDA 웹 프로세스도 CPU 이미지를 사용한다.
 #
-# CUDA 이미지도 python:3.12-slim 기반이다: torch cu129 휠이 CUDA 런타임을
-# 동봉하므로 호스트 드라이버(+ nvidia container runtime)만 있으면 된다.
+# CUDA 모델 추론은 services/unlimited_ocr2/Dockerfile의 SGLang 프로세스가 담당한다.
 
 ARG TORCH_VARIANT=cpu
 
@@ -44,7 +43,6 @@ RUN uv pip install -p /venv/bin/python /src/native
 # ── 2단계: 런타임 ──────────────────────────────────────────────
 FROM python:3.12-slim-bookworm@sha256:54c85f3c47607a77f32adec749d3c81d1348bf25833671f512b26a9b6d778cb3
 
-# tesseract-ocr(+eng/kor): textlayer 엔진의 스캔 페이지 OCR 폴백 (OCR_LANGUAGES=eng+kor)
 # fonts-noto-cjk: 번역 PDF 내보내기(pdf_export._SYSTEM_FONT_CANDIDATES)의
 #   Noto Serif/Sans CJK — 없으면 PyMuPDF 내장 비임베드 Dotum 폴백으로
 #   전각 조판(라틴 자간 파손)이 된다
@@ -55,7 +53,6 @@ FROM python:3.12-slim-bookworm@sha256:54c85f3c47607a77f32adec749d3c81d1348bf2583
 RUN apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends curl \
-        tesseract-ocr tesseract-ocr-eng tesseract-ocr-kor \
         fonts-noto-cjk fontconfig \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 1000 --create-home app \

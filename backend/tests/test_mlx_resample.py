@@ -51,7 +51,7 @@ _OK, _WHY = mlx_status()
 def test_mlx_position_embeddings_match_torch_functions():
     import mlx.core as mx
 
-    from app.vendor.unlimited_ocr import deepencoder as de
+    from app.vendor.unlimited_ocr2 import deepencoder as de
     from app.vendor.unlimited_ocr_mlx.sam import get_abs_pos_sam, get_rel_pos
     from app.vendor.unlimited_ocr_mlx.vision import get_abs_pos
 

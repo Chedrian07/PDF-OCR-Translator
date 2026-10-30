@@ -2,9 +2,7 @@
 """OCR 엔진 비교 벤치마크 — 같은 PDF들을 실행 중인 backend들에 순차 제출한다.
 
     python scripts/benchmark_ocr_engines.py \
-      --endpoint unlimited=http://127.0.0.1:8001 \
-      --endpoint ovis=http://127.0.0.1:8002 \
-      --endpoint paddle=http://127.0.0.1:8003 \
+      --endpoint unlimited2=http://127.0.0.1:8001 \
       --input benchmark_docs/ --out bench_out/
 
 ⚠ 단일 GPU에서는 한 시점에 한 스택만 기동할 수 있으므로, 보통 스택을 하나씩

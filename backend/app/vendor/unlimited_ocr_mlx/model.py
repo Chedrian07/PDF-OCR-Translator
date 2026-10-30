@@ -1,7 +1,7 @@
 # Vendored from mlx-vlm 0.7.4 (MIT): mlx_vlm/models/deepseekocr/deepseekocr.py (Model,
 # MlpProjector, sanitize) + mlx_vlm/models/unlimited_ocr/unlimitedocr.py (멀티페이지
 # 단일 <image> 경로) + vision.py/language.py의 sanitize.
-# 레퍼런스: app/vendor/unlimited_ocr/modeling_unlimitedocr.py (UnlimitedOCRModel.forward).
+# 레퍼런스: app/vendor/unlimited_ocr2/modeling_unlimitedocr.py (UnlimitedOCRModel.forward).
 # 출처·패치 내역: PROVENANCE.md
 """SAM + CLIP + projector + DeepseekV2 디코더 조립과 가중치 키 매핑."""
 
@@ -61,7 +61,7 @@ def sanitize(weights: dict[str, mx.array], config: ModelConfig) -> dict[str, mx.
     (vision_model.embeddings.position_ids)는 버린다 — 실체크포인트에는 없다."""
     out: dict[str, mx.array] = {}
     for key, value in weights.items():
-        if key.endswith("position_ids"):
+        if ".self_attn.indexer." in key or key.endswith("position_ids"):
             continue
         new_key = _map_key(key)
         if new_key in _CONV_KEYS:

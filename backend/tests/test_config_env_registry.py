@@ -29,7 +29,8 @@ _COMPOSE_VAR = re.compile(r"\$\{([A-Z][A-Z0-9_]*)")
 def _direct_env_reads() -> set[str]:
     keys: set[str] = set()
     for path in APP.rglob("*.py"):
-        keys |= set(_DIRECT_ENV_READ.findall(path.read_text(encoding="utf-8")))
+        if "vendor" not in path.parts:
+            keys |= set(_DIRECT_ENV_READ.findall(path.read_text(encoding="utf-8")))
     return keys
 
 
@@ -54,8 +55,8 @@ def _deploy_file_keys() -> set[str]:
 def test_scanners_still_find_the_known_readers():
     """스캐너가 조용히 0개를 반환하면 아래 계약이 통과하며 무력화된다."""
     direct = _direct_env_reads()
-    assert {"OCR_NGRAM_HOST", "OCR_SDPA", "OCR_CUDA_GRAPHS", "PYTORCH_ENABLE_MPS_FALLBACK"} <= direct
-    assert {"OCR_DEVICE", "OPENAI_BASE_URL", "BIND_HOST", "OVIS_MODEL_ID"} <= (
+    assert {"OCR_TEST_MODE", "PYTORCH_ENABLE_MPS_FALLBACK"} <= direct
+    assert {"OCR_DEVICE", "OPENAI_BASE_URL", "BIND_HOST", "MODEL_ID"} <= (
         _env_keys_read_by_code() | _deploy_file_keys()
     )
     assert {"docker-compose.yml", "compose.ollama.yaml"} <= {p.name for p in _compose_files()}
@@ -105,9 +106,8 @@ def test_keys_read_by_tools_sharing_the_process_are_not_flagged():
     assert config.unknown_dotenv_key_warnings(shared) == []
     # 다른 도구의 접두사와 겹쳐도, 이 앱의 키에서 OCR_만 빠뜨린 이름은 오타로 안내한다
     typos = config.unknown_dotenv_key_warnings({"MLX_QUANT_BITS": "8", "CUDA_GRAPHS": "1"})
-    assert [w.split(":", 1)[0] for w in typos] == ["MLX_QUANT_BITS", "CUDA_GRAPHS"]
+    assert [w.split(":", 1)[0] for w in typos] == ["MLX_QUANT_BITS"]
     assert "OCR_MLX_QUANT_BITS의 오타" in typos[0]
-    assert "OCR_CUDA_GRAPHS의 오타" in typos[1]
 
 
 def test_categories_do_not_overlap_and_the_registry_is_not_scanned_as_reads():
@@ -131,7 +131,7 @@ def test_keys_read_directly_anywhere_in_the_app_are_documented_in_env_example():
     OCR_NGRAM_HOST가 코드·compose·ARCHITECTURE에는 있는데 .env.example에만 빠져 있었다."""
     text = (REPO / ".env.example").read_text(encoding="utf-8")
     direct = _direct_env_reads()
-    assert {"OCR_SDPA", "OCR_NGRAM_HOST"} <= direct
+    assert {"OCR_TEST_MODE", "PYTORCH_ENABLE_MPS_FALLBACK"} <= direct
     missing = sorted(
         key for key in direct - NOT_OPERATOR_KNOBS - _TOOL_OWNED_KEYS
         if not re.search(rf"\b{key}\b", text)

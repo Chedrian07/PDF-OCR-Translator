@@ -267,7 +267,8 @@ def extract_embedded_page_markdown(
 ) -> str | None:
     """PDF의 1-based 페이지 텍스트 레이어를 안전한 plain-text Markdown으로 추출.
 
-    OCR이 최종 실패한 페이지의 복구 경로다. 텍스트 블록을 **읽기 순서**(다단 인식 —
+    품질·정합성 검증용 참조 추출이며 제품 OCR 대체 출력으로 호출하지 않는다.
+    텍스트 블록을 **읽기 순서**(다단 인식 —
     reading_order.page_text_blocks)대로 문단 하나씩 내보내고, 줄마다 마크다운 문법을
     이스케이프해 원문의 ``#``/``---``/``|``가 제목·페이지 구분자·표로 해석되지 않게
     한다. 예전에는 페이지 전체를 4칸 들여쓴 코드 블록으로 냈는데, 코드 블록은 번역
@@ -295,7 +296,7 @@ def extract_embedded_page_markdown(
 
 def embedded_page_markdown_local(pdf_path: Path, page_index: int) -> str | None:
     """(PDF 워커) extract_embedded_page_markdown의 본체 — page_index는 0-based."""
-    from ..engine.textlayer import sanitize_text
+    from .text_reference import sanitize_text
     from . import pdf_worker
     from .reading_order import page_text_blocks
 

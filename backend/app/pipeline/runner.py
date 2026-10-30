@@ -29,7 +29,7 @@ from .merge import (
     keep_leading_pages,
     split_pages,
 )
-from .pdf import extract_embedded_page_markdown, render_pdf_pages
+from .pdf import render_pdf_pages
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..config import Settings
@@ -318,7 +318,7 @@ def chunk_length_budget_note(settings: "Settings", engine: OCREngine) -> str | N
     알린다. 대조할 텍스트 레이어가 없는 스캔은 모델의 페이지 마커를 그대로 믿으므로 '내용이
     빠지지 않는다'고 단정하지 않는다. MAX_LENGTH를 쓰는 생성 엔진(unlimited: torch·MLX)이
     토큰을 스트리밍하는 multi 청크에만 해당한다 — 아니면 None."""
-    if engine.name != "unlimited":
+    if engine.name not in ("unlimited", "unlimited2"):
         return None  # 능력 조회 전에 거른다(textlayer는 Tesseract 버전을 프로세스로 묻는다)
     caps = engine.capabilities()
     if not caps.supports_multi_page or caps.stream_granularity != "token":
@@ -547,46 +547,6 @@ def execute_job(
                         return restored
                     break
             return merger.pages_md[page_number - 1]
-
-        def _try_embedded_text_fallback(
-            page_number: int,
-            recovery_dir: Path,
-            error: Exception,
-        ) -> bool:
-            """single OCR 최종 실패 페이지를 원본 PDF 텍스트 레이어로 복구."""
-            if cancel.is_set():
-                raise JobCanceled()
-            # 실패한 single 호출이 만든 crop/layout/raw 산출물은 절대 병합하지 않는다.
-            shutil.rmtree(recovery_dir, ignore_errors=True)
-            page_md = extract_embedded_page_markdown(
-                job.dir / "source.pdf", page_number, should_cancel=cancel.is_set,
-            )
-            if cancel.is_set():
-                raise JobCanceled()
-            if page_md is None:
-                return False
-            recovery_dir.mkdir(parents=True, exist_ok=True)
-            if cancel.is_set():
-                raise JobCanceled()
-            merger.add_chunk(
-                ChunkResult(recovery_dir, page_number, 1, page_md, single=True)
-            )
-            # 실패한 OCR 시도가 라이브로 흘려보낸 출력을 물리고, 복구된 본문을
-            # 같은 페이지 세그먼트로 다시 넣는다.
-            sink.rewind_to(page_number, "PDF 텍스트 레이어로 복구")
-            sink.emit_page(page_number, page_md)
-            cause = (
-                _failure_reason(error) if isinstance(error, RepetitiveOutputError)
-                else "OCR 실패"
-            )
-            message = (
-                f"{page_number}페이지: {cause} 후 PDF 내장 텍스트 레이어로 복구 "
-                f"(이미지·정밀 레이아웃 제외; {error.__class__.__name__}: "
-                f"{str(error)[:160]})"
-            )
-            merger.warnings.append(message)
-            logger.warning("%s", message)
-            return True
 
         done_pages = 0
         failed_chunks = 0
@@ -1005,14 +965,14 @@ def execute_job(
                         raise
                     except Exception as page_error:  # noqa: BLE001 — 페이지 단위 격리
                         last_error = _detach(page_error)
-                        if not _try_embedded_text_fallback(
-                            global_page, page_dir, page_error
-                        ):
-                            failed_pages += 1
-                            sink.rewind_to(global_page, "페이지 변환 실패")
-                            _add_failed_chunk(
-                                merger, page_dir, global_page, 1, True, page_error, sink
-                            )
+                        if cancel.is_set():
+                            raise JobCanceled()
+                        shutil.rmtree(page_dir, ignore_errors=True)
+                        failed_pages += 1
+                        sink.rewind_to(global_page, "페이지 변환 실패")
+                        _add_failed_chunk(
+                            merger, page_dir, global_page, 1, True, page_error, sink
+                        )
                     else:
                         if cancel.is_set():
                             # 엔진은 취소돼도 그때까지의 부분 출력을 정상 반환한다 — 메인 경로처럼
@@ -1038,12 +998,9 @@ def execute_job(
                 return keep == 0 and failed_pages == len(chunk), last_error
 
             def _recover_single_page_chunk(page_error: Exception) -> bool:
-                """1쪽 청크의 최종 실패 — 같은 페이지의 다른 OCR 호출 대신 텍스트 레이어부터.
-
-                per_page 모드든 multi 모드의 1쪽 청크(sidecar 엔진 기본 구성)든 같다.
-                복구하지 못하면 플레이스홀더로 보정하고 False."""
-                if _try_embedded_text_fallback(start_page, work_dir, page_error):
-                    return True
+                """Keep a failed page in place without substituting embedded text."""
+                if cancel.is_set():
+                    raise JobCanceled()
                 logger.warning(
                     "청크 %d/%d 최종 실패 (%s) — 플레이스홀더로 보정 후 계속",
                     ci + 1, len(chunks), _error_summary(page_error),

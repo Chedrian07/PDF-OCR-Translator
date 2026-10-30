@@ -1,0 +1,63 @@
+{
+  "model": "baidu/Unlimited-OCR-2",
+  "revision": "c14071b549f4fcab10909f3c4acc6a2edb366947",
+  "runtime": "sglang-0.5.20.dev13+g75b9b06b02",
+  "pdf_sha256": "dcbc5ad799147585e666400d44bb9dd4c37b93515bce424662820f594596d2a2",
+  "image_sha256": [
+    "c83e64c44b905000afe69999ec47ea48b0ff2a7741833e3c30f53713e1eb8692"
+  ],
+  "dpi": 200,
+  "pages": 1,
+  "concurrency": 1,
+  "mode": "multi/base-1024",
+  "pages_per_chunk": 8,
+  "gpu_index": "0",
+  "runs": [
+    {
+      "run": 0,
+      "warmup": true,
+      "seconds": 3.0138917539734393,
+      "first_text_s": 1.1840935639338568,
+      "pages_per_s": 0.3317969196078874,
+      "page_markers": 1,
+      "figures": 0,
+      "warnings": [],
+      "peak_vram_mib": 11473
+    },
+    {
+      "run": 1,
+      "warmup": false,
+      "seconds": 2.9036029040580615,
+      "first_text_s": 1.1477682969998568,
+      "pages_per_s": 0.3443997106499669,
+      "page_markers": 1,
+      "figures": 0,
+      "warnings": [],
+      "peak_vram_mib": 11473
+    },
+    {
+      "run": 2,
+      "warmup": false,
+      "seconds": 2.905895923031494,
+      "first_text_s": 1.136766039999202,
+      "pages_per_s": 0.34412794762338844,
+      "page_markers": 1,
+      "figures": 0,
+      "warnings": [],
+      "peak_vram_mib": 11473
+    },
+    {
+      "run": 3,
+      "warmup": false,
+      "seconds": 2.890823800000362,
+      "first_text_s": 1.159891188959591,
+      "pages_per_s": 0.3459221554768834,
+      "page_markers": 1,
+      "figures": 0,
+      "warnings": [],
+      "peak_vram_mib": 11473
+    }
+  ],
+  "gpu": "NVIDIA GeForce RTX 5070 Ti",
+  "median_ocr_s": 2.9036029040580615
+}

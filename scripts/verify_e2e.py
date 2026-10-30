@@ -2,7 +2,7 @@
 
 scripts/smoke_e2e.sh 는 업로드→OCR→markdown/zip 에서 끝난다. 이 스크립트는 그 뒤의
 번역 · 레이아웃 보존 PDF 내보내기 · 뷰어 계약 · Q&A 키 분리 · 워커 복원력까지
-**실제 서버를 띄워** 검증한다. 모델 다운로드 없이 돌도록 OCR_ENGINE=textlayer 를 쓰며,
+**실제 서버를 띄워** 검증한다. 고정 Unlimited-OCR-2 실모델을 사용하며,
 샘플 PDF(arXiv 논문)는 텍스트 레이어가 충분해 tesseract 없이 전 페이지가 처리된다.
 
 사용 (= make verify-e2e):
@@ -545,7 +545,7 @@ ENV_EXAMPLE = REPO / ".env.example"
 # PDF_WORKER_MODE: 셸·테스트 세션(conftest는 inline)의 값이 새면 하네스가 PyMuPDF 격리를 끈 채
 # 검증한다 — 하네스는 늘 운영 기본값(process)으로 돈다.
 _UNDOCUMENTED_APP_KEYS = frozenset(
-    {"DATA_DIR", "FRONTEND_DIR", "FAKE_DELAY", "DISABLE_DOTENV", "PDF_WORKER_MODE"}
+    {"DATA_DIR", "FRONTEND_DIR", "FAKE_DELAY", "DISABLE_DOTENV", "PDF_WORKER_MODE", "OCR_TEST_MODE", "OCR_NGRAM_HOST"}
 )
 _ENV_EXAMPLE_KEY_RE = re.compile(r"^#? ?([A-Z][A-Z0-9_]*)=", re.MULTILINE)
 _SECRETISH_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)$|SECRET", re.IGNORECASE)
@@ -593,7 +593,7 @@ def backend_env(base, data_dir: Path, mock_url: str, extra: dict[str, str]) -> d
     env = scrubbed_env(base)
     env.update({
         "DISABLE_DOTENV": "1",
-        "OCR_ENGINE": "textlayer",
+        "OCR_ENGINE": "unlimited2",
         "OCR_DEVICE": "cpu",
         "PRELOAD_MODEL": "0",
         "DATA_DIR": str(data_dir),
@@ -1259,7 +1259,7 @@ def _run(args) -> int:
     with Servers(data_dir, {}):
         s, health, _ = req("GET", "/api/health")
         check("GET /api/health 200", s == 200, json.dumps(health, ensure_ascii=False)[:200])
-        check("엔진이 textlayer", health.get("engine") == "textlayer", str(health.get("engine")))
+        check("엔진이 Unlimited-OCR-2", health.get("engine") == "unlimited2", str(health.get("engine")))
         check("번역 프로바이더 활성", health.get("translate_available") is True)
 
         job_id = upload(pdf, dpi=150)

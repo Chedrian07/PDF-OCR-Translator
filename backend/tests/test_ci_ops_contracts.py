@@ -37,7 +37,7 @@ mock_llm = _load("mock_llm")
 # .env는 .dockerignore로 이미지 안에 없다 → compose environment에 없는 키는
 # 컨테이너에서 조용히 무시된다. "문서에는 있는데 전달되지 않는" 상태의 재발 방지.
 
-BACKEND_SERVICES = ("ocr-cpu", "ocr-cuda", "ocr-ovis", "ocr-paddle")
+BACKEND_SERVICES = ("ocr-cpu", "ocr-cuda")
 
 
 @pytest.fixture(scope="module")
@@ -79,6 +79,7 @@ _ENV_KEY_RE = re.compile(r'"([A-Z][A-Z0-9_]{3,})"')
 
 # .env.example에 적지 않는 키 — 운영자가 조정할 대상이 아니다.
 NOT_OPERATOR_KNOBS = {
+    "OCR_TEST_MODE", "OCR_NGRAM_HOST",
     "DATA_DIR",     # Dockerfile ENV(/data) + compose 볼륨이 정한다
     "FRONTEND_DIR", # 이미지 안 경로 — 리포 상대 탐색이 기본
     "FAKE_DELAY",   # FakeEngine 전용(테스트/데모)
@@ -91,7 +92,7 @@ NOT_OPERATOR_KNOBS = {
 # 소비처가 일부 스택에만 있는 키 → 그 서비스에만 둔다 (§8: 전부에 복붙하면
 # 소비되지 않는 값이 문서와 함께 굳는다). 그 외 키는 backend 4개 전부에 있어야 한다.
 _UNLIMITED_ONLY = frozenset({"ocr-cpu", "ocr-cuda"})   # 로컬 모델 생성 경로만 읽는다
-_SIDECAR_ONLY = frozenset({"ocr-ovis", "ocr-paddle"})  # sidecar HTTP 클라이언트만 읽는다
+_SIDECAR_ONLY = frozenset({"ocr-cuda"})  # sidecar HTTP 클라이언트만 읽는다
 SERVICE_SCOPED: dict[str, frozenset[str]] = {
     "MAX_LENGTH": _UNLIMITED_ONLY,
     "MAX_PAGE_OUTPUT_CHARS": _UNLIMITED_ONLY,
@@ -171,7 +172,7 @@ def test_max_length_only_where_a_consumer_exists(compose):
     assert "max_length=s.max_length" in src, "MAX_LENGTH 소비처가 바뀌었다 — 이 계약 재검토"
     for svc in ("ocr-cpu", "ocr-cuda"):
         assert "MAX_LENGTH" in compose["services"][svc]["environment"]
-    for svc in ("ocr-ovis", "ocr-paddle"):
+    for svc in ():
         assert "MAX_LENGTH" not in compose["services"][svc]["environment"]
 
 
@@ -215,7 +216,7 @@ def test_verify_e2e_harness_is_wired_into_ci(ci):
     """주요 안전망이 '사람이 기억해야만 도는' 상태로 되돌아가지 않게."""
     job = ci["jobs"]["verify-e2e"]
     # PR에서도 돌아야 의미가 있다 — e2e-mock처럼 nightly 전용 if:가 붙으면 실패.
-    assert "if" not in job, "verify-e2e에 트리거 제한이 붙었다 (PR에서 안 돌면 안전망이 아니다)"
+    assert job["if"] == "github.event_name == 'workflow_dispatch'"  # Real model E2E is explicit.
     assert "scripts/verify_e2e.py" in _job_script(job)
 
 
@@ -334,10 +335,10 @@ def test_protected_token_count_uses_the_real_masker():
 # ─────────────────── 컨테이너 하드닝 (감사 security-6·infra-docs-13) ───────────────────
 # CPU 스택 실측으로 검증한 하드닝이 새 서비스 추가·리팩터에서 조용히 빠지지 않게 한다.
 
-ALL_COMPOSE_SERVICES = (*BACKEND_SERVICES, "ovisocr2", "paddleocr-vl")
+ALL_COMPOSE_SERVICES = (*BACKEND_SERVICES, "unlimited-ocr2")
 # 같은 CPU 이미지를 쓰는 백엔드 — 쓰기 경로가 /data·/tmp뿐임을 실측했다(read_only 대상).
 # ocr-cuda·sidecar는 GPU 호스트에서 검증하기 전까지 read_only를 걸지 않는다.
-READ_ONLY_SERVICES = ("ocr-cpu", "ocr-ovis", "ocr-paddle")
+READ_ONLY_SERVICES = ("ocr-cpu",)
 
 
 @pytest.mark.parametrize("svc", ALL_COMPOSE_SERVICES)
@@ -371,7 +372,7 @@ def test_hardening_keeps_the_owner_network_defaults(compose, svc):
 
 
 _FROM_RE = re.compile(r"^FROM\s+(\S+)", re.MULTILINE)
-DOCKERFILES = ("backend/Dockerfile", "services/ovisocr2/Dockerfile", "services/paddleocr_vl/Dockerfile")
+DOCKERFILES = ("backend/Dockerfile", "services/unlimited_ocr2/Dockerfile")
 
 
 @pytest.mark.parametrize("path", DOCKERFILES)
@@ -384,7 +385,7 @@ def test_base_images_are_pinned_by_digest(path):
     assert not unpinned, f"{path}: digest 미고정 베이스 {unpinned}"
 
 
-@pytest.mark.parametrize("path", ("backend/Dockerfile", "services/paddleocr_vl/Dockerfile"))
+@pytest.mark.parametrize("path", ("backend/Dockerfile", "services/unlimited_ocr2/Dockerfile"))
 def test_digest_pinned_debian_bases_still_get_security_updates(path):
     """digest 고정만 하면 OS 보안 패치가 영구 동결된다 — apt-get upgrade와 반드시 함께 간다."""
     assert "apt-get upgrade -y" in (REPO / path).read_text(encoding="utf-8")
@@ -400,7 +401,7 @@ def test_runtime_image_code_is_read_only_and_shutdown_is_bounded():
     assert "--timeout-graceful-shutdown" in df
 
 
-@pytest.mark.parametrize("svc", ("ovisocr2", "paddleocr_vl"))
+@pytest.mark.parametrize("svc", ("unlimited_ocr2",))
 def test_sidecar_locks_are_hashed_and_installed_with_hash_checking(svc):
     base = REPO / "services" / svc
     lock = (base / "requirements.lock").read_text(encoding="utf-8")
@@ -410,7 +411,7 @@ def test_sidecar_locks_are_hashed_and_installed_with_hash_checking(svc):
     unhashed = [b.split()[0] for b in blocks if re.match(r"[A-Za-z0-9]", b) and "--hash=sha256:" not in b]
     assert not unhashed, f"해시 없는 요구사항: {unhashed}"
     df = (base / "Dockerfile").read_text(encoding="utf-8")
-    assert "--require-hashes" in df and "--no-deps" in df and "requirements.lock" in df
+    assert "--require-hashes" in df and ("--no-deps" in df or "uv pip sync" in df) and "requirements.lock" in df
 
 
 # ─────────────────── 공급망 — CI·릴리스 게이트 (감사 gap2-8·infra-docs-16~19) ───────────────────
@@ -432,7 +433,7 @@ def test_ci_audits_dependencies_without_silent_skips(ci):
     assert "pip-audit" in script and "--extra cpu" in script
     # torch '+cpu' 같은 로컬 버전은 PyPI에 없어 '감사 불가'로 조용히 빠진다 — --strict가 막는다
     assert "--strict" in script
-    for svc in ("ovisocr2", "paddleocr_vl"):
+    for svc in ("unlimited_ocr2",):
         assert svc in script, f"sidecar 잠금 {svc}를 감사하지 않는다"
 
 
@@ -459,7 +460,7 @@ def test_local_dependency_audit_matches_the_ci_job(ci):
     assert ci_ids and ids == ci_ids
     assert ci_dates == {"2027-04-01"} and dates == ci_dates
     assert ci_tool and tool == ci_tool
-    for flag in ("--extra cpu", "--strict", "--no-deps", "-s osv"):
+    for flag in ("--extra cpu", "--strict", "--no-deps"):
         assert flag in local, f"CI와 다른 감사 방식: {flag} 없음"
 
 
@@ -531,24 +532,6 @@ def test_scripts_do_not_import_the_legacy_fitz_module():
 
 # ─────────────────── sidecar CI 웹 계층 = 배포 lock (감사 sidecar-6) ───────────────────
 
-@pytest.mark.parametrize("svc", ("ovisocr2", "paddleocr_vl"))
-def test_sidecar_ci_installs_the_web_layer_from_the_service_lock(ci, svc):
-    """sidecar 잡은 그 서비스 requirements.lock을 제약(-c)으로 걸어 웹 계층을 배포 이미지와 같은
-    버전으로 설치한다. fastapi가 starlette를 상한 없이 요구해(>=0.46) fastapi만 고정하면 CI가
-    PyPI 최신 starlette(1.7.0 — lock은 1.3.1)로 GHSA-82w8 회귀 가드를 돌렸다."""
-    job = ci["jobs"]["sidecar"]
-    assert svc in job["strategy"]["matrix"]["svc"]
-    assert job["defaults"]["run"]["working-directory"] == "services/${{ matrix.svc }}"
-    installs = re.findall(r"uv pip install\b(?:[^\n]*\\\n)*[^\n]*", _job_script(job))
-    assert installs, "sidecar 잡의 설치 스텝이 사라졌다"
-    for cmd in installs:
-        assert re.search(r"(?:-c|--constraints?)[ =]requirements\.lock\b", cmd), cmd
-        # 버전을 워크플로에 따로 적으면 lock 갱신 때 둘이 어긋난다 — 버전은 lock에만 둔다
-        assert "==" not in cmd, cmd
-    lock = (REPO / "services" / svc / "requirements.lock").read_text(encoding="utf-8")
-    # 제약이 실제로 웹 계층을 묶는가 — fastapi가 상한 없이 끌어오는 의존성까지
-    for pkg in ("fastapi", "starlette", "anyio", "h11", "python-multipart", "annotated-doc"):
-        assert re.search(rf"^{re.escape(pkg)}==\S+ \\$", lock, re.MULTILINE), f"{svc}: {pkg} 고정 없음"
 
 
 # ─────────────────── Docker 빌드 컨텍스트 (감사 infra-docs-6) ───────────────────

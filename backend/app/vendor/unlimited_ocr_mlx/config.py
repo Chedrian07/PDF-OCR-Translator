@@ -53,6 +53,7 @@ class TextConfig:
     sliding_window: int | None = 128
     bos_token_id: int = BOS_ID
     eos_token_id: int = 1
+    sparse_attention_config: dict = field(default_factory=dict)
 
     @property
     def head_dim(self) -> int:
@@ -70,8 +71,11 @@ class TextConfig:
         hidden = int(cfg.get("hidden_size", cls.hidden_size))
         if cfg.get("head_dim") not in (None, hidden // heads):
             raise ValueError("head_dim != hidden_size/num_attention_heads는 지원하지 않습니다")
-        if cfg.get("rope_scaling") is not None:
-            raise ValueError("rope_scaling은 지원하지 않습니다 (torch 기본 RoPE만)")
+        sp = cfg.get("sparse_attention_config") or {}
+        if sp.get("training_stage") != "dash" or sp.get("sparse_main_rope_mode") != "page2d":
+            raise ValueError("Unlimited-OCR-2 DASH/page2d checkpoint required")
+        if sp.get("dash_stage0") != "head_cls" or sp.get("sparse_rope_page_span", 0) != 0:
+            raise ValueError("Unsupported Unlimited-OCR-2 sparse routing configuration")
         if cfg.get("topk_method", "greedy") != "greedy":
             raise ValueError(f"topk_method={cfg.get('topk_method')!r}는 지원하지 않습니다")
         if cfg.get("scoring_func", "softmax") != "softmax":
@@ -96,6 +100,7 @@ class TextConfig:
         out["rms_norm_eps"] = float(out["rms_norm_eps"])
         out["rope_theta"] = float(out["rope_theta"])
         out["sliding_window"] = cfg.get("sliding_window_size") or cfg.get("sliding_window")
+        out["sparse_attention_config"] = sp
         return cls(**out)
 
 

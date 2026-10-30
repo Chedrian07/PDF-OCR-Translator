@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import platform
 import sys
 
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 # auto = unlimited 엔진이 쓸 수 있는 가장 빠른 디바이스(resolve_auto_device). mps는 config가
 # metal로 바꾼다. mlx = Apple Silicon in-process MLX 엔진(unlimited_mlx.py) — metal(torch MPS)은 폴백.
 VALID_DEVICES = ("auto", "cpu", "cuda", "metal", "mlx")
-VALID_ENGINES = ("unlimited", "fake", "textlayer", "ovisocr2", "paddleocr_vl")
+VALID_ENGINES = ("unlimited2", "fake")
 
 
 def _torch_accelerators() -> tuple[bool, bool, str]:
@@ -65,32 +66,21 @@ def build_engine(settings: Settings) -> OCREngine:
         raise ValueError(f"알 수 없는 OCR_DEVICE: {device!r} (사용 가능: {', '.join(VALID_DEVICES)})")
 
     if settings.engine == "fake":
+        if os.environ.get("OCR_TEST_MODE") != "1":
+            raise ValueError("OCR_ENGINE=fake is test-only; set OCR_TEST_MODE=1 in the test harness")
         from .fake import FakeEngine
 
         # 가짜 엔진은 하드웨어를 쓰지 않는다 — auto는 탐지 없이 cpu로 표기한다
         return FakeEngine(device="cpu" if device == "auto" else device, delay=settings.fake_delay)
 
-    if settings.engine == "textlayer":
-        # 텍스트 레이어 + 로컬 Tesseract (Localight 이식) — torch·GPU 불필요
-        from .textlayer import TextLayerEngine
-
-        return TextLayerEngine(settings)
-
-    if settings.engine in ("ovisocr2", "paddleocr_vl"):
-        # GPU는 sidecar 컨테이너 몫 — 이 프로세스는 OCR_DEVICE와 무관하게 GPU를 안 쓴다
-        if not settings.sidecar_url:
-            raise ValueError(
-                f"OCR_ENGINE={settings.engine}에는 OCR_SIDECAR_URL이 필요합니다 "
-                "(예: http://ovisocr2:8080 — docker compose --profile ovis|paddle 참조)"
-            )
-        from .sidecar import SidecarEngine
-
-        return SidecarEngine(settings, name=settings.engine)
-
-    if settings.engine != "unlimited":
+    if settings.engine != "unlimited2":
         raise ValueError(
-            f"알 수 없는 OCR_ENGINE: {settings.engine!r} (사용 가능: {', '.join(VALID_ENGINES)})"
+            f"OCR_ENGINE={settings.engine!r} is retired. Use OCR_ENGINE=unlimited2 "
+            "with baidu/Unlimited-OCR-2. No legacy OCR fallback is available."
         )
+    from ..config import _DEFAULT_REVISION
+    if settings.model_id != "baidu/Unlimited-OCR-2" or settings.model_revision != _DEFAULT_REVISION:
+        raise ValueError("Use MODEL_ID=baidu/Unlimited-OCR-2 and MODEL_REVISION=" + _DEFAULT_REVISION)
 
     if device == "cpu" and sys.platform == "darwin" and platform.machine() == "arm64":
         # 명시 선택이어도 알린다 (감사 api-jobs-5) — .env.example 줄을 그대로 풀면 cpu가 된다
@@ -102,6 +92,10 @@ def build_engine(settings: Settings) -> OCREngine:
         device = resolve_auto_device()
         # 엔진(과 health의 device)은 실제 디바이스를 본다 — 호출자의 settings는 그대로 둔다
         settings = dataclasses.replace(settings, device=device)
+
+    if device == "cuda":
+        from .sglang import SGLangEngine
+        return SGLangEngine(settings)
 
     if device == "mlx":
         # mlx 자체는 load()에서야 임포트한다 — 생성만으로는 mlx가 필요 없다(torch 엔진과 같은 규칙)

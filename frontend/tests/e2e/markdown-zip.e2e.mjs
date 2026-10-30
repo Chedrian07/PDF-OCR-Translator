@@ -95,7 +95,7 @@ doc.close()
     cwd: ROOT,
     env: {
       ...process.env, DISABLE_DOTENV: '1', DATA_DIR: path.join(DATA, 'data'),
-      OCR_ENGINE: 'textlayer', OCR_DEVICE: 'cpu', PRELOAD_MODEL: '0', NATIVE_TEXT_THRESHOLD: '1',
+      OCR_ENGINE: 'unlimited2', OCR_DEVICE: process.env.E2E_OCR_DEVICE || 'cpu', PRELOAD_MODEL: '1',
       OPENAI_API_KEY: '', LLM_OPENAI_API_KEY: '', LLM_LOCAL_OPENAI_API_KEY: '',
       OPENAI_BASE_URL: 'https://api.openai.com/v1', LLM_OPENAI_BASE_URL: 'https://api.openai.com/v1',
       LLM_LOCAL_OPENAI_BASE_URL: '', LLM_PROVIDER: 'openai-responses',
@@ -107,7 +107,7 @@ doc.close()
   backend.stderr.on('data', (chunk) => { logs += chunk; });
   const health = await ready(base);
   assert.equal(health.translate_available, false);
-  assert.equal(health.engine, 'textlayer');
+  assert.equal(health.engine, 'unlimited2');
   browser = await chromium.launch({ executablePath: process.env.E2E_CHROMIUM_PATH || undefined });
 
   for (const polling of [false, true]) {

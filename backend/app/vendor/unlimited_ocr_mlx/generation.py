@@ -29,7 +29,6 @@ from dataclasses import dataclass, field
 import mlx.core as mx
 
 from .model import Model
-from .ngram import NoRepeatNgramProcessor
 from .processing import OCRInputs
 
 FINISH_EOS = "eos"
@@ -83,61 +82,60 @@ def generate(
         result.finish_reason = FINISH_LENGTH
         return result
 
-    proc = None
-    if no_repeat_ngram_size and no_repeat_ngram_size > 0:
-        proc = NoRepeatNgramProcessor(no_repeat_ngram_size, ngram_window)
-        proc.reset(inputs.input_ids)
     lm = model.language_model
     cache = model.make_cache()
-
-    def _sample(logits: mx.array) -> mx.array:
-        if proc is not None:
-            logits = proc(logits)
-        return mx.argmax(logits, axis=-1).astype(mx.int32)  # [1]
-
-    def _step(y: mx.array) -> mx.array:
-        if proc is not None:
-            proc.append(y)  # 레퍼런스 seq = 프롬프트 + (y까지의) 생성 토큰
-        logits = lm(y.reshape(1, 1), cache=cache)
-        return _sample(logits[:, -1, :])
-
+    for c in cache:
+        c.prepare(inputs.input_ids)
+    expected_pages = int((inputs.input_ids == 128827).sum())
+    tokens = result.token_ids
     t0 = time.perf_counter()
     feats = model.encode_images(inputs.global_views, inputs.crops, inputs.spatial_crop)
     embeds = model.get_input_embeddings(inputs.input_ids, inputs.images_seq_mask, feats)
-    # [local patch M2] 원샷 프리필 — 링 캐시가 prefill_length = P를 기록한다
-    logits = lm(None, inputs_embeds=embeds, cache=cache, last_only=True)
-    y = _sample(logits[:, -1, :])
-    mx.async_eval(y)
-    del feats, embeds, logits
-
-    tokens = result.token_ids
+    logits = lm(None, inputs_embeds=embeds, cache=cache, last_only=True)[:, -1, :]
+    del feats, embeds
     t_first = None
     finish = FINISH_LENGTH
-    while True:
-        # y를 붙인 뒤 총 길이가 상한 미만일 때만 다음 스텝을 미리 띄운다
-        schedule_next = prompt_len + len(tokens) + 1 < max_length
-        if schedule_next:
-            next_y = _step(y)
-            mx.async_eval(next_y)
-        tok = int(y.item())
-        if t_first is None:
-            t_first = time.perf_counter()
-        tokens.append(tok)
-        if on_token is not None:
-            on_token(tok)
-        if tok == eos_token_id:
-            finish = FINISH_EOS
-            break
-        if not schedule_next:
-            finish = FINISH_LENGTH
-            break
-        if should_stop is not None and should_stop():
-            finish = FINISH_STOP
-            break
-        y = next_y
-        if len(tokens) % 256 == 0:
-            mx.clear_cache()  # mlx-lm 관례: 장시간 디코드의 버퍼 캐시 누적 방지
-
+    marker_count = 0
+    try:
+        while prompt_len + len(tokens) < max_length:
+            if should_stop is not None and should_stop():
+                finish = FINISH_STOP
+                break
+            n = no_repeat_ngram_size
+            if n > 0 and len(tokens) >= n:
+                prefix = tuple(tokens[-(n-1):]) if n > 1 else ()
+                start = max(0,len(tokens)-ngram_window) if ngram_window > 0 else 0
+                banned = {tokens[i+n-1] for i in range(start,len(tokens)-n+1)
+                          if tuple(tokens[i:i+n-1]) == prefix}
+                for token in banned:
+                    logits[:,token] = -mx.inf
+            if marker_count > expected_pages:
+                token = eos_token_id
+            elif marker_count < expected_pages:
+                logits[:,eos_token_id] = -mx.inf
+                token = int(mx.argmax(logits,axis=-1).item())
+            else:
+                token = int(mx.argmax(logits,axis=-1).item())
+            if t_first is None:
+                t_first = time.perf_counter()
+            tokens.append(token)
+            marker_count += int(token == 128827)
+            if on_token is not None:
+                on_token(token)
+            if token == eos_token_id:
+                finish = FINISH_EOS
+                break
+            if prompt_len+len(tokens) >= max_length:
+                break
+            for c in cache:
+                c.prepare([token])
+            logits = lm(mx.array([[token]],dtype=mx.int32),cache=cache)[:, -1, :]
+            mx.eval(logits)
+            if len(tokens)%256 == 0:
+                mx.clear_cache()
+    finally:
+        cache.clear()
+        mx.clear_cache()
     t_end = time.perf_counter()
     result.finish_reason = finish
     result.prefill_seconds = (t_first or t_end) - t0

@@ -114,22 +114,13 @@ def _env_example_block(key: str) -> str:
     return " ".join(" ".join(block).split())
 
 
-def test_env_example_moe_switches_name_the_vendor_default_devices():
-    vendor = _read(_VENDOR_MOE)
-    fused = re.search(r"^_FUSED_DEVICE_TYPES = \(([^)]*)\)", vendor, re.MULTILINE)
-    fast = re.search(r'def _moe_fast_enabled\(device_type\):.*?return device_type == "(\w+)"', vendor, re.DOTALL)
-    assert fused and fast, "벤더의 MoE 기본 디바이스 표기를 못 찾았다 — 이 테스트의 파서를 갱신한다"
-    fused_devices = [d.upper() for d in re.findall(r'"(\w+)"', fused.group(1))]
-    assert fused_devices, fused.group(0)
+def test_env_example_documents_the_only_production_model():
+    example = (REPO / ".env.example").read_text(encoding="utf-8")
+    assert "OCR_ENGINE=unlimited2" in example
+    assert "MODEL_ID=baidu/Unlimited-OCR-2" in example
+    assert "OCR_MOE_FUSED=" not in example
+    assert "SGLANG_CONCURRENCY=1" in example
 
-    fused_doc = _env_example_block("OCR_MOE_FUSED")
-    missing = [d for d in fused_devices if d not in fused_doc]
-    assert not missing, f"OCR_MOE_FUSED 설명에 P17 기본 디바이스 {missing}가 없다: {fused_doc}"
-
-    fast_doc = _env_example_block("OCR_MOE_FAST")
-    assert fast.group(1).upper() in fast_doc, f"OCR_MOE_FAST 설명에 P18 기본 디바이스가 없다: {fast_doc}"
-    # P18은 이제 P17이 받지 않을 때의 폴백이다 — 그 관계가 빠지면 FAST=1이 기본 경로를 바꾼다고 읽힌다
-    assert "OCR_MOE_FUSED=0" in fast_doc, fast_doc
 
 
 # ── docs-final-3: 캐시 버전 상수의 '현재 값'은 한 곳(§15.1 표)에서 코드와 같다 ─────────

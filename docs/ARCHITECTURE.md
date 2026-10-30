@@ -1,3 +1,7 @@
+> OCR 구현·설정·복구 정책은 [Unlimited-OCR-2 전환 문서](UNLIMITED_OCR_2.md)가 우선합니다.
+> 아래 v1/sidecar/textlayer 관련 절은 과거 구조 기록이며, 현재는 unlimited2 단일 엔진입니다.
+> 업로드·작업·SSE·번역·내보내기 API 계약은 유지됩니다.
+
 # Unlimited-OCR PDF → Markdown 변환 서비스 — 아키텍처 & API 계약
 
 > 이 문서는 본 프로젝트의 **단일 진실 공급원(SSOT)** 입니다.

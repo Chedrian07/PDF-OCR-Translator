@@ -82,7 +82,7 @@ export function renderHealth(d) {
 // 배지는 제자리에서 고친다. lead는 글자 앞 장식('icon' | 'dot' | 'spinner' | '').
 function healthBadgeSpecs(d, status) {
   const specs = [];
-  const modelId = d.model_id || 'baidu/Unlimited-OCR';
+  const modelId = d.model_id || 'baidu/Unlimited-OCR-2';
   const modelTitle = modelId +
     (d.model_revision ? ` @ ${String(d.model_revision).slice(0, 8)}` : '') +
     (d.provider ? ` · ${d.provider}` : '');

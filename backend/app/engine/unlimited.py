@@ -15,17 +15,14 @@ import os
 import subprocess
 import sys
 import threading
-from pathlib import Path
 
 from ..config import Settings
-from ..native_ops import make_ngram_logits_processor
 from .base import (
     EngineCapabilities,
     EngineError,
     OCREngine,
     OutputLimitError,
     RepetitiveOutputError,
-    StreamSink,
 )
 from .hf_snapshot import pretrained_local_first
 from .objc_pool import autorelease_pool
@@ -64,6 +61,7 @@ _TORCH_DEVICES = {"cpu": "cpu", "cuda": "cuda", "metal": "mps"}
 # 프로세스 전역으로 몽키패치한다 — 동시 호출 시 다른 스레드가 로드한 가중치가 meta로 되돌아가
 # .to(device)가 "Cannot copy out of meta tensor"로 실패. 프로세스 전체에서 직렬화해야 안전하다.
 _LOAD_LOCK = threading.Lock()
+_RUN_LOCK = threading.Lock()
 
 
 def torch_device_name(device: str) -> str:
@@ -165,7 +163,7 @@ def _resolve_dtype(device: str, dtype_name: str):
 
 
 class UnlimitedEngine(OCREngine):
-    name = "unlimited"
+    name = "unlimited2"
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -199,6 +197,7 @@ class UnlimitedEngine(OCREngine):
             model_id=self._settings.model_id,
             model_revision=self._settings.model_revision,
             provider="in-process",
+            runtime="torch",
             supports_multi_page=True,
             preferred_chunk_size=None,  # settings.pages_per_chunk 사용 (기존 동작)
             stream_granularity="token",
@@ -222,7 +221,7 @@ class UnlimitedEngine(OCREngine):
         import torch
         from transformers import AutoTokenizer
 
-        from ..vendor.unlimited_ocr import UnlimitedOCRForCausalLM
+        from ..vendor.unlimited_ocr2 import UnlimitedOCRForCausalLM
 
         s = self._settings
         if self.device == "cuda" and not torch.cuda.is_available():
@@ -280,14 +279,7 @@ class UnlimitedEngine(OCREngine):
         첫 디코드 때 디바이스에서 지연 재스택하던 구 동작은 MPS 힙 단편화로 드라이버
         메모리 +1.7~3.3GB가 남고 첫 실행 피크가 15~16GB였다(audit MPS-2).
         OCR_MOE_FUSED=0이면 프리빌드하지 않는다(legacy 개별 가중치 그대로)."""
-        from ..vendor.unlimited_ocr.modeling_deepseekv2 import prebuild_fused_moe
-
-        model = model.eval()
-        if self.torch_device in ("cuda", "mps"):
-            stacked = prebuild_fused_moe(model, self.torch_device)
-            if stacked:
-                logger.info("융합 MoE(P17) expert 스택 프리빌드: %d개 레이어", stacked)
-        model = model.to(self.torch_device)
+        model = model.eval().to(self.torch_device)
         self._release_device_cache()
         return model
 
@@ -317,177 +309,85 @@ class UnlimitedEngine(OCREngine):
         except Exception:  # pragma: no cover - 방어적
             pass
 
-    def _gen_extras(
-        self,
-        sink: StreamSink,
-        cancel: threading.Event,
-        ngram_window: int,
-        repetition: SemanticRepetitionDetector,
-        outcome: _GenerationOutcome | None = None,
-    ) -> dict:
-        from transformers import StoppingCriteria, StoppingCriteriaList, TextStreamer
+    def _run(self, image_paths, out_dir, sink, cancel, *, single):
+        import torch
+        from PIL import Image
+        from transformers import TextStreamer
+        from .base import JobCanceled
+        from .postprocess import BlockStream, save_results_multi, save_results_single, _split_multi_pages
 
-        tokenizer = self._tokenizer
-        eos_text = tokenizer.decode([tokenizer.eos_token_id], skip_special_tokens=False)
-
-        class _SinkStreamer(TextStreamer):
-            def put(self, value) -> None:
-                # 첫 put은 프롬프트이며 TextStreamer(skip_prompt=True)가 버린다.
-                # 이후 put의 실제 생성 토큰 수는 디코딩/공백 유무와 무관한 hard
-                # limit에 사용한다. fast_decode에서는 블록 크기만큼의 overshoot만
-                # 가능하고 이 산출물은 전부 폐기된다.
-                is_prompt = self.next_tokens_are_prompt
-                super().put(value)
-                # 먼저 디코딩해야 이 블록 안의 <PAGE>가 문자 감지기의 페이지
-                # 상태를 초기화한다. 그 뒤 블록 전체를 새 페이지에 보수적으로
-                # 계수하면 경계에서 이전 페이지를 잘못 초과시키거나 토큰을 잃지 않는다.
-                if not is_prompt:
-                    repetition.feed_tokens(int(value.numel()))
-
-            def on_finalized_text(self, text: str, stream_end: bool = False) -> None:
-                text = text.replace(eos_text, "\n")
-                repeated = repetition.feed(text, stream_end=stream_end)
-                if text and not repeated:
-                    sink.on_text(text)
-
-        class _CancelCriteria(StoppingCriteria):
-            def __call__(self, input_ids, scores, **kwargs) -> bool:
-                return cancel.is_set() or repetition.detected
-
-        extras: dict = {
-            "streamer": _SinkStreamer(tokenizer, skip_prompt=True, skip_special_tokens=False),
-            "stopping_criteria": StoppingCriteriaList([_CancelCriteria()]),
-        }
-        extras["logits_processor"] = make_ngram_logits_processor(
-            NGRAM_SIZE, ngram_window, self.torch_device
-        )
-        # 디코드 경로는 항상 generate_fn(벤더 P15)으로 주입한다 — fast_decode든 HF generate
-        # 폴백(OCR_FAST_DECODE=0)이든 반환 텐서로 "EOS 없이 MAX_LENGTH 도달"을 판정해야
-        # 잘린 출력을 정상 결과로 채택하지 않는다(audit decode-correctness-1).
-        # 폴백 래퍼는 벤더의 기본 분기와 똑같이 model.generate(**gen_kwargs)를 부른다.
-        from .fast_decode import hit_length_limit
-
-        if outcome is None:
-            outcome = _GenerationOutcome()
-        if self._settings.fast_decode:
-            from .fast_decode import fast_greedy_decode
-
-            block = self._settings.decode_block
-
-            def _decode(model, gen_kwargs):
-                return fast_greedy_decode(model, gen_kwargs, block=block)
-        else:
-            def _decode(model, gen_kwargs):
-                return model.generate(**gen_kwargs)
-
-        def _generate_fn(model, gen_kwargs):
-            output_ids = _decode(model, gen_kwargs)
-            outcome.length_capped = hit_length_limit(output_ids, gen_kwargs)
-            return output_ids
-
-        extras["generate_fn"] = _generate_fn
-        return extras
-
-    # ── OCREngine 구현 ─────────────────────────────────────────
-
-    def run_multi(
-        self,
-        image_paths: list[Path],
-        out_dir: Path,
-        sink: StreamSink,
-        cancel: threading.Event,
-    ) -> str:
         self.load()
-        out_dir.mkdir(parents=True, exist_ok=True)
+        sink = BlockStream(sink)
         s = self._settings
         repetition = SemanticRepetitionDetector(
             max_page_chars=s.max_page_output_chars,
             max_page_tokens=s.max_page_output_tokens,
             expected_pages=len(image_paths),
         )
-        outcome = _GenerationOutcome()
-        try:
-            try:
-                # MPS: 이미지 H2D 복사·생성 루프·후처리 전체를 풀로 감싼다 — fast_decode는
-                # 스텝마다 따로 비우지만 HF generate 폴백(OCR_FAST_DECODE=0)은 이 바깥
-                # 풀이 유일한 회수 지점이다.
-                with autorelease_pool(self._uses_mps):
-                    outputs, _tokens = self._model.infer_multi(
-                        self._tokenizer,
-                        prompt=MULTI_PROMPT,
-                        image_files=[str(p) for p in image_paths],
-                        output_path=str(out_dir),
-                        image_size=1024,
-                        max_length=s.max_length,
-                        no_repeat_ngram_size=NGRAM_SIZE,
-                        ngram_window=MULTI_NGRAM_WINDOW,
-                        save_results=True,
-                        **self._gen_extras(
-                            sink, cancel, MULTI_NGRAM_WINDOW, repetition, outcome
-                        ),
-                    )
-            except Exception as exc:
-                if repetition.detected and not cancel.is_set():
-                    raise RepetitiveOutputError(repetition.message) from exc
-                raise
-            if repetition.detected and not cancel.is_set():
-                raise RepetitiveOutputError(repetition.message)
-            if outcome.length_capped and not cancel.is_set():
-                # 스트리머는 디코드 끝에서 이미 flush됐다. 잘린 청크(꼬리 페이지 손실)를
-                # 정상 결과로 넘기지 않고 runner의 페이지별 복구 경로를 태운다. 잘린
-                # 출력(run_multi 형식 — 산출물은 이미 out_dir에 있다)을 함께 실어 runner가
-                # 끝까지 생성된 앞 페이지는 살리고 잘린 페이지부터만 다시 처리하게 한다.
-                raise OutputLimitError(
-                    _length_limit_message(s.max_length), partial_output=outputs,
-                )
-        finally:
-            self._release_device_cache()
-        # 취소 시에도 부분 출력을 반환한다 — 병합 후 취소 처리는 runner 몫
-        return outputs
 
-    def run_single(
-        self,
-        image_path: Path,
-        out_dir: Path,
-        sink: StreamSink,
-        cancel: threading.Event,
-    ) -> str:
-        self.load()
-        out_dir.mkdir(parents=True, exist_ok=True)
-        s = self._settings
-        repetition = SemanticRepetitionDetector(
-            max_page_chars=s.max_page_output_chars,
-            max_page_tokens=s.max_page_output_tokens,
-            expected_pages=1,
-        )
-        outcome = _GenerationOutcome()
+        class SinkStreamer(TextStreamer):
+            def put(self, value):
+                super().put(value)
+                repetition.feed_tokens(int(value.numel()))
+
+            def on_finalized_text(self, text, stream_end=False):
+                if not repetition.feed(text, stream_end=stream_end) and text:
+                    sink.on_text(text)
+
+        streamer = SinkStreamer(self._tokenizer, skip_prompt=False, skip_special_tokens=False)
         try:
-            try:
-                with autorelease_pool(self._uses_mps):  # run_multi와 같은 이유
-                    outputs = self._model.infer(
-                        self._tokenizer,
-                        prompt=SINGLE_PROMPT,
-                        image_file=str(image_path),
-                        output_path=str(out_dir),
-                        base_size=1024,
-                        image_size=640,
-                        crop_mode=True,
-                        max_length=s.max_length,
-                        no_repeat_ngram_size=NGRAM_SIZE,
-                        ngram_window=SINGLE_NGRAM_WINDOW,
-                        save_results=True,
-                        **self._gen_extras(
-                            sink, cancel, SINGLE_NGRAM_WINDOW, repetition, outcome
-                        ),
-                    )
-            except Exception as exc:
-                if repetition.detected and not cancel.is_set():
-                    raise RepetitiveOutputError(repetition.message) from exc
-                raise
-            if repetition.detected and not cancel.is_set():
+            # Upstream switches DASH routing on the model. Serialize requests, and
+            # always let its finally restore those switches before releasing the lock.
+            with _RUN_LOCK, autorelease_pool(self._uses_mps), torch.inference_mode():
+                if cancel.is_set():
+                    raise JobCanceled()
+                res = self._model.infer(
+                    self._tokenizer,
+                    image_file=[str(p) for p in image_paths],
+                    prompt="Multi page parsing.",
+                    crop_mode=single,
+                    base_size=1024, image_size=640,
+                    max_length=s.max_length,
+                    no_repeat_ngram_size=NGRAM_SIZE,
+                    ngram_window=SINGLE_NGRAM_WINDOW if single else MULTI_NGRAM_WINDOW,
+                    max_page_tokens=s.max_page_output_tokens or 20000,
+                    return_dict=True, eval_mode=True,
+                    streamer=streamer,
+                    should_stop=lambda: cancel.is_set() or repetition.detected,
+                )
+            sink.end()
+            if cancel.is_set():
+                raise JobCanceled()
+            if repetition.detected:
                 raise RepetitiveOutputError(repetition.message)
-            if outcome.length_capped and not cancel.is_set():
-                raise OutputLimitError(_length_limit_message(s.max_length))
+            images = []
+            try:
+                for path in image_paths:
+                    with Image.open(path) as img:
+                        images.append(img.convert("RGB"))
+                if single:
+                    pages = _split_multi_pages(res["text"])
+                    output = save_results_single("\n".join(pages), images[0], str(out_dir))
+                else:
+                    output = save_results_multi(res["text"], images, str(out_dir))
+            finally:
+                for img in images:
+                    img.close()
+            if res["finish_reason"] == "length":
+                raise OutputLimitError(_length_limit_message(s.max_length),
+                                       partial_output=None if single else output)
+            return output
+        except InterruptedError as exc:
+            if cancel.is_set():
+                raise JobCanceled() from exc
+            if repetition.detected:
+                raise RepetitiveOutputError(repetition.message) from exc
+            raise
         finally:
             self._release_device_cache()
-        return outputs or ""
+
+    def run_multi(self, image_paths, out_dir, sink, cancel):
+        return self._run(image_paths, out_dir, sink, cancel, single=False)
+
+    def run_single(self, image_path, out_dir, sink, cancel):
+        return self._run([image_path], out_dir, sink, cancel, single=True)

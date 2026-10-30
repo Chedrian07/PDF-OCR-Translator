@@ -265,8 +265,8 @@ def test_engine_construction_needs_no_mlx_torch_or_transformers():
         "import sys\n"
         "from app.config import Settings\n"
         "from app.engine.unlimited_mlx import UnlimitedMLXEngine\n"
-        "e = UnlimitedMLXEngine(Settings(engine='unlimited', device='mlx', preload_model=False))\n"
-        "assert e.device == 'mlx' and e.name == 'unlimited' and not e.loaded\n"
+        "e = UnlimitedMLXEngine(Settings(engine='unlimited2', device='mlx', preload_model=False))\n"
+        "assert e.device == 'mlx' and e.name == 'unlimited2' and not e.loaded\n"
         "print(sorted(m for m in ('mlx', 'mlx.core', 'torch', 'transformers') if m in sys.modules))\n"
     )
     out = subprocess.run(
@@ -279,9 +279,10 @@ def test_engine_construction_needs_no_mlx_torch_or_transformers():
 def test_capabilities_match_the_torch_engine():
     from app.engine.unlimited import UnlimitedEngine
 
-    s = Settings(engine="unlimited", device="mlx", preload_model=False)
-    torch_caps = UnlimitedEngine(Settings(engine="unlimited", device="cpu")).capabilities()
-    assert UnlimitedMLXEngine(s).capabilities() == torch_caps
+    s = Settings(engine="unlimited2", device="mlx", preload_model=False)
+    torch_caps = UnlimitedEngine(Settings(engine="unlimited2", device="cpu")).capabilities()
+    from dataclasses import replace
+    assert replace(UnlimitedMLXEngine(s).capabilities(), runtime="torch") == torch_caps
 
 
 @pytest.mark.parametrize(
@@ -290,15 +291,15 @@ def test_capabilities_match_the_torch_engine():
      ("float32", 0, "float32"), ("float16", 8, "float16+q8")],
 )
 def test_dtype_name_reports_dtype_and_quantization(dtype, bits, name):
-    eng = UnlimitedMLXEngine(Settings(engine="unlimited", device="mlx", dtype=dtype, mlx_quant_bits=bits))
+    eng = UnlimitedMLXEngine(Settings(engine="unlimited2", device="mlx", dtype=dtype, mlx_quant_bits=bits))
     assert eng.dtype_name == name
 
 
 def test_invalid_dtype_or_quant_bits_fail_at_construction():
     with pytest.raises(ValueError, match="OCR_DTYPE"):
-        UnlimitedMLXEngine(Settings(engine="unlimited", device="mlx", dtype="int8"))
+        UnlimitedMLXEngine(Settings(engine="unlimited2", device="mlx", dtype="int8"))
     with pytest.raises(ValueError, match="OCR_MLX_QUANT_BITS"):
-        UnlimitedMLXEngine(Settings(engine="unlimited", device="mlx", mlx_quant_bits=4))
+        UnlimitedMLXEngine(Settings(engine="unlimited2", device="mlx", mlx_quant_bits=4))
 
 
 @needs_mlx
@@ -312,7 +313,7 @@ def test_engine_dtype_and_quant_tables_match_the_vendor_loader():
 def test_load_on_non_apple_silicon_fails_with_a_korean_reason(monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(um.platform, "machine", lambda: "x86_64")
-    eng = UnlimitedMLXEngine(Settings(engine="unlimited", device="mlx"))
+    eng = UnlimitedMLXEngine(Settings(engine="unlimited2", device="mlx"))
     with pytest.raises(EngineError, match="Apple Silicon") as info:
         eng.load()
     assert "linux/x86_64" in str(info.value) and "OCR_DEVICE=auto" in str(info.value)
@@ -324,7 +325,7 @@ def test_load_without_mlx_points_to_the_install_command(monkeypatch):
     monkeypatch.setattr(um.platform, "machine", lambda: "arm64")
     monkeypatch.setitem(sys.modules, "mlx", None)
     monkeypatch.setitem(sys.modules, "mlx.core", None)
-    eng = UnlimitedMLXEngine(Settings(engine="unlimited", device="mlx"))
+    eng = UnlimitedMLXEngine(Settings(engine="unlimited2", device="mlx"))
     with pytest.raises(EngineError, match="uv sync --extra metal --extra mlx"):
         eng.load()
 
@@ -446,7 +447,7 @@ def _page_images(tmp_path: Path, n: int = 2, size=(600, 800)) -> list[Path]:
 
 
 def _engine(monkeypatch, model, tokenizer, **settings_kw) -> UnlimitedMLXEngine:
-    s = Settings(engine="unlimited", device="mlx", preload_model=False, **settings_kw)
+    s = Settings(engine="unlimited2", device="mlx", preload_model=False, **settings_kw)
     eng = UnlimitedMLXEngine(s)
     monkeypatch.setattr(eng, "_load_weights", lambda: (model, tokenizer))
     monkeypatch.setattr(eng, "_warmup", lambda m, t: None)
@@ -681,7 +682,7 @@ def test_load_is_idempotent_under_concurrent_callers(monkeypatch, tok):
         time.sleep(0.2)  # 두 번째 스레드가 로딩 도중에 들어오게
         return model, tok
 
-    eng = UnlimitedMLXEngine(Settings(engine="unlimited", device="mlx", preload_model=False))
+    eng = UnlimitedMLXEngine(Settings(engine="unlimited2", device="mlx", preload_model=False))
     monkeypatch.setattr(eng, "_load_weights", slow_load)
     monkeypatch.setattr(eng, "_warmup", lambda m, t: warmups.append(1))
     errors: list[Exception] = []
@@ -753,7 +754,7 @@ def tiny_model():
 
 
 def _tiny_engine(monkeypatch, model, tokenizer, **kw) -> UnlimitedMLXEngine:
-    eng = UnlimitedMLXEngine(Settings(engine="unlimited", device="mlx", preload_model=False, **kw))
+    eng = UnlimitedMLXEngine(Settings(engine="unlimited2", device="mlx", preload_model=False, **kw))
     monkeypatch.setattr(eng, "_load_weights", lambda: (model, tokenizer))
     return eng  # 워밍업은 실제로 돈다 (vendor warmup: 두 모드 짧은 생성)
 
@@ -849,7 +850,7 @@ def mlx_app(monkeypatch, tmp_path, tok):
 
     def make(**kw):
         settings = Settings(
-            engine="unlimited", device="mlx", data_dir=tmp_path / "data",
+            engine="unlimited2", device="mlx", data_dir=tmp_path / "data",
             frontend_dir=tmp_path / "no-frontend", preload_model=False, render_dpi=72, **kw,
         )
         return TestClient(create_app(settings)), model, settings
@@ -874,7 +875,7 @@ def test_pipeline_runs_a_job_to_done_on_the_mlx_engine(mlx_app):
     client, model, settings = mlx_app()
     with client:
         health = client.get("/api/health").json()
-        assert (health["engine"], health["device"], health["dtype"]) == ("unlimited", "mlx", "bfloat16")
+        assert (health["engine"], health["device"], health["dtype"]) == ("unlimited2", "mlx", "bfloat16")
         assert health["capabilities"]["stream_granularity"] == "token"
         job = _upload_and_wait(client, make_pdf_bytes(pages=2))
         assert job["status"] == "done", job
@@ -997,7 +998,7 @@ def test_load_weights_uses_the_complete_cached_snapshot_without_the_hub(monkeypa
     monkeypatch.setattr(
         um, "complete_local_snapshot", lambda *args: lookups.append(args) or snapshot,
     )
-    settings = Settings(engine="unlimited", device="mlx")
+    settings = Settings(engine="unlimited2", device="mlx")
     eng = UnlimitedMLXEngine(settings)
     assert eng._load_weights() == ("model", "tokenizer")
     assert lookups == [(settings.model_id, settings.model_revision)]

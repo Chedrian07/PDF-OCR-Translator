@@ -28,7 +28,7 @@ class EngineError(RuntimeError):
     이를 하드 실패로 로깅하지 않고, 워커의 준비 대기가 계속 기다린다.
 
     retry_same_page=False이면 runner가 같은 청크·페이지를 **즉시 다시 요청하지 않고**
-    곧바로 페이지 격리(텍스트 레이어 폴백 → 플레이스홀더)로 넘긴다. 같은 입력을 곧장
+    곧바로 페이지 격리(플레이스홀더)로 넘긴다. 같은 입력을 곧장
     다시 보내 봐야 소용없는 실패용이다 — 예: sidecar 읽기 타임아웃(SidecarTimeoutError)은
     provider가 끊긴 요청의 추론을 끝까지 하므로 재요청이 그 뒤에 줄을 서 다시 타임아웃이
     난다. 기본값 True(1회 재시도). runner는 EngineError가 아닌 예외(벤더 RuntimeError·
@@ -101,6 +101,7 @@ class EngineCapabilities:
     model_id: str = ""
     model_revision: str = ""
     provider: str = "in-process"
+    runtime: str = ""
     supports_multi_page: bool = True
     preferred_chunk_size: int | None = None
     stream_granularity: str = "token"
@@ -112,7 +113,7 @@ class OCREngine(abc.ABC):
     name: str = "base"
     device: str = "cpu"
     dtype_name: str = "float32"
-    # 같은 페이지를 다시 돌려도 결과가 같은 결정적 엔진인가(텍스트 레이어·Tesseract).
+    # 같은 페이지를 다시 돌려도 결과가 같은 테스트 엔진인가.
     # True면 runner의 충실도 게이트가 단독 재처리를 하지 않는다 — 같은 호출을 반복해
     # 시간만 쓰고 거짓 '충실도 미달' 경고를 남긴다. 생성 모델 엔진은 False(기본).
     deterministic_rerun: bool = False

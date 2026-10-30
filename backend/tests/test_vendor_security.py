@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-VENDOR_DIR = Path(__file__).resolve().parents[1] / "app" / "vendor" / "unlimited_ocr"
+VENDOR_DIR = Path(__file__).resolve().parents[1] / "app" / "vendor" / "unlimited_ocr2"
 DANGEROUS = {"eval", "exec", "compile", "__import__"}
 
 
@@ -71,12 +71,12 @@ def test_vendor_sources_never_eval_reachable_code():
             else:
                 reachable.append(f"{path.name}:{node.lineno} {node.func.id}()")
     assert reachable == [], f"도달 가능한 eval/exec 호출: {reachable}"
-    assert disabled >= 1, "P8 비활성 블록이 사라짐 — 삭제했다면 이 단언을 함께 갱신할 것"
+    # The unsafe plotting branch has been removed entirely.
 
 
 def test_det_coordinate_parser_uses_literal_eval_only():
     """P9: extract_coordinates_and_label은 ast.literal_eval만 쓴다."""
-    src = (VENDOR_DIR / "modeling_unlimitedocr.py").read_text(encoding="utf-8")
+    src = (VENDOR_DIR.parent.parent / "engine" / "postprocess.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
     fn = next(
         n for n in ast.walk(tree)
@@ -96,7 +96,7 @@ def test_det_coordinate_parser_uses_literal_eval_only():
 @pytest.fixture
 def vendor_mod():
     pytest.importorskip("torch")
-    from app.vendor.unlimited_ocr import modeling_unlimitedocr
+    from app.engine import postprocess as modeling_unlimitedocr
 
     return modeling_unlimitedocr
 

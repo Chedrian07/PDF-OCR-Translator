@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageOps
 
+from ...engine.image_input import normalize_model_image
 from .config import BOS_ID, IMAGE_TOKEN, IMAGE_TOKEN_ID
 
 PATCH_SIZE = 16
@@ -196,6 +197,7 @@ def prepare_multi(tokenizer, prompt: str, image_files, image_size: int = 640) ->
     images_seq_mask += [False] * len(tokenized_sep)
 
     for image in images:
+        image = normalize_model_image(image)  # Original stays in OCRInputs.images.
         marker = text_encode(tokenizer, "<PAGE>", bos=False, eos=False)
         tokenized_str += marker
         images_seq_mask += [False] * len(marker)
@@ -246,6 +248,7 @@ def prepare_single(
     spatial: list[list[int]] = []
 
     for text_sep, image in zip(text_splits, images):
+        image = normalize_model_image(image)  # Normalize global and tiled views alike.
         tokenized_sep = text_encode(tokenizer, text_sep, bos=False, eos=False)
         tokenized_str += tokenized_sep
         images_seq_mask += [False] * len(tokenized_sep)

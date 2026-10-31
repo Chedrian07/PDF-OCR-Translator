@@ -1,0 +1,33 @@
+{
+  "backend": {
+    "passed": 2309,
+    "skipped": 34,
+    "failed": 0
+  },
+  "frontend": {
+    "passed": 381,
+    "failed": 0
+  },
+  "real_ocr_mock_provider_browser": "passed",
+  "live_provider_browser": {
+    "status": "passed",
+    "translated_units": 12,
+    "translated_exports_verified": true,
+    "downloads": [
+      "HTML",
+      "Markdown",
+      "ZIP",
+      "PDF"
+    ],
+    "mock_provider": false
+  },
+  "standard_compose_gpu": "real inference passed without driver override",
+  "cpu": "real inference passed on contrast-normalized input",
+  "mlx": {
+    "cpu_arithmetic_parity": "passed",
+    "active_checkpoint_parameters": 691,
+    "apple_gpu": "user verification"
+  },
+  "metal_gpu": "user verification",
+  "synthetic_quality_non_regression": "passed on recorded diagnostics; clean Korean formula transcription remains incorrect in both models"
+}

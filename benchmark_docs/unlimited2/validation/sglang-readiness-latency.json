@@ -1,0 +1,56 @@
+{
+  "checked_at": "2026-10-31T07:09:51.269249+00:00",
+  "environment": "Standard Compose ocr-cuda container calling http://unlimited-ocr2:10000",
+  "method": "Same Python process, previous installed adapter and updated source adapter, alternating three load() calls each.",
+  "runtime": "sglang-0.5.20.dev13+g75b9b06b02",
+  "request_seconds": {
+    "/ready": {
+      "status": 200,
+      "seconds": 0.007034
+    },
+    "/model_info": {
+      "status": 200,
+      "seconds": 0.000973
+    },
+    "/get_server_info": {
+      "status": 200,
+      "seconds": 0.008186
+    },
+    "/health_generate": {
+      "status": 200,
+      "seconds": 1.001251
+    },
+    "/health": {
+      "status": 200,
+      "seconds": 1.002556
+    }
+  },
+  "load_seconds": {
+    "previous": [
+      1.027592,
+      1.023885,
+      1.027946
+    ],
+    "updated": [
+      0.022875,
+      0.023257,
+      0.027335
+    ]
+  },
+  "median_load_seconds": {
+    "previous": 1.027592,
+    "updated": 0.023257
+  },
+  "median_seconds_removed": 1.004335,
+  "contract_preserved": [
+    "Readiness rejects paused, starting, unhealthy, and shutting-down server states.",
+    "Every load() checks model snapshot revision and pinned runtime version.",
+    "Every load() queries live scheduler state through /get_server_info."
+  ],
+  "cause": "Pinned /health and /health_generate share a synthetic one-token generation handler with a one-second polling sleep. /ready reads readiness state without generating a token.",
+  "tests": {
+    "path": "backend/tests/test_sglang.py",
+    "passed": 22
+  },
+  "scope": "Adapter load() overhead only; does not measure OCR model throughput or full HTTP time to first token."
+}

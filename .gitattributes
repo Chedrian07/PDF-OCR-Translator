@@ -18,3 +18,4 @@
 backend/app/vendor/unlimited_ocr2/** -whitespace
 benchmark_docs/unlimited2/results/**/output.md -whitespace
 benchmark_docs/unlimited2/validation/*.log -whitespace
+benchmark_docs/unlimited2/validation/2026-10-31/*.log -whitespace

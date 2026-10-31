@@ -38,6 +38,21 @@ def main():
                 matrix=fitz.Matrix(args.dpi / 72, args.dpi / 72), alpha=False
             ).save(p)
             paths.append(p)
+    from PIL import Image
+
+    pixel_hashes, model_hashes, adjusted = [], [], []
+    if not args.baseline:
+        from app.engine.image_input import normalize_model_image
+    for path in paths:
+        with Image.open(path) as source:
+            pixel_hashes.append(hashlib.sha256(source.tobytes()).hexdigest())
+            view = source if args.baseline else normalize_model_image(source)
+            try:
+                model_hashes.append(hashlib.sha256(view.tobytes()).hexdigest())
+                adjusted.append(view is not source)
+            finally:
+                if view is not source:
+                    view.close()
     kw = {"device": "cuda", "engine": "unlimited" if args.baseline else "unlimited2"}
     if not args.baseline:
         kw["sidecar_url"] = args.runtime_url
@@ -50,6 +65,10 @@ def main():
         "runtime": getattr(caps, "runtime", "torch"),
         "pdf_sha256": hashlib.sha256(args.pdf.read_bytes()).hexdigest(),
         "image_sha256": [hashlib.sha256(p.read_bytes()).hexdigest() for p in paths],
+        "source_pixel_sha256": pixel_hashes,
+        "model_pixel_sha256": model_hashes,
+        "contrast_adjusted_pages": adjusted,
+        "model_input_policy": "none" if args.baseline else "washed-paper-blackpoint-v1",
         "dpi": args.dpi,
         "pages": len(paths),
         "concurrency": 1,

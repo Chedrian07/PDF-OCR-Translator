@@ -29,6 +29,7 @@ from pathlib import Path
 from markdown_it.common.utils import escapeHtml
 
 from .render import _restore_table_tags, text_with_math_html
+from ..engine.math_delimiters import recover_math_delimiters
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,9 @@ def parse_page_blocks(raw: str) -> list[dict]:
     image 매치마다 `_image_slots`의 자리 수만큼(상자마다 1개, 읽지 못한 페이로드는 1개)
     그 순서를 그대로 재현한다. 크롭 파일이 없는 자리는 번호만 세고 블록을 만들지 않는다.
     """
+    # Keep raw_pages.json as model evidence while presenting the same recovered
+    # math as the saved Markdown and live stream in layout views/exports.
+    raw = recover_math_delimiters(raw)
     ref_events = []
     for m in _REF_BLOCK.finditer(raw):
         label = m.group(1).strip()

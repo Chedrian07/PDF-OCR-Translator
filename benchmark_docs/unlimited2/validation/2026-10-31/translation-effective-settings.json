@@ -1,0 +1,15 @@
+{
+  "status": "done",
+  "current": 12,
+  "total": 12,
+  "translated": 12,
+  "cached": 0,
+  "requested_temperature": "0",
+  "temperature_omitted": true,
+  "responses_input_list": true,
+  "notices": [
+    "번역 API가 temperature를 지원하지 않습니다 — 이 클라이언트는 temperature를 생략하고 서버 기본값을 사용합니다",
+    "번역 API가 Responses input 목록을 요구합니다 — 이 클라이언트는 같은 원문을 user 메시지 목록 형식으로 전달합니다"
+  ],
+  "mock_provider": false
+}

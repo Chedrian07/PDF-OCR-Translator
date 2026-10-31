@@ -453,6 +453,9 @@ npm --prefix frontend run test:e2e-mock
 E2E_BASE_URL=http://127.0.0.1:8001 npm --prefix frontend run test:e2e
 ```
 
+실제 설정된 번역 공급자까지 검증하려면 `npm --prefix frontend run test:e2e-live`를 사용합니다.
+인증 오류는 성공으로 세지 않고 별도로 기록합니다.
+
 실모델 측정은 `scripts/benchmark_unlimited2.py`를 사용합니다. 모델 없는 테스트는
 실모델 품질·성능 검증을 대신하지 않습니다. Apple Silicon 실기기 검증은 사용자 측에서 진행합니다.
 

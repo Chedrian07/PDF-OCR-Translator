@@ -1,0 +1,52 @@
+{
+  "checked_at": "2026-10-31T08:23:46.638810+00:00",
+  "status": "passed",
+  "probe": "One bounded public synthetic Korean translation through the normal configured OpenAI-compatible client.",
+  "provider_model_and_reasoning_unchanged": true,
+  "requested": {
+    "temperature": "0",
+    "reasoning": "",
+    "reasoning_style": "auto"
+  },
+  "attempts": [
+    {
+      "endpoint": "responses",
+      "http_status": 400,
+      "temperature_present": true,
+      "input_format": "text",
+      "reasoning_field_present": false,
+      "category": "explicit-unsupported-temperature"
+    },
+    {
+      "endpoint": "responses",
+      "http_status": 400,
+      "temperature_present": false,
+      "input_format": "text",
+      "reasoning_field_present": false,
+      "category": "explicit-input-list-required"
+    },
+    {
+      "endpoint": "responses",
+      "http_status": 200,
+      "temperature_present": false,
+      "input_format": "message-list",
+      "reasoning_field_present": false
+    }
+  ],
+  "korean_output_verified": true,
+  "effective": {
+    "temperature_omitted": true,
+    "responses_input_list": true
+  },
+  "compatibility_contract": [
+    "Each explicit field rejection permits one shape/parameter negotiation; unrelated errors do not trigger it.",
+    "Per-client latches are monotonic and synchronized; later payload rebuilds preserve the negotiated forms.",
+    "Explicit reasoning off is not masked when the provider reports active reasoning.",
+    "Fixed compatibility warnings and effective flags are included in translation state and report."
+  ],
+  "tests": {
+    "passed": 294,
+    "scope": "Temperature/Responses compatibility, translation client/engine, isolated live harness configuration."
+  },
+  "full_browser_flow": "Root agent runs separately after this compatible probe; this artifact does not establish full browser/export success."
+}

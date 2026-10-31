@@ -1,0 +1,13 @@
+
+> unlimited-ocr-frontend@0.1.0 test:e2e-live
+> node tests/e2e/live-flow.e2e.mjs
+
+PASS real-backend-ready
+PASS browser-upload
+PASS ocr-stream-and-result
+PASS browser-result-display
+PASS original-html-markdown-zip-downloads
+PASS real-provider-authenticated
+PASS real-translation-and-browser-display
+PASS translated-html-markdown-zip-pdf-downloads
+Live E2E evidence: /home/kch3dri4n/project/PDF-OCR-Translator/tmp/live-e2e-RbTDDL/report.json

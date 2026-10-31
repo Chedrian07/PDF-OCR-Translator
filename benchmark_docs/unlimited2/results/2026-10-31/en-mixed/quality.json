@@ -1,0 +1,177 @@
+{
+  "metric_limits": "CER ignores whitespace, punctuation and common LaTeX wrappers. It is a diagnostic, not a formula-semantic or full layout score. Synthetic reference text includes text within drawn figures. Full quality non-regression needs visual review and additional annotations.",
+  "baseline": {
+    "normalized_alphanumeric_cer": 0.0,
+    "table_shapes": [
+      [
+        3,
+        4
+      ]
+    ],
+    "table_shapes_match": true,
+    "formula_markup_count": 1,
+    "reading_order_landmarks_found": 0,
+    "reading_order_landmarks_total": 0,
+    "reading_order_pair_accuracy": null,
+    "page_markers": 2,
+    "figures": 2,
+    "expected_figures": 2,
+    "median_ocr_s": 3.500248023075983,
+    "figure_mean_iou": 0.980521678110912,
+    "annotated_quality": {
+      "annotation_schema_version": 1,
+      "limits": "Cells use NFKC, case folding and whitespace normalization while retaining punctuation. Equations compare exact operator-preserving token transcriptions after supported LaTeX presentation normalization; matches do not establish semantic equivalence. Unsupported notation is a mismatch.",
+      "page_count_match": true,
+      "table_structure_exact_match": true,
+      "expected_tables": 1,
+      "predicted_tables": 1,
+      "exact_tables": 1,
+      "correct_cells": 12,
+      "expected_cells": 12,
+      "matched_equations": 1,
+      "expected_equations": 1,
+      "cell_accuracy": 1.0,
+      "equation_transcription_accuracy": 1.0,
+      "pages": [
+        {
+          "page": 1,
+          "tables": [
+            {
+              "expected_row_lengths": [
+                4,
+                4,
+                4
+              ],
+              "predicted_row_lengths": [
+                4,
+                4,
+                4
+              ],
+              "structure_match": true,
+              "cell_matches": [
+                [
+                  true,
+                  true,
+                  true,
+                  true
+                ],
+                [
+                  true,
+                  true,
+                  true,
+                  true
+                ],
+                [
+                  true,
+                  true,
+                  true,
+                  true
+                ]
+              ]
+            }
+          ],
+          "equations": [
+            {
+              "expected": "E = mc^2",
+              "token_transcription_match": true
+            }
+          ],
+          "unexpected_tables": 0
+        },
+        {
+          "page": 2,
+          "tables": [],
+          "equations": [],
+          "unexpected_tables": 0
+        }
+      ]
+    }
+  },
+  "candidate": {
+    "normalized_alphanumeric_cer": 0.0,
+    "table_shapes": [
+      [
+        3,
+        4
+      ]
+    ],
+    "table_shapes_match": true,
+    "formula_markup_count": 1,
+    "reading_order_landmarks_found": 0,
+    "reading_order_landmarks_total": 0,
+    "reading_order_pair_accuracy": null,
+    "page_markers": 2,
+    "figures": 2,
+    "expected_figures": 2,
+    "median_ocr_s": 1.3365207309998368,
+    "figure_mean_iou": 0.9981859114145943,
+    "annotated_quality": {
+      "annotation_schema_version": 1,
+      "limits": "Cells use NFKC, case folding and whitespace normalization while retaining punctuation. Equations compare exact operator-preserving token transcriptions after supported LaTeX presentation normalization; matches do not establish semantic equivalence. Unsupported notation is a mismatch.",
+      "page_count_match": true,
+      "table_structure_exact_match": true,
+      "expected_tables": 1,
+      "predicted_tables": 1,
+      "exact_tables": 1,
+      "correct_cells": 12,
+      "expected_cells": 12,
+      "matched_equations": 1,
+      "expected_equations": 1,
+      "cell_accuracy": 1.0,
+      "equation_transcription_accuracy": 1.0,
+      "pages": [
+        {
+          "page": 1,
+          "tables": [
+            {
+              "expected_row_lengths": [
+                4,
+                4,
+                4
+              ],
+              "predicted_row_lengths": [
+                4,
+                4,
+                4
+              ],
+              "structure_match": true,
+              "cell_matches": [
+                [
+                  true,
+                  true,
+                  true,
+                  true
+                ],
+                [
+                  true,
+                  true,
+                  true,
+                  true
+                ],
+                [
+                  true,
+                  true,
+                  true,
+                  true
+                ]
+              ]
+            }
+          ],
+          "equations": [
+            {
+              "expected": "E = mc^2",
+              "token_transcription_match": true
+            }
+          ],
+          "unexpected_tables": 0
+        },
+        {
+          "page": 2,
+          "tables": [],
+          "equations": [],
+          "unexpected_tables": 0
+        }
+      ]
+    }
+  }
+}

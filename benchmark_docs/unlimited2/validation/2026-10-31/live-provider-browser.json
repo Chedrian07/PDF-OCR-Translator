@@ -1,0 +1,33 @@
+{
+  "status": "passed",
+  "checks": [
+    "real-backend-ready",
+    "browser-upload",
+    "ocr-stream-and-result",
+    "browser-result-display",
+    "original-html-markdown-zip-downloads",
+    "real-provider-authenticated",
+    "real-translation-and-browser-display",
+    "translated-html-markdown-zip-pdf-downloads"
+  ],
+  "downloads": [
+    "original.html",
+    "original.md",
+    "original.zip",
+    "translated.html",
+    "translated.md",
+    "translated.zip",
+    "translated.pdf"
+  ],
+  "mock_provider": false,
+  "job_id": "j_a6ecdea36947",
+  "ocr_stream": {
+    "connected": 1,
+    "token": 7,
+    "replay": 0,
+    "done": 1
+  },
+  "provider_probe": {
+    "status": "ready"
+  }
+}

@@ -256,6 +256,72 @@ def test_single_line_dry_run_reserves_actual_cjk_span_bounds(
     doc.close()
 
 
+@pytest.mark.parametrize(
+    "unsupported_glyph,bold,large_overhang",
+    [(False, False, False), (True, False, False), (False, True, False), (False, False, True)],
+    ids=["font-outline", "fallback-glyph", "bold", "large-outline-overhang"],
+)
+def test_compact_font_outline_keeps_full_span_collision_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+    unsupported_glyph: bool,
+    bold: bool,
+    large_overhang: bool,
+):
+    """Non-Noto compact placement keeps the scale floor and full PDF span bbox."""
+    import fitz
+
+    class FontWithLineSpacing:
+        name = "Korean font with line spacing"
+        ascender = 1.10
+        descender = -0.25
+        bbox = (
+            fitz.Rect(-0.5, -0.65, 1.1, 0.5)
+            if large_overhang else fitz.Rect(-0.5, -0.25, 1.1, 0.94)
+        )
+
+        @staticmethod
+        def has_glyph(codepoint: int) -> bool:
+            return not (unsupported_glyph and codepoint == ord("글"))
+
+        @staticmethod
+        def text_length(_text: str, *, fontsize: float) -> float:
+            return fontsize * 2
+
+    monkeypatch.setattr(
+        pdf_export_module, "_metrics_font", lambda *_args: FontWithLineSpacing(),
+    )
+    with fitz.open() as doc:
+        page = doc.new_page(width=300, height=200)
+        common = {
+            "page": page,
+            "rect": fitz.Rect(20, 80, 200, 92),
+            "text": "한글",
+            "base_pt": 12,
+            "fontname": "outline-test",
+            "fontfile": "/fonts/with-line-spacing.ttf",
+            "bold": bold,
+        }
+        plan = _plan_single_line(**common)
+        if unsupported_glyph or bold or large_overhang:
+            assert plan is None
+            return
+
+        assert plan is not None and plan.origin is not None
+        assert plan.fontsize == pytest.approx(12 * 0.84)
+        assert plan.ink_rect.y0 == pytest.approx(
+            plan.origin[1] - plan.fontsize * FontWithLineSpacing.ascender,
+        )
+        assert plan.ink_rect.y1 == pytest.approx(
+            plan.origin[1] - plan.fontsize * FontWithLineSpacing.descender,
+        )
+        assert plan.ink_rect.y0 < common["rect"].y0
+        assert _plan_single_line(
+            **common,
+            scales=(0.84,),
+            avoid_rects=[fitz.Rect(20, 77, 200, 79)],
+        ) is None
+
+
 @pytest.mark.parametrize("lower_y0", [100.0, 110.0], ids=["overlap", "touch"])
 def test_overlapping_or_touching_layout_blocks_export_without_text_collision(
     tmp_path: Path,

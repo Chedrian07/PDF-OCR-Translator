@@ -8,6 +8,7 @@ import json
 import threading
 import time
 import uuid
+from io import BytesIO
 from pathlib import Path
 
 import httpx
@@ -28,6 +29,7 @@ from .postprocess import (
     save_results_single,
 )
 from .repetition import SemanticRepetitionDetector
+from .image_input import normalize_model_image
 
 # dill.loads accepts the standard pickle GLOBAL representation. This references
 # the installed wheel's official class, without importing CUDA into the web app.
@@ -84,27 +86,40 @@ class SGLangEngine(OCREngine):
             runtime="sglang-0.5.20.dev13+g75b9b06b02",
         )
 
+    def _mark_unavailable(self):
+        self._loaded = False
+        self._health = {"status": "unavailable"}
+
     def load(self):
         s = self._settings
         try:
             with httpx.Client(
                 base_url=self.url, trust_env=False, timeout=s.sidecar_health_timeout_s
             ) as client:
-                ready = client.get("/health" if self._loaded else "/health_generate")
+                # In the pinned wheel both /health variants run an inference and
+                # wait at least one second. /ready checks startup, pause, shutdown
+                # and unhealthy state without scheduling a synthetic generation.
+                # Keep the live scheduler query and identity checks on every call.
+                ready = client.get("/ready")
                 ready.raise_for_status()
                 response = client.get("/model_info")
                 response.raise_for_status()
                 info = response.json()
-                runtime = client.get("/get_server_info")
+                runtime = client.get("/server_info")
                 runtime.raise_for_status()
                 runtime_info = runtime.json()
+                if not isinstance(info, dict) or not isinstance(runtime_info, dict):
+                    raise ValueError("SGLang identity metadata must be objects")
                 if runtime_info.get("version") != "0.5.20.dev13+g75b9b06b02":
                     raise EngineError(
                         "SGLang runtime version mismatch; install the pinned official wheel"
                     )
             # The launcher passes the resolved immutable snapshot directory. Never
             # advertise the configured revision for an unrelated running server.
-            path = info.get("model_path", "").rstrip("/")
+            path = info.get("model_path", "")
+            if not isinstance(path, str):
+                raise ValueError("SGLang model path must be a string")
+            path = path.rstrip("/")
             if (
                 not path.endswith("/snapshots/" + s.model_revision)
                 or "models--baidu--Unlimited-OCR-2/" not in path
@@ -115,9 +130,11 @@ class SGLangEngine(OCREngine):
             self._loaded = True
             self._health = {"status": "ready", "model_revision": s.model_revision}
         except (httpx.HTTPError, ValueError) as exc:
-            self._loaded = False
-            self._health = {"status": "unavailable"}
+            self._mark_unavailable()
             raise SGLangUnavailable("Unlimited-OCR-2 SGLang is not ready") from exc
+        except EngineError:
+            self._mark_unavailable()
+            raise
 
     def provider_health(self):
         try:
@@ -149,7 +166,20 @@ class SGLangEngine(OCREngine):
                 if path.suffix.lower() in (".jpg", ".jpeg")
                 else "image/png"
             )
-            data = base64.b64encode(path.read_bytes()).decode("ascii")
+            with Image.open(path) as source:
+                prepared = normalize_model_image(source)
+                try:
+                    if prepared is source:
+                        encoded = path.read_bytes()
+                    else:
+                        buffer = BytesIO()
+                        prepared.save(buffer, format="PNG", compress_level=1)
+                        encoded = buffer.getvalue()
+                        mime = "image/png"
+                finally:
+                    if prepared is not source:
+                        prepared.close()
+            data = base64.b64encode(encoded).decode("ascii")
             content.append(
                 {
                     "type": "image_url",
@@ -272,7 +302,11 @@ class SGLangEngine(OCREngine):
         payload = self.payload(paths, single=single, rid=uuid.uuid4().hex)
         try:
             raw, finish = asyncio.run(self._stream(payload, sink, cancel, repetition))
+        except SGLangUnavailable:
+            self._mark_unavailable()
+            raise
         except (httpx.HTTPError, ValueError) as exc:
+            self._mark_unavailable()
             raise SGLangUnavailable("SGLang OCR connection/stream failed") from exc
         if cancel.is_set():
             raise JobCanceled()

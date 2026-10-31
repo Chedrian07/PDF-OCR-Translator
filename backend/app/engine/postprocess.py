@@ -22,6 +22,9 @@ import re
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from .figure_geometry import refine_figure_box
+from .math_delimiters import MathDelimiterStream, recover_math_delimiters
+
 STOP_STR = "<｜end▁of▁sentence｜>"
 
 
@@ -52,10 +55,10 @@ def normalize_blocks(text: str) -> str:
 
 
 class BlockStream:
-    """Buffer only an unfinished v2 header; stream ordinary text immediately."""
+    """Normalize v2 headers, then recover algebra with bounded line lookahead."""
 
     def __init__(self, sink):
-        self.sink = sink
+        self.sink = MathDelimiterStream(sink)
         self.pending = ""
 
     def on_text(self, text):
@@ -79,6 +82,7 @@ class BlockStream:
         if self.pending:
             self.sink.on_text(normalize_blocks(self.pending))
             self.pending = ""
+        self.sink.end()
 
 
 def _dump_raw_pages(output_path, pages) -> None:
@@ -218,6 +222,9 @@ def draw_bounding_boxes(image, refs, ouput_path, image_prefix=""):
                         if is_image:
                             img_idx += 1
                         continue
+                    original_box = box
+                    if is_image:
+                        box = refine_figure_box(image, box)
                     x1, y1, x2, y2 = box
 
                     if is_image:
@@ -234,6 +241,8 @@ def draw_bounding_boxes(image, refs, ouput_path, image_prefix=""):
                                 "image_width": image_width,
                                 "image_height": image_height,
                             }
+                            if box != original_box:
+                                crop_boxes[f"{image_prefix}{img_idx}.jpg"]["refined"] = True
                         except Exception as e:  # noqa: BLE001 - 업스트림 동작 유지
                             logger.debug("figure 크롭 저장 실패: %s", e)
                         img_idx += 1
@@ -321,6 +330,7 @@ def save_results_single(outputs: str, image, output_path) -> str:
     outputs = normalize_blocks(outputs)
     _ensure_dirs(output_path)
     _dump_raw_pages(output_path, [outputs])  # [torch vendor patch P14]
+    outputs = recover_math_delimiters(outputs)
     matches_ref, matches_images, mathes_other = re_match(outputs)
     result = process_image_with_refs(image, matches_ref, output_path)
 
@@ -345,6 +355,7 @@ def save_results_multi(outputs: str, images, output_path) -> str:
     _ensure_dirs(output_path)
     pages = _split_multi_pages(outputs)  # [torch vendor patch P23]
     _dump_raw_pages(output_path, [p.strip() for p in pages])  # [torch vendor patch P14]
+    pages = _split_multi_pages(recover_math_delimiters(outputs))
     processed_pages = []
     for page_idx, page_output in enumerate(pages):
         page_output = page_output.strip()

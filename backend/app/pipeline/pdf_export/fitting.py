@@ -589,6 +589,34 @@ def _noto_visible_ink_bounds(text: str) -> tuple[float, float] | None:
     return ascender, descender
 
 
+def _font_outline_ink_bounds(font, text: str, max_size: float) -> tuple[float, float] | None:
+    """행 메트릭보다 작은 폰트 전체의 윤곽 bbox는 안전한 compact 배치에 쓴다.
+
+    ascender/descender에는 행간용 여백이 포함될 수 있다. Font.bbox는 해당
+    폰트의 모든 글리프 윤곽을 덮으므로 Noto 전용 실측값을 다른 폰트에 적용할
+    필요가 없다. 폴백 글리프는 이 bbox 밖일 수 있으므로 전부 해당 폰트에
+    있는 문자열에만 사용한다.
+    """
+    try:
+        bounds = font.bbox
+        ascender, descender = float(bounds.y1), float(bounds.y0)
+        metric_ascender, metric_descender = float(font.ascender), float(font.descender)
+        if (
+            not all(math.isfinite(value) for value in (ascender, descender))
+            or not descender <= 0 < ascender
+            or ascender - descender >= metric_ascender - metric_descender
+            # 충돌 검사는 span 주위 0.5pt를 더 본다. 두 compact 줄의 윤곽이
+            # 각각 span 밖으로 나와도 합계가 그 여유보다 작게 제한한다.
+            or max(0.0, ascender - metric_ascender, metric_descender - descender)
+            * max_size > 0.2
+            or not all(font.has_glyph(ord(char)) for char in set(text) if not char.isspace())
+        ):
+            return None
+        return ascender, descender
+    except Exception:  # noqa: BLE001 — 윤곽 bbox가 없거나 불확실하면 기존 메트릭 유지
+        return None
+
+
 def _plan_single_line(
     page,
     rect,
@@ -647,6 +675,11 @@ def _plan_single_line(
     ):
         return None
     avoid = avoid_rects or []
+    outline_bounds = (
+        _font_outline_ink_bounds(
+            font, text, max(_MIN_FONT_PT, base_pt * max(scales, default=1.0)),
+        ) if fontfile and not bold else None
+    )
     for scale in scales:
         size = max(_MIN_FONT_PT, base_pt * scale)
         # PyMuPDF의 내장 CJK 폰트는 ``Font.text_length()``와 실제
@@ -691,6 +724,14 @@ def _plan_single_line(
             measured_ascender, measured_descender = visible_bounds
             layout_ascender = min(layout_ascender, measured_ascender)
             layout_descender = max(layout_descender, measured_descender)
+        elif (
+            outline_bounds is not None
+            and size * (layout_ascender - layout_descender)
+            > vertical.y1 - working.y0
+        ):
+            # Malgun 등은 전역 윤곽 bbox가 행 메트릭보다 작다. 기존 축소
+            # 하한을 더 낮추지 않고 그 보수적 윤곽 안에서 baseline만 계산한다.
+            layout_ascender, layout_descender = outline_bounds
         baseline = working.y0 + size * layout_ascender
         glyph_bottom = baseline - size * layout_descender
         # max_rect은 다음 블록 앞 5pt에서 끝난다. 폰트 bbox의 descender는 한글

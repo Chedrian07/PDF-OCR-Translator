@@ -278,8 +278,7 @@ services:
           pids: 1024   # fork 폭주 차단 — 설명은 ocr-cpu 하드닝 주석 참조
     restart: unless-stopped
 
-  # ── OvisOCR2 스택 (profile: ovis) ────────────────────────────
-  # backend(ocr-ovis)는 GPU 미사용 — GPU는 ovisocr2 sidecar 전용.
+  # CUDA 모델 추론은 고정 Unlimited-OCR-2 SGLang 서비스가 담당한다.
   unlimited-ocr2:
     build:
       context: .

@@ -73,16 +73,14 @@ CPU·Metal은 직렬화된 공식 생성 루프가 DASH 상태를 복원하며, 
 충실도 비교와 페이지 정렬에만 사용한다. 실패한 모델 출력은 원본 텍스트/Tesseract로
 대체하지 않는다. 실패 페이지는 경고와 자리표시자를 유지하며 전부 실패하면 작업이 실패한다.
 
-## WSL NVIDIA 진단
+## WSL GPU 상태
 
-이번 환경에서는 `/usr/lib/wsl/lib/libnvidia-ml.so.1`의 ELF 재배치 중 SIGSEGV가 발생했다.
-`/dev/dxg`는 존재했고 Docker NVIDIA runtime도 등록되어 있었다. 설치된 드라이버 디렉터리의
-라이브러리를 **해당 프로세스에만** 지정하면 GPU 조회와 CUDA 실행이 복구됐다.
+2026-10-31 재검증에서는 기본 `nvidia-smi`, Docker `--gpus`, 표준 Compose의
+`gpus: all`로 실제 CUDA 추론이 성공했다. 드라이버 경로·장치를 수동 지정할 필요가 없다.
 
-```bash
-# 실제 설치된 nv*.inf 디렉터리를 확인한 뒤 사용한다. 시스템 파일을 덮어쓰지 않는다.
-LD_LIBRARY_PATH=/usr/lib/wsl/drivers/<installed-nvidia-driver>:/usr/lib/wsl/lib nvidia-smi
-```
+2026-10-30에는 WSL NVML 라이브러리 로딩에서 SIGSEGV가 발생해 검증 프로세스에만
+설치된 드라이버 디렉터리를 지정했다. 충돌 위치는 확인했지만 그 상태의 근본 원인은
+확정하지 못했다. 시스템 드라이버 파일은 수정하지 않았다. 그 우회는 과거 진단 기록이다.
 
 ## 검증 명령
 
@@ -94,6 +92,23 @@ npm test
 npm run test:e2e-mock
 E2E_BASE_URL=http://127.0.0.1:8001 npm run test:e2e
 ```
+
+실제 번역 공급자까지 쓰는 옵트인 브라우저 검증은 다음 명령이다. `.env`의 등록된
+`OPENAI_`/`TRANSLATE_` 설정만 격리된 테스트 백엔드에 전달하며, 공개 합성 문서를 쓴다.
+인증 실패는 `blocked-auth`, 종료 코드 2로 기록하고 모의 공급자로 대체하지 않는다.
+
+```bash
+OCR_SIDECAR_URL=http://127.0.0.1:10000 npm --prefix frontend run test:e2e-live
+```
+
+모델 포트는 Compose 내부 전용이므로, 이 호스트 하네스는 로컬 SGLang 주소나 해당
+호스트에서 접근 가능한 컨테이너 주소가 필요하다. 실제 번역 성공 분기는 유효한 공급자
+인증 설정이 있어야 실행된다.
+
+수식 구분자가 없는 출력은 제한된 문법으로만 조판을 복구한다. 원 모델 출력은 보존하며
+코드·URL·기존 수식은 바꾸지 않는다. 흐린 흰 종이의 모델 입력에는 제한적 명암 확장을,
+직사각형 그림에는 네 변의 픽셀 근거에 따른 경계 정제를 적용한다. 원본 이미지와 해상도는
+유지한다. [최신 검증 기록](UNLIMITED_OCR_2_VALIDATION.md)에 범위와 실제 지표를 남겼다.
 
 실모델 비교는 `scripts/benchmark_unlimited2.py`로 PDF를 같은 DPI로 렌더하고 준비 실행
 1회 후 3회를 측정한다. JSON에는 입력·래스터 해시, 실제 GPU, OCR 시간 중앙값,
@@ -114,3 +129,27 @@ OCR_DEVICE=mlx DISABLE_DOTENV=1 uv run --extra metal --extra mlx uvicorn app.mai
 MLX sparse 연산은 `tests/test_unlimited2_sparse.py`가 torch reference와 실제 배열 연산을
 비교한다. Linux에서는 선택적으로 `mlx[cpu]==0.32.3`을 설치해 실행할 수 있다.
 이 수치 검증은 Apple GPU 실검증을 대신하지 않는다.
+
+## 실모델 CI 선택 실행
+
+일반 push/PR CI는 모델 없는 회귀와 브라우저 하네스를 사용한다. GitHub Actions의
+수동 실행에서 `run_real_ocr=true`를 선택한 경우에만 실모델 브라우저 작업을 실행한다.
+러너 라벨은 `self-hosted`, `linux`, `x64`, `ocr-gpu`이며 다음 준비가 필요하다.
+
+- Docker Compose와 정상 NVIDIA Container Toolkit/CUDA GPU 접근.
+- 기본 설정 기준 VRAM 16GB 및 모델·빌드 캐시를 담을 충분한 RAM/디스크.
+- Chromium 실행에 필요한 OS 라이브러리와 Noto Sans/Serif CJK 폰트.
+
+작업은 호스트 패키지나 드라이버를 수정하지 않는다. 실행/재시도 ID별로 고유한 Compose
+프로젝트를 만들어 모델만 기동하고, `/ready`를 최대900초 기다린 뒤 실제 CUDA OCR과
+모의 번역/Q&A 브라우저 검사를 실행한다. 종료 시 해당 프로젝트의 컨테이너·볼륨만 정리한다.
+실제 유료 번역 공급자의 성공 검증은 별도 `test:e2e-live` 하네스에서 수행한다.
+
+## 번역 공급자 호환 처리
+
+공급자가 HTTP400으로 temperature 미지원을 명시하면 같은 모델·추론 설정을 유지하고
+해당 필드를 한 번만 생략 재시도한다. Responses의 문자열 input 축약을 거절하고 메시지
+목록을 요구하면 동일한 instructions/원문을 정식 user 메시지 목록으로 한 번만 재시도한다.
+성공한 호환 설정은 클라이언트에 기억하고 상태/리포트의 `temperature_omitted`,
+`responses_input_list`와 안내문에 기록한다. 명시적인 reasoning=off가 지켜지지 않는 경우는
+조용히 무시하지 않고 설정 오류로 알린다. 사용자 `.env`나 선택 모델을 자동 변경하지 않는다.

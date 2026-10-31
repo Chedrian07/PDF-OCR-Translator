@@ -1,10 +1,11 @@
 # CI — backend pytest(+커버리지)·backend×native 통합·native 패리티·frontend
 # node --test·sidecar 파서 테스트 + ruff 린트(backend·services) + 의존성 감사(pip-audit)
-# + CPU 이미지 빌드·하드닝 스모크(amd64·arm64, push 없음) + 실 PDF 전 구간
-# 하네스(verify-e2e). PR을 뺀 모든 실행(main push·nightly·수동)에서는 hermetic 브라우저
+# + CPU 이미지 빌드·하드닝 스모크(amd64·arm64, push 없음). PR을 뺀 모든 실행(main
+# push·nightly·수동)에서는 hermetic 브라우저
 # E2E(e2e-mock)까지 — release.yml은 태그 커밋의 push CI 성공을 요구하므로 e2e-mock도
 # 사실상 릴리스 게이트다.
-# 실모델은 실행하지 않음: backend 테스트는 FakeEngine 기반, torch는 CPU 휠(uv 캐시 활용).
+# 기본 CI는 모델을 실행하지 않는다. 실모델 검증은 수동 opt-in + 전용 CUDA 러너에서만
+# 실행하며, 번역/Q&A 공급자는 로컬 mock이다. backend 테스트의 torch는 CPU 휠을 쓴다.
 name: CI
 
 on:
@@ -15,6 +16,11 @@ on:
   schedule:
     - cron: "0 18 * * *"
   workflow_dispatch:
+    inputs:
+      run_real_ocr:
+        description: Run real CUDA OCR + mock-provider browser E2E on the dedicated ocr-gpu runner
+        type: boolean
+        default: false
 
 # 액션은 전부 전체 커밋 SHA로 고정하고 버전은 주석으로 남긴다 — 태그는 다른 커밋으로
 # 다시 밀릴 수 있다(2025 tj-actions/changed-files 유형). 갱신은 Dependabot이 PR로 연다
@@ -259,11 +265,15 @@ jobs:
           if-no-files-found: ignore
 
   verify-e2e:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
+    name: Real CUDA OCR + mock-provider browser E2E (opt-in)
+    if: github.event_name == 'workflow_dispatch' && inputs.run_real_ocr
+    # 전용 Linux x64 러너: Docker Compose + NVIDIA Container Toolkit/GPU, Chromium
+    # 시스템 의존성, Noto CJK 폰트를 미리 설치한다. 호스트 패키지/드라이버는 변경하지 않는다.
+    # 준비 절차: docs/UNLIMITED_OCR_2.md. 일반 CI의 CPU 웹 의존성은 모델을 로드하지 않는다.
+    runs-on: [self-hosted, linux, x64, ocr-gpu]
+    timeout-minutes: 60
+    env:
+      COMPOSE_PROJECT_NAME: uocr-ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -274,23 +284,72 @@ jobs:
           cache-dependency-glob: backend/uv.lock
       - name: Install backend (torch CPU 휠)
         run: uv sync --locked --extra cpu
-      # 하네스가 한국어 PDF를 조판·추출해 tofu(□)를 세므로 CJK 폰트가 필수다 —
-      # 없으면 "폰트 폴백 tofu 없음" 단언이 실패한다 (backend 잡과 동일 이유).
-      - name: Install CJK fonts (Docker 런타임과 동일 경로)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
-      # 하네스는 backend/.venv/bin/python을 골라 서버·목을 띄운다. `uv run`을 거치면
-      # 재동기화가 일어날 수 있어 인터프리터를 직접 부른다.
-      # --work: 리포 밖(RUNNER_TEMP)에 두어 산출물이 작업 트리를 오염시키지 않게.
-      - name: verify-e2e (실 PDF 6페이지 · 업로드→OCR→번역→PDF→뷰어→보안→결함주입)
-        run: .venv/bin/python ../scripts/verify_e2e.py --pages 6 --work "$RUNNER_TEMP/verify-e2e"
+        working-directory: backend
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Check dedicated GPU runner prerequisites
+        run: |
+          docker version
+          docker compose version
+          nvidia-smi -L
+          test -r /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
+          test -r /usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc
+      - name: Install Playwright Chromium (host dependencies are preinstalled)
+        run: npm ci && npx playwright install chromium
+        working-directory: frontend
+      - name: Start only the pinned Compose model service
+        run: docker compose --project-name "$COMPOSE_PROJECT_NAME" --file docker-compose.yml --env-file /dev/null --profile cuda up -d --no-deps --build unlimited-ocr2
+      - name: Wait for the model ready endpoint (up to 900 seconds)
+        run: |
+          container=$(docker compose --project-name "$COMPOSE_PROJECT_NAME" --file docker-compose.yml --env-file /dev/null --profile cuda ps -q unlimited-ocr2)
+          test -n "$container"
+          service_ip=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$container")
+          test -n "$service_ip"
+          echo "OCR_SIDECAR_URL=http://${service_ip}:10000" >> "$GITHUB_ENV"
+          backend/.venv/bin/python - "$service_ip" <<'PY'
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+          url = f"http://{sys.argv[1]}:10000/ready"
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+          deadline = time.monotonic() + 900
+          while time.monotonic() < deadline:
+              try:
+                  with opener.open(url, timeout=5) as response:
+                      if response.status == 200:
+                          print("Unlimited-OCR-2 is ready")
+                          break
+              except (OSError, urllib.error.URLError):
+                  pass
+              time.sleep(2)
+          else:
+              raise SystemExit("Unlimited-OCR-2 did not become ready within 900 seconds")
+          PY
+      - name: Real Unlimited-OCR-2 CUDA + mock translation/Q&A browser E2E
+        env:
+          E2E_OCR_ENGINE: unlimited2
+          E2E_OCR_DEVICE: cuda
+          E2E_PDF: ${{ github.workspace }}/sample/sample.pdf
+        run: npm run test:e2e-mock
+        working-directory: frontend
+      - name: Collect model service logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/real-ocr-e2e"
+          docker compose --project-name "$COMPOSE_PROJECT_NAME" --file docker-compose.yml --env-file /dev/null --profile cuda logs --no-color unlimited-ocr2 > "$RUNNER_TEMP/real-ocr-e2e/model.log" 2>&1 || true
+      - name: Remove only this run's Compose project
+        if: always()
+        run: docker compose --project-name "$COMPOSE_PROJECT_NAME" --file docker-compose.yml --env-file /dev/null --profile cuda down --volumes
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
-          name: verify-e2e-artifacts
-          # 서버 로그·내보낸 PDF만 올린다(잡 데이터 전체는 수백 MB가 될 수 있다).
+          name: real-ocr-mock-provider-e2e-artifacts
           path: |
-            ${{ runner.temp }}/verify-e2e/api.log
-            ${{ runner.temp }}/verify-e2e/*.pdf
+            ${{ runner.temp }}/real-ocr-e2e/model.log
+            frontend/tests/e2e/shots
           if-no-files-found: ignore
 
   # mock OpenAI(로컬 http) + FakeEngine 백엔드를 직접 띄우는 hermetic 브라우저 E2E.

@@ -3,7 +3,9 @@
 scripts/smoke_e2e.sh 는 업로드→OCR→markdown/zip 에서 끝난다. 이 스크립트는 그 뒤의
 번역 · 레이아웃 보존 PDF 내보내기 · 뷰어 계약 · Q&A 키 분리 · 워커 복원력까지
 **실제 서버를 띄워** 검증한다. 고정 Unlimited-OCR-2 실모델을 사용하며,
-샘플 PDF(arXiv 논문)는 텍스트 레이어가 충분해 tesseract 없이 전 페이지가 처리된다.
+모델을 여러 번 재기동하는 수동 CPU 하네스이며 충분한 메모리와 시간이 필요하다.
+현재 CI의 실모델 검증은 준비된 GPU 러너에서 frontend의 브라우저 하네스를 사용한다.
+이 도구의 원본 텍스트는 비교용이며 OCR 대체 출력으로 쓰지 않는다.
 
 사용 (= make verify-e2e):
     uv run --project backend python scripts/verify_e2e.py [--pdf PATH] [--pages N]

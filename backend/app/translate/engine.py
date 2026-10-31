@@ -329,6 +329,11 @@ class _TranslationRun:
                 "context": cfg.context,
                 # 캐시 키 재료 — translate_eval이 units.json 키를 재현할 때 쓴다
                 "temperature": cfg.temperature,
+                "temperature_omitted": bool(getattr(self.client, "temperature_omitted", cfg.temperature == "none")),
+                "responses_input_list": bool(getattr(self.client, "responses_input_list", False)),
+                "warnings": list(dict.fromkeys([
+                    *self.warnings, *getattr(self.client, "compatibility_warnings", ()),
+                ])),
                 "reasoning": cfg.reasoning,
                 # 실제 전달 방식(auto 확정값) — off가 서버에 닿았는지 확인하는 단서
                 "reasoning_style": cfg.effective_reasoning_style,
@@ -1203,6 +1208,9 @@ class _TranslationRun:
             logger.warning("번역 캐시 전량 무효: %s (lang=%s) — %s", self.job_dir.name, self.lang, msg)
 
         api_mode = getattr(self.client, "api_mode_used", "") or cfg.api_mode
+        self.warnings = list(dict.fromkeys([
+            *self.warnings, *getattr(self.client, "compatibility_warnings", ()),
+        ]))
         _atomic_write_json(self.tdir / "report.json", {
             "kept_original": self.kept_original,
             "retried": self.retried_n,
@@ -1229,6 +1237,9 @@ class _TranslationRun:
             "cached": self.cached_n,
             "translated": self.translated_n,
             "api_mode": api_mode,
+            "temperature": cfg.temperature,
+            "temperature_omitted": bool(getattr(self.client, "temperature_omitted", cfg.temperature == "none")),
+            "responses_input_list": bool(getattr(self.client, "responses_input_list", False)),
             "warnings": self.warnings,
         })
         self.write_state("done", self.total, self.total)

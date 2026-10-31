@@ -1,0 +1,2 @@
+unlimited-ocr-web:cuda sha256:de220b636c6fe15ccf0f97bc1eaac5e6a98d5f0482682c07dcc07d35379f1f01
+unlimited-ocr2-sglang:0.5.20.dev13-g75b9b06b02 sha256:fe397f7a64d8afd90f9635e56479a194e6d887c04e1be500084b13b4f87a0bbe

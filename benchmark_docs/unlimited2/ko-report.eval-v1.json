@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "document": "ko-report.pdf",
+  "input_sha256": "396ac3ef19082b9df76da15f4e86f3cf82becdb535e18e8668e7035791890427",
+  "provenance": {
+    "sources": [
+      {
+        "path": "scripts/make_sample_pdf.py",
+        "sha256": "781ecd5cde618bbd69a19e623e85bc2bfeeba3b89e019e680296ef0900646a20"
+      },
+      {
+        "path": "scripts/make_unlimited2_eval.py",
+        "sha256": "4cfc80e6ab975f68d0ad5673e85920da53e13c28b4b097d4dffcc786891b239a"
+      }
+    ],
+    "method": "Manual transcription from public synthetic generators; scan inherits the Korean source before raster degradation.",
+    "page_numbering": "1-based physical PDF page"
+  },
+  "pages": [
+    {
+      "page": 1,
+      "tables": [
+        {
+          "cells": [
+            [
+              "항목",
+              "1분기",
+              "2분기"
+            ],
+            [
+              "매출액",
+              "1,234",
+              "2,345"
+            ],
+            [
+              "영업비용",
+              "567",
+              "678"
+            ],
+            [
+              "순이익",
+              "667",
+              "1,667"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "sigma = sqrt((1/N) * sum(x_i - mu)^2)"
+      ]
+    }
+  ]
+}

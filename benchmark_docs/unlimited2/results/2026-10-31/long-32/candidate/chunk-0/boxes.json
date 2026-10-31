@@ -1,0 +1,74 @@
+{
+ "page_0_0.jpg": {
+  "x1": 200,
+  "y1": 416,
+  "x2": 1445,
+  "y2": 1117,
+  "image_width": 1653,
+  "image_height": 2339,
+  "refined": true
+ },
+ "page_1_0.jpg": {
+  "x1": 200,
+  "y1": 307,
+  "x2": 1195,
+  "y2": 971,
+  "image_width": 1653,
+  "image_height": 2339,
+  "refined": true
+ },
+ "page_2_0.jpg": {
+  "x1": 200,
+  "y1": 416,
+  "x2": 1445,
+  "y2": 1117,
+  "image_width": 1653,
+  "image_height": 2339,
+  "refined": true
+ },
+ "page_3_0.jpg": {
+  "x1": 200,
+  "y1": 307,
+  "x2": 1195,
+  "y2": 971,
+  "image_width": 1653,
+  "image_height": 2339,
+  "refined": true
+ },
+ "page_4_0.jpg": {
+  "x1": 200,
+  "y1": 416,
+  "x2": 1445,
+  "y2": 1117,
+  "image_width": 1653,
+  "image_height": 2339,
+  "refined": true
+ },
+ "page_5_0.jpg": {
+  "x1": 200,
+  "y1": 307,
+  "x2": 1195,
+  "y2": 971,
+  "image_width": 1653,
+  "image_height": 2339,
+  "refined": true
+ },
+ "page_6_0.jpg": {
+  "x1": 200,
+  "y1": 416,
+  "x2": 1445,
+  "y2": 1117,
+  "image_width": 1653,
+  "image_height": 2339,
+  "refined": true
+ },
+ "page_7_0.jpg": {
+  "x1": 200,
+  "y1": 307,
+  "x2": 1195,
+  "y2": 971,
+  "image_width": 1653,
+  "image_height": 2339,
+  "refined": true
+ }
+}

@@ -95,6 +95,7 @@ def load_image(image_path):
             return None
 
 
+from ...engine.image_input import normalize_model_image
 from ...engine.postprocess import re_match, process_image_with_refs
 
 
@@ -436,6 +437,8 @@ def _uocr_build_inputs(tokenizer, prompt, images, crop_mode=None, base_size=1024
     nqb = math.ceil((base_size // patch_size) / downsample_ratio)
     ids, seq_mask, globals_, crops, spatial = [], [], [], [], []
     for text_sep, image in zip(splits, images):
+        # Model views may recover washed ink; keep images unchanged for crops.
+        image = normalize_model_image(image)
         t = tokenizer.encode(text_sep, add_special_tokens=False)
         ids += t
         seq_mask += [False] * len(t)

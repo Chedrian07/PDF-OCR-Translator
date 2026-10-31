@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 from app.vendor.unlimited_ocr_mlx.processing import prepare_multi, prepare_single
 
 
@@ -23,14 +23,18 @@ class Tokenizer:
 
 
 @pytest.mark.parametrize("single", [False, True])
-def test_v2_prompt_tokens_and_image_masks(tmp_path, single):
+@pytest.mark.parametrize("washed", [False, True])
+def test_v2_prompt_tokens_and_image_masks(tmp_path, single, washed):
     torch = pytest.importorskip("torch")
     from app.vendor.unlimited_ocr2.modeling_unlimitedocr import _uocr_build_inputs
 
     paths = []
     for i in range(1 if single else 2):
         p = tmp_path / f"p{i}.png"
-        Image.new("RGB", (800, 1000), (127, 150, 210)).save(p)
+        image = Image.new("RGB", (800, 1000), "white" if washed else (127, 150, 210))
+        if washed:
+            ImageDraw.Draw(image).rectangle((100, 100, 699, 139), fill=(80, 80, 80))
+        image.save(p)
         paths.append(p)
     tok = Tokenizer()
     got = (
@@ -38,12 +42,19 @@ def test_v2_prompt_tokens_and_image_masks(tmp_path, single):
         if single
         else prepare_multi(tok, "<image>Multi page parsing.", paths, image_size=1024)
     )
+    for path, original in zip(paths, got.images):
+        with Image.open(path) as source:
+            assert original.tobytes() == source.convert("RGB").tobytes()
+    if washed:
+        assert got.global_views.min() == -1.0
+    originals_before_native = [image.tobytes() for image in got.images]
     ids, imgs, mask, spatial = _uocr_build_inputs(
         tok,
         "<PAGE><image>" * len(paths) + "Multi page parsing.",
         got.images,
         crop_mode=single,
     )
+    assert [image.tobytes() for image in got.images] == originals_before_native
     np.testing.assert_array_equal(got.input_ids, ids.numpy())
     np.testing.assert_array_equal(got.images_seq_mask, mask.numpy())
     np.testing.assert_array_equal(got.images_spatial_crop, spatial.numpy())

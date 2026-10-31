@@ -14,6 +14,8 @@ Local changes in `modeling_unlimitedocr.py`:
 - Generation state restored in upstream `finally`; the application serializes model use.
 - Remove output-driven eval/cropping functions; use `app.engine.postprocess`, which uses
   literal coordinate parsing, clamping, v2 BLOCK/FORK normalization and the existing artifact contract.
+- Model-input views share conservative washed-paper contrast recovery through
+  `app.engine.image_input`; original image pixels remain unchanged for figure crops.
 
 All other upstream Python files are byte-for-byte copies. CPU and Metal use the upstream
 pure torch sparse fallback; CUDA serving uses the separately pinned official SGLang wheel.

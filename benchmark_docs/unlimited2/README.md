@@ -11,6 +11,11 @@ PDF-ID normalization was added. Use the committed files to reproduce exact byte 
 - `columns.pdf`: two columns with sixteen labelled reading-order landmarks.
 - `long-32.pdf`: thirty-two pages with unique physical page numbers and repeated mixed content.
 
+Latest follow-up candidates and scored comparisons are in `results/2026-10-31/<document>/`.
+The original `results/<document>/` records remain unchanged. The follow-up fixes math
+presentation, washed-paper model inputs, conservative figure bounds, CJK fitting, and
+readiness overhead. See the validation report for the still-blocked real provider check.
+
 `results/<document>/{baseline,candidate}/measurements.json` includes one warmup and three
 measured runs on the same RTX 5070 Ti. Raster hashes match between both models.
 Baseline is commit `cc97954`, model `ee63731b6461c8afcdcc7b15352e7d2ffecc2ead`;
@@ -22,6 +27,15 @@ normalized alphanumeric CER, table shape, formula markup count, landmark order a
 IoU (missing figures count as zero). These are diagnostics, not a complete formula-semantic
 or layout benchmark. Scan figure IoU is unannotated. The synthetic reference text includes
 labels inside drawn figures; CER is consequently not a certified recognition score.
+
+Separate `*.eval-v1.json` sidecars annotate table cells and equation transcriptions
+from the public synthetic generators and bind them to the frozen PDF hashes. Add
+`--annotations benchmark_docs/unlimited2/en-mixed.eval-v1.json` to the scoring command
+below to include `annotated_quality`. Cell checks retain punctuation while ignoring
+case and whitespace; structure checks include every row and reject merged cells.
+Equation checks retain operators and normalize supported LaTeX presentation only.
+They measure lexical transcription, not semantic equivalence. Existing reference
+files, CER calculations, and committed result scores remain unchanged.
 
 ```bash
 PYTHONPATH=backend backend/.venv/bin/python scripts/benchmark_unlimited2.py \
@@ -35,4 +49,4 @@ backend/.venv/bin/python scripts/score_unlimited2.py \
 
 Run baseline measurements from the old checkout using its CUDA environment and the same
 benchmark script with `--baseline`. Do not run another OCR workload on the measured GPU.
-See [validation status](../../docs/UNLIMITED_OCR_2_VALIDATION.md) for the unmet gates.
+See [validation status](../../docs/UNLIMITED_OCR_2_VALIDATION.md) for the current acceptance status.

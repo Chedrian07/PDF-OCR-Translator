@@ -1,0 +1,77 @@
+{
+  "model": "baidu/Unlimited-OCR-2",
+  "revision": "c14071b549f4fcab10909f3c4acc6a2edb366947",
+  "runtime": "sglang-0.5.20.dev13+g75b9b06b02",
+  "pdf_sha256": "147f529a3214c9c832ee7084a2d72275ad8380f874a259031b8c192612336c2c",
+  "image_sha256": [
+    "71da0cef96d946efe26d2e7e60eafa78b084e45872d4d7651a1c8150fa41040d",
+    "967961917e20d8be75fecfefb018a5648ed11ba6c93e07baf5cc1a30b7bfa190"
+  ],
+  "source_pixel_sha256": [
+    "f82f38d80d762846ba4e0121be5196a705f1f263ef76e8c702a3876a34468450",
+    "f21d03a206dda604e8c49a93bd5216733c72d96e189929b2ddee4928701cf60b"
+  ],
+  "model_pixel_sha256": [
+    "f82f38d80d762846ba4e0121be5196a705f1f263ef76e8c702a3876a34468450",
+    "f21d03a206dda604e8c49a93bd5216733c72d96e189929b2ddee4928701cf60b"
+  ],
+  "contrast_adjusted_pages": [
+    false,
+    false
+  ],
+  "model_input_policy": "washed-paper-blackpoint-v1",
+  "dpi": 200,
+  "pages": 2,
+  "concurrency": 1,
+  "mode": "multi/base-1024",
+  "pages_per_chunk": 8,
+  "gpu_index": "0",
+  "runs": [
+    {
+      "run": 0,
+      "warmup": true,
+      "seconds": 1.335503078000329,
+      "first_text_s": 0.2585858599995845,
+      "pages_per_s": 1.4975630029955702,
+      "page_markers": 2,
+      "figures": 2,
+      "warnings": [],
+      "peak_vram_mib": 11405
+    },
+    {
+      "run": 1,
+      "warmup": false,
+      "seconds": 1.3283531730003233,
+      "first_text_s": 0.26090755600034754,
+      "pages_per_s": 1.5056236855162863,
+      "page_markers": 2,
+      "figures": 2,
+      "warnings": [],
+      "peak_vram_mib": 11405
+    },
+    {
+      "run": 2,
+      "warmup": false,
+      "seconds": 1.3368987780004318,
+      "first_text_s": 0.2675586640007168,
+      "pages_per_s": 1.495999572227415,
+      "page_markers": 2,
+      "figures": 2,
+      "warnings": [],
+      "peak_vram_mib": 11405
+    },
+    {
+      "run": 3,
+      "warmup": false,
+      "seconds": 1.3365207309998368,
+      "first_text_s": 0.2636689969995132,
+      "pages_per_s": 1.4964227292634822,
+      "page_markers": 2,
+      "figures": 2,
+      "warnings": [],
+      "peak_vram_mib": 11405
+    }
+  ],
+  "gpu": "NVIDIA GeForce RTX 5070 Ti",
+  "median_ocr_s": 1.3365207309998368
+}

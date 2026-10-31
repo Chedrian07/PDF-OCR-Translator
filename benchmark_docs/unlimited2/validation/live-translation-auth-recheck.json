@@ -1,0 +1,41 @@
+{
+  "checked_at": "2026-10-31T07:05:10.433124+00:00",
+  "status": "blocked",
+  "configuration": {
+    "loader": "app.config.Settings.from_env then app.translate.types.TranslateConfig.from_env",
+    "provider": "OpenRouter",
+    "credential_configured": true,
+    "credential_source": "application_dotenv_loader",
+    "model_configured": true,
+    "secrets_disclosed": false,
+    "configuration_changed": false
+  },
+  "live_probes": [
+    {
+      "endpoint": "responses",
+      "http_status": 401,
+      "provider_error_code": 401,
+      "error_category": "invalid_authentication"
+    },
+    {
+      "endpoint": "chat/completions",
+      "http_status": 401,
+      "error_category": "invalid_authentication"
+    }
+  ],
+  "probe_input": "The quick brown fox jumps over the lazy dog.",
+  "translation_generated": false,
+  "required_external_input": "A valid authorized OpenRouter API credential/account for the configured provider.",
+  "offline_validation": {
+    "status": "passed",
+    "tests_passed": 266,
+    "test_files": [
+      "backend/tests/test_translate_client.py",
+      "backend/tests/test_config_dotenv.py",
+      "backend/tests/test_verify_e2e_env.py",
+      "backend/tests/test_verify_e2e_harness.py"
+    ],
+    "warning": "Existing Starlette TestClient httpx deprecation warning."
+  },
+  "harness_note": "scripts/verify_e2e.py intentionally removes real credentials and routes translation to a loopback mock. Passing that harness does not establish live provider authentication or translation quality."
+}

@@ -1,0 +1,8 @@
+{
+  "device_request": "standard Docker Compose gpus: all",
+  "driver_path_override": false,
+  "custom_driver_mounts": false,
+  "device": "RTX 5070 Ti",
+  "runtime": "sglang-0.5.20.dev13+g75b9b06b02",
+  "real_inference": true
+}

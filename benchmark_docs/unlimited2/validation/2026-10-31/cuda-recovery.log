@@ -1,0 +1,3 @@
+CANCEL {"pages": 12, "text_seen": true, "latency_s": 0.029413704000035068}
+LIMIT MAX_PAGE_OUTPUT_TOKENS
+RECOVERY subsequent document is byte-identical to independent pre-cancel result

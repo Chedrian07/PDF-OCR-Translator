@@ -13,6 +13,8 @@ inference path and are explicitly excluded from MLX loading; all active weights 
 Generation uses per-page prompt markers and generated-token-only ngram suppression.
 No quantization is enabled by default. Linux MLX CPU arithmetic parity is covered by
 `tests/test_unlimited2_sparse.py`; Apple GPU validation is delegated to the user.
+Model-input views share the native path's conservative washed-paper contrast recovery
+through `app.engine.image_input`; `OCRInputs.images` retains original pixels for crops.
 
 The following provenance describes the retained components and historical v1 measurements;
 those measurements do not establish v2 quality or performance.

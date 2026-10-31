@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "document": "en-mixed.pdf",
+  "input_sha256": "147f529a3214c9c832ee7084a2d72275ad8380f874a259031b8c192612336c2c",
+  "provenance": {
+    "sources": [
+      {
+        "path": "scripts/make_sample_pdf.py",
+        "sha256": "781ecd5cde618bbd69a19e623e85bc2bfeeba3b89e019e680296ef0900646a20"
+      },
+      {
+        "path": "scripts/make_unlimited2_eval.py",
+        "sha256": "4cfc80e6ab975f68d0ad5673e85920da53e13c28b4b097d4dffcc786891b239a"
+      }
+    ],
+    "method": "Manual transcription from public synthetic generators; scan inherits the Korean source before raster degradation.",
+    "page_numbering": "1-based physical PDF page"
+  },
+  "pages": [
+    {
+      "page": 1,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 2,
+      "tables": [],
+      "equations": []
+    }
+  ]
+}

@@ -212,12 +212,62 @@ def _job_script(job: dict) -> str:
     return "\n".join(str(s.get("run", "")) for s in job["steps"])
 
 
-def test_verify_e2e_harness_is_wired_into_ci(ci):
-    """주요 안전망이 '사람이 기억해야만 도는' 상태로 되돌아가지 않게."""
+def test_real_model_e2e_requires_explicit_gpu_runner_opt_in(ci):
+    """기본 CI는 모델 없이 돌고 실모델은 준비된 CUDA 러너에서만 명시적으로 실행한다."""
     job = ci["jobs"]["verify-e2e"]
-    # PR에서도 돌아야 의미가 있다 — e2e-mock처럼 nightly 전용 if:가 붙으면 실패.
-    assert job["if"] == "github.event_name == 'workflow_dispatch'"  # Real model E2E is explicit.
-    assert "scripts/verify_e2e.py" in _job_script(job)
+    # PyYAML's YAML 1.1 loader parses the GitHub Actions `on` key as True.
+    triggers = ci.get("on", ci.get(True))
+    opt_in = triggers["workflow_dispatch"]["inputs"]["run_real_ocr"]
+    assert opt_in["type"] == "boolean" and opt_in["default"] is False
+    assert job["if"] == "github.event_name == 'workflow_dispatch' && inputs.run_real_ocr"
+    assert job["runs-on"] == ["self-hosted", "linux", "x64", "ocr-gpu"]
+
+
+def test_real_model_e2e_keeps_ocr_real_and_providers_mocked(ci):
+    job = ci["jobs"]["verify-e2e"]
+    script = _job_script(job)
+    browser = next(s for s in job["steps"] if s.get("run") == "npm run test:e2e-mock")
+    assert browser["env"]["E2E_OCR_ENGINE"] == "unlimited2"
+    assert browser["env"]["E2E_OCR_DEVICE"] == "cuda"
+    assert "verify_e2e.py" not in script and "test:e2e-live" not in script
+    assert "uv sync --locked --extra cpu" in script  # Web adapter dependencies only.
+    assert "sudo " not in script and "apt-get " not in script
+    assert "playwright install chromium" in script and "--with-deps" not in script
+    assert "NotoSansCJK-Regular.ttc" in script and "NotoSerifCJK-Regular.ttc" in script
+    # The ordinary browser gate continues to use its model-free defaults.
+    mock = ci["jobs"]["e2e-mock"]
+    assert mock["if"] == "github.event_name != 'pull_request'"
+    assert not any(
+        s.get("env", {}).get("E2E_OCR_ENGINE") == "unlimited2" for s in mock["steps"]
+    )
+
+
+def test_real_model_e2e_waits_for_ready_and_cleans_only_its_unique_project(ci):
+    job = ci["jobs"]["verify-e2e"]
+    project = job["env"]["COMPOSE_PROJECT_NAME"]
+    assert "github.run_id" in project and "github.run_attempt" in project
+    steps = job["steps"]
+    ready_index = next(i for i, s in enumerate(steps) if "/ready" in s.get("run", ""))
+    browser_index = next(
+        i for i, s in enumerate(steps) if s.get("run") == "npm run test:e2e-mock"
+    )
+    assert ready_index < browser_index
+    ready = steps[ready_index]["run"]
+    assert "900" in ready and "docker inspect" in ready and ".IPAddress" in ready
+    assert "OCR_SIDECAR_URL=" in ready and "GITHUB_ENV" in ready
+    script = _job_script(job)
+    compose_calls = [line for line in script.splitlines() if "docker compose " in line]
+    assert compose_calls
+    assert all(
+        ('--project-name "$COMPOSE_PROJECT_NAME"' in line and "--file docker-compose.yml" in line)
+        or line.strip() == "docker compose version"
+        for line in compose_calls
+    )
+    starts = [line for line in compose_calls if " up " in line]
+    assert len(starts) == 1 and "--no-deps" in starts[0] and starts[0].endswith("unlimited-ocr2")
+    cleanup = next(s for s in steps if " down " in s.get("run", ""))
+    assert cleanup["if"] == "always()" and "--volumes" in cleanup["run"]
+    assert not re.search(r"docker\s+(?:system|container|volume|network)\s+prune", script)
 
 
 def test_backend_native_job_exercises_the_installed_native_path(ci):

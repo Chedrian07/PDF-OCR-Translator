@@ -1,0 +1,581 @@
+{
+  "schema_version": 1,
+  "document": "long-32.pdf",
+  "input_sha256": "6c057909a98d49d1993b4e5cdb60abcb951a32e8c6cf3b92aa80ef73081175f8",
+  "provenance": {
+    "sources": [
+      {
+        "path": "scripts/make_sample_pdf.py",
+        "sha256": "781ecd5cde618bbd69a19e623e85bc2bfeeba3b89e019e680296ef0900646a20"
+      },
+      {
+        "path": "scripts/make_unlimited2_eval.py",
+        "sha256": "4cfc80e6ab975f68d0ad5673e85920da53e13c28b4b097d4dffcc786891b239a"
+      }
+    ],
+    "method": "Manual transcription from public synthetic generators; scan inherits the Korean source before raster degradation.",
+    "page_numbering": "1-based physical PDF page"
+  },
+  "pages": [
+    {
+      "page": 1,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 2,
+      "tables": [],
+      "equations": []
+    },
+    {
+      "page": 3,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 4,
+      "tables": [],
+      "equations": []
+    },
+    {
+      "page": 5,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 6,
+      "tables": [],
+      "equations": []
+    },
+    {
+      "page": 7,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 8,
+      "tables": [],
+      "equations": []
+    },
+    {
+      "page": 9,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 10,
+      "tables": [],
+      "equations": []
+    },
+    {
+      "page": 11,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 12,
+      "tables": [],
+      "equations": []
+    },
+    {
+      "page": 13,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 14,
+      "tables": [],
+      "equations": []
+    },
+    {
+      "page": 15,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 16,
+      "tables": [],
+      "equations": []
+    },
+    {
+      "page": 17,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 18,
+      "tables": [],
+      "equations": []
+    },
+    {
+      "page": 19,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 20,
+      "tables": [],
+      "equations": []
+    },
+    {
+      "page": 21,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 22,
+      "tables": [],
+      "equations": []
+    },
+    {
+      "page": 23,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 24,
+      "tables": [],
+      "equations": []
+    },
+    {
+      "page": 25,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 26,
+      "tables": [],
+      "equations": []
+    },
+    {
+      "page": 27,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 28,
+      "tables": [],
+      "equations": []
+    },
+    {
+      "page": 29,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 30,
+      "tables": [],
+      "equations": []
+    },
+    {
+      "page": 31,
+      "tables": [
+        {
+          "cells": [
+            [
+              "Mode",
+              "base_size",
+              "image_size",
+              "crop"
+            ],
+            [
+              "gundam",
+              "1024",
+              "640",
+              "true"
+            ],
+            [
+              "base",
+              "1024",
+              "1024",
+              "false"
+            ]
+          ]
+        }
+      ],
+      "equations": [
+        "E = mc^2"
+      ]
+    },
+    {
+      "page": 32,
+      "tables": [],
+      "equations": []
+    }
+  ]
+}

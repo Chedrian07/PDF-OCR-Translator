@@ -9,7 +9,7 @@ from PIL import Image
 from app.config import Settings
 from app.engine.base import EngineError, JobCanceled, NullSink, OutputLimitError
 from app.engine.postprocess import BlockStream, normalize_blocks
-from app.engine.sglang import SGLangEngine
+from app.engine.sglang import SGLangEngine, SGLangUnavailable
 
 
 class Sink:
@@ -131,8 +131,137 @@ def test_server_identity_mismatch_is_fatal(monkeypatch):
         SGLangEngine(Settings()).load()
 
 
+@pytest.fixture
+def sglang_service(monkeypatch):
+    settings = Settings()
+    routes = {
+        "/ready": (200, None),
+        "/model_info": (
+            200,
+            {
+                "model_path": "/models/models--baidu--Unlimited-OCR-2/snapshots/"
+                + settings.model_revision,
+            },
+        ),
+        "/server_info": (200, {"version": "0.5.20.dev13+g75b9b06b02"}),
+    }
+    calls = []
+
+    def handle(request):
+        calls.append(request.url.path)
+        status, body = routes[request.url.path]
+        return httpx.Response(status, json=body)
+
+    original = httpx.Client
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda **kw: original(transport=httpx.MockTransport(handle), **kw),
+    )
+    return SGLangEngine(settings), routes, calls
+
+
+def test_repeated_readiness_checks_do_not_generate_tokens(sglang_service):
+    engine, _, calls = sglang_service
+    engine.load()
+    assert engine.provider_health()["status"] == "ready"
+    assert engine.loaded
+    assert calls == ["/ready", "/model_info", "/server_info"] * 2
+
+
+@pytest.mark.parametrize(
+    "endpoint, response, expected_error",
+    [
+        ("/ready", (503, None), SGLangUnavailable),
+        ("/server_info", (503, None), SGLangUnavailable),
+        ("/model_info", (200, {"model_path": "/models/other"}), EngineError),
+        ("/server_info", (200, {"version": "wrong"}), EngineError),
+        ("/model_info", (200, []), SGLangUnavailable),
+        ("/model_info", (200, {"model_path": None}), SGLangUnavailable),
+        ("/server_info", (200, []), SGLangUnavailable),
+    ],
+)
+def test_readiness_failure_invalidates_previous_success(
+    sglang_service, endpoint, response, expected_error
+):
+    engine, routes, _ = sglang_service
+    engine.load()
+    routes[endpoint] = response
+    with pytest.raises(expected_error):
+        engine.load()
+    assert not engine.loaded
+    assert engine._health["status"] == "unavailable"
+    assert engine.provider_health()["status"] == "unavailable"
+
+
+@pytest.mark.parametrize(
+    "endpoint, response, message",
+    [
+        ("/model_info", {"model_path": "/models/other"}, "model identity mismatch"),
+        ("/server_info", {"version": "wrong"}, "runtime version mismatch"),
+    ],
+)
+def test_each_ocr_request_rechecks_identity(
+    sglang_service, monkeypatch, tmp_path, endpoint, response, message
+):
+    engine, routes, calls = sglang_service
+    streams = []
+
+    async def stream(payload, sink, cancel, repetition):
+        streams.append(payload)
+        return "<PAGE><BLOCK>text[0,0,500,500]<FORK>readable", "stop"
+
+    monkeypatch.setattr(engine, "_stream", stream)
+    image = tmp_path / "page.png"
+    Image.new("RGB", (20, 20)).save(image)
+    engine.run_single(image, tmp_path / "first", NullSink(), threading.Event())
+    routes[endpoint] = (200, response)
+    with pytest.raises(EngineError, match=message):
+        engine.run_single(image, tmp_path / "second", NullSink(), threading.Event())
+    assert calls == ["/ready", "/model_info", "/server_info"] * 2
+    assert len(streams) == 1
+    assert not engine.loaded
+
+
+@pytest.mark.parametrize("failure", [httpx.ConnectError, SGLangUnavailable, ValueError])
+def test_stream_unavailability_invalidates_readiness(
+    sglang_service, monkeypatch, tmp_path, failure
+):
+    engine, _, _ = sglang_service
+
+    async def stream(payload, sink, cancel, repetition):
+        raise failure("service disconnected")
+
+    monkeypatch.setattr(engine, "_stream", stream)
+    image = tmp_path / "page.png"
+    Image.new("RGB", (20, 20)).save(image)
+    with pytest.raises(SGLangUnavailable):
+        engine.run_single(image, tmp_path / "out", NullSink(), threading.Event())
+    assert not engine.loaded
+    assert engine._health["status"] == "unavailable"
+
+
 def test_server_page_guard_cannot_hide_truncated_pages():
     from app.engine.sglang import page_budget_reached
 
     assert page_budget_reached([128827, 5, 6, 7, 128827, 8, 1], 3)
     assert not page_budget_reached([128827, 5, 6, 128827, 8, 1], 3)
+
+
+def test_payload_normalizes_only_model_pixels_and_keeps_source(tmp_path):
+    import base64
+    from io import BytesIO
+    from PIL import ImageDraw
+
+    path = tmp_path / "scan.png"
+    image = Image.new("RGB", (100, 100), "white")
+    ImageDraw.Draw(image).rectangle((0, 0, 9, 19), fill=(80, 80, 80))
+    image.save(path)
+    original = path.read_bytes()
+    payload = SGLangEngine(Settings()).payload([path], single=False, rid="contrast")
+    url = payload["messages"][0]["content"][0]["image_url"]["url"]
+    with Image.open(BytesIO(base64.b64decode(url.split(",", 1)[1]))) as prepared:
+        assert prepared.size == image.size
+        assert prepared.getpixel((1, 1)) == (0, 0, 0)
+        assert prepared.getpixel((50, 50)) == (255, 255, 255)
+    assert path.read_bytes() == original

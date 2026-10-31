@@ -98,6 +98,43 @@ _STREAM_REJECTED = frozenset({400, 415, 422})
 _THINK_OPEN_RE = re.compile(r"^\s*<think>")
 _THINK_CLOSE = "</think>"
 _FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)```\s*$", re.DOTALL)
+_TEMPERATURE_OMISSION_WARNING = (
+    "번역 API가 temperature를 지원하지 않습니다 — 이 클라이언트는 "
+    "temperature를 생략하고 서버 기본값을 사용합니다"
+)
+_RESPONSES_INPUT_LIST_WARNING = (
+    "번역 API가 Responses input 목록을 요구합니다 — 이 클라이언트는 "
+    "같은 원문을 user 메시지 목록 형식으로 전달합니다"
+)
+
+
+def _temperature_rejection(body: dict | str) -> tuple[bool, bool]:
+    """Recognize explicit parameter rejection, never a generic HTTP 400.
+
+    The second flag identifies a server reporting active reasoning. That must
+    not hide an explicit user request to turn reasoning off.
+    """
+    error = body.get("error", body) if isinstance(body, dict) else body
+    param = error.get("param") if isinstance(error, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    message = error.get("message", "") if isinstance(error, dict) else error
+    if not isinstance(message, str):
+        message = ""
+    message = message.lower()
+    rejected = param == "temperature" and code in ("unsupported_parameter", "unsupported_value")
+    rejected = rejected or any(re.search(pattern, message) for pattern in (
+        r"unsupported (?:parameter|value)\s*:?\s*['\"`]?temperature\b",
+        r"(?:does not|doesn't|doesn’t) support\s+(?:the\s+)?(?:parameter\s+)?['\"`]?temperature\b",
+        r"\btemperature\b.{0,40}\b(?:not supported|unsupported|not allowed)\b",
+    ))
+    active = bool(re.search(r"\breasoning (?:is )?(?:active|enabled)\b", message))
+    return bool(rejected), active
+
+
+def _responses_input_list_rejection(body: dict | str) -> bool:
+    error = body.get("error", body) if isinstance(body, dict) else body
+    message = error.get("message", error.get("detail", "")) if isinstance(error, dict) else error
+    return isinstance(message, str) and bool(re.search(r"\binput must be a list\b", message, re.IGNORECASE))
 
 
 class _NeedsFallback(Exception):
@@ -172,10 +209,35 @@ class OpenAICompatClient:
         self._stream_ok: bool | None = None
         # Responses store:false 래치 — False면 서버가 store 파라미터를 거부해 빼고 보낸다
         self._store_ok: bool | None = None
+        # Only moves to True, under _mode_lock; concurrent successful requests
+        # must not restore a parameter another request already proved unsupported.
+        self._temperature_disabled = False
+        self._responses_input_list = False
 
     def set_cancel_check(self, check: Callable[[], bool] | None) -> None:
         """엔진의 cancel+abort predicate를 주입한다 (사용자 제공 client와 호환용 선택 API)."""
         self._cancel_check = check
+
+    @property
+    def temperature_omitted(self) -> bool:
+        with self._mode_lock:
+            disabled = self._temperature_disabled
+        return disabled or (self.cfg.temperature == "none" and "temperature" not in self.cfg.extra_body_dict)
+
+    @property
+    def compatibility_warnings(self) -> tuple[str, ...]:
+        with self._mode_lock:
+            warnings = []
+            if self._temperature_disabled:
+                warnings.append(_TEMPERATURE_OMISSION_WARNING)
+            if self._responses_input_list:
+                warnings.append(_RESPONSES_INPUT_LIST_WARNING)
+            return tuple(warnings)
+
+    @property
+    def responses_input_list(self) -> bool:
+        with self._mode_lock:
+            return self._responses_input_list
 
     def _raise_if_cancelled(self) -> None:
         check = self._cancel_check
@@ -547,6 +609,11 @@ class OpenAICompatClient:
                 p["stream_options"] = {"include_usage": True}
         _apply_reasoning(p, mode, cfg.reasoning, cfg.effective_reasoning_style)
         _merge_extra_body(p, cfg.extra_body_dict)
+        with self._mode_lock:
+            if self._temperature_disabled:
+                p.pop("temperature", None)
+            if mode == "responses" and self._responses_input_list:
+                p["input"] = [{"role": "user", "content": [{"type": "input_text", "text": user}]}]
         return p
 
     def _send(
@@ -634,9 +701,42 @@ class OpenAICompatClient:
                 elif payload.get("stream"):
                     self._stream_ok = True
                 return result
+            temperature_rejected, reasoning_active = (
+                _temperature_rejection(body) if status == 400 else (False, False)
+            )
+            if temperature_rejected and "temperature" in payload:
+                if self.cfg.reasoning == "off" and reasoning_active:
+                    raise TranslateAPIError(
+                        "번역 API가 reasoning=off 요청 뒤에도 reasoning이 활성화됐다고 응답했습니다"
+                        " — TRANSLATE_REASONING_STYLE을 확인하세요"
+                    )
+                with self._mode_lock:
+                    warn = not self._temperature_disabled
+                    self._temperature_disabled = True
+                if warn:
+                    logger.warning(_TEMPERATURE_OMISSION_WARNING)
+                # The removed field also bounds this compatibility retry: a
+                # repeated temperature rejection falls through to the real error.
+                payload = {key: value for key, value in payload.items() if key != "temperature"}
+                continue
+            if (
+                status == 400 and mode == "responses" and isinstance(payload.get("input"), str)
+                and _responses_input_list_rejection(body)
+            ):
+                with self._mode_lock:
+                    warn = not self._responses_input_list
+                    self._responses_input_list = True
+                if warn:
+                    logger.warning(_RESPONSES_INPUT_LIST_WARNING)
+                payload = {
+                    **payload,
+                    "input": [{"role": "user", "content": [{"type": "input_text", "text": user}]}],
+                }
+                continue
             if (
                 payload.get("stream") and self.cfg.stream == "auto"
                 and self._stream_ok is None and status in _STREAM_REJECTED
+                and not temperature_rejected
             ):
                 # 스트리밍(stream_options 등)을 모르는 엄격한 서버일 수 있다 — 같은 요청을
                 # 비스트리밍으로 1회 보내 보고, 그게 성공하면 이 클라이언트는 비스트리밍으로
@@ -647,6 +747,7 @@ class OpenAICompatClient:
             if (
                 "store" in payload and self._store_ok is None
                 and status in _STREAM_REJECTED and "store" in str(body).lower()
+                and not temperature_rejected
             ):
                 # store를 모르는 엄격한 Responses 구현 — 빼고 1회 재시도, 성공하면 래치.
                 payload = {k: v for k, v in payload.items() if k != "store"}

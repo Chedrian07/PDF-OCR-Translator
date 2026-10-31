@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -249,6 +250,30 @@ def keep_leading_pages(chunk_dir: Path, keep: int) -> None:
 
 def _global_image_name(global_page: int, k: int | str) -> str:
     return f"p{global_page:04d}_{k}.jpg"
+
+
+def _refined_figure_bbox(meta) -> list[float] | None:
+    """Convert explicitly refined crop pixels to layout units, or abstain.
+
+    Older/unrefined boxes intentionally retain the model's normalized geometry.
+    Refined metadata is an optional artifact; malformed values must not replace
+    valid model coordinates or reach layout/PDF coordinate arithmetic.
+    """
+    if not isinstance(meta, dict) or meta.get("refined") is not True:
+        return None
+    keys = ("x1", "y1", "x2", "y2", "image_width", "image_height")
+    try:
+        values = [meta[key] for key in keys]
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in values):
+            return None
+        x1, y1, x2, y2, width, height = (float(v) for v in values)
+    except (KeyError, OverflowError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (x1, y1, x2, y2, width, height)):
+        return None
+    if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
+        return None
+    return [x1 / width * 999, y1 / height * 999, x2 / width * 999, y2 / height * 999]
 
 
 def _fold_local_page(chunk: "ChunkResult", local_page: int) -> tuple[int, str]:
@@ -507,6 +532,7 @@ class IncrementalMerger:
         """
         from PIL import Image
 
+        from ..engine.figure_geometry import refine_figure_box
         from .layout import parse_page_blocks
 
         done: set[tuple[int, int]] = set()
@@ -539,12 +565,16 @@ class IncrementalMerger:
                         )
                         if box[2] <= box[0] or box[3] <= box[1]:
                             continue
+                        original_box = box
+                        box = refine_figure_box(im, box)
                         name = self._crop_name(chunk, placement, k, b["crop_index"])
                         im.crop(box).save(self.images_dir / name)
                         self.figure_boxes[name] = {
                             "x1": box[0], "y1": box[1], "x2": box[2], "y2": box[3],
                             "image_width": width, "image_height": height,
                         }
+                        if box != original_box:
+                            self.figure_boxes[name]["refined"] = True
                         done.add((k, int(b["crop_index"])))
             except Exception:  # noqa: BLE001 — 다시 자르기 실패는 벤더 크롭으로 폴백
                 continue
@@ -784,6 +814,7 @@ class IncrementalMerger:
                     if "crop_index" in b:
                         # 벤더 크롭 순서 == boxes/이미지 저장 순서 → 글로벌 이미지명 매핑
                         b["image"] = self._crop_name(chunk, placement, k, b.pop("crop_index"))
+                        self._apply_refined_figure_bbox(b)
                     blocks.append(b)
             w, h = self._page_size(g)
             page = {"page": g, "width": w, "height": h, "blocks": blocks}
@@ -826,6 +857,11 @@ class IncrementalMerger:
                 f"비웠습니다 (본문은 유지; {type(error).__name__})"
             )
             return []
+
+    def _apply_refined_figure_bbox(self, block: dict) -> None:
+        bbox = _refined_figure_bbox(self.figure_boxes.get(block.get("image")))
+        if bbox is not None:
+            block["bbox"] = bbox
 
     # ── 페이지 단위 교체 (충실도 게이트의 복구 경로) ─────────────
 
@@ -882,6 +918,7 @@ class IncrementalMerger:
         for b in blocks:
             if "crop_index" in b:
                 b["image"] = _global_image_name(page_number, b.pop("crop_index"))
+                self._apply_refined_figure_bbox(b)
         width, height = self._page_size(page_number)
         page = {"page": page_number, "width": width, "height": height, "blocks": blocks}
         try:

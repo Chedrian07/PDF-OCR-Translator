@@ -1,0 +1,16 @@
+{
+  "package": "diskcache",
+  "version": "5.6.3",
+  "expires": "2026-11-30",
+  "reviewed_wheel": {
+    "version": "0.5.20.dev13+g75b9b06b02",
+    "sha256": "576c71dab3cacad843f6870739494e13b2e8169a69cc038f84395d6503e801ea"
+  },
+  "advisories": [
+    "PYSEC-2026-2447",
+    "CVE-2025-69872",
+    "GHSA-w8v5-vhqr-4h9v"
+  ],
+  "reason": "No patched upstream release. The pinned OCR-only launcher enforces grammar-backend none and disable-outlines-disk-cache, rejects arbitrary/config/abbreviated overrides, and assigns a fresh owner-only cache directory. In this wheel the only Outlines imports are lazy optional grammar paths; none rejects constrained requests before those paths. The model service has no published Compose port and accepts trusted fixed OCR requests from the adapter. This acceptance does not cover exposing SGLang directly or administrator/same-UID compromise.",
+  "evidence": "docs/UNLIMITED_OCR_2.md#dependency-audit"
+}

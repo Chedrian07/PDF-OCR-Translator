@@ -988,7 +988,7 @@
     "page_markers": 32,
     "figures": 32,
     "expected_figures": 32,
-    "median_ocr_s": 22.145671192999544,
+    "median_ocr_s": 22.171315686000526,
     "figure_mean_iou": 0.9981859114145943,
     "annotated_quality": {
       "annotation_schema_version": 1,

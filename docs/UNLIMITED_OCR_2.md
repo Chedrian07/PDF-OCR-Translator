@@ -19,6 +19,37 @@
 원격 코드를 실행하는 대신 CPU·Metal은 저장소의 검토 가능한 벤더 코드를 읽는다.
 SGLang은 고정 wheel의 모델 구현을 사용한다.
 
+## Dependency audit
+
+백엔드의 I/O·인증서 의존성은 Pillow 13.0.0, certifi 2026.10.23,
+filelock 4.2.4, setuptools 84.2.1로 갱신했다. torch·transformers·모델 가중치는
+변경하지 않았다. [Pillow 보안 수정](https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html)에는
+native storage 재사용과 JPEG 디코더 오버플로 수정이 포함된다.
+
+`make audit`와 CI는 백엔드 및 SGLang 전이 의존성을 검사한다. 커스텀 SGLang 휠은
+공식 고정 URL·SHA-256·wheel METADATA의 이름/버전을 확인한 뒤 정확한 버전을
+OSV에 조회한다. 나머지 잠금 패키지는 기존 SHA-256과 함께 PyPI로 검사한다.
+두 검사 모두 `--strict`이며 URL 패키지를 조용히 건너뛰지 않는다.
+
+SGLang의 Outlines 0.1.11이 요구하는 DiskCache 5.6.3에는
+[CVE-2025-69872](https://github.com/advisories/GHSA-w8v5-vhqr-4h9v)의 수정 릴리스가 없다.
+이 권고는 공격자가 캐시 디렉터리에 쓴 pickle을 애플리케이션이 읽을 때 실행되는
+역직렬화 문제다. 고정 휠의 `constrained/base_grammar_backend.py`는 Outlines를
+선택할 때만 해당 구현을 import한다. OCR 전용 런처는 `--grammar-backend none`과
+`--disable-outlines-disk-cache`를 강제하고 `--host`·`--port` 이외의 추가 인자를
+거부한다. 특히 SGLang은 CLI 값으로 캐시 환경변수를 다시 설정하므로 환경변수만으로
+끄는 것에 의존하지 않는다. 새 소유자 전용 0700 캐시 디렉터리도 매번 배정한다.
+백엔드는 `/server_info`의 실제 두 설정을 매 요청 전 확인한다.
+
+따라서 이 OCR 경로에서 사용하지 않는 **DiskCache 5.6.3의 해당 권고 별칭만**
+`services/unlimited_ocr2/audit-policy.json`에서 2026-11-30까지 수용한다. DiskCache
+버전·권고·기한이나 검토한 SGLang 휠의 정확한 버전·SHA-256이 달라지면 감사가 실패한다.
+별도 소스 검토에서도 무조건 실행되는 DiskCache
+읽기는 발견되지 않았으며, `none`에서 문법 제약 요청은 거절된다. 이는 수정 완료
+선언이 아니다. Compose에서 모델 포트를 외부에 공개하지 않고 신뢰하는 OCR 어댑터만
+호출하는 구성을 전제로 하며, SGLang 직접 공개나 관리자·동일 UID 침해는 포함하지 않는다.
+기한 전 업스트림 수정판과 런타임 경로를 다시 검토해야 한다.
+
 ## 실행
 
 ```bash

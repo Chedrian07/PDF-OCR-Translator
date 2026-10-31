@@ -37,7 +37,7 @@
 | 이미지(figure) 추출 | 모델이 `<\|ref\|>image<\|/ref\|><\|det\|>[[x1,y1,x2,y2]]<\|/det\|>` (0–999 정규화 좌표) 출력 → 원본 페이지에서 크롭하여 `{out}/images/page_{i}_{k}.jpg` 저장, 마크다운에는 `![](images/page_{i}_{k}.jpg)` 치환 |
 | 레이아웃 시각화 | 페이지별 `result_with_boxes_{i}.jpg` 저장 (GIF 데모의 박스 오버레이) |
 | 고정 의존성 | 모델 README 기준 — torch==2.10.0, torchvision==0.25.0, transformers==4.57.1 등. 벤더 모델 코드가 이 API에 묶여 고정하며, 남은 pip-audit 권고는 수용한 잔여 위험이다(근거는 `backend/pyproject.toml` 고정 옆 주석) |
-| 보안 고정 | 모델 수치와 무관한 I/O 라이브러리는 README 고정에서 이탈 — pymupdf==1.28.2(동봉 MuPDF의 CVE-2026-3308 수정), pillow==12.3.0. 전이 의존 urllib3≥2.8.0·anyio≥4.14.2와 함께 `backend/tests/test_dependency_floor.py`가 하한을 지킨다 |
+| 보안 고정 | 모델 수치와 무관한 I/O 라이브러리는 README 고정에서 이탈 — pymupdf==1.28.2(동봉 MuPDF의 CVE-2026-3308 수정), pillow==13.0.0(native storage·JPEG 디코더 보안 수정). 전이 의존 certifi≥2026.10.18·filelock≥4.2.1·setuptools≥84.1.0·urllib3≥2.8.0·anyio≥4.14.2와 함께 `backend/tests/test_dependency_floor.py`가 하한을 지킨다 |
 | MLX extra | `mlx==0.32.3`(darwin-arm64 마커, macOS 14+ 휠) — in-process MLX OCR 엔진(§6)의 런타임. torch와 겹치지 않아 `uv sync --extra metal --extra mlx`(= `make setup-mlx`)로 함께 설치한다. metal 단독·mlx 단독 sync는 서로를(그리고 `uv pip`로 넣은 C++ 모듈을) 지운다 |
 | MLX 포팅 | `backend/app/vendor/unlimited_ocr_mlx/` — mlx-vlm **0.7.4**의 Unlimited-OCR 모델 코드를 벤더링(MIT). mlx-vlm(transformers≥5.14 요구)·torch에 의존하지 않고 transformers 4.57.1은 토크나이저에만 쓴다. torch 경로와 **같은 스냅샷**을 변환 없이 strict 로드한다 |
 | CUDA 휠 | cu129 (README 테스트 환경 CUDA 12.9, Blackwell sm_120 포함) |

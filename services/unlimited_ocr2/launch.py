@@ -1,8 +1,10 @@
 """Resolve a pinned snapshot, then exec the official Unlimited-OCR-2 SGLang wheel."""
 
+import argparse
 import json
 import os
 import sys
+import tempfile
 
 from huggingface_hub import snapshot_download
 
@@ -10,7 +12,19 @@ MODEL_ID = "baidu/Unlimited-OCR-2"
 REVISION = "c14071b549f4fcab10909f3c4acc6a2edb366947"
 
 
-def command():
+def command(argv=None):
+    # This is an OCR-only service. Do not forward arbitrary SGLang arguments:
+    # config files/aliases must not re-enable optional grammar/cache code paths.
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    parser.add_argument("--host", default=os.environ.get("SGLANG_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=10000)
+    args = parser.parse_args(argv)
+    if not 0 < args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
+    # Independent of the disabled grammar path, never reuse a cache another
+    # principal could have populated. mkdtemp creates an owner-only 0700 directory.
+    os.environ["OUTLINES_CACHE_DIR"] = tempfile.mkdtemp(prefix="uocr2-outlines-")
+    os.environ["SGLANG_DISABLE_OUTLINES_DISK_CACHE"] = "true"
     snapshot = snapshot_download(
         MODEL_ID, revision=REVISION, allow_patterns=["*.json", "*.safetensors", "*.py"]
     )
@@ -41,6 +55,9 @@ def command():
         "--tokenizer-worker-num",
         "1",
         "--enable-custom-logit-processor",
+        "--grammar-backend",
+        "none",
+        "--disable-outlines-disk-cache",
         "--enable-streaming-session",
         "--allow-auto-truncate",
         "--disable-radix-cache",
@@ -75,10 +92,9 @@ def command():
             }
         ),
         "--host",
-        os.environ.get("SGLANG_HOST", "127.0.0.1"),
+        args.host,
         "--port",
-        "10000",
-        *sys.argv[1:],
+        str(args.port),
     ]
 
 

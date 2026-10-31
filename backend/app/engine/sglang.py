@@ -127,6 +127,14 @@ class SGLangEngine(OCREngine):
                 raise EngineError(
                     "SGLang model identity mismatch; start services/unlimited_ocr2/launch.py"
                 )
+            if (
+                runtime_info.get("grammar_backend") != "none"
+                or runtime_info.get("disable_outlines_disk_cache") is not True
+            ):
+                raise EngineError(
+                    "SGLang optional grammar/cache must be disabled; "
+                    "start services/unlimited_ocr2/launch.py"
+                )
             self._loaded = True
             self._health = {"status": "ready", "model_revision": s.model_revision}
         except (httpx.HTTPError, ValueError) as exc:

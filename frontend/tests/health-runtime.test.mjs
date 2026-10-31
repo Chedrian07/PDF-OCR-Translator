@@ -67,6 +67,17 @@ function setup(t, bodies) {
 
 const badges = () => el.healthBadges.querySelectorAll('.badge').map((b) => b.textContent);
 
+test('모델 배지는 서버가 준 ID를 보존하고, ID가 없을 때만 Unlimited-OCR-2를 쓴다', (t) => {
+  setup(t, [{}]);
+  const healthy = { model_loaded: true, device: 'cpu' };
+  renderHealth(healthy);
+  assert.deepEqual(badges(), ['baidu/Unlimited-OCR-2', 'CPU']);
+  for (const model_id of ['research/custom-ocr', 'baidu/Unlimited-OCR']) {
+    renderHealth({ ...healthy, model_id });
+    assert.deepEqual(badges(), [model_id, 'CPU']);
+  }
+});
+
 test('프리로드 실패: "로딩 중" 대신 실패 배지와 사유가 담긴 업로드 안내', (t) => {
   setup(t, [{}]);
   renderHealth({ model_loaded: false, model_load_error: 'CUDA out of memory', device: 'cuda' });
@@ -235,9 +246,9 @@ test('상태가 바뀌면 바뀐 배지만 고친다 — 나머지 배지 노드
     provider: 'local-sidecar', provider_health: { status: 'ok' } };
   renderHealth(healthy);
   const [model, device] = el.healthBadges.children;
-  assert.deepEqual(badges(), ['baidu/Unlimited-OCR', 'CUDA · RTX 4090']);
+  assert.deepEqual(badges(), ['baidu/Unlimited-OCR-2', 'CUDA · RTX 4090']);
   renderHealth({ ...healthy, provider_health: { status: 'error', error: 'refused' } });
-  assert.deepEqual(badges(), ['baidu/Unlimited-OCR', 'CUDA · RTX 4090', '엔진 서버 연결 안 됨']);
+  assert.deepEqual(badges(), ['baidu/Unlimited-OCR-2', 'CUDA · RTX 4090', '엔진 서버 연결 안 됨']);
   assert.ok(el.healthBadges.children[0] === model && el.healthBadges.children[1] === device,
     '그대로인 배지는 다시 만들지 않는다');
   // 사유(툴팁)만 바뀌면 같은 노드의 title만 고친다 — 글자를 다시 쓰지 않는다
@@ -263,5 +274,5 @@ test('연결 실패 배지도 반복 조회마다 다시 쓰지 않고, 회복�
   assert.deepEqual(log, []);
   assert.deepEqual(badges(), ['서버 연결 실패']);
   renderHealth({ model_loaded: true, device: 'cpu' });
-  assert.deepEqual(badges(), ['baidu/Unlimited-OCR', 'CPU']);
+  assert.deepEqual(badges(), ['baidu/Unlimited-OCR-2', 'CPU']);
 });

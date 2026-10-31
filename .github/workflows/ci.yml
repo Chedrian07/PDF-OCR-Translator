@@ -162,7 +162,7 @@ jobs:
           sed -E -i 's/^([A-Za-z0-9._-]+==[^ ;+]+)\+[A-Za-z0-9._]+/\1/' "$RUNNER_TEMP/req.txt"
           uvx pip-audit==2.10.1 -r "$RUNNER_TEMP/req.txt" --disable-pip --no-deps --strict "${args[@]}"
       - name: pip-audit — SGLang lock
-        run: uvx pip-audit==2.10.1 -r services/unlimited_ocr2/requirements.lock --disable-pip --no-deps
+        run: python3 scripts/audit_unlimited_ocr2.py
 
   frontend:
     runs-on: ubuntu-latest
@@ -309,6 +309,7 @@ jobs:
           echo "OCR_SIDECAR_URL=http://${service_ip}:10000" >> "$GITHUB_ENV"
           backend/.venv/bin/python - "$service_ip" <<'PY'
           import sys
+          import json
           import time
           import urllib.error
           import urllib.request
@@ -327,6 +328,10 @@ jobs:
               time.sleep(2)
           else:
               raise SystemExit("Unlimited-OCR-2 did not become ready within 900 seconds")
+          with opener.open(f"http://{sys.argv[1]}:10000/server_info", timeout=5) as response:
+              runtime = json.load(response)
+          if runtime.get("grammar_backend") != "none" or runtime.get("disable_outlines_disk_cache") is not True:
+              raise SystemExit("The OCR-only model service must disable optional grammar/disk caches")
           PY
       - name: Real Unlimited-OCR-2 CUDA + mock translation/Q&A browser E2E
         env:

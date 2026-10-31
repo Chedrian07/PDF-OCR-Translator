@@ -29,8 +29,9 @@ dependencies = [
     # pymupdf: 동봉 MuPDF 1.28.0 미만은 CVE-2026-3308(이미지 stride 정수 오버플로 →
     #   힙 OOB 쓰기, 수정 커밋 a26f0142)이 남는다. 1.27.2.x도 MuPDF 1.27.2라 미수정이고
     #   패키지 스캐너는 동봉 MuPDF를 못 본다 — tests/test_dependency_floor.py가 지킨다.
-    # pillow: 12.3.0 미만은 crop/paste 좌표 오버플로 OOB 쓰기 등 HIGH 권고가 남는다.
-    "pillow==12.3.0",
+    # pillow: 13.0.0은 모드 전환 뒤 native storage 재사용·JPEG 디코더 오버플로 등
+    # 보안 수정판이다. https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html
+    "pillow==13.0.0",
     "pymupdf==1.28.2",
     # 내보내기 PDF에 임베드하는 CJK 폰트 서브셋 — 없으면 전체 폰트를
     # 임베드하는 예전 동작으로 조용히 폴백한다(pdf_export/subset.py).

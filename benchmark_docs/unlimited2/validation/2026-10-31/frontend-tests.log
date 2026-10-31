@@ -6,2362 +6,2310 @@ TAP version 13
 # Subtest: 브라우저가 실행하는 스크립트에 정규식 lookbehind가 없다 (Safari 16.4 미만 파싱 실패)
 ok 1 - 브라우저가 실행하는 스크립트에 정규식 lookbehind가 없다 (Safari 16.4 미만 파싱 실패)
   ---
-  duration_ms: 5.870234
+  duration_ms: 8.958943
   type: 'test'
   ...
 # Subtest: warningSegments: lookbehind 없이도 앞 글자 규칙이 같다 — 거절한 자리 바로 뒤부터 다시 찾는다
 ok 2 - warningSegments: lookbehind 없이도 앞 글자 규칙이 같다 — 거절한 자리 바로 뒤부터 다시 찾는다
   ---
-  duration_ms: 1.252137
+  duration_ms: 0.78141
   type: 'test'
   ...
 # Subtest: langFetchVerdict: 404/409만 "없음", 503은 "바쁨", 나머지는 일시 장애
 ok 3 - langFetchVerdict: 404/409만 "없음", 503은 "바쁨", 나머지는 일시 장애
   ---
-  duration_ms: 1.439007
+  duration_ms: 1.301977
   type: 'test'
   ...
 # Subtest: busyRetryDelay: Retry-After(초)를 지키고 1..60초로 묶는다
 ok 4 - busyRetryDelay: Retry-After(초)를 지키고 1..60초로 묶는다
   ---
-  duration_ms: 0.751655
+  duration_ms: 3.234048
   type: 'test'
   ...
 # Subtest: busyRetryDelay: HTTP-date Retry-After는 남은 초로 환산한다
 ok 5 - busyRetryDelay: HTTP-date Retry-After는 남은 초로 환산한다
   ---
-  duration_ms: 0.129616
+  duration_ms: 0.146127
   type: 'test'
   ...
 # Subtest: busyRetryDelay: 재시도는 유한하다 — 상한에 닿으면 0
 ok 6 - busyRetryDelay: 재시도는 유한하다 — 상한에 닿으면 0
   ---
-  duration_ms: 0.115338
+  duration_ms: 0.172397
   type: 'test'
   ...
 # Subtest: busyRetryDelay: 503이 아니면 재시도하지 않는다
 ok 7 - busyRetryDelay: 503이 아니면 재시도하지 않는다
   ---
-  duration_ms: 0.103346
+  duration_ms: 0.16373
   type: 'test'
   ...
 # Subtest: busyWaitMessage: 무엇을 얼마나 기다리는지와 시도 횟수를 보여 준다
 ok 8 - busyWaitMessage: 무엇을 얼마나 기다리는지와 시도 횟수를 보여 준다
   ---
-  duration_ms: 0.089189
+  duration_ms: 0.146307
   type: 'test'
   ...
 # Subtest: fetchTextWithBusyRetry: 503 뒤 Retry-After만큼 기다렸다 성공을 돌려준다
 ok 9 - fetchTextWithBusyRetry: 503 뒤 Retry-After만큼 기다렸다 성공을 돌려준다
   ---
-  duration_ms: 1.055541
+  duration_ms: 4.251756
   type: 'test'
   ...
 # Subtest: fetchTextWithBusyRetry: 바쁨이 계속되면 상한 뒤 503을 돌려준다
 ok 10 - fetchTextWithBusyRetry: 바쁨이 계속되면 상한 뒤 503을 돌려준다
   ---
-  duration_ms: 0.616187
+  duration_ms: 0.513042
   type: 'test'
   ...
 # Subtest: fetchTextWithBusyRetry: 대기 중 잡·언어가 바뀌면 다시 묻지 않는다
 ok 11 - fetchTextWithBusyRetry: 대기 중 잡·언어가 바뀌면 다시 묻지 않는다
   ---
-  duration_ms: 0.329845
+  duration_ms: 0.340746
   type: 'test'
   ...
 # Subtest: fetchTextWithBusyRetry: 네트워크 오류는 status 0, 404는 재시도 없이 그대로
 ok 12 - fetchTextWithBusyRetry: 네트워크 오류는 status 0, 404는 재시도 없이 그대로
   ---
-  duration_ms: 1.061992
+  duration_ms: 0.499076
   type: 'test'
   ...
 # Subtest: 레이아웃 탭(한국어): 503 동안 진행을 보이고 끝나면 한국어 그대로 렌더
 ok 13 - 레이아웃 탭(한국어): 503 동안 진행을 보이고 끝나면 한국어 그대로 렌더
   ---
-  duration_ms: 1.491386
+  duration_ms: 1.701033
   type: 'test'
   ...
 # Subtest: 레이아웃 탭(한국어): 바쁨이 끝내 안 풀려도 언어를 유지하고 다시 시도를 준다
 ok 14 - 레이아웃 탭(한국어): 바쁨이 끝내 안 풀려도 언어를 유지하고 다시 시도를 준다
   ---
-  duration_ms: 5.76269
+  duration_ms: 6.193312
   type: 'test'
   ...
 # Subtest: 레이아웃 탭(한국어): 네트워크 오류도 언어를 뒤집지 않는다
 ok 15 - 레이아웃 탭(한국어): 네트워크 오류도 언어를 뒤집지 않는다
   ---
-  duration_ms: 0.471884
+  duration_ms: 0.7286
   type: 'test'
   ...
 # Subtest: 레이아웃 탭(한국어): 404(번역본 없음)일 때만 원문으로 폴백한다
 ok 16 - 레이아웃 탭(한국어): 404(번역본 없음)일 때만 원문으로 폴백한다
   ---
-  duration_ms: 3.973199
+  duration_ms: 2.801608
   type: 'test'
   ...
 # Subtest: 레이아웃 탭: 같은 잡·언어 로드는 바쁨 대기 중에도 하나만 돈다
 ok 17 - 레이아웃 탭: 같은 잡·언어 로드는 바쁨 대기 중에도 하나만 돈다
   ---
-  duration_ms: 0.585039
+  duration_ms: 0.626678
   type: 'test'
   ...
 # Subtest: 미리보기 탭(한국어): 503 뒤 성공하면 한국어 미리보기를 그린다
 ok 18 - 미리보기 탭(한국어): 503 뒤 성공하면 한국어 미리보기를 그린다
   ---
-  duration_ms: 0.465142
+  duration_ms: 0.605727
   type: 'test'
   ...
 # Subtest: Markdown 탭(한국어): 5xx는 언어를 유지하고 재시도 안내만 남긴다
 ok 19 - Markdown 탭(한국어): 5xx는 언어를 유지하고 재시도 안내만 남긴다
   ---
-  duration_ms: 0.391782
+  duration_ms: 0.628972
   type: 'test'
   ...
 # Subtest: 리더(한국어): 네트워크 오류는 언어를 유지하고 다시 시도·원문 보기를 준다
 ok 20 - 리더(한국어): 네트워크 오류는 언어를 유지하고 다시 시도·원문 보기를 준다
   ---
-  duration_ms: 0.841074
+  duration_ms: 2.877043
   type: 'test'
   ...
 # Subtest: 리더(한국어): 404일 때만 원문으로 폴백한다
 ok 21 - 리더(한국어): 404일 때만 원문으로 폴백한다
   ---
-  duration_ms: 1.107298
+  duration_ms: 2.820996
   type: 'test'
   ...
 # Subtest: 리더 개요: 일시 실패는 캐시하지 않고, 404만 빈 개요로 확정한다
 ok 22 - 리더 개요: 일시 실패는 캐시하지 않고, 404만 빈 개요로 확정한다
   ---
-  duration_ms: 2.990637
+  duration_ms: 2.36939
   type: 'test'
   ...
 # Subtest: apiGet: timeoutMs가 있으면 시간 제한 신호를 붙이고, 응답이 없으면 실패한다
 ok 23 - apiGet: timeoutMs가 있으면 시간 제한 신호를 붙이고, 응답이 없으면 실패한다
   ---
-  duration_ms: 29.986069
+  duration_ms: 31.030117
   type: 'test'
   ...
 # Subtest: fetchTextWithBusyRetry: 멈춘 요청은 시간 제한 뒤 네트워크 오류(0)로 끝나 다시 시도할 수 있다
 ok 24 - fetchTextWithBusyRetry: 멈춘 요청은 시간 제한 뒤 네트워크 오류(0)로 끝나 다시 시도할 수 있다
   ---
-  duration_ms: 29.832442
+  duration_ms: 29.948679
   type: 'test'
   ...
 # Subtest: 잡 SSE 폴백: 문서의 상태 폴링 간격·재승격 백오프가 sse.js와 같다
 ok 25 - 잡 SSE 폴백: 문서의 상태 폴링 간격·재승격 백오프가 sse.js와 같다
   ---
-  duration_ms: 1.790878
+  duration_ms: 2.557167
   type: 'test'
   ...
 # Subtest: 번역 SSE 폴백: 재승격 없이 translate.js의 간격으로 끝까지 폴링한다고 적는다
 ok 26 - 번역 SSE 폴백: 재승격 없이 translate.js의 간격으로 끝까지 폴링한다고 적는다
   ---
-  duration_ms: 0.441667
+  duration_ms: 0.658839
   type: 'test'
   ...
-# (node:115161) ExperimentalWarning: The MockTimers API is an experimental feature and might change at any time
+# (node:217302) ExperimentalWarning: The MockTimers API is an experimental feature and might change at any time
 # (Use `node --trace-warnings ...` to show where the warning was created)
 # Subtest: healthStatus: 로딩 중·로드 실패·워커 중지를 구분한다 (필드 부재는 정상)
 ok 27 - healthStatus: 로딩 중·로드 실패·워커 중지를 구분한다 (필드 부재는 정상)
   ---
-  duration_ms: 6.032923
+  duration_ms: 0.958106
   type: 'test'
   ...
 # Subtest: healthPollDelay: 정상은 느리게, 로딩·장애·연결 실패는 빠르게 다시 묻는다
 ok 28 - healthPollDelay: 정상은 느리게, 로딩·장애·연결 실패는 빠르게 다시 묻는다
   ---
-  duration_ms: 0.196863
+  duration_ms: 0.227701
+  type: 'test'
+  ...
+# Subtest: 모델 배지는 서버가 준 ID를 보존하고, ID가 없을 때만 Unlimited-OCR-2를 쓴다
+ok 29 - 모델 배지는 서버가 준 ID를 보존하고, ID가 없을 때만 Unlimited-OCR-2를 쓴다
+  ---
+  duration_ms: 5.646189
   type: 'test'
   ...
 # Subtest: 프리로드 실패: "로딩 중" 대신 실패 배지와 사유가 담긴 업로드 안내
-ok 29 - 프리로드 실패: "로딩 중" 대신 실패 배지와 사유가 담긴 업로드 안내
+ok 30 - 프리로드 실패: "로딩 중" 대신 실패 배지와 사유가 담긴 업로드 안내
   ---
-  duration_ms: 5.174255
+  duration_ms: 1.079054
   type: 'test'
   ...
 # Subtest: 로딩 중에는 기존 안내, 로드되면 안내를 숨긴다
-ok 30 - 로딩 중에는 기존 안내, 로드되면 안내를 숨긴다
+ok 31 - 로딩 중에는 기존 안내, 로드되면 안내를 숨긴다
   ---
-  duration_ms: 1.224416
+  duration_ms: 1.336493
   type: 'test'
   ...
 # Subtest: 워커 스레드가 죽으면 "작업 처리기 중지됨" 배지
-ok 31 - 워커 스레드가 죽으면 "작업 처리기 중지됨" 배지
+ok 32 - 워커 스레드가 죽으면 "작업 처리기 중지됨" 배지
   ---
-  duration_ms: 2.553529
+  duration_ms: 1.119892
   type: 'test'
   ...
 # Subtest: 정상이어도 30초마다 다시 묻고, 그 사이 죽은 sidecar를 배지로 띄운다
-ok 32 - 정상이어도 30초마다 다시 묻고, 그 사이 죽은 sidecar를 배지로 띄운다
+ok 33 - 정상이어도 30초마다 다시 묻고, 그 사이 죽은 sidecar를 배지로 띄운다
   ---
-  duration_ms: 9.673872
+  duration_ms: 6.878484
   type: 'test'
   ...
 # Subtest: 숨은 탭에서는 예약하지 않고, 다시 보이면 바로 묻는다
-ok 33 - 숨은 탭에서는 예약하지 않고, 다시 보이면 바로 묻는다
+ok 34 - 숨은 탭에서는 예약하지 않고, 다시 보이면 바로 묻는다
   ---
-  duration_ms: 2.058912
+  duration_ms: 1.032387
   type: 'test'
   ...
 # Subtest: 조회가 진행 중이면 겹쳐 보내지 않는다
-ok 34 - 조회가 진행 중이면 겹쳐 보내지 않는다
+ok 35 - 조회가 진행 중이면 겹쳐 보내지 않는다
   ---
-  duration_ms: 0.779597
+  duration_ms: 0.941615
   type: 'test'
   ...
 # Subtest: MLX 디바이스는 Apple GPU 배지(칩 이름·Metal 스타일)로 보인다
-ok 35 - MLX 디바이스는 Apple GPU 배지(칩 이름·Metal 스타일)로 보인다
+ok 36 - MLX 디바이스는 Apple GPU 배지(칩 이름·Metal 스타일)로 보인다
   ---
-  duration_ms: 1.337093
+  duration_ms: 2.839591
   type: 'test'
   ...
 # Subtest: 같은 health 응답을 다시 받으면 배지·업로드 안내를 전혀 다시 쓰지 않는다
-ok 36 - 같은 health 응답을 다시 받으면 배지·업로드 안내를 전혀 다시 쓰지 않는다
+ok 37 - 같은 health 응답을 다시 받으면 배지·업로드 안내를 전혀 다시 쓰지 않는다
   ---
-  duration_ms: 2.167728
+  duration_ms: 1.218168
   type: 'test'
   ...
 # Subtest: 상태가 바뀌면 바뀐 배지만 고친다 — 나머지 배지 노드는 그대로
-not ok 37 - 상태가 바뀌면 바뀐 배지만 고친다 — 나머지 배지 노드는 그대로
+ok 38 - 상태가 바뀌면 바뀐 배지만 고친다 — 나머지 배지 노드는 그대로
   ---
-  duration_ms: 1.23491
+  duration_ms: 0.750523
   type: 'test'
-  location: '/home/kch3dri4n/project/PDF-OCR-Translator/frontend/tests/health-runtime.test.mjs:232:1'
-  failureType: 'testCodeFailure'
-  error: |-
-    Expected values to be strictly deep-equal:
-    + actual - expected
-    
-      [
-    +   'baidu/Unlimited-OCR-2',
-    -   'baidu/Unlimited-OCR',
-        'CUDA · RTX 4090'
-      ]
-    
-  code: 'ERR_ASSERTION'
-  name: 'AssertionError'
-  expected:
-    0: 'baidu/Unlimited-OCR'
-    1: 'CUDA · RTX 4090'
-  actual:
-    0: 'baidu/Unlimited-OCR-2'
-    1: 'CUDA · RTX 4090'
-  operator: 'deepStrictEqual'
-  stack: |-
-    TestContext.<anonymous> (file:///home/kch3dri4n/project/PDF-OCR-Translator/frontend/tests/health-runtime.test.mjs:238:10)
-    Test.runInAsyncScope (node:async_hooks:214:14)
-    Test.run (node:internal/test_runner/test:1047:25)
-    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
-    Test.postRun (node:internal/test_runner/test:1173:19)
-    Test.run (node:internal/test_runner/test:1101:12)
-    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
   ...
 # Subtest: 연결 실패 배지도 반복 조회마다 다시 쓰지 않고, 회복하면 정상 배지로 돌아간다
-not ok 38 - 연결 실패 배지도 반복 조회마다 다시 쓰지 않고, 회복하면 정상 배지로 돌아간다
+ok 39 - 연결 실패 배지도 반복 조회마다 다시 쓰지 않고, 회복하면 정상 배지로 돌아간다
   ---
-  duration_ms: 0.753417
+  duration_ms: 2.295511
   type: 'test'
-  location: '/home/kch3dri4n/project/PDF-OCR-Translator/frontend/tests/health-runtime.test.mjs:257:1'
-  failureType: 'testCodeFailure'
-  error: |-
-    Expected values to be strictly deep-equal:
-    + actual - expected
-    
-      [
-    +   'baidu/Unlimited-OCR-2',
-    -   'baidu/Unlimited-OCR',
-        'CPU'
-      ]
-    
-  code: 'ERR_ASSERTION'
-  name: 'AssertionError'
-  expected:
-    0: 'baidu/Unlimited-OCR'
-    1: 'CPU'
-  actual:
-    0: 'baidu/Unlimited-OCR-2'
-    1: 'CPU'
-  operator: 'deepStrictEqual'
-  stack: |-
-    TestContext.<anonymous> (file:///home/kch3dri4n/project/PDF-OCR-Translator/frontend/tests/health-runtime.test.mjs:266:10)
-    Test.runInAsyncScope (node:async_hooks:214:14)
-    Test.run (node:internal/test_runner/test:1047:25)
-    Test.processPendingSubtests (node:internal/test_runner/test:744:18)
-    Test.postRun (node:internal/test_runner/test:1173:19)
-    Test.run (node:internal/test_runner/test:1101:12)
-    async Test.processPendingSubtests (node:internal/test_runner/test:744:7)
   ...
 # Subtest: imageSrcAllowed: 같은 출처·data:image·blob:만 허용한다
-ok 39 - imageSrcAllowed: 같은 출처·data:image·blob:만 허용한다
+ok 40 - imageSrcAllowed: 같은 출처·data:image·blob:만 허용한다
   ---
-  duration_ms: 0.652407
+  duration_ms: 0.68593
   type: 'test'
   ...
 # Subtest: sanitizeImageSources: 외부 이미지는 요청 전에 자리표시로 바꾸고 같은 출처는 둔다
-ok 40 - sanitizeImageSources: 외부 이미지는 요청 전에 자리표시로 바꾸고 같은 출처는 둔다
+ok 41 - sanitizeImageSources: 외부 이미지는 요청 전에 자리표시로 바꾸고 같은 출처는 둔다
   ---
-  duration_ms: 3.012028
+  duration_ms: 3.050662
   type: 'test'
   ...
 # Subtest: sanitizeImageSources: lazyImages면 남은 그림에 loading=lazy·decoding=async
-ok 41 - sanitizeImageSources: lazyImages면 남은 그림에 loading=lazy·decoding=async
+ok 42 - sanitizeImageSources: lazyImages면 남은 그림에 loading=lazy·decoding=async
   ---
-  duration_ms: 0.36378
+  duration_ms: 0.450083
   type: 'test'
   ...
 # Subtest: sanitizeImageSources: srcset·다른 미디어의 외부 주소 속성도 지운다
-ok 42 - sanitizeImageSources: srcset·다른 미디어의 외부 주소 속성도 지운다
+ok 43 - sanitizeImageSources: srcset·다른 미디어의 외부 주소 속성도 지운다
   ---
-  duration_ms: 0.593905
+  duration_ms: 0.661022
   type: 'test'
   ...
 # Subtest: CSP: 이미지는 같은 출처와 data:·blob:만, 연결도 같은 출처만
-ok 43 - CSP: 이미지는 같은 출처와 data:·blob:만, 연결도 같은 출처만
+ok 44 - CSP: 이미지는 같은 출처와 data:·blob:만, 연결도 같은 출처만
   ---
-  duration_ms: 0.272055
+  duration_ms: 0.286072
   type: 'test'
   ...
 # Subtest: CSP: 스크립트는 같은 출처 파일만 — 인라인 스크립트가 없어야 그 정책이 성립한다
-ok 44 - CSP: 스크립트는 같은 출처 파일만 — 인라인 스크립트가 없어야 그 정책이 성립한다
+ok 45 - CSP: 스크립트는 같은 출처 파일만 — 인라인 스크립트가 없어야 그 정책이 성립한다
   ---
-  duration_ms: 0.365223
+  duration_ms: 0.355424
   type: 'test'
   ...
 # Subtest: CSP meta는 리소스보다 먼저, 테마 부트스트랩은 동기 스크립트로 head에 있다
-ok 45 - CSP meta는 리소스보다 먼저, 테마 부트스트랩은 동기 스크립트로 head에 있다
+ok 46 - CSP meta는 리소스보다 먼저, 테마 부트스트랩은 동기 스크립트로 head에 있다
   ---
-  duration_ms: 0.218304
+  duration_ms: 0.217642
   type: 'test'
   ...
 # Subtest: jobRowSignature: 표시 필드가 바뀔 때만 달라진다
-ok 46 - jobRowSignature: 표시 필드가 바뀔 때만 달라진다
+ok 47 - jobRowSignature: 표시 필드가 바뀔 때만 달라진다
   ---
-  duration_ms: 0.755431
+  duration_ms: 1.457142
   type: 'test'
   ...
 # Subtest: 같은 데이터로 다시 렌더하면 DOM을 건드리지 않고 포커스가 남는다
-ok 47 - 같은 데이터로 다시 렌더하면 DOM을 건드리지 않고 포커스가 남는다
+ok 48 - 같은 데이터로 다시 렌더하면 DOM을 건드리지 않고 포커스가 남는다
   ---
-  duration_ms: 12.248355
+  duration_ms: 16.812705
   type: 'test'
   ...
 # Subtest: 상태가 바뀐 줄은 제자리에서 갱신되고 포커스·삭제 무장이 유지된다
-ok 48 - 상태가 바뀐 줄은 제자리에서 갱신되고 포커스·삭제 무장이 유지된다
+ok 49 - 상태가 바뀐 줄은 제자리에서 갱신되고 포커스·삭제 무장이 유지된다
   ---
-  duration_ms: 1.270858
+  duration_ms: 1.523106
   type: 'test'
   ...
 # Subtest: 줄 순서가 바뀌어 포커스가 빠지면 같은 잡의 같은 컨트롤로 돌려준다
-ok 49 - 줄 순서가 바뀌어 포커스가 빠지면 같은 잡의 같은 컨트롤로 돌려준다
+ok 50 - 줄 순서가 바뀌어 포커스가 빠지면 같은 잡의 같은 컨트롤로 돌려준다
   ---
-  duration_ms: 0.976601
+  duration_ms: 1.009323
   type: 'test'
   ...
 # Subtest: 새 잡이 맨 위에 생겨도 기존 줄은 옮기지 않는다
-ok 50 - 새 잡이 맨 위에 생겨도 기존 줄은 옮기지 않는다
+ok 51 - 새 잡이 맨 위에 생겨도 기존 줄은 옮기지 않는다
   ---
-  duration_ms: 0.715606
+  duration_ms: 0.77026
   type: 'test'
   ...
 # Subtest: 포커스된 잡이 목록에서 사라지면 같은 자리 줄의 열기 버튼으로 넘긴다
-ok 51 - 포커스된 잡이 목록에서 사라지면 같은 자리 줄의 열기 버튼으로 넘긴다
+ok 52 - 포커스된 잡이 목록에서 사라지면 같은 자리 줄의 열기 버튼으로 넘긴다
   ---
-  duration_ms: 0.653899
+  duration_ms: 0.69641
   type: 'test'
   ...
 # Subtest: 빈 목록이면 안내 문구를 보이고 줄을 모두 지운다
-ok 52 - 빈 목록이면 안내 문구를 보이고 줄을 모두 지운다
+ok 53 - 빈 목록이면 안내 문구를 보이고 줄을 모두 지운다
   ---
-  duration_ms: 0.642864
+  duration_ms: 0.405789
   type: 'test'
   ...
 # Subtest: 키보드 2단계 삭제: 폴링 재렌더 뒤 두 번째 Enter가 실제로 삭제한다
-ok 53 - 키보드 2단계 삭제: 폴링 재렌더 뒤 두 번째 Enter가 실제로 삭제한다
+ok 54 - 키보드 2단계 삭제: 폴링 재렌더 뒤 두 번째 Enter가 실제로 삭제한다
   ---
-  duration_ms: 8.384028
+  duration_ms: 12.65448
   type: 'test'
   ...
 # Subtest: 목록 갱신은 한 번에 하나 — 진행 중 명시적 갱신은 한 번 더, 주기 폴링은 건너뛴다
-ok 54 - 목록 갱신은 한 번에 하나 — 진행 중 명시적 갱신은 한 번 더, 주기 폴링은 건너뛴다
+ok 55 - 목록 갱신은 한 번에 하나 — 진행 중 명시적 갱신은 한 번 더, 주기 폴링은 건너뛴다
   ---
-  duration_ms: 1.105725
+  duration_ms: 2.104407
   type: 'test'
   ...
 # Subtest: jobListUrl: 기본 창은 예전 URL, 그 밖은 limit(1–500)과 before 커서
-ok 55 - jobListUrl: 기본 창은 예전 URL, 그 밖은 limit(1–500)과 before 커서
+ok 56 - jobListUrl: 기본 창은 예전 URL, 그 밖은 limit(1–500)과 before 커서
   ---
-  duration_ms: 0.249032
+  duration_ms: 0.252388
   type: 'test'
   ...
 # Subtest: normalizeJobPage·appendJobPage·jobListMoreLabel: 구버전 응답과 겹친 경계를 견딘다
-ok 56 - normalizeJobPage·appendJobPage·jobListMoreLabel: 구버전 응답과 겹친 경계를 견딘다
+ok 57 - normalizeJobPage·appendJobPage·jobListMoreLabel: 구버전 응답과 겹친 경계를 견딘다
   ---
-  duration_ms: 0.186834
+  duration_ms: 0.198906
   type: 'test'
   ...
 # Subtest: '더 보기': 마지막 잡 다음 한 쪽을 before로 잇고 폴링은 넓어진 창을 유지한다
-ok 57 - '더 보기': 마지막 잡 다음 한 쪽을 before로 잇고 폴링은 넓어진 창을 유지한다
+ok 58 - '더 보기': 마지막 잡 다음 한 쪽을 before로 잇고 폴링은 넓어진 창을 유지한다
   ---
-  duration_ms: 11.650142
+  duration_ms: 17.325888
   type: 'test'
   ...
 # Subtest: '더 보기' 커서 잡이 그사이 지워지면(422) 넓힌 창을 처음부터 다시 받는다
-ok 58 - '더 보기' 커서 잡이 그사이 지워지면(422) 넓힌 창을 처음부터 다시 받는다
+ok 59 - '더 보기' 커서 잡이 그사이 지워지면(422) 넓힌 창을 처음부터 다시 받는다
   ---
-  duration_ms: 12.949495
+  duration_ms: 17.313353
   type: 'test'
   ...
 # Subtest: '더 보기' 응답을 기다리는 사이 목록 끝이 밀리면 틈 없이 처음부터 다시 받는다
-ok 59 - '더 보기' 응답을 기다리는 사이 목록 끝이 밀리면 틈 없이 처음부터 다시 받는다
+ok 60 - '더 보기' 응답을 기다리는 사이 목록 끝이 밀리면 틈 없이 처음부터 다시 받는다
   ---
-  duration_ms: 15.726933
+  duration_ms: 14.515968
   type: 'test'
   ...
 # Subtest: 서버 limit 상한(500)을 넘는 창은 before 커서로 이어 받는다
-ok 60 - 서버 limit 상한(500)을 넘는 창은 before 커서로 이어 받는다
+ok 61 - 서버 limit 상한(500)을 넘는 창은 before 커서로 이어 받는다
   ---
-  duration_ms: 51.102429
+  duration_ms: 68.898934
   type: 'test'
   ...
 # Subtest: 구버전 서버(has_more 없음)에는 '더 보기'를 보이지 않는다
-ok 61 - 구버전 서버(has_more 없음)에는 '더 보기'를 보이지 않는다
+ok 62 - 구버전 서버(has_more 없음)에는 '더 보기'를 보이지 않는다
   ---
-  duration_ms: 9.915309
+  duration_ms: 11.099474
   type: 'test'
   ...
 # Subtest: '더 보기'로 끝까지 받으면 포커스를 새로 붙은 첫 줄로 넘긴다
-ok 62 - '더 보기'로 끝까지 받으면 포커스를 새로 붙은 첫 줄로 넘긴다
+ok 63 - '더 보기'로 끝까지 받으면 포커스를 새로 붙은 첫 줄로 넘긴다
   ---
-  duration_ms: 4.159653
+  duration_ms: 4.300039
   type: 'test'
   ...
 # Subtest: Markdown ZIP history has a service label and no reader shortcut; legacy restores it
-ok 63 - Markdown ZIP history has a service label and no reader shortcut; legacy restores it
+ok 64 - Markdown ZIP history has a service label and no reader shortcut; legacy restores it
   ---
-  duration_ms: 0.516028
+  duration_ms: 0.495469
   type: 'test'
   ...
 # Subtest: jobNotices: 문자열 경고를 정리하고 중복·빈 값·비문자열을 버린다
-ok 64 - jobNotices: 문자열 경고를 정리하고 중복·빈 값·비문자열을 버린다
+ok 65 - jobNotices: 문자열 경고를 정리하고 중복·빈 값·비문자열을 버린다
   ---
-  duration_ms: 1.092961
+  duration_ms: 1.106598
   type: 'test'
   ...
 # Subtest: jobNotices: notices와 level=info 항목은 참고로 분리한다 (Phase 2 대비)
-ok 65 - jobNotices: notices와 level=info 항목은 참고로 분리한다 (Phase 2 대비)
+ok 66 - jobNotices: notices와 level=info 항목은 참고로 분리한다 (Phase 2 대비)
   ---
-  duration_ms: 0.208465
+  duration_ms: 0.183257
   type: 'test'
   ...
 # Subtest: jobNotices: 항목 수에 상한이 있다
-ok 66 - jobNotices: 항목 수에 상한이 있다
+ok 67 - jobNotices: 항목 수에 상한이 있다
   ---
-  duration_ms: 0.220528
+  duration_ms: 0.240906
   type: 'test'
   ...
 # Subtest: warningSegments: 실제 경고 문구의 페이지 언급을 링크 조각으로 나눈다
-ok 67 - warningSegments: 실제 경고 문구의 페이지 언급을 링크 조각으로 나눈다
+ok 68 - warningSegments: 실제 경고 문구의 페이지 언급을 링크 조각으로 나눈다
   ---
-  duration_ms: 1.042806
+  duration_ms: 0.379178
   type: 'test'
   ...
 # Subtest: warningSegments: 분수(2/10페이지)·개수(페이지 4개)는 링크하지 않는다
-ok 68 - warningSegments: 분수(2/10페이지)·개수(페이지 4개)는 링크하지 않는다
+ok 69 - warningSegments: 분수(2/10페이지)·개수(페이지 4개)는 링크하지 않는다
   ---
-  duration_ms: 0.190972
+  duration_ms: 0.184329
   type: 'test'
   ...
 # Subtest: warningSegments: 조각을 이어 붙이면 원문 그대로다
-ok 69 - warningSegments: 조각을 이어 붙이면 원문 그대로다
+ok 70 - warningSegments: 조각을 이어 붙이면 원문 그대로다
   ---
-  duration_ms: 0.139995
+  duration_ms: 0.171415
   type: 'test'
   ...
 # Subtest: 경고가 있으면 "주의 N건" 칩을 띄우고, 누르면 목록이 펼쳐진다
-ok 70 - 경고가 있으면 "주의 N건" 칩을 띄우고, 누르면 목록이 펼쳐진다
+ok 71 - 경고가 있으면 "주의 N건" 칩을 띄우고, 누르면 목록이 펼쳐진다
   ---
-  duration_ms: 5.51107
+  duration_ms: 13.432379
   type: 'test'
   ...
 # Subtest: "N페이지" 링크는 읽기 탭을 열고 그 페이지로 간다
-ok 71 - "N페이지" 링크는 읽기 탭을 열고 그 페이지로 간다
+ok 72 - "N페이지" 링크는 읽기 탭을 열고 그 페이지로 간다
   ---
-  duration_ms: 2.018855
+  duration_ms: 2.278258
   type: 'test'
   ...
 # Subtest: 완료 전 잡의 경고는 평문으로 보인다 (리더가 없으므로 링크 없음)
-ok 72 - 완료 전 잡의 경고는 평문으로 보인다 (리더가 없으므로 링크 없음)
+ok 73 - 완료 전 잡의 경고는 평문으로 보인다 (리더가 없으므로 링크 없음)
   ---
-  duration_ms: 0.484504
+  duration_ms: 0.579589
   type: 'test'
   ...
 # Subtest: 참고(notices)만 있으면 흐린 "참고 N건" 칩과 별도 목록
-ok 73 - 참고(notices)만 있으면 흐린 "참고 N건" 칩과 별도 목록
+ok 74 - 참고(notices)만 있으면 흐린 "참고 N건" 칩과 별도 목록
   ---
-  duration_ms: 0.497152
+  duration_ms: 0.632999
   type: 'test'
   ...
 # Subtest: 경고가 없는 잡으로 바뀌면 칩과 목록을 숨긴다
-ok 74 - 경고가 없는 잡으로 바뀌면 칩과 목록을 숨긴다
+ok 75 - 경고가 없는 잡으로 바뀌면 칩과 목록을 숨긴다
   ---
-  duration_ms: 0.546286
+  duration_ms: 0.567897
   type: 'test'
   ...
 # Subtest: 작업 목록 줄에도 경고 개수를 표시하고, 경고가 사라지면 지운다
-ok 75 - 작업 목록 줄에도 경고 개수를 표시하고, 경고가 사라지면 지운다
+ok 76 - 작업 목록 줄에도 경고 개수를 표시하고, 경고가 사라지면 지운다
   ---
-  duration_ms: 1.142826
+  duration_ms: 3.254457
   type: 'test'
   ...
 # Subtest: 클래식 스크립트다 — 모듈 문법 없이 window.uocrKatexGuard 하나만 내보낸다
-ok 76 - 클래식 스크립트다 — 모듈 문법 없이 window.uocrKatexGuard 하나만 내보낸다
+ok 77 - 클래식 스크립트다 — 모듈 문법 없이 window.uocrKatexGuard 하나만 내보낸다
   ---
-  duration_ms: 1.114652
+  duration_ms: 1.221164
   type: 'test'
   ...
 # Subtest: 옵션이 앱 katexOptions와 같고 호출마다 새 객체다
-ok 77 - 옵션이 앱 katexOptions와 같고 호출마다 새 객체다
+ok 78 - 옵션이 앱 katexOptions와 같고 호출마다 새 객체다
   ---
-  duration_ms: 0.361235
+  duration_ms: 0.375933
   type: 'test'
   ...
 # Subtest: 크기 묶기가 앱 clampTexSizes와 같다 — 고정 표와 무작위 입력
-ok 78 - 크기 묶기가 앱 clampTexSizes와 같다 — 고정 표와 무작위 입력
+ok 79 - 크기 묶기가 앱 clampTexSizes와 같다 — 고정 표와 무작위 입력
   ---
-  duration_ms: 19.895192
+  duration_ms: 22.269357
   type: 'test'
   ...
 # Subtest: 크기 묶기는 입력 길이에 선형이다 — 닫는 괄호 없는 \\\\[ 반복 (앱·내려받기 둘 다)
-ok 79 - 크기 묶기는 입력 길이에 선형이다 — 닫는 괄호 없는 \\\\[ 반복 (앱·내려받기 둘 다)
+ok 80 - 크기 묶기는 입력 길이에 선형이다 — 닫는 괄호 없는 \\\\[ 반복 (앱·내려받기 둘 다)
   ---
-  duration_ms: 38.675951
+  duration_ms: 27.873599
   type: 'test'
   ...
 # Subtest: 크기 묶기는 입력 길이에 선형이다 — \\kern + 긴 공백(단위 없음) (앱·내려받기 둘 다)
-ok 80 - 크기 묶기는 입력 길이에 선형이다 — \\kern + 긴 공백(단위 없음) (앱·내려받기 둘 다)
+ok 81 - 크기 묶기는 입력 길이에 선형이다 — \\kern + 긴 공백(단위 없음) (앱·내려받기 둘 다)
   ---
-  duration_ms: 0.949028
+  duration_ms: 0.960155
   type: 'test'
   ...
 # Subtest: 크기 묶기는 입력 길이에 선형이다 — \\kern + 긴 공백 + 부호 (앱·내려받기 둘 다)
-ok 81 - 크기 묶기는 입력 길이에 선형이다 — \\kern + 긴 공백 + 부호 (앱·내려받기 둘 다)
+ok 82 - 크기 묶기는 입력 길이에 선형이다 — \\kern + 긴 공백 + 부호 (앱·내려받기 둘 다)
   ---
-  duration_ms: 0.790699
+  duration_ms: 0.818721
   type: 'test'
   ...
 # Subtest: 크기 묶기는 입력 길이에 선형이다 — 닫는 괄호 없는 \\rule[ 반복 (앱·내려받기 둘 다)
-ok 82 - 크기 묶기는 입력 길이에 선형이다 — 닫는 괄호 없는 \\rule[ 반복 (앱·내려받기 둘 다)
+ok 83 - 크기 묶기는 입력 길이에 선형이다 — 닫는 괄호 없는 \\rule[ 반복 (앱·내려받기 둘 다)
   ---
-  duration_ms: 22.027381
+  duration_ms: 12.525991
   type: 'test'
   ...
 # Subtest: 크기 묶기는 입력 길이에 선형이다 — \\\\ + 긴 공백 (앱·내려받기 둘 다)
-ok 83 - 크기 묶기는 입력 길이에 선형이다 — \\\\ + 긴 공백 (앱·내려받기 둘 다)
+ok 84 - 크기 묶기는 입력 길이에 선형이다 — \\\\ + 긴 공백 (앱·내려받기 둘 다)
   ---
-  duration_ms: 0.582194
+  duration_ms: 0.571543
   type: 'test'
   ...
 # Subtest: 크기 묶기는 입력 길이에 선형이다 — 닫는 중괄호 없는 \\raisebox{ 반복 (앱·내려받기 둘 다)
-ok 84 - 크기 묶기는 입력 길이에 선형이다 — 닫는 중괄호 없는 \\raisebox{ 반복 (앱·내려받기 둘 다)
+ok 85 - 크기 묶기는 입력 길이에 선형이다 — 닫는 중괄호 없는 \\raisebox{ 반복 (앱·내려받기 둘 다)
   ---
-  duration_ms: 1.921071
+  duration_ms: 2.106682
   type: 'test'
   ...
 # Subtest: 조판 결과 상한 판정이 앱 katexStyleOversized와 같다
-ok 85 - 조판 결과 상한 판정이 앱 katexStyleOversized와 같다
+ok 86 - 조판 결과 상한 판정이 앱 katexStyleOversized와 같다
   ---
-  duration_ms: 0.550834
+  duration_ms: 0.603433
   type: 'test'
   ...
 # Subtest: 실제 KaTeX: 음수·거대 크기도 묶은 TeX로 조판하면 ±상한 안이고 오류가 없다
-ok 86 - 실제 KaTeX: 음수·거대 크기도 묶은 TeX로 조판하면 ±상한 안이고 오류가 없다
+ok 87 - 실제 KaTeX: 음수·거대 크기도 묶은 TeX로 조판하면 ±상한 안이고 오류가 없다
   ---
-  duration_ms: 24.848568
+  duration_ms: 30.384795
   type: 'test'
   ...
 # Subtest: renderMath: 크기를 묶어 조판하고, 매크로로 만든 거대 박스는 원문 TeX로 되돌린다
-ok 87 - renderMath: 크기를 묶어 조판하고, 매크로로 만든 거대 박스는 원문 TeX로 되돌린다
+ok 88 - renderMath: 크기를 묶어 조판하고, 매크로로 만든 거대 박스는 원문 TeX로 되돌린다
   ---
-  duration_ms: 14.611629
+  duration_ms: 36.726121
   type: 'test'
   ...
 # Subtest: renderMath: 상한보다 긴 TeX는 조판하지 않고 원문으로 둔다 — 앱 상한과 같은 값
-ok 88 - renderMath: 상한보다 긴 TeX는 조판하지 않고 원문으로 둔다 — 앱 상한과 같은 값
+ok 89 - renderMath: 상한보다 긴 TeX는 조판하지 않고 원문으로 둔다 — 앱 상한과 같은 값
   ---
-  duration_ms: 185.533155
+  duration_ms: 189.604583
   type: 'test'
   ...
 # Subtest: typesetMath: 문서의 인라인·디스플레이 수식을 모두 window.katex로 조판한다
-ok 89 - typesetMath: 문서의 인라인·디스플레이 수식을 모두 window.katex로 조판한다
+ok 90 - typesetMath: 문서의 인라인·디스플레이 수식을 모두 window.katex로 조판한다
   ---
-  duration_ms: 3.114973
+  duration_ms: 3.335677
   type: 'test'
   ...
 # Warning: KaTeX doesn't work in quirks mode. Make sure your website has a suitable doctype.
 # Warning: KaTeX doesn't work in quirks mode. Make sure your website has a suitable doctype.
 # Warning: KaTeX doesn't work in quirks mode. Make sure your website has a suitable doctype.
 # Subtest: KaTeX VERSION 파일이 번들의 version 문자열과 일치한다
-ok 90 - KaTeX VERSION 파일이 번들의 version 문자열과 일치한다
+ok 91 - KaTeX VERSION 파일이 번들의 version 문자열과 일치한다
   ---
-  duration_ms: 1.638064
+  duration_ms: 1.475847
   type: 'test'
   ...
 # Subtest: KaTeX 번들은 GHSA-238p-pmpm-9mq7 수정본(0.18.2) 이상이다
-ok 91 - KaTeX 번들은 GHSA-238p-pmpm-9mq7 수정본(0.18.2) 이상이다
+ok 92 - KaTeX 번들은 GHSA-238p-pmpm-9mq7 수정본(0.18.2) 이상이다
   ---
-  duration_ms: 11.615512
+  duration_ms: 13.887026
   type: 'test'
   ...
 # Subtest: KaTeX CSS가 참조하는 woff2 폰트가 모두 벤더 사본에 있다
-ok 92 - KaTeX CSS가 참조하는 woff2 폰트가 모두 벤더 사본에 있다
+ok 93 - KaTeX CSS가 참조하는 woff2 폰트가 모두 벤더 사본에 있다
   ---
-  duration_ms: 0.383627
+  duration_ms: 0.393906
   type: 'test'
   ...
 # Subtest: katexOptions: 상한과 trust·strict를 명시한 새 객체를 돌려준다
-ok 93 - katexOptions: 상한과 trust·strict를 명시한 새 객체를 돌려준다
+ok 94 - katexOptions: 상한과 trust·strict를 명시한 새 객체를 돌려준다
   ---
-  duration_ms: 0.136889
+  duration_ms: 0.145206
   type: 'test'
   ...
 # Subtest: 앱의 katex.render는 ui.renderMath 한 곳뿐이고, 크기를 묶은 TeX와 katexOptions를 쓴다
-ok 94 - 앱의 katex.render는 ui.renderMath 한 곳뿐이고, 크기를 묶은 TeX와 katexOptions를 쓴다
+ok 95 - 앱의 katex.render는 ui.renderMath 한 곳뿐이고, 크기를 묶은 TeX와 katexOptions를 쓴다
   ---
-  duration_ms: 3.737512
+  duration_ms: 2.365503
   type: 'test'
   ...
 # Subtest: maxSize: 거대한 \\rule 박스가 상한으로 잘린다
-ok 95 - maxSize: 거대한 \\rule 박스가 상한으로 잘린다
+ok 96 - maxSize: 거대한 \\rule 박스가 상한으로 잘린다
   ---
-  duration_ms: 14.907039
+  duration_ms: 16.752517
   type: 'test'
   ...
 # Subtest: maxExpand: 무한 매크로 루프는 예외 없이 오류 표시로 끝난다
-ok 96 - maxExpand: 무한 매크로 루프는 예외 없이 오류 표시로 끝난다
+ok 97 - maxExpand: 무한 매크로 루프는 예외 없이 오류 표시로 끝난다
   ---
-  duration_ms: 3.632594
+  duration_ms: 5.131254
   type: 'test'
   ...
 # Subtest: trust: Object.prototype이 오염돼도 \\href가 링크로 렌더되지 않는다
-ok 97 - trust: Object.prototype이 오염돼도 \\href가 링크로 렌더되지 않는다
+ok 98 - trust: Object.prototype이 오염돼도 \\href가 링크로 렌더되지 않는다
   ---
-  duration_ms: 4.893047
+  duration_ms: 4.393095
   type: 'test'
   ...
 # Subtest: KaTeX maxSize는 음수 크기를 묶지 않는다 — clampTexSizes를 거치면 ±상한 안
-ok 98 - KaTeX maxSize는 음수 크기를 묶지 않는다 — clampTexSizes를 거치면 ±상한 안
+ok 99 - KaTeX maxSize는 음수 크기를 묶지 않는다 — clampTexSizes를 거치면 ±상한 안
   ---
-  duration_ms: 13.91543
+  duration_ms: 10.007465
   type: 'test'
   ...
 # Subtest: clampTexSizes: 크기 인자 자리만 같은 단위로 묶고, 크기가 아닌 글자·작은 크기는 그대로
-ok 99 - clampTexSizes: 크기 인자 자리만 같은 단위로 묶고, 크기가 아닌 글자·작은 크기는 그대로
+ok 100 - clampTexSizes: 크기 인자 자리만 같은 단위로 묶고, 크기가 아닌 글자·작은 크기는 그대로
   ---
-  duration_ms: 0.45365
+  duration_ms: 0.304497
   type: 'test'
   ...
 # Subtest: katexStyleOversized: 매크로·arraystretch로 만든 거대 박스는 잡고, 정상 큰 수식은 통과
-ok 100 - katexStyleOversized: 매크로·arraystretch로 만든 거대 박스는 잡고, 정상 큰 수식은 통과
+ok 101 - katexStyleOversized: 매크로·arraystretch로 만든 거대 박스는 잡고, 정상 큰 수식은 통과
   ---
-  duration_ms: 30.74421
+  duration_ms: 43.383958
   type: 'test'
   ...
 # Subtest: renderMath·typesetMath: 크기를 묶어 조판하고, 그래도 거대하면 원문 TeX로 되돌린다
-ok 101 - renderMath·typesetMath: 크기를 묶어 조판하고, 그래도 거대하면 원문 TeX로 되돌린다
+ok 102 - renderMath·typesetMath: 크기를 묶어 조판하고, 그래도 거대하면 원문 TeX로 되돌린다
   ---
-  duration_ms: 5.915909
+  duration_ms: 4.335745
   type: 'test'
   ...
 # Subtest: renderMath: 상한보다 긴 TeX는 KaTeX에 넘기지 않고 원문 글자로 둔다
-ok 102 - renderMath: 상한보다 긴 TeX는 KaTeX에 넘기지 않고 원문 글자로 둔다
+ok 103 - renderMath: 상한보다 긴 TeX는 KaTeX에 넘기지 않고 원문 글자로 둔다
   ---
-  duration_ms: 2.293888
+  duration_ms: 2.376894
   type: 'test'
   ...
 # Subtest: 리더 카드 수식(mathTextNodes)도 renderMath를 거친다 — 크기를 묶고 거대 결과는 원문 TeX
-ok 103 - 리더 카드 수식(mathTextNodes)도 renderMath를 거친다 — 크기를 묶고 거대 결과는 원문 TeX
+ok 104 - 리더 카드 수식(mathTextNodes)도 renderMath를 거친다 — 크기를 묶고 거대 결과는 원문 TeX
   ---
-  duration_ms: 2.64925
+  duration_ms: 3.576748
   type: 'test'
   ...
 # Subtest: 이미 불러온 레이아웃 탭을 다시 보이면 맞춤을 다시 돌린다
-ok 104 - 이미 불러온 레이아웃 탭을 다시 보이면 맞춤을 다시 돌린다
+ok 105 - 이미 불러온 레이아웃 탭을 다시 보이면 맞춤을 다시 돌린다
   ---
-  duration_ms: 2.030337
+  duration_ms: 2.500412
   type: 'test'
   ...
 # Subtest: 불러오기 전에는 맞춤을 돌리지 않는다
-ok 105 - 불러오기 전에는 맞춤을 돌리지 않는다
+ok 106 - 불러오기 전에는 맞춤을 돌리지 않는다
   ---
-  duration_ms: 1.077962
+  duration_ms: 1.648213
   type: 'test'
   ...
 # Subtest: 주입 직후에 한 번, 웹폰트 로드가 끝나면 한 번 더 맞춘다
-ok 106 - 주입 직후에 한 번, 웹폰트 로드가 끝나면 한 번 더 맞춘다
+ok 107 - 주입 직후에 한 번, 웹폰트 로드가 끝나면 한 번 더 맞춘다
   ---
-  duration_ms: 5.77789
+  duration_ms: 5.998212
   type: 'test'
   ...
 # Subtest: layout-fit.js: 같은 블록에 여러 번 돌려도 원래 크기에서 다시 축소한다(멱등)
-ok 107 - layout-fit.js: 같은 블록에 여러 번 돌려도 원래 크기에서 다시 축소한다(멱등)
+ok 108 - layout-fit.js: 같은 블록에 여러 번 돌려도 원래 크기에서 다시 축소한다(멱등)
   ---
-  duration_ms: 0.537158
+  duration_ms: 0.881521
   type: 'test'
   ...
 # Subtest: renderPagesInOrder: 동시 요청은 상한까지, 반영은 페이지 순서대로
-ok 108 - renderPagesInOrder: 동시 요청은 상한까지, 반영은 페이지 순서대로
+ok 109 - renderPagesInOrder: 동시 요청은 상한까지, 반영은 페이지 순서대로
   ---
-  duration_ms: 4.288868
+  duration_ms: 3.943895
   type: 'test'
   ...
 # Subtest: renderPagesInOrder: 실패하면 그 앞까지만 반영하고 실패 상태를 돌려준다
-ok 109 - renderPagesInOrder: 실패하면 그 앞까지만 반영하고 실패 상태를 돌려준다
+ok 110 - renderPagesInOrder: 실패하면 그 앞까지만 반영하고 실패 상태를 돌려준다
   ---
-  duration_ms: 0.194759
+  duration_ms: 0.313314
   type: 'test'
   ...
+# (node:217363) ExperimentalWarning: The MockTimers API is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
 # Subtest: renderPagesInOrder: 내용 없는 페이지는 요청 없이 빈 HTML로, 예외는 네트워크 오류(0)로
-ok 110 - renderPagesInOrder: 내용 없는 페이지는 요청 없이 빈 HTML로, 예외는 네트워크 오류(0)로
+ok 111 - renderPagesInOrder: 내용 없는 페이지는 요청 없이 빈 HTML로, 예외는 네트워크 오류(0)로
   ---
-  duration_ms: 0.260073
+  duration_ms: 0.315117
   type: 'test'
   ...
 # Subtest: renderPagesInOrder: 중간에 잡이 바뀌면(stale) 더 반영하지 않는다
-ok 111 - renderPagesInOrder: 중간에 잡이 바뀌면(stale) 더 반영하지 않는다
+ok 112 - renderPagesInOrder: 중간에 잡이 바뀌면(stale) 더 반영하지 않는다
   ---
-  duration_ms: 0.13185
+  duration_ms: 0.124376
   type: 'test'
   ...
 # Subtest: 백로그 중 한 장이 실패해도 앞서 받은 페이지는 남고, 다음 사이클은 그 페이지부터
-ok 112 - 백로그 중 한 장이 실패해도 앞서 받은 페이지는 남고, 다음 사이클은 그 페이지부터
+ok 113 - 백로그 중 한 장이 실패해도 앞서 받은 페이지는 남고, 다음 사이클은 그 페이지부터
   ---
-  duration_ms: 2.748108
+  duration_ms: 3.835328
   type: 'test'
   ...
 # Subtest: render-preview 429: 실패로 세지 않고 Retry-After만큼 쉰 뒤 막힌 페이지부터 잇는다
-ok 113 - render-preview 429: 실패로 세지 않고 Retry-After만큼 쉰 뒤 막힌 페이지부터 잇는다
+ok 114 - render-preview 429: 실패로 세지 않고 Retry-After만큼 쉰 뒤 막힌 페이지부터 잇는다
   ---
-  duration_ms: 4.78397
+  duration_ms: 4.756083
   type: 'test'
   ...
-# (node:115223) ExperimentalWarning: The MockTimers API is an experimental feature and might change at any time
-# (Use `node --trace-warnings ...` to show where the warning was created)
 # Subtest: render-preview 429가 계속돼도 미리보기를 멈추지 않는다 — 502는 다섯 번이면 멈춘다
-ok 114 - render-preview 429가 계속돼도 미리보기를 멈추지 않는다 — 502는 다섯 번이면 멈춘다
+ok 115 - render-preview 429가 계속돼도 미리보기를 멈추지 않는다 — 502는 다섯 번이면 멈춘다
   ---
-  duration_ms: 6.100275
+  duration_ms: 6.164693
   type: 'test'
   ...
 # Subtest: render-preview 429 대기 중 앞당겨 불린 실행은 요청 없이 남은 시간만큼 미룬다
-ok 115 - render-preview 429 대기 중 앞당겨 불린 실행은 요청 없이 남은 시간만큼 미룬다
+ok 116 - render-preview 429 대기 중 앞당겨 불린 실행은 요청 없이 남은 시간만큼 미룬다
   ---
-  duration_ms: 4.161781
+  duration_ms: 2.493876
   type: 'test'
   ...
 # Subtest: PDF download keeps its original filename when the user opens another job
-ok 116 - PDF download keeps its original filename when the user opens another job
+ok 117 - PDF download keeps its original filename when the user opens another job
   ---
-  duration_ms: 18.346767
+  duration_ms: 24.507065
   type: 'test'
   ...
 # Subtest: pdfRetryDelay: 503은 Retry-After만큼 기다렸다 재시도한다
-ok 117 - pdfRetryDelay: 503은 Retry-After만큼 기다렸다 재시도한다
+ok 118 - pdfRetryDelay: 503은 Retry-After만큼 기다렸다 재시도한다
   ---
-  duration_ms: 0.97616
+  duration_ms: 0.793413
   type: 'test'
   ...
 # Subtest: pdfRetryDelay: 재시도는 유한하다 — 무한 재시도로 서버를 더 밀지 않는다
-ok 118 - pdfRetryDelay: 재시도는 유한하다 — 무한 재시도로 서버를 더 밀지 않는다
+ok 119 - pdfRetryDelay: 재시도는 유한하다 — 무한 재시도로 서버를 더 밀지 않는다
   ---
-  duration_ms: 0.197595
+  duration_ms: 0.187325
   type: 'test'
   ...
 # Subtest: pdfRetryDelay: 예열 빌드(30초 예산 503 반복)를 기다릴 만큼 여러 번 재시도한다
-ok 119 - pdfRetryDelay: 예열 빌드(30초 예산 503 반복)를 기다릴 만큼 여러 번 재시도한다
+ok 120 - pdfRetryDelay: 예열 빌드(30초 예산 503 반복)를 기다릴 만큼 여러 번 재시도한다
   ---
-  duration_ms: 0.167507
+  duration_ms: 0.127702
   type: 'test'
   ...
 # Subtest: pdfRetryDelay: 503이 아니면 재시도하지 않는다
-ok 120 - pdfRetryDelay: 503이 아니면 재시도하지 않는다
+ok 121 - pdfRetryDelay: 503이 아니면 재시도하지 않는다
   ---
-  duration_ms: 0.111622
+  duration_ms: 0.129415
   type: 'test'
   ...
 # Subtest: pdfRetryDelay: Retry-After가 없거나 쓰레기여도 합리적인 값으로 떨어진다
-ok 121 - pdfRetryDelay: Retry-After가 없거나 쓰레기여도 합리적인 값으로 떨어진다
+ok 122 - pdfRetryDelay: Retry-After가 없거나 쓰레기여도 합리적인 값으로 떨어진다
   ---
-  duration_ms: 0.256977
+  duration_ms: 0.20036
   type: 'test'
   ...
 # Subtest: pdfRetryDelay: 터무니없이 긴 Retry-After는 상한에 걸린다
-ok 122 - pdfRetryDelay: 터무니없이 긴 Retry-After는 상한에 걸린다
+ok 123 - pdfRetryDelay: 터무니없이 긴 Retry-After는 상한에 걸린다
   ---
-  duration_ms: 0.101112
+  duration_ms: 0.081895
   type: 'test'
   ...
 # Subtest: pdfProgressLabel: Content-Length가 있으면 퍼센트를 보여 준다
-ok 123 - pdfProgressLabel: Content-Length가 있으면 퍼센트를 보여 준다
+ok 124 - pdfProgressLabel: Content-Length가 있으면 퍼센트를 보여 준다
   ---
-  duration_ms: 0.191954
+  duration_ms: 0.144814
   type: 'test'
   ...
 # Subtest: pdfProgressLabel: 길이를 모르면 받은 MB를 보여 준다
-ok 124 - pdfProgressLabel: 길이를 모르면 받은 MB를 보여 준다
+ok 125 - pdfProgressLabel: 길이를 모르면 받은 MB를 보여 준다
   ---
-  duration_ms: 0.099389
+  duration_ms: 0.075634
   type: 'test'
   ...
 # Subtest: pdfProgressLabel: 퍼센트는 0..100을 벗어나지 않는다
-ok 125 - pdfProgressLabel: 퍼센트는 0..100을 벗어나지 않는다
+ok 126 - pdfProgressLabel: 퍼센트는 0..100을 벗어나지 않는다
   ---
-  duration_ms: 0.256787
+  duration_ms: 0.194799
   type: 'test'
   ...
 # Subtest: pdfReportDetails: 스캔 원문 지움·줄 정렬 실패 보존·새 주의 문장을 보인다
-ok 126 - pdfReportDetails: 스캔 원문 지움·줄 정렬 실패 보존·새 주의 문장을 보인다
+ok 127 - pdfReportDetails: 스캔 원문 지움·줄 정렬 실패 보존·새 주의 문장을 보인다
   ---
-  duration_ms: 1.846743
+  duration_ms: 1.305063
   type: 'test'
   ...
 # Subtest: pdfReportDetails: 깨끗한 내보내기는 상세 없이 요약만, 비정상 값은 0으로
-ok 127 - pdfReportDetails: 깨끗한 내보내기는 상세 없이 요약만, 비정상 값은 0으로
+ok 128 - pdfReportDetails: 깨끗한 내보내기는 상세 없이 요약만, 비정상 값은 0으로
   ---
-  duration_ms: 0.171354
+  duration_ms: 0.178228
   type: 'test'
   ...
 # Subtest: pdfReportDetails: 서버가 앞 50건만 실은 경고의 나머지 수를 알린다
-ok 128 - pdfReportDetails: 서버가 앞 50건만 실은 경고의 나머지 수를 알린다
+ok 129 - pdfReportDetails: 서버가 앞 50건만 실은 경고의 나머지 수를 알린다
   ---
-  duration_ms: 0.30596
+  duration_ms: 0.309126
   type: 'test'
   ...
 # Subtest: pdfKeptReasonLabel: 새 사유·접두 사유·모르는 사유
-ok 129 - pdfKeptReasonLabel: 새 사유·접두 사유·모르는 사유
+ok 130 - pdfKeptReasonLabel: 새 사유·접두 사유·모르는 사유
   ---
-  duration_ms: 0.087346
+  duration_ms: 0.125918
   type: 'test'
   ...
 # Subtest: pdfReportUrl·pdfReportMessage: 같은 잡·언어의 리포트 주소, 헤더 요약의 스캔 지움
-ok 130 - pdfReportUrl·pdfReportMessage: 같은 잡·언어의 리포트 주소, 헤더 요약의 스캔 지움
+ok 131 - pdfReportUrl·pdfReportMessage: 같은 잡·언어의 리포트 주소, 헤더 요약의 스캔 지움
   ---
-  duration_ms: 0.219887
+  duration_ms: 0.237931
   type: 'test'
   ...
 # Subtest: 대조 PDF를 받으면 같은 빌드의 리포트로 상세 목록과 전체 요약을 보인다
-ok 131 - 대조 PDF를 받으면 같은 빌드의 리포트로 상세 목록과 전체 요약을 보인다
+ok 132 - 대조 PDF를 받으면 같은 빌드의 리포트로 상세 목록과 전체 요약을 보인다
   ---
-  duration_ms: 25.683716
+  duration_ms: 31.497659
   type: 'test'
   ...
 # Subtest: 리포트가 없는 서버(404)면 헤더 요약 토스트만 남고 상세 목록은 숨긴다
-ok 132 - 리포트가 없는 서버(404)면 헤더 요약 토스트만 남고 상세 목록은 숨긴다
+ok 133 - 리포트가 없는 서버(404)면 헤더 요약 토스트만 남고 상세 목록은 숨긴다
   ---
-  duration_ms: 1.725414
+  duration_ms: 3.744606
   type: 'test'
   ...
 # Subtest: 리포트를 기다리는 사이 다른 잡으로 바꾸면 그리지 않는다
-ok 133 - 리포트를 기다리는 사이 다른 잡으로 바꾸면 그리지 않는다
+ok 134 - 리포트를 기다리는 사이 다른 잡으로 바꾸면 그리지 않는다
   ---
-  duration_ms: 1.502888
+  duration_ms: 8.137154
   type: 'test'
   ...
 # Subtest: renderQaAnswer: answer_html이 있으면 그 조각을 마크다운 본문으로 붙인다
-ok 134 - renderQaAnswer: answer_html이 있으면 그 조각을 마크다운 본문으로 붙인다
+ok 135 - renderQaAnswer: answer_html이 있으면 그 조각을 마크다운 본문으로 붙인다
   ---
-  duration_ms: 2.746604
+  duration_ms: 2.173549
   type: 'test'
   ...
 # Subtest: renderQaAnswer: answer_html이 없으면(구 서버) 원문 글자 그대로
-ok 135 - renderQaAnswer: answer_html이 없으면(구 서버) 원문 글자 그대로
+ok 136 - renderQaAnswer: answer_html이 없으면(구 서버) 원문 글자 그대로
   ---
-  duration_ms: 1.936781
+  duration_ms: 2.039028
   type: 'test'
   ...
 # Subtest: pickQaProvider: 저장된 로컬 공급자가 지금 못 써도 원격으로 넘어가지 않는다
-ok 136 - pickQaProvider: 저장된 로컬 공급자가 지금 못 써도 원격으로 넘어가지 않는다
+ok 137 - pickQaProvider: 저장된 로컬 공급자가 지금 못 써도 원격으로 넘어가지 않는다
   ---
-  duration_ms: 0.630935
+  duration_ms: 0.970018
   type: 'test'
   ...
 # Subtest: pickQaProvider: 로컬 의도는 다른 로컬 공급자로만 넘어간다
-ok 137 - pickQaProvider: 로컬 의도는 다른 로컬 공급자로만 넘어간다
+ok 138 - pickQaProvider: 로컬 의도는 다른 로컬 공급자로만 넘어간다
   ---
-  duration_ms: 0.106051
+  duration_ms: 0.145125
   type: 'test'
   ...
 # Subtest: pickQaProvider: 원격 의도를 못 쓰면(키 없음) 쓸 수 있는 로컬로 넘어간다 — 기기 밖으로 나가지 않는 방향
-ok 138 - pickQaProvider: 원격 의도를 못 쓰면(키 없음) 쓸 수 있는 로컬로 넘어간다 — 기기 밖으로 나가지 않는 방향
+ok 139 - pickQaProvider: 원격 의도를 못 쓰면(키 없음) 쓸 수 있는 로컬로 넘어간다 — 기기 밖으로 나가지 않는 방향
   ---
-  duration_ms: 0.125979
+  duration_ms: 0.186052
   type: 'test'
   ...
 # Subtest: loadQaCatalog: 로컬 서버가 바쁠 때 고른 공급자를 저장하지 않아, 다음 세션도 사용자의 로컬 선택이다
-ok 139 - loadQaCatalog: 로컬 서버가 바쁠 때 고른 공급자를 저장하지 않아, 다음 세션도 사용자의 로컬 선택이다
+ok 140 - loadQaCatalog: 로컬 서버가 바쁠 때 고른 공급자를 저장하지 않아, 다음 세션도 사용자의 로컬 선택이다
   ---
-  duration_ms: 2.6229
+  duration_ms: 3.019162
   type: 'test'
   ...
 # Subtest: loadQaCatalog: 자동으로 고른 공급자는 저장하지 않는다 — 저장은 사용자가 바꿀 때만
-ok 140 - loadQaCatalog: 자동으로 고른 공급자는 저장하지 않는다 — 저장은 사용자가 바꿀 때만
+ok 141 - loadQaCatalog: 자동으로 고른 공급자는 저장하지 않는다 — 저장은 사용자가 바꿀 때만
   ---
-  duration_ms: 0.839721
+  duration_ms: 0.829521
   type: 'test'
   ...
 # Subtest: parseRetryAfter: delta-seconds 정수를 그대로 쓴다
-ok 141 - parseRetryAfter: delta-seconds 정수를 그대로 쓴다
+ok 142 - parseRetryAfter: delta-seconds 정수를 그대로 쓴다
   ---
-  duration_ms: 0.990558
+  duration_ms: 0.93898
   type: 'test'
   ...
 # Subtest: parseRetryAfter: HTTP-date는 현재 시각 기준 남은 초로 환산한다
-ok 142 - parseRetryAfter: HTTP-date는 현재 시각 기준 남은 초로 환산한다
+ok 143 - parseRetryAfter: HTTP-date는 현재 시각 기준 남은 초로 환산한다
   ---
-  duration_ms: 0.194559
+  duration_ms: 0.160995
   type: 'test'
   ...
 # Subtest: parseRetryAfter: 헤더 없음·빈값·파싱 실패는 기본값으로 강등
-ok 143 - parseRetryAfter: 헤더 없음·빈값·파싱 실패는 기본값으로 강등
+ok 144 - parseRetryAfter: 헤더 없음·빈값·파싱 실패는 기본값으로 강등
   ---
-  duration_ms: 0.123595
+  duration_ms: 0.080493
   type: 'test'
   ...
 # Subtest: parseRetryAfter: 음수·0·과거 시각은 최소 1초
-ok 144 - parseRetryAfter: 음수·0·과거 시각은 최소 1초
+ok 145 - parseRetryAfter: 음수·0·과거 시각은 최소 1초
   ---
-  duration_ms: 0.202424
+  duration_ms: 0.111801
   type: 'test'
   ...
 # Subtest: parseRetryAfter: 거대값은 상한으로 잘린다 (UI 영구 잠금 방지)
-ok 145 - parseRetryAfter: 거대값은 상한으로 잘린다 (UI 영구 잠금 방지)
+ok 146 - parseRetryAfter: 거대값은 상한으로 잘린다 (UI 영구 잠금 방지)
   ---
-  duration_ms: 0.175814
+  duration_ms: 0.118935
   type: 'test'
   ...
 # Subtest: rateLimitNotice: 서버 detail 앞부분 + 구체적인 대기 초
-ok 146 - rateLimitNotice: 서버 detail 앞부분 + 구체적인 대기 초
+ok 147 - rateLimitNotice: 서버 detail 앞부분 + 구체적인 대기 초
   ---
-  duration_ms: 0.157468
+  duration_ms: 0.100781
   type: 'test'
   ...
 # Subtest: rateLimitNotice: 번역/질문 동시 실행 상한 detail도 그대로 살린다
-ok 147 - rateLimitNotice: 번역/질문 동시 실행 상한 detail도 그대로 살린다
+ok 148 - rateLimitNotice: 번역/질문 동시 실행 상한 detail도 그대로 살린다
   ---
-  duration_ms: 0.205529
+  duration_ms: 0.173253
   type: 'test'
   ...
 # Subtest: rateLimitNotice: detail이 없거나 비문자열이면 기본 문구
-ok 148 - rateLimitNotice: detail이 없거나 비문자열이면 기본 문구
+ok 149 - rateLimitNotice: detail이 없거나 비문자열이면 기본 문구
   ---
-  duration_ms: 0.133062
+  duration_ms: 0.156346
   type: 'test'
   ...
 # Subtest: rateLimitNotice: 문구는 항상 초를 포함하고 잠금은 유한하다
-ok 149 - rateLimitNotice: 문구는 항상 초를 포함하고 잠금은 유한하다
+ok 150 - rateLimitNotice: 문구는 항상 초를 포함하고 잠금은 유한하다
   ---
-  duration_ms: 0.381273
+  duration_ms: 0.436558
   type: 'test'
   ...
 # Subtest: applyRetryLock: 남은 시간이 있으면 버튼을 다시 비활성으로 되돌린다
-ok 150 - applyRetryLock: 남은 시간이 있으면 버튼을 다시 비활성으로 되돌린다
+ok 151 - applyRetryLock: 남은 시간이 있으면 버튼을 다시 비활성으로 되돌린다
   ---
-  duration_ms: 0.838699
+  duration_ms: 1.131344
   type: 'test'
   ...
 # Subtest: applyRetryLock: 잠금이 끝났으면 아무것도 건드리지 않는다
-ok 151 - applyRetryLock: 잠금이 끝났으면 아무것도 건드리지 않는다
+ok 152 - applyRetryLock: 잠금이 끝났으면 아무것도 건드리지 않는다
   ---
-  duration_ms: 0.156426
+  duration_ms: 0.199168
   type: 'test'
   ...
 # Subtest: applyRetryLock: 다른 사유로 이미 비활성인 버튼을 활성화하지 않는다
-ok 152 - applyRetryLock: 다른 사유로 이미 비활성인 버튼을 활성화하지 않는다
+ok 153 - applyRetryLock: 다른 사유로 이미 비활성인 버튼을 활성화하지 않는다
   ---
-  duration_ms: 0.113826
+  duration_ms: 0.106903
   type: 'test'
   ...
 # Subtest: applyRetryLock: 빈 목록·null 항목에도 던지지 않는다
-ok 153 - applyRetryLock: 빈 목록·null 항목에도 던지지 않는다
+ok 154 - applyRetryLock: 빈 목록·null 항목에도 던지지 않는다
   ---
-  duration_ms: 0.092004
+  duration_ms: 0.10567
   type: 'test'
   ...
 # Subtest: normalizeReaderNotes: 잘못된 항목을 버리고 공백·길이를 정리한다
-ok 154 - normalizeReaderNotes: 잘못된 항목을 버리고 공백·길이를 정리한다
+ok 155 - normalizeReaderNotes: 잘못된 항목을 버리고 공백·길이를 정리한다
   ---
-  duration_ms: 2.106472
+  duration_ms: 2.082005
   type: 'test'
   ...
 # Subtest: addReaderNote: 같은 종류·페이지·언어·문장은 다시 쌓지 않고, 상한을 넘으면 오래된 것부터 버린다
-ok 155 - addReaderNote: 같은 종류·페이지·언어·문장은 다시 쌓지 않고, 상한을 넘으면 오래된 것부터 버린다
+ok 156 - addReaderNote: 같은 종류·페이지·언어·문장은 다시 쌓지 않고, 상한을 넘으면 오래된 것부터 버린다
   ---
-  duration_ms: 0.403594
+  duration_ms: 0.455493
   type: 'test'
   ...
 # Subtest: removeReaderNote: id로 지운다
-ok 156 - removeReaderNote: id로 지운다
+ok 157 - removeReaderNote: id로 지운다
+  ---
+  duration_ms: 0.189199
+  type: 'test'
+  ...
+# Subtest: readerNotesMarkdown: 인용·하이라이트를 페이지 순으로 묶고 줄머리 마크다운을 무력화한다
+ok 158 - readerNotesMarkdown: 인용·하이라이트를 페이지 순으로 묶고 줄머리 마크다운을 무력화한다
+  ---
+  duration_ms: 0.503714
+  type: 'test'
+  ...
+# Subtest: readerNotesPruneKeys: 지금 잡을 빼고 가장 오래 손대지 않은 잡부터 지운다
+ok 159 - readerNotesPruneKeys: 지금 잡을 빼고 가장 오래 손대지 않은 잡부터 지운다
+  ---
+  duration_ms: 0.36412
+  type: 'test'
+  ...
+# Subtest: saveReaderNotes/loadReaderNotes: 잡별로 왕복하고 손댄 값은 정리해서 읽는다
+ok 160 - saveReaderNotes/loadReaderNotes: 잡별로 왕복하고 손댄 값은 정리해서 읽는다
+  ---
+  duration_ms: 1.37194
+  type: 'test'
+  ...
+# Subtest: saveReaderNotes: 저장 공간이 모자라면 false — 호출부가 "저장했다"고 말하지 않게
+ok 161 - saveReaderNotes: 저장 공간이 모자라면 false — 호출부가 "저장했다"고 말하지 않게
+  ---
+  duration_ms: 0.652035
+  type: 'test'
+  ...
+# Subtest: saveReaderNotes: 보관 잡 수 상한을 넘으면 가장 오래된 잡의 메모를 지운다
+ok 162 - saveReaderNotes: 보관 잡 수 상한을 넘으면 가장 오래된 잡의 메모를 지운다
+  ---
+  duration_ms: 1.608558
+  type: 'test'
+  ...
+# Subtest: 저장 상한: 잡 하나에 READER_NOTES_MAX개까지만 남긴다
+ok 163 - 저장 상한: 잡 하나에 READER_NOTES_MAX개까지만 남긴다
+  ---
+  duration_ms: 1.318899
+  type: 'test'
+  ...
+# Subtest: 인용 저장: 잡별로 남고 목록·배지·내보내기 버튼이 살아난다
+ok 164 - 인용 저장: 잡별로 남고 목록·배지·내보내기 버튼이 살아난다
+  ---
+  duration_ms: 4.574069
+  type: 'test'
+  ...
+# Subtest: 목록의 페이지 링크는 그 페이지로, 삭제는 저장소와 목록에서 지운다
+ok 165 - 목록의 페이지 링크는 그 페이지로, 삭제는 저장소와 목록에서 지운다
+  ---
+  duration_ms: 3.777318
+  type: 'test'
+  ...
+# Subtest: 저장된 하이라이트는 레일을 다시 그릴 때 텍스트 조각 단위로 되살아난다(중복 없이)
+ok 166 - 저장된 하이라이트는 레일을 다시 그릴 때 텍스트 조각 단위로 되살아난다(중복 없이)
+  ---
+  duration_ms: 10.890552
+  type: 'test'
+  ...
+# Subtest: 카드 경계를 넘는 하이라이트도 조각마다 감싸고 머리말은 건너뛴다
+ok 167 - 카드 경계를 넘는 하이라이트도 조각마다 감싸고 머리말은 건너뛴다
+  ---
+  duration_ms: 3.342734
+  type: 'test'
+  ...
+# Subtest: Markdown 복사: 클립보드에 내보내기 문서를 넣는다
+ok 168 - Markdown 복사: 클립보드에 내보내기 문서를 넣는다
+  ---
+  duration_ms: 0.77045
+  type: 'test'
+  ...
+# Subtest: 잡을 삭제하면 그 잡의 인용·하이라이트 저장값도 지운다
+ok 169 - 잡을 삭제하면 그 잡의 인용·하이라이트 저장값도 지운다
+  ---
+  duration_ms: 0.887923
+  type: 'test'
+  ...
+# Subtest: 다른 탭이 그사이 저장한 메모를 덮어쓰지 않는다
+ok 170 - 다른 탭이 그사이 저장한 메모를 덮어쓰지 않는다
+  ---
+  duration_ms: 0.583746
+  type: 'test'
+  ...
+# Subtest: 다른 탭이 지운 메모를 다음 저장이 되살리지 않는다
+ok 171 - 다른 탭이 지운 메모를 다음 저장이 되살리지 않는다
+  ---
+  duration_ms: 0.920694
+  type: 'test'
+  ...
+# Subtest: 삭제도 최신 저장값에서 뺀다 — 다른 탭이 새로 저장한 메모는 남는다
+ok 172 - 삭제도 최신 저장값에서 뺀다 — 다른 탭이 새로 저장한 메모는 남는다
+  ---
+  duration_ms: 0.567586
+  type: 'test'
+  ...
+# Subtest: storage 이벤트: 다른 탭의 저장·삭제를 목록과 하이라이트에 맞춘다
+ok 173 - storage 이벤트: 다른 탭의 저장·삭제를 목록과 하이라이트에 맞춘다
+  ---
+  duration_ms: 7.862334
+  type: 'test'
+  ...
+# Subtest: 목록에서 지우면 포커스가 같은 자리의 다음 삭제 버튼으로, 다 지우면 도구 제목으로 간다
+ok 174 - 목록에서 지우면 포커스가 같은 자리의 다음 삭제 버튼으로, 다 지우면 도구 제목으로 간다
+  ---
+  duration_ms: 1.599992
+  type: 'test'
+  ...
+# Subtest: 다른 탭의 변경으로 목록을 다시 맞춰도 남은 줄의 포커스는 그대로다
+ok 175 - 다른 탭의 변경으로 목록을 다시 맞춰도 남은 줄의 포커스는 그대로다
+  ---
+  duration_ms: 0.991619
+  type: 'test'
+  ...
+# Subtest: storeReaderNotes: 저장 공간이 차면 가장 오래 손대지 않은 다른 잡의 메모부터 지우고 다시 저장한다
+ok 176 - storeReaderNotes: 저장 공간이 차면 가장 오래 손대지 않은 다른 잡의 메모부터 지우고 다시 저장한다
+  ---
+  duration_ms: 0.45383
+  type: 'test'
+  ...
+# Subtest: storeReaderNotes: 쿼터가 아닌 실패(저장소 차단)는 다른 잡의 메모를 지우지 않는다
+ok 177 - storeReaderNotes: 쿼터가 아닌 실패(저장소 차단)는 다른 잡의 메모를 지우지 않는다
+  ---
+  duration_ms: 0.295159
+  type: 'test'
+  ...
+# Subtest: 인용 저장: 자리를 만들려고 다른 문서의 메모를 지웠으면 저장 안내에 알린다
+ok 178 - 인용 저장: 자리를 만들려고 다른 문서의 메모를 지웠으면 저장 안내에 알린다
+  ---
+  duration_ms: 0.730905
+  type: 'test'
+  ...
+# Subtest: railPagesToRender: 새 레일이면 전부, 그대로면 아직 안 그린 페이지만
+ok 179 - railPagesToRender: 새 레일이면 전부, 그대로면 아직 안 그린 페이지만
+  ---
+  duration_ms: 0.979276
+  type: 'test'
+  ...
+# Subtest: 재진입: 이미 그린 카드·흐름 본문·하이라이트를 다시 만들지 않는다
+ok 180 - 재진입: 이미 그린 카드·흐름 본문·하이라이트를 다시 만들지 않는다
+  ---
+  duration_ms: 9.461429
+  type: 'test'
+  ...
+# Subtest: 재진입: 새로 캐시된(아직 빈) 섹션만 채운다
+ok 181 - 재진입: 새로 캐시된(아직 빈) 섹션만 채운다
+  ---
+  duration_ms: 4.286789
+  type: 'test'
+  ...
+# Subtest: 레일을 새로 만들면(언어·총 페이지 변경) 캐시된 페이지를 전부 다시 그린다
+ok 182 - 레일을 새로 만들면(언어·총 페이지 변경) 캐시된 페이지를 전부 다시 그린다
+  ---
+  duration_ms: 2.264091
+  type: 'test'
+  ...
+# Subtest: 활성 블록: 새 카드에 바로 붙고, 다른 페이지를 그릴 때 레일 전체를 훑지 않는다
+ok 183 - 활성 블록: 새 카드에 바로 붙고, 다른 페이지를 그릴 때 레일 전체를 훑지 않는다
+  ---
+  duration_ms: 3.827122
+  type: 'test'
+  ...
+# Subtest: splitHtmlTables: 구조 태그만 행·셀로 읽고 셀 글자의 엔티티를 푼다
+ok 184 - splitHtmlTables: 구조 태그만 행·셀로 읽고 셀 글자의 엔티티를 푼다
+  ---
+  duration_ms: 0.802611
+  type: 'test'
+  ...
+# Subtest: splitHtmlTables: 표 앞뒤 글자·표 아닌 블록·잘린 표·과한 병합을 견딘다
+ok 185 - splitHtmlTables: 표 앞뒤 글자·표 아닌 블록·잘린 표·과한 병합을 견딘다
+  ---
+  duration_ms: 0.273368
+  type: 'test'
+  ...
+# Subtest: splitHtmlTables: 셀 안의 다른 태그는 요소가 아니라 글자다
+ok 186 - splitHtmlTables: 셀 안의 다른 태그는 요소가 아니라 글자다
+  ---
+  duration_ms: 0.117793
+  type: 'test'
+  ...
+# Subtest: 표 블록 카드: 원시 HTML 대신 표를 그린다 — 셀 글자는 텍스트 노드
+ok 187 - 표 블록 카드: 원시 HTML 대신 표를 그린다 — 셀 글자는 텍스트 노드
+  ---
+  duration_ms: 2.507992
+  type: 'test'
+  ...
+# Subtest: 표 블록 카드: 한국어 레일은 번역된 표와 ORIGINAL 표를 둘 다 표로 그린다
+ok 188 - 표 블록 카드: 한국어 레일은 번역된 표와 ORIGINAL 표를 둘 다 표로 그린다
+  ---
+  duration_ms: 2.217903
+  type: 'test'
+  ...
+# Subtest: readerPageBands: 높이 배열을 누적 밴드로 바꾼다
+ok 189 - readerPageBands: 높이 배열을 누적 밴드로 바꾼다
+  ---
+  duration_ms: 1.450749
+  type: 'test'
+  ...
+# Subtest: readerPageBands: gap 0과 빈 입력
+ok 190 - readerPageBands: gap 0과 빈 입력
+  ---
+  duration_ms: 0.240145
+  type: 'test'
+  ...
+# Subtest: readerPageBands: 비정상 높이는 0으로 방어 (NaN·음수)
+ok 191 - readerPageBands: 비정상 높이는 0으로 방어 (NaN·음수)
+  ---
+  duration_ms: 0.222231
+  type: 'test'
+  ...
+# Subtest: readerFocusAt: 페이지와 페이지 내 진행률을 돌려준다
+ok 192 - readerFocusAt: 페이지와 페이지 내 진행률을 돌려준다
+  ---
+  duration_ms: 0.198185
+  type: 'test'
+  ...
+# Subtest: readerFocusAt: 위/아래 바깥과 페이지 사이 여백
+ok 193 - readerFocusAt: 위/아래 바깥과 페이지 사이 여백
+  ---
+  duration_ms: 0.200941
+  type: 'test'
+  ...
+# Subtest: readerFocusAt: 각 페이지의 처음과 끝이 그 페이지로 돌아온다 (왕복 무모순)
+ok 194 - readerFocusAt: 각 페이지의 처음과 끝이 그 페이지로 돌아온다 (왕복 무모순)
+  ---
+  duration_ms: 0.210339
+  type: 'test'
+  ...
+# Subtest: readerHydrationWindow: 현재 페이지 ± radius를 문서 범위로 클램프
+ok 195 - readerHydrationWindow: 현재 페이지 ± radius를 문서 범위로 클램프
+  ---
+  duration_ms: 0.22174
+  type: 'test'
+  ...
+# Subtest: readerHydrationWindow: 총 페이지 미상이면 아무것도 붙이지 않는다
+ok 196 - readerHydrationWindow: 총 페이지 미상이면 아무것도 붙이지 않는다
+  ---
+  duration_ms: 0.138803
+  type: 'test'
+  ...
+# Subtest: alignmentBatchPlan: 미로드 구간만 배치로 덮는다
+ok 197 - alignmentBatchPlan: 미로드 구간만 배치로 덮는다
+  ---
+  duration_ms: 0.433992
+  type: 'test'
+  ...
+# Subtest: alignmentBatchPlan: 서버 계약(start≥1, 1≤limit≤16)을 절대 넘지 않는다
+ok 198 - alignmentBatchPlan: 서버 계약(start≥1, 1≤limit≤16)을 절대 넘지 않는다
+  ---
+  duration_ms: 0.555813
+  type: 'test'
+  ...
+# Subtest: alignmentBatchPlan: 문서보다 큰 창을 줘도 페이지 밖을 요청하지 않는다
+ok 199 - alignmentBatchPlan: 문서보다 큰 창을 줘도 페이지 밖을 요청하지 않는다
+  ---
+  duration_ms: 0.168068
+  type: 'test'
+  ...
+# Subtest: blockAtFraction: 그 지점을 지나온 마지막 블록
+ok 200 - blockAtFraction: 그 지점을 지나온 마지막 블록
+  ---
+  duration_ms: 0.175522
+  type: 'test'
+  ...
+# Subtest: blockAtFraction: 범위 밖 진행률은 클램프, 블록 없으면 빈 문자열
+ok 201 - blockAtFraction: 범위 밖 진행률은 클램프, 블록 없으면 빈 문자열
+  ---
+  duration_ms: 0.107735
+  type: 'test'
+  ...
+# Subtest: blockAtFraction: 다단·세로 머리말처럼 y 순서가 뒤섞여도 가장 가까운 블록
+ok 202 - blockAtFraction: 다단·세로 머리말처럼 y 순서가 뒤섞여도 가장 가까운 블록
+  ---
+  duration_ms: 0.113254
+  type: 'test'
+  ...
+# Subtest: splitInlineMath: 인라인 \\( … \\)를 수식 조각으로 분리
+ok 203 - splitInlineMath: 인라인 \\( … \\)를 수식 조각으로 분리
+  ---
+  duration_ms: 0.218554
+  type: 'test'
+  ...
+# Subtest: splitInlineMath: 디스플레이 \\[ … \\]는 display=true
+ok 204 - splitInlineMath: 디스플레이 \\[ … \\]는 display=true
+  ---
+  duration_ms: 0.498419
+  type: 'test'
+  ...
+# Subtest: splitInlineMath: 수식이 없으면 텍스트 한 조각
+ok 205 - splitInlineMath: 수식이 없으면 텍스트 한 조각
+  ---
+  duration_ms: 0.235146
+  type: 'test'
+  ...
+# Subtest: splitInlineMath: 짝이 맞지 않는 구분자는 텍스트로 남긴다 (원문 무손실)
+ok 206 - splitInlineMath: 짝이 맞지 않는 구분자는 텍스트로 남긴다 (원문 무손실)
+  ---
+  duration_ms: 0.104147
+  type: 'test'
+  ...
+# Subtest: splitInlineMath: 통화 $는 수식으로 오인하지 않는다
+ok 207 - splitInlineMath: 통화 $는 수식으로 오인하지 않는다
+  ---
+  duration_ms: 0.11112
+  type: 'test'
+  ...
+# Subtest: splitInlineMath: 여러 수식과 빈 수식
+ok 208 - splitInlineMath: 여러 수식과 빈 수식
+  ---
+  duration_ms: 0.137721
+  type: 'test'
+  ...
+# Subtest: readerRailBandAt: 오프셋을 지나온 마지막 밴드
+ok 209 - readerRailBandAt: 오프셋을 지나온 마지막 밴드
+  ---
+  duration_ms: 0.215173
+  type: 'test'
+  ...
+# Subtest: railAnchorFrom: 눈높이 밴드와 그 밴드 기준 스크롤 오프셋
+ok 210 - railAnchorFrom: 눈높이 밴드와 그 밴드 기준 스크롤 오프셋
+  ---
+  duration_ms: 0.18415
+  type: 'test'
+  ...
+# Subtest: railAnchorTarget: 위쪽 페이지가 커져도 같은 문단이 같은 눈높이에 남는다
+ok 211 - railAnchorTarget: 위쪽 페이지가 커져도 같은 문단이 같은 눈높이에 남는다
+  ---
+  duration_ms: 0.112683
+  type: 'test'
+  ...
+# Subtest: railAnchorTarget: 앵커 페이지가 사라졌거나 앵커가 없으면 복원하지 않는다
+ok 212 - railAnchorTarget: 앵커 페이지가 사라졌거나 앵커가 없으면 복원하지 않는다
+  ---
+  duration_ms: 0.063811
+  type: 'test'
+  ...
+# Subtest: railAnchorTarget: 음수 스크롤로 내려가지 않는다
+ok 213 - railAnchorTarget: 음수 스크롤로 내려가지 않는다
+  ---
+  duration_ms: 0.055535
+  type: 'test'
+  ...
+# Subtest: alignmentFailureIsPermanent: 409 레이아웃 불일치는 재시도해도 소용없다
+ok 214 - alignmentFailureIsPermanent: 409 레이아웃 불일치는 재시도해도 소용없다
+  ---
+  duration_ms: 0.083488
+  type: 'test'
+  ...
+# Subtest: alignmentFailureIsPermanent: 일시 실패는 재시도 대상으로 남긴다
+ok 215 - alignmentFailureIsPermanent: 일시 실패는 재시도 대상으로 남긴다
+  ---
+  duration_ms: 0.064713
+  type: 'test'
+  ...
+# Subtest: overlayInKeepWindow: keep 창 안에서만 bbox를 그린다
+ok 216 - overlayInKeepWindow: keep 창 안에서만 bbox를 그린다
+  ---
+  duration_ms: 0.072477
+  type: 'test'
+  ...
+# Subtest: overlayInKeepWindow: hydrateReaderPages의 keep 창과 정확히 같은 집합
+ok 217 - overlayInKeepWindow: hydrateReaderPages의 keep 창과 정확히 같은 집합
+  ---
+  duration_ms: 0.176835
+  type: 'test'
+  ...
+# Subtest: overlayInKeepWindow: 총 페이지 미상·비정상 입력은 그리지 않는다
+ok 218 - overlayInKeepWindow: 총 페이지 미상·비정상 입력은 그리지 않는다
+  ---
+  duration_ms: 0.060114
+  type: 'test'
+  ...
+# Subtest: rangeReadableText: 카드 머리말·버튼은 빼고 수식은 TeX 한 번으로
+ok 219 - rangeReadableText: 카드 머리말·버튼은 빼고 수식은 TeX 한 번으로
+  ---
+  duration_ms: 3.789481
+  type: 'test'
+  ...
+# Subtest: 선택 캡처: 정리된 문장과 실제 페이지를 기억한다
+ok 220 - 선택 캡처: 정리된 문장과 실제 페이지를 기억한다
+  ---
+  duration_ms: 4.255765
+  type: 'test'
+  ...
+# Subtest: 하이라이트: 카드 경계를 넘어도 조각마다 감싸고 메모 문장은 칠한 본문 그대로
+ok 221 - 하이라이트: 카드 경계를 넘어도 조각마다 감싸고 메모 문장은 칠한 본문 그대로
+  ---
+  duration_ms: 6.921492
+  type: 'test'
+  ...
+# Subtest: 도구를 펼치느라 문서 선택이 지워져도 잡아 둔 범위로 하이라이트한다
+ok 222 - 도구를 펼치느라 문서 선택이 지워져도 잡아 둔 범위로 하이라이트한다
+  ---
+  duration_ms: 1.752621
+  type: 'test'
+  ...
+# Subtest: 언어를 바꿔 레일을 다시 그리면 이전 레일의 선택을 버린다 — 다른 언어로 인용되지 않는다
+ok 223 - 언어를 바꿔 레일을 다시 그리면 이전 레일의 선택을 버린다 — 다른 언어로 인용되지 않는다
+  ---
+  duration_ms: 6.855141
+  type: 'test'
+  ...
+# Subtest: 인용 언어는 저장 시점의 보기 언어가 아니라 문장을 고른 레일의 언어다
+ok 224 - 인용 언어는 저장 시점의 보기 언어가 아니라 문장을 고른 레일의 언어다
+  ---
+  duration_ms: 4.556985
+  type: 'test'
+  ...
+# Subtest: 선택이 걸린 페이지를 다시 그리면 그 선택도 버린다
+ok 225 - 선택이 걸린 페이지를 다시 그리면 그 선택도 버린다
+  ---
+  duration_ms: 3.179606
+  type: 'test'
+  ...
+# Subtest: 저장해 둔 범위가 접혔으면(그 DOM이 바뀌었다) 칠한 것 없는 하이라이트를 저장하지 않는다
+ok 226 - 저장해 둔 범위가 접혔으면(그 DOM이 바뀌었다) 칠한 것 없는 하이라이트를 저장하지 않는다
+  ---
+  duration_ms: 2.42723
+  type: 'test'
+  ...
+# Subtest: real fixture: parses into ordered events
+ok 227 - real fixture: parses into ordered events
+  ---
+  duration_ms: 0.998583
+  type: 'test'
+  ...
+# Subtest: real fixture — drain at progress events (coarse batching): boxPage sequence is 1 then 2
+ok 228 - real fixture — drain at progress events (coarse batching): boxPage sequence is 1 then 2
+  ---
+  duration_ms: 1.187219
+  type: 'test'
+  ...
+# Subtest: real fixture — drain after every token (tight batching): boxPage sequence is 1 then 2
+ok 229 - real fixture — drain after every token (tight batching): boxPage sequence is 1 then 2
+  ---
+  duration_ms: 1.041123
+  type: 'test'
+  ...
+# Subtest: real fixture — re-chunked into 3-char chunks: boxPage sequence is 1 then 2
+ok 230 - real fixture — re-chunked into 3-char chunks: boxPage sequence is 1 then 2
+  ---
+  duration_ms: 2.422315
+  type: 'test'
+  ...
+# Subtest: real fixture: render-phase progress storm cannot pin the box page
+ok 231 - real fixture: render-phase progress storm cannot pin the box page
+  ---
+  duration_ms: 0.30068
+  type: 'test'
+  ...
+# Subtest: real fixture: merge-phase progress does not move the box page
+ok 232 - real fixture: merge-phase progress does not move the box page
+  ---
+  duration_ms: 0.091554
+  type: 'test'
+  ...
+# Subtest: fake fixture — drain at progress events: chunk-2 leading marker does not double-bump
+ok 233 - fake fixture — drain at progress events: chunk-2 leading marker does not double-bump
+  ---
+  duration_ms: 0.305414
+  type: 'test'
+  ...
+# Subtest: fake fixture — drain after every token: chunk-2 leading marker does not double-bump
+ok 234 - fake fixture — drain after every token: chunk-2 leading marker does not double-bump
+  ---
+  duration_ms: 0.203435
+  type: 'test'
+  ...
+# Subtest: fake fixture — re-chunked into 5-char chunks: chunk-2 leading marker does not double-bump
+ok 235 - fake fixture — re-chunked into 5-char chunks: chunk-2 leading marker does not double-bump
+  ---
+  duration_ms: 2.75436
+  type: 'test'
+  ...
+# Subtest: markers without fresh announcements advance by +1 (announced page confirmed once)
+ok 236 - markers without fresh announcements advance by +1 (announced page confirmed once)
+  ---
+  duration_ms: 0.375662
+  type: 'test'
+  ...
+# Subtest: per_page mode: announcements alone drive the page (no markers at all)
+ok 237 - per_page mode: announcements alone drive the page (no markers at all)
+  ---
+  duration_ms: 0.21103
+  type: 'test'
+  ...
+# Subtest: joining mid-OCR: snapshot announcement seeds the page; later pages self-correct
+ok 238 - joining mid-OCR: snapshot announcement seeds the page; later pages self-correct
+  ---
+  duration_ms: 0.151597
+  type: 'test'
+  ...
+# Subtest: first-ocr announcement resets stale pre-OCR advancement
+ok 239 - first-ocr announcement resets stale pre-OCR advancement
+  ---
+  duration_ms: 0.075243
+  type: 'test'
+  ...
+# Subtest: marker count is capped by total_pages (spurious trailing markers)
+ok 240 - marker count is capped by total_pages (spurious trailing markers)
+  ---
+  duration_ms: 0.688054
+  type: 'test'
+  ...
+# Subtest: split ref block (3-char chunks) parses exactly once with 2 quads
+ok 241 - split ref block (3-char chunks) parses exactly once with 2 quads
+  ---
+  duration_ms: 0.249653
+  type: 'test'
+  ...
+# Subtest: split inline det (2-char chunks) parses exactly once
+ok 242 - split inline det (2-char chunks) parses exactly once
+  ---
+  duration_ms: 0.113034
+  type: 'test'
+  ...
+# Subtest: markers split across 4-char chunks attribute boxes to the right pages
+ok 243 - markers split across 4-char chunks attribute boxes to the right pages
+  ---
+  duration_ms: 0.189069
+  type: 'test'
+  ...
+# Subtest: degenerate boxes are dropped; single-bracket ref payload accepted
+ok 244 - degenerate boxes are dropped; single-bracket ref payload accepted
+  ---
+  duration_ms: 0.073399
+  type: 'test'
+  ...
+# Subtest: idempotent across repeated drains of the same buffer
+ok 245 - idempotent across repeated drains of the same buffer
+  ---
+  duration_ms: 0.075423
+  type: 'test'
+  ...
+# Subtest: incompleteTailIndex holdback boundaries
+ok 246 - incompleteTailIndex holdback boundaries
+  ---
+  duration_ms: 0.092756
+  type: 'test'
+  ...
+# Subtest: scanQuads: number-quad scanner, not JSON
+ok 247 - scanQuads: number-quad scanner, not JSON
+  ---
+  duration_ms: 0.104498
+  type: 'test'
+  ...
+# Subtest: structurer on the real fixture: heading, intact table html, no det remnants
+ok 248 - structurer on the real fixture: heading, intact table html, no det remnants
+  ---
+  duration_ms: 0.441547
+  type: 'test'
+  ...
+# Subtest: structurer: streaming holdback keeps incomplete tails out
+ok 249 - structurer: streaming holdback keeps incomplete tails out
+  ---
+  duration_ms: 0.072848
+  type: 'test'
+  ...
+# Subtest: structurer: block semantics
+ok 250 - structurer: block semantics
+  ---
+  duration_ms: 0.210529
+  type: 'test'
+  ...
+# Subtest: structurer: fake-engine plain markdown passes through with page separators
+ok 251 - structurer: fake-engine plain markdown passes through with page separators
+  ---
+  duration_ms: 0.182235
+  type: 'test'
+  ...
+# Subtest: splitPreviewPages: 뒤에 새 페이지가 시작된 세그먼트만 확정, 나머지는 꼬리
+ok 252 - splitPreviewPages: 뒤에 새 페이지가 시작된 세그먼트만 확정, 나머지는 꼬리
+  ---
+  duration_ms: 0.09461
+  type: 'test'
+  ...
+# Subtest: splitPreviewPages: 조각난 마커(<PA + GE>)는 완성 전까지 경계가 아니다
+ok 253 - splitPreviewPages: 조각난 마커(<PA + GE>)는 완성 전까지 경계가 아니다
+  ---
+  duration_ms: 0.061938
+  type: 'test'
+  ...
+# Subtest: splitPreviewPages: 확정 프리픽스는 append에 안정 — 캐시 재사용 가능
+ok 254 - splitPreviewPages: 확정 프리픽스는 append에 안정 — 캐시 재사용 가능
+  ---
+  duration_ms: 0.060034
+  type: 'test'
+  ...
+# Subtest: planPreviewRender: 첫 사이클 — 확정 페이지 + 꼬리, hr(sep)은 앞 내용이 있을 때만
+ok 255 - planPreviewRender: 첫 사이클 — 확정 페이지 + 꼬리, hr(sep)은 앞 내용이 있을 때만
   ---
   duration_ms: 0.137751
   type: 'test'
   ...
-# Subtest: readerNotesMarkdown: 인용·하이라이트를 페이지 순으로 묶고 줄머리 마크다운을 무력화한다
-ok 157 - readerNotesMarkdown: 인용·하이라이트를 페이지 순으로 묶고 줄머리 마크다운을 무력화한다
-  ---
-  duration_ms: 0.42178
-  type: 'test'
-  ...
-# Subtest: readerNotesPruneKeys: 지금 잡을 빼고 가장 오래 손대지 않은 잡부터 지운다
-ok 158 - readerNotesPruneKeys: 지금 잡을 빼고 가장 오래 손대지 않은 잡부터 지운다
-  ---
-  duration_ms: 0.27964
-  type: 'test'
-  ...
-# Subtest: saveReaderNotes/loadReaderNotes: 잡별로 왕복하고 손댄 값은 정리해서 읽는다
-ok 159 - saveReaderNotes/loadReaderNotes: 잡별로 왕복하고 손댄 값은 정리해서 읽는다
-  ---
-  duration_ms: 2.049293
-  type: 'test'
-  ...
-# Subtest: saveReaderNotes: 저장 공간이 모자라면 false — 호출부가 "저장했다"고 말하지 않게
-ok 160 - saveReaderNotes: 저장 공간이 모자라면 false — 호출부가 "저장했다"고 말하지 않게
-  ---
-  duration_ms: 0.349793
-  type: 'test'
-  ...
-# Subtest: saveReaderNotes: 보관 잡 수 상한을 넘으면 가장 오래된 잡의 메모를 지운다
-ok 161 - saveReaderNotes: 보관 잡 수 상한을 넘으면 가장 오래된 잡의 메모를 지운다
-  ---
-  duration_ms: 0.971877
-  type: 'test'
-  ...
-# Subtest: 저장 상한: 잡 하나에 READER_NOTES_MAX개까지만 남긴다
-ok 162 - 저장 상한: 잡 하나에 READER_NOTES_MAX개까지만 남긴다
-  ---
-  duration_ms: 0.724593
-  type: 'test'
-  ...
-# Subtest: 인용 저장: 잡별로 남고 목록·배지·내보내기 버튼이 살아난다
-ok 163 - 인용 저장: 잡별로 남고 목록·배지·내보내기 버튼이 살아난다
-  ---
-  duration_ms: 2.804183
-  type: 'test'
-  ...
-# Subtest: 목록의 페이지 링크는 그 페이지로, 삭제는 저장소와 목록에서 지운다
-ok 164 - 목록의 페이지 링크는 그 페이지로, 삭제는 저장소와 목록에서 지운다
-  ---
-  duration_ms: 2.636416
-  type: 'test'
-  ...
-# Subtest: 저장된 하이라이트는 레일을 다시 그릴 때 텍스트 조각 단위로 되살아난다(중복 없이)
-ok 165 - 저장된 하이라이트는 레일을 다시 그릴 때 텍스트 조각 단위로 되살아난다(중복 없이)
-  ---
-  duration_ms: 12.408354
-  type: 'test'
-  ...
-# Subtest: 카드 경계를 넘는 하이라이트도 조각마다 감싸고 머리말은 건너뛴다
-ok 166 - 카드 경계를 넘는 하이라이트도 조각마다 감싸고 머리말은 건너뛴다
-  ---
-  duration_ms: 2.080863
-  type: 'test'
-  ...
-# Subtest: Markdown 복사: 클립보드에 내보내기 문서를 넣는다
-ok 167 - Markdown 복사: 클립보드에 내보내기 문서를 넣는다
-  ---
-  duration_ms: 0.693174
-  type: 'test'
-  ...
-# Subtest: 잡을 삭제하면 그 잡의 인용·하이라이트 저장값도 지운다
-ok 168 - 잡을 삭제하면 그 잡의 인용·하이라이트 저장값도 지운다
-  ---
-  duration_ms: 1.110956
-  type: 'test'
-  ...
-# Subtest: 다른 탭이 그사이 저장한 메모를 덮어쓰지 않는다
-ok 169 - 다른 탭이 그사이 저장한 메모를 덮어쓰지 않는다
-  ---
-  duration_ms: 0.677454
-  type: 'test'
-  ...
-# Subtest: 다른 탭이 지운 메모를 다음 저장이 되살리지 않는다
-ok 170 - 다른 탭이 지운 메모를 다음 저장이 되살리지 않는다
-  ---
-  duration_ms: 0.657716
-  type: 'test'
-  ...
-# Subtest: 삭제도 최신 저장값에서 뺀다 — 다른 탭이 새로 저장한 메모는 남는다
-ok 171 - 삭제도 최신 저장값에서 뺀다 — 다른 탭이 새로 저장한 메모는 남는다
-  ---
-  duration_ms: 1.492809
-  type: 'test'
-  ...
-# Subtest: storage 이벤트: 다른 탭의 저장·삭제를 목록과 하이라이트에 맞춘다
-ok 172 - storage 이벤트: 다른 탭의 저장·삭제를 목록과 하이라이트에 맞춘다
-  ---
-  duration_ms: 7.108326
-  type: 'test'
-  ...
-# Subtest: 목록에서 지우면 포커스가 같은 자리의 다음 삭제 버튼으로, 다 지우면 도구 제목으로 간다
-ok 173 - 목록에서 지우면 포커스가 같은 자리의 다음 삭제 버튼으로, 다 지우면 도구 제목으로 간다
-  ---
-  duration_ms: 4.171616
-  type: 'test'
-  ...
-# Subtest: 다른 탭의 변경으로 목록을 다시 맞춰도 남은 줄의 포커스는 그대로다
-ok 174 - 다른 탭의 변경으로 목록을 다시 맞춰도 남은 줄의 포커스는 그대로다
-  ---
-  duration_ms: 0.702351
-  type: 'test'
-  ...
-# Subtest: storeReaderNotes: 저장 공간이 차면 가장 오래 손대지 않은 다른 잡의 메모부터 지우고 다시 저장한다
-ok 175 - storeReaderNotes: 저장 공간이 차면 가장 오래 손대지 않은 다른 잡의 메모부터 지우고 다시 저장한다
-  ---
-  duration_ms: 0.314706
-  type: 'test'
-  ...
-# Subtest: storeReaderNotes: 쿼터가 아닌 실패(저장소 차단)는 다른 잡의 메모를 지우지 않는다
-ok 176 - storeReaderNotes: 쿼터가 아닌 실패(저장소 차단)는 다른 잡의 메모를 지우지 않는다
-  ---
-  duration_ms: 0.218865
-  type: 'test'
-  ...
-# Subtest: 인용 저장: 자리를 만들려고 다른 문서의 메모를 지웠으면 저장 안내에 알린다
-ok 177 - 인용 저장: 자리를 만들려고 다른 문서의 메모를 지웠으면 저장 안내에 알린다
-  ---
-  duration_ms: 0.500017
-  type: 'test'
-  ...
-# Subtest: railPagesToRender: 새 레일이면 전부, 그대로면 아직 안 그린 페이지만
-ok 178 - railPagesToRender: 새 레일이면 전부, 그대로면 아직 안 그린 페이지만
-  ---
-  duration_ms: 1.409572
-  type: 'test'
-  ...
-# Subtest: 재진입: 이미 그린 카드·흐름 본문·하이라이트를 다시 만들지 않는다
-ok 179 - 재진입: 이미 그린 카드·흐름 본문·하이라이트를 다시 만들지 않는다
-  ---
-  duration_ms: 8.711197
-  type: 'test'
-  ...
-# Subtest: 재진입: 새로 캐시된(아직 빈) 섹션만 채운다
-ok 180 - 재진입: 새로 캐시된(아직 빈) 섹션만 채운다
-  ---
-  duration_ms: 2.512612
-  type: 'test'
-  ...
-# Subtest: 레일을 새로 만들면(언어·총 페이지 변경) 캐시된 페이지를 전부 다시 그린다
-ok 181 - 레일을 새로 만들면(언어·총 페이지 변경) 캐시된 페이지를 전부 다시 그린다
-  ---
-  duration_ms: 2.589988
-  type: 'test'
-  ...
-# Subtest: 활성 블록: 새 카드에 바로 붙고, 다른 페이지를 그릴 때 레일 전체를 훑지 않는다
-ok 182 - 활성 블록: 새 카드에 바로 붙고, 다른 페이지를 그릴 때 레일 전체를 훑지 않는다
-  ---
-  duration_ms: 4.918486
-  type: 'test'
-  ...
-# Subtest: splitHtmlTables: 구조 태그만 행·셀로 읽고 셀 글자의 엔티티를 푼다
-ok 183 - splitHtmlTables: 구조 태그만 행·셀로 읽고 셀 글자의 엔티티를 푼다
-  ---
-  duration_ms: 0.819773
-  type: 'test'
-  ...
-# Subtest: splitHtmlTables: 표 앞뒤 글자·표 아닌 블록·잘린 표·과한 병합을 견딘다
-ok 184 - splitHtmlTables: 표 앞뒤 글자·표 아닌 블록·잘린 표·과한 병합을 견딘다
-  ---
-  duration_ms: 0.298796
-  type: 'test'
-  ...
-# Subtest: splitHtmlTables: 셀 안의 다른 태그는 요소가 아니라 글자다
-ok 185 - splitHtmlTables: 셀 안의 다른 태그는 요소가 아니라 글자다
-  ---
-  duration_ms: 0.089249
-  type: 'test'
-  ...
-# Subtest: 표 블록 카드: 원시 HTML 대신 표를 그린다 — 셀 글자는 텍스트 노드
-ok 186 - 표 블록 카드: 원시 HTML 대신 표를 그린다 — 셀 글자는 텍스트 노드
-  ---
-  duration_ms: 1.325462
-  type: 'test'
-  ...
-# Subtest: 표 블록 카드: 한국어 레일은 번역된 표와 ORIGINAL 표를 둘 다 표로 그린다
-ok 187 - 표 블록 카드: 한국어 레일은 번역된 표와 ORIGINAL 표를 둘 다 표로 그린다
-  ---
-  duration_ms: 1.189825
-  type: 'test'
-  ...
-# Subtest: readerPageBands: 높이 배열을 누적 밴드로 바꾼다
-ok 188 - readerPageBands: 높이 배열을 누적 밴드로 바꾼다
-  ---
-  duration_ms: 0.983123
-  type: 'test'
-  ...
-# Subtest: readerPageBands: gap 0과 빈 입력
-ok 189 - readerPageBands: gap 0과 빈 입력
-  ---
-  duration_ms: 0.217322
-  type: 'test'
-  ...
-# Subtest: readerPageBands: 비정상 높이는 0으로 방어 (NaN·음수)
-ok 190 - readerPageBands: 비정상 높이는 0으로 방어 (NaN·음수)
-  ---
-  duration_ms: 0.134315
-  type: 'test'
-  ...
-# Subtest: readerFocusAt: 페이지와 페이지 내 진행률을 돌려준다
-ok 191 - readerFocusAt: 페이지와 페이지 내 진행률을 돌려준다
-  ---
-  duration_ms: 0.61742
-  type: 'test'
-  ...
-# Subtest: readerFocusAt: 위/아래 바깥과 페이지 사이 여백
-ok 192 - readerFocusAt: 위/아래 바깥과 페이지 사이 여백
-  ---
-  duration_ms: 0.163791
-  type: 'test'
-  ...
-# Subtest: readerFocusAt: 각 페이지의 처음과 끝이 그 페이지로 돌아온다 (왕복 무모순)
-ok 193 - readerFocusAt: 각 페이지의 처음과 끝이 그 페이지로 돌아온다 (왕복 무모순)
-  ---
-  duration_ms: 0.171154
-  type: 'test'
-  ...
-# Subtest: readerHydrationWindow: 현재 페이지 ± radius를 문서 범위로 클램프
-ok 194 - readerHydrationWindow: 현재 페이지 ± radius를 문서 범위로 클램프
-  ---
-  duration_ms: 0.212603
-  type: 'test'
-  ...
-# Subtest: readerHydrationWindow: 총 페이지 미상이면 아무것도 붙이지 않는다
-ok 195 - readerHydrationWindow: 총 페이지 미상이면 아무것도 붙이지 않는다
-  ---
-  duration_ms: 0.109898
-  type: 'test'
-  ...
-# Subtest: alignmentBatchPlan: 미로드 구간만 배치로 덮는다
-ok 196 - alignmentBatchPlan: 미로드 구간만 배치로 덮는다
-  ---
-  duration_ms: 0.357327
-  type: 'test'
-  ...
-# Subtest: alignmentBatchPlan: 서버 계약(start≥1, 1≤limit≤16)을 절대 넘지 않는다
-ok 197 - alignmentBatchPlan: 서버 계약(start≥1, 1≤limit≤16)을 절대 넘지 않는다
-  ---
-  duration_ms: 0.826086
-  type: 'test'
-  ...
-# Subtest: alignmentBatchPlan: 문서보다 큰 창을 줘도 페이지 밖을 요청하지 않는다
-ok 198 - alignmentBatchPlan: 문서보다 큰 창을 줘도 페이지 밖을 요청하지 않는다
-  ---
-  duration_ms: 0.172066
-  type: 'test'
-  ...
-# Subtest: blockAtFraction: 그 지점을 지나온 마지막 블록
-ok 199 - blockAtFraction: 그 지점을 지나온 마지막 블록
-  ---
-  duration_ms: 0.17975
-  type: 'test'
-  ...
-# Subtest: blockAtFraction: 범위 밖 진행률은 클램프, 블록 없으면 빈 문자열
-ok 200 - blockAtFraction: 범위 밖 진행률은 클램프, 블록 없으면 빈 문자열
-  ---
-  duration_ms: 0.095651
-  type: 'test'
-  ...
-# Subtest: blockAtFraction: 다단·세로 머리말처럼 y 순서가 뒤섞여도 가장 가까운 블록
-ok 201 - blockAtFraction: 다단·세로 머리말처럼 y 순서가 뒤섞여도 가장 가까운 블록
-  ---
-  duration_ms: 0.14267
-  type: 'test'
-  ...
-# Subtest: splitInlineMath: 인라인 \\( … \\)를 수식 조각으로 분리
-ok 202 - splitInlineMath: 인라인 \\( … \\)를 수식 조각으로 분리
-  ---
-  duration_ms: 0.457698
-  type: 'test'
-  ...
-# Subtest: splitInlineMath: 디스플레이 \\[ … \\]는 display=true
-ok 203 - splitInlineMath: 디스플레이 \\[ … \\]는 display=true
-  ---
-  duration_ms: 0.182906
-  type: 'test'
-  ...
-# Subtest: splitInlineMath: 수식이 없으면 텍스트 한 조각
-ok 204 - splitInlineMath: 수식이 없으면 텍스트 한 조각
-  ---
-  duration_ms: 0.181654
-  type: 'test'
-  ...
-# Subtest: splitInlineMath: 짝이 맞지 않는 구분자는 텍스트로 남긴다 (원문 무손실)
-ok 205 - splitInlineMath: 짝이 맞지 않는 구분자는 텍스트로 남긴다 (원문 무손실)
-  ---
-  duration_ms: 0.067397
-  type: 'test'
-  ...
-# Subtest: splitInlineMath: 통화 $는 수식으로 오인하지 않는다
-ok 206 - splitInlineMath: 통화 $는 수식으로 오인하지 않는다
-  ---
-  duration_ms: 0.067057
-  type: 'test'
-  ...
-# Subtest: splitInlineMath: 여러 수식과 빈 수식
-ok 207 - splitInlineMath: 여러 수식과 빈 수식
-  ---
-  duration_ms: 0.08948
-  type: 'test'
-  ...
-# Subtest: readerRailBandAt: 오프셋을 지나온 마지막 밴드
-ok 208 - readerRailBandAt: 오프셋을 지나온 마지막 밴드
-  ---
-  duration_ms: 0.091414
-  type: 'test'
-  ...
-# Subtest: railAnchorFrom: 눈높이 밴드와 그 밴드 기준 스크롤 오프셋
-ok 209 - railAnchorFrom: 눈높이 밴드와 그 밴드 기준 스크롤 오프셋
-  ---
-  duration_ms: 0.186403
-  type: 'test'
-  ...
-# Subtest: railAnchorTarget: 위쪽 페이지가 커져도 같은 문단이 같은 눈높이에 남는다
-ok 210 - railAnchorTarget: 위쪽 페이지가 커져도 같은 문단이 같은 눈높이에 남는다
-  ---
-  duration_ms: 0.866131
-  type: 'test'
-  ...
-# Subtest: railAnchorTarget: 앵커 페이지가 사라졌거나 앵커가 없으면 복원하지 않는다
-ok 211 - railAnchorTarget: 앵커 페이지가 사라졌거나 앵커가 없으면 복원하지 않는다
-  ---
-  duration_ms: 0.063691
-  type: 'test'
-  ...
-# Subtest: railAnchorTarget: 음수 스크롤로 내려가지 않는다
-ok 212 - railAnchorTarget: 음수 스크롤로 내려가지 않는다
-  ---
-  duration_ms: 0.054754
-  type: 'test'
-  ...
-# Subtest: alignmentFailureIsPermanent: 409 레이아웃 불일치는 재시도해도 소용없다
-ok 213 - alignmentFailureIsPermanent: 409 레이아웃 불일치는 재시도해도 소용없다
-  ---
-  duration_ms: 0.096032
-  type: 'test'
-  ...
-# Subtest: alignmentFailureIsPermanent: 일시 실패는 재시도 대상으로 남긴다
-ok 214 - alignmentFailureIsPermanent: 일시 실패는 재시도 대상으로 남긴다
-  ---
-  duration_ms: 0.077327
-  type: 'test'
-  ...
-# Subtest: overlayInKeepWindow: keep 창 안에서만 bbox를 그린다
-ok 215 - overlayInKeepWindow: keep 창 안에서만 bbox를 그린다
-  ---
-  duration_ms: 0.075704
-  type: 'test'
-  ...
-# Subtest: overlayInKeepWindow: hydrateReaderPages의 keep 창과 정확히 같은 집합
-ok 216 - overlayInKeepWindow: hydrateReaderPages의 keep 창과 정확히 같은 집합
-  ---
-  duration_ms: 0.191573
-  type: 'test'
-  ...
-# Subtest: overlayInKeepWindow: 총 페이지 미상·비정상 입력은 그리지 않는다
-ok 217 - overlayInKeepWindow: 총 페이지 미상·비정상 입력은 그리지 않는다
-  ---
-  duration_ms: 0.066256
-  type: 'test'
-  ...
-# Subtest: rangeReadableText: 카드 머리말·버튼은 빼고 수식은 TeX 한 번으로
-ok 218 - rangeReadableText: 카드 머리말·버튼은 빼고 수식은 TeX 한 번으로
-  ---
-  duration_ms: 6.315347
-  type: 'test'
-  ...
-# Subtest: 선택 캡처: 정리된 문장과 실제 페이지를 기억한다
-ok 219 - 선택 캡처: 정리된 문장과 실제 페이지를 기억한다
-  ---
-  duration_ms: 1.974662
-  type: 'test'
-  ...
-# Subtest: 하이라이트: 카드 경계를 넘어도 조각마다 감싸고 메모 문장은 칠한 본문 그대로
-ok 220 - 하이라이트: 카드 경계를 넘어도 조각마다 감싸고 메모 문장은 칠한 본문 그대로
-  ---
-  duration_ms: 8.54377
-  type: 'test'
-  ...
-# Subtest: 도구를 펼치느라 문서 선택이 지워져도 잡아 둔 범위로 하이라이트한다
-ok 221 - 도구를 펼치느라 문서 선택이 지워져도 잡아 둔 범위로 하이라이트한다
-  ---
-  duration_ms: 2.203075
-  type: 'test'
-  ...
-# Subtest: 언어를 바꿔 레일을 다시 그리면 이전 레일의 선택을 버린다 — 다른 언어로 인용되지 않는다
-ok 222 - 언어를 바꿔 레일을 다시 그리면 이전 레일의 선택을 버린다 — 다른 언어로 인용되지 않는다
-  ---
-  duration_ms: 15.606616
-  type: 'test'
-  ...
-# Subtest: 인용 언어는 저장 시점의 보기 언어가 아니라 문장을 고른 레일의 언어다
-ok 223 - 인용 언어는 저장 시점의 보기 언어가 아니라 문장을 고른 레일의 언어다
-  ---
-  duration_ms: 3.39332
-  type: 'test'
-  ...
-# Subtest: 선택이 걸린 페이지를 다시 그리면 그 선택도 버린다
-ok 224 - 선택이 걸린 페이지를 다시 그리면 그 선택도 버린다
-  ---
-  duration_ms: 1.333036
-  type: 'test'
-  ...
-# Subtest: 저장해 둔 범위가 접혔으면(그 DOM이 바뀌었다) 칠한 것 없는 하이라이트를 저장하지 않는다
-ok 225 - 저장해 둔 범위가 접혔으면(그 DOM이 바뀌었다) 칠한 것 없는 하이라이트를 저장하지 않는다
-  ---
-  duration_ms: 1.892626
-  type: 'test'
-  ...
-# Subtest: real fixture: parses into ordered events
-ok 226 - real fixture: parses into ordered events
-  ---
-  duration_ms: 1.445459
-  type: 'test'
-  ...
-# Subtest: real fixture — drain at progress events (coarse batching): boxPage sequence is 1 then 2
-ok 227 - real fixture — drain at progress events (coarse batching): boxPage sequence is 1 then 2
-  ---
-  duration_ms: 2.294392
-  type: 'test'
-  ...
-# Subtest: real fixture — drain after every token (tight batching): boxPage sequence is 1 then 2
-ok 228 - real fixture — drain after every token (tight batching): boxPage sequence is 1 then 2
-  ---
-  duration_ms: 1.584232
-  type: 'test'
-  ...
-# Subtest: real fixture — re-chunked into 3-char chunks: boxPage sequence is 1 then 2
-ok 229 - real fixture — re-chunked into 3-char chunks: boxPage sequence is 1 then 2
-  ---
-  duration_ms: 3.537675
-  type: 'test'
-  ...
-# Subtest: real fixture: render-phase progress storm cannot pin the box page
-ok 230 - real fixture: render-phase progress storm cannot pin the box page
-  ---
-  duration_ms: 0.289699
-  type: 'test'
-  ...
-# Subtest: real fixture: merge-phase progress does not move the box page
-ok 231 - real fixture: merge-phase progress does not move the box page
-  ---
-  duration_ms: 0.090942
-  type: 'test'
-  ...
-# Subtest: fake fixture — drain at progress events: chunk-2 leading marker does not double-bump
-ok 232 - fake fixture — drain at progress events: chunk-2 leading marker does not double-bump
-  ---
-  duration_ms: 0.214787
-  type: 'test'
-  ...
-# Subtest: fake fixture — drain after every token: chunk-2 leading marker does not double-bump
-ok 233 - fake fixture — drain after every token: chunk-2 leading marker does not double-bump
-  ---
-  duration_ms: 0.125237
-  type: 'test'
-  ...
-# Subtest: fake fixture — re-chunked into 5-char chunks: chunk-2 leading marker does not double-bump
-ok 234 - fake fixture — re-chunked into 5-char chunks: chunk-2 leading marker does not double-bump
-  ---
-  duration_ms: 0.565792
-  type: 'test'
-  ...
-# Subtest: markers without fresh announcements advance by +1 (announced page confirmed once)
-ok 235 - markers without fresh announcements advance by +1 (announced page confirmed once)
-  ---
-  duration_ms: 0.331989
-  type: 'test'
-  ...
-# Subtest: per_page mode: announcements alone drive the page (no markers at all)
-ok 236 - per_page mode: announcements alone drive the page (no markers at all)
-  ---
-  duration_ms: 0.201312
-  type: 'test'
-  ...
-# Subtest: joining mid-OCR: snapshot announcement seeds the page; later pages self-correct
-ok 237 - joining mid-OCR: snapshot announcement seeds the page; later pages self-correct
-  ---
-  duration_ms: 0.106311
-  type: 'test'
-  ...
-# Subtest: first-ocr announcement resets stale pre-OCR advancement
-ok 238 - first-ocr announcement resets stale pre-OCR advancement
-  ---
-  duration_ms: 0.065364
-  type: 'test'
-  ...
-# Subtest: marker count is capped by total_pages (spurious trailing markers)
-ok 239 - marker count is capped by total_pages (spurious trailing markers)
-  ---
-  duration_ms: 0.644691
-  type: 'test'
-  ...
-# Subtest: split ref block (3-char chunks) parses exactly once with 2 quads
-ok 240 - split ref block (3-char chunks) parses exactly once with 2 quads
-  ---
-  duration_ms: 0.271063
-  type: 'test'
-  ...
-# Subtest: split inline det (2-char chunks) parses exactly once
-ok 241 - split inline det (2-char chunks) parses exactly once
-  ---
-  duration_ms: 0.11596
-  type: 'test'
-  ...
-# Subtest: markers split across 4-char chunks attribute boxes to the right pages
-ok 242 - markers split across 4-char chunks attribute boxes to the right pages
-  ---
-  duration_ms: 0.107563
-  type: 'test'
-  ...
-# Subtest: degenerate boxes are dropped; single-bracket ref payload accepted
-ok 243 - degenerate boxes are dropped; single-bracket ref payload accepted
-  ---
-  duration_ms: 0.088458
-  type: 'test'
-  ...
-# Subtest: idempotent across repeated drains of the same buffer
-ok 244 - idempotent across repeated drains of the same buffer
-  ---
-  duration_ms: 0.089309
-  type: 'test'
-  ...
-# Subtest: incompleteTailIndex holdback boundaries
-ok 245 - incompleteTailIndex holdback boundaries
-  ---
-  duration_ms: 0.088789
-  type: 'test'
-  ...
-# Subtest: scanQuads: number-quad scanner, not JSON
-ok 246 - scanQuads: number-quad scanner, not JSON
-  ---
-  duration_ms: 0.107123
-  type: 'test'
-  ...
-# Subtest: structurer on the real fixture: heading, intact table html, no det remnants
-ok 247 - structurer on the real fixture: heading, intact table html, no det remnants
-  ---
-  duration_ms: 1.003762
-  type: 'test'
-  ...
-# Subtest: structurer: streaming holdback keeps incomplete tails out
-ok 248 - structurer: streaming holdback keeps incomplete tails out
-  ---
-  duration_ms: 0.095171
-  type: 'test'
-  ...
-# Subtest: structurer: block semantics
-ok 249 - structurer: block semantics
-  ---
-  duration_ms: 0.199818
-  type: 'test'
-  ...
-# Subtest: structurer: fake-engine plain markdown passes through with page separators
-ok 250 - structurer: fake-engine plain markdown passes through with page separators
-  ---
-  duration_ms: 0.184159
-  type: 'test'
-  ...
-# Subtest: splitPreviewPages: 뒤에 새 페이지가 시작된 세그먼트만 확정, 나머지는 꼬리
-ok 251 - splitPreviewPages: 뒤에 새 페이지가 시작된 세그먼트만 확정, 나머지는 꼬리
-  ---
-  duration_ms: 0.124466
-  type: 'test'
-  ...
-# Subtest: splitPreviewPages: 조각난 마커(<PA + GE>)는 완성 전까지 경계가 아니다
-ok 252 - splitPreviewPages: 조각난 마커(<PA + GE>)는 완성 전까지 경계가 아니다
-  ---
-  duration_ms: 0.083408
-  type: 'test'
-  ...
-# Subtest: splitPreviewPages: 확정 프리픽스는 append에 안정 — 캐시 재사용 가능
-ok 253 - splitPreviewPages: 확정 프리픽스는 append에 안정 — 캐시 재사용 가능
-  ---
-  duration_ms: 0.077327
-  type: 'test'
-  ...
-# Subtest: planPreviewRender: 첫 사이클 — 확정 페이지 + 꼬리, hr(sep)은 앞 내용이 있을 때만
-ok 254 - planPreviewRender: 첫 사이클 — 확정 페이지 + 꼬리, hr(sep)은 앞 내용이 있을 때만
-  ---
-  duration_ms: 0.144504
-  type: 'test'
-  ...
 # Subtest: planPreviewRender: 꼬리만 변하는 경우 — 확정 페이지 캐시 재사용, 재렌더 없음
-ok 255 - planPreviewRender: 꼬리만 변하는 경우 — 확정 페이지 캐시 재사용, 재렌더 없음
+ok 256 - planPreviewRender: 꼬리만 변하는 경우 — 확정 페이지 캐시 재사용, 재렌더 없음
   ---
-  duration_ms: 0.102755
+  duration_ms: 0.10531
   type: 'test'
   ...
 # Subtest: planPreviewRender: 같은 꼬리 md라도 sep이 바뀌면 재렌더 대상
-ok 256 - planPreviewRender: 같은 꼬리 md라도 sep이 바뀌면 재렌더 대상
+ok 257 - planPreviewRender: 같은 꼬리 md라도 sep이 바뀌면 재렌더 대상
   ---
-  duration_ms: 0.067798
+  duration_ms: 0.065845
   type: 'test'
   ...
 # Subtest: planPreviewRender: 증분 조각을 이어 붙이면 전체 structurePreview와 동치
-ok 257 - planPreviewRender: 증분 조각을 이어 붙이면 전체 structurePreview와 동치
+ok 258 - planPreviewRender: 증분 조각을 이어 붙이면 전체 structurePreview와 동치
   ---
-  duration_ms: 0.2797
+  duration_ms: 0.18965
   type: 'test'
   ...
 # Subtest: ssePromoteDelay: 10초 → 20초 → 30초 상한 백오프
-ok 258 - ssePromoteDelay: 10초 → 20초 → 30초 상한 백오프
+ok 259 - ssePromoteDelay: 10초 → 20초 → 30초 상한 백오프
   ---
-  duration_ms: 0.515878
+  duration_ms: 0.111551
   type: 'test'
   ...
 # Subtest: syncedStreamPageNo: 정상 흐름에서는 항상 no-op (디바이더 = 마커 카운트)
-ok 259 - syncedStreamPageNo: 정상 흐름에서는 항상 no-op (디바이더 = 마커 카운트)
+ok 260 - syncedStreamPageNo: 정상 흐름에서는 항상 no-op (디바이더 = 마커 카운트)
   ---
-  duration_ms: 0.147109
+  duration_ms: 0.113545
   type: 'test'
   ...
 # Subtest: syncedStreamPageNo: 재연결 갭 뒤 디바이더 번호를 ground 페이지로 재동기화
-ok 260 - syncedStreamPageNo: 재연결 갭 뒤 디바이더 번호를 ground 페이지로 재동기화
+ok 261 - syncedStreamPageNo: 재연결 갭 뒤 디바이더 번호를 ground 페이지로 재동기화
   ---
-  duration_ms: 0.151377
+  duration_ms: 0.122271
   type: 'test'
   ...
 # Subtest: syncedStreamPageNo: 실행 중 잡을 중간에 연 경우(스냅샷 선언) 첫 디바이더 보정
-ok 261 - syncedStreamPageNo: 실행 중 잡을 중간에 연 경우(스냅샷 선언) 첫 디바이더 보정
+ok 262 - syncedStreamPageNo: 실행 중 잡을 중간에 연 경우(스냅샷 선언) 첫 디바이더 보정
   ---
-  duration_ms: 0.080823
+  duration_ms: 0.058811
   type: 'test'
   ...
 # Subtest: withLangUrl: appends ?lang=ko only for ko, preserving existing query
-ok 262 - withLangUrl: appends ?lang=ko only for ko, preserving existing query
+ok 263 - withLangUrl: appends ?lang=ko only for ko, preserving existing query
   ---
-  duration_ms: 0.091383
+  duration_ms: 0.061467
   type: 'test'
   ...
 # Subtest: translateUiStateFor: state → control mapping
-ok 263 - translateUiStateFor: state → control mapping
+ok 264 - translateUiStateFor: state → control mapping
   ---
-  duration_ms: 0.086564
+  duration_ms: 0.046729
   type: 'test'
   ...
 # Subtest: fileSizeError: 경계값 — 정확히 상한이면 통과, 1바이트 초과부터 차단
-ok 264 - fileSizeError: 경계값 — 정확히 상한이면 통과, 1바이트 초과부터 차단
+ok 265 - fileSizeError: 경계값 — 정확히 상한이면 통과, 1바이트 초과부터 차단
   ---
-  duration_ms: 0.081765
+  duration_ms: 0.067107
   type: 'test'
   ...
 # Subtest: fileSizeError: 문구에 파일 크기와 서버 상한이 함께 표기된다
-ok 265 - fileSizeError: 문구에 파일 크기와 서버 상한이 함께 표기된다
+ok 266 - fileSizeError: 문구에 파일 크기와 서버 상한이 함께 표기된다
   ---
-  duration_ms: 0.069121
+  duration_ms: 0.069471
   type: 'test'
   ...
 # Subtest: fileSizeError: 반올림 경계에서 자기모순 문구를 피한다 (100 MB — 상한 100MB 금지)
-ok 266 - fileSizeError: 반올림 경계에서 자기모순 문구를 피한다 (100 MB — 상한 100MB 금지)
+ok 267 - fileSizeError: 반올림 경계에서 자기모순 문구를 피한다 (100 MB — 상한 100MB 금지)
   ---
-  duration_ms: 0.041178
+  duration_ms: 0.039485
   type: 'test'
   ...
 # Subtest: fileSizeError: health 미수신/비정상 상한이면 검증 생략 (서버 413이 최후 방어)
-ok 267 - fileSizeError: health 미수신/비정상 상한이면 검증 생략 (서버 413이 최후 방어)
+ok 268 - fileSizeError: health 미수신/비정상 상한이면 검증 생략 (서버 413이 최후 방어)
   ---
-  duration_ms: 0.051227
+  duration_ms: 0.099178
   type: 'test'
   ...
 # Subtest: armTransition: first click arms, second click on the same key confirms
-ok 268 - armTransition: first click arms, second click on the same key confirms
+ok 269 - armTransition: first click arms, second click on the same key confirms
   ---
-  duration_ms: 0.097505
+  duration_ms: 0.116631
   type: 'test'
   ...
 # Subtest: armTransition: key-based arming survives a list re-render (button replaced)
-ok 269 - armTransition: key-based arming survives a list re-render (button replaced)
+ok 270 - armTransition: key-based arming survives a list re-render (button replaced)
   ---
-  duration_ms: 0.058521
+  duration_ms: 0.061677
   type: 'test'
   ...
 # Subtest: armTransition: header click after job switch clears the stale arm instead of deleting
-ok 270 - armTransition: header click after job switch clears the stale arm instead of deleting
+ok 271 - armTransition: header click after job switch clears the stale arm instead of deleting
   ---
-  duration_ms: 0.050055
+  duration_ms: 0.069712
   type: 'test'
   ...
 # Subtest: armTransition: arms on different buttons stay independent
-ok 271 - armTransition: arms on different buttons stay independent
+ok 272 - armTransition: arms on different buttons stay independent
   ---
-  duration_ms: 0.127882
+  duration_ms: 0.135237
   type: 'test'
   ...
 # Subtest: statusLabel: queued + queue_position → 대기중 · N번째
-ok 272 - statusLabel: queued + queue_position → 대기중 · N번째
+ok 273 - statusLabel: queued + queue_position → 대기중 · N번째
   ---
-  duration_ms: 0.080102
+  duration_ms: 0.082807
   type: 'test'
   ...
 # Subtest: statusLabel: 필드 부재·비정상 값·다른 상태는 기존 라벨 그대로 (안전 폴백)
-ok 273 - statusLabel: 필드 부재·비정상 값·다른 상태는 기존 라벨 그대로 (안전 폴백)
+ok 274 - statusLabel: 필드 부재·비정상 값·다른 상태는 기존 라벨 그대로 (안전 폴백)
   ---
-  duration_ms: 0.062548
+  duration_ms: 0.060234
   type: 'test'
   ...
 # Subtest: jobIdFromHash: 해시에서 잡 id 추출 — 선행 \# 제거
-ok 274 - jobIdFromHash: 해시에서 잡 id 추출 — 선행 \# 제거
+ok 275 - jobIdFromHash: 해시에서 잡 id 추출 — 선행 \# 제거
   ---
-  duration_ms: 0.136278
+  duration_ms: 0.098627
   type: 'test'
   ...
 # Subtest: jobIdFromHash: 빈/이상값은 null
-ok 275 - jobIdFromHash: 빈/이상값은 null
+ok 276 - jobIdFromHash: 빈/이상값은 null
   ---
-  duration_ms: 0.092636
+  duration_ms: 0.054123
   type: 'test'
   ...
 # Subtest: classifyFiles: 유효/무효(파일명+사유) 분리 — 순서 유지, 전부 무효면 선택 없음
-ok 276 - classifyFiles: 유효/무효(파일명+사유) 분리 — 순서 유지, 전부 무효면 선택 없음
+ok 277 - classifyFiles: 유효/무효(파일명+사유) 분리 — 순서 유지, 전부 무효면 선택 없음
   ---
-  duration_ms: 0.194128
+  duration_ms: 0.186283
   type: 'test'
   ...
 # Subtest: selectionSummary: 1개면 이름·크기 그대로, 여러 개면 N개 파일 · 총 X
-ok 277 - selectionSummary: 1개면 이름·크기 그대로, 여러 개면 N개 파일 · 총 X
+ok 278 - selectionSummary: 1개면 이름·크기 그대로, 여러 개면 N개 파일 · 총 X
   ---
-  duration_ms: 0.128914
+  duration_ms: 0.125668
   type: 'test'
   ...
 # Subtest: summarizeIssues: 첫 건 + 나머지 개수 축약 (건너뜀/업로드 실패 공용)
-ok 278 - summarizeIssues: 첫 건 + 나머지 개수 축약 (건너뜀/업로드 실패 공용)
+ok 279 - summarizeIssues: 첫 건 + 나머지 개수 축약 (건너뜀/업로드 실패 공용)
   ---
-  duration_ms: 0.088658
+  duration_ms: 0.084771
   type: 'test'
   ...
 # Subtest: healthCapabilities: 신규 health 응답에서 capability 추출
-ok 279 - healthCapabilities: 신규 health 응답에서 capability 추출
+ok 280 - healthCapabilities: 신규 health 응답에서 capability 추출
   ---
-  duration_ms: 0.102384
+  duration_ms: 0.078369
   type: 'test'
   ...
 # Subtest: healthCapabilities: legacy health(capabilities 부재)는 전부 undefined — 기존 UI 그대로
-ok 280 - healthCapabilities: legacy health(capabilities 부재)는 전부 undefined — 기존 UI 그대로
+ok 281 - healthCapabilities: legacy health(capabilities 부재)는 전부 undefined — 기존 UI 그대로
   ---
-  duration_ms: 0.083398
+  duration_ms: 0.060204
   type: 'test'
   ...
 # Subtest: healthCapabilities: unlimited 토큰 스트리밍은 page 칩을 켜지 않는다
-ok 281 - healthCapabilities: unlimited 토큰 스트리밍은 page 칩을 켜지 않는다
+ok 282 - healthCapabilities: unlimited 토큰 스트리밍은 page 칩을 켜지 않는다
   ---
-  duration_ms: 0.07902
+  duration_ms: 0.070994
   type: 'test'
   ...
 # Subtest: providerIssue: sidecar 다운이면 요약 반환, 정상/in-process면 null
-ok 282 - providerIssue: sidecar 다운이면 요약 반환, 정상/in-process면 null
+ok 283 - providerIssue: sidecar 다운이면 요약 반환, 정상/in-process면 null
   ---
-  duration_ms: 0.074932
+  duration_ms: 0.072047
   type: 'test'
   ...
 # Subtest: jobModelChip: 잡 모델 메타 → 칩 텍스트/툴팁, 구버전 잡은 null
-ok 283 - jobModelChip: 잡 모델 메타 → 칩 텍스트/툴팁, 구버전 잡은 null
+ok 284 - jobModelChip: 잡 모델 메타 → 칩 텍스트/툴팁, 구버전 잡은 null
   ---
-  duration_ms: 0.087125
+  duration_ms: 0.086143
   type: 'test'
   ...
 # Subtest: docLayoutIsFigureOnly: figure_only 엔진 잡만 true, 엔진 불일치·full은 false
-ok 284 - docLayoutIsFigureOnly: figure_only 엔진 잡만 true, 엔진 불일치·full은 false
+ok 285 - docLayoutIsFigureOnly: figure_only 엔진 잡만 true, 엔진 불일치·full은 false
   ---
-  duration_ms: 0.06835
+  duration_ms: 0.065464
   type: 'test'
   ...
 # Subtest: progressPhaseText: note(모델 로딩) 최우선, 없으면 queued/phase 규칙
-ok 285 - progressPhaseText: note(모델 로딩) 최우선, 없으면 queued/phase 규칙
+ok 286 - progressPhaseText: note(모델 로딩) 최우선, 없으면 queued/phase 규칙
   ---
-  duration_ms: 0.069802
+  duration_ms: 0.098397
   type: 'test'
   ...
 # Subtest: docLayoutIsFigureOnly: 구버전 잡(엔진 메타 없음)은 캔버스 유지
-ok 286 - docLayoutIsFigureOnly: 구버전 잡(엔진 메타 없음)은 캔버스 유지
+ok 287 - docLayoutIsFigureOnly: 구버전 잡(엔진 메타 없음)은 캔버스 유지
   ---
-  duration_ms: 0.037952
+  duration_ms: 0.045116
   type: 'test'
   ...
 # Subtest: buildQaBody: openai-responses + thinking → summary 선택값을 그대로 전송
-ok 287 - buildQaBody: openai-responses + thinking → summary 선택값을 그대로 전송
+ok 288 - buildQaBody: openai-responses + thinking → summary 선택값을 그대로 전송
   ---
-  duration_ms: 0.077898
+  duration_ms: 0.083729
   type: 'test'
   ...
 # Subtest: buildQaBody: thinking 꺼짐이면 responses라도 summary는 none으로 강제
-ok 288 - buildQaBody: thinking 꺼짐이면 responses라도 summary는 none으로 강제
+ok 289 - buildQaBody: thinking 꺼짐이면 responses라도 summary는 none으로 강제
   ---
-  duration_ms: 0.050746
+  duration_ms: 0.053842
   type: 'test'
   ...
 # Subtest: buildQaBody: responses가 아닌 공급자는 thinking이어도 summary none
-ok 289 - buildQaBody: responses가 아닌 공급자는 thinking이어도 summary none
+ok 290 - buildQaBody: responses가 아닌 공급자는 thinking이어도 summary none
   ---
-  duration_ms: 0.060875
+  duration_ms: 0.06305
   type: 'test'
   ...
 # Subtest: buildQaBody: 빈 모델은 null, effort는 passthrough(빈 값은 default 폴백)
-ok 290 - buildQaBody: 빈 모델은 null, effort는 passthrough(빈 값은 default 폴백)
+ok 291 - buildQaBody: 빈 모델은 null, effort는 passthrough(빈 값은 default 폴백)
   ---
-  duration_ms: 0.062148
+  duration_ms: 0.067217
   type: 'test'
   ...
 # Subtest: pickQaModels: 공급자 검색 — 모델 목록/기본 모델/available/supportsSummary
-ok 291 - pickQaModels: 공급자 검색 — 모델 목록/기본 모델/available/supportsSummary
+ok 292 - pickQaModels: 공급자 검색 — 모델 목록/기본 모델/available/supportsSummary
   ---
-  duration_ms: 0.117052
+  duration_ms: 0.111862
   type: 'test'
   ...
 # Subtest: pickQaModels: 미지 공급자·비정상 카탈로그는 빈 값/false 방어
-ok 292 - pickQaModels: 미지 공급자·비정상 카탈로그는 빈 값/false 방어
+ok 293 - pickQaModels: 미지 공급자·비정상 카탈로그는 빈 값/false 방어
   ---
-  duration_ms: 0.078188
+  duration_ms: 0.080232
   type: 'test'
   ...
 # Subtest: qaProviderHint: 공급자별 한국어 미설정 안내
-ok 293 - qaProviderHint: 공급자별 한국어 미설정 안내
+ok 294 - qaProviderHint: 공급자별 한국어 미설정 안내
   ---
-  duration_ms: 0.097184
+  duration_ms: 0.097675
   type: 'test'
   ...
 # Subtest: clampQaPage: 1..totalPages 범위 보정, total 미상이면 하한만
-ok 294 - clampQaPage: 1..totalPages 범위 보정, total 미상이면 하한만
+ok 295 - clampQaPage: 1..totalPages 범위 보정, total 미상이면 하한만
   ---
-  duration_ms: 0.0791
+  duration_ms: 0.083949
   type: 'test'
   ...
 # Subtest: extractDocPages: doc-page 섹션별 분해 — 페이지 번호·섹션 마크업·내용 격리
-ok 295 - extractDocPages: doc-page 섹션별 분해 — 페이지 번호·섹션 마크업·내용 격리
+ok 296 - extractDocPages: doc-page 섹션별 분해 — 페이지 번호·섹션 마크업·내용 격리
   ---
-  duration_ms: 0.477415
+  duration_ms: 0.492894
   type: 'test'
   ...
 # Subtest: extractDocPages: 속성 순서·따옴표·추가 클래스 변형 허용
-ok 296 - extractDocPages: 속성 순서·따옴표·추가 클래스 변형 허용
+ok 297 - extractDocPages: 속성 순서·따옴표·추가 클래스 변형 허용
   ---
-  duration_ms: 0.222863
+  duration_ms: 0.200069
   type: 'test'
   ...
 # Subtest: extractDocPages: 섹션 없음(구버전 렌더) → 전체 HTML 한 장 폴백
-ok 297 - extractDocPages: 섹션 없음(구버전 렌더) → 전체 HTML 한 장 폴백
+ok 298 - extractDocPages: 섹션 없음(구버전 렌더) → 전체 HTML 한 장 폴백
   ---
-  duration_ms: 0.081284
+  duration_ms: 0.06875
   type: 'test'
   ...
 # Subtest: extractDocPages: doc-page가 아닌 섹션은 무시, data-page 없으면 등장 순번
-ok 298 - extractDocPages: doc-page가 아닌 섹션은 무시, data-page 없으면 등장 순번
+ok 299 - extractDocPages: doc-page가 아닌 섹션은 무시, data-page 없으면 등장 순번
   ---
-  duration_ms: 0.096152
+  duration_ms: 0.097835
   type: 'test'
   ...
 # Subtest: clampReaderPage: 1..total 보정 — 경계/NaN/문자열/소수, total 미상은 하한만
-ok 299 - clampReaderPage: 1..total 보정 — 경계/NaN/문자열/소수, total 미상은 하한만
+ok 300 - clampReaderPage: 1..total 보정 — 경계/NaN/문자열/소수, total 미상은 하한만
   ---
-  duration_ms: 0.064392
+  duration_ms: 0.070103
   type: 'test'
   ...
 # Subtest: readerImageUrl: 언어와 무관하게 원문 좌표 기준면 endpoint
-ok 300 - readerImageUrl: 언어와 무관하게 원문 좌표 기준면 endpoint
+ok 301 - readerImageUrl: 언어와 무관하게 원문 좌표 기준면 endpoint
   ---
-  duration_ms: 0.070223
+  duration_ms: 0.064833
   type: 'test'
   ...
 # Subtest: livePageImageUrl: 라이브 패널은 렌더 단계 산출물(pages/)을 직접 본다
-ok 301 - livePageImageUrl: 라이브 패널은 렌더 단계 산출물(pages/)을 직접 본다
+ok 302 - livePageImageUrl: 라이브 패널은 렌더 단계 산출물(pages/)을 직접 본다
   ---
-  duration_ms: 0.070894
+  duration_ms: 0.111502
   type: 'test'
   ...
 # Subtest: production viewer search: 열림·페이지·언어를 파싱하고 비정상값을 안전하게 보정
-ok 302 - production viewer search: 열림·페이지·언어를 파싱하고 비정상값을 안전하게 보정
+ok 303 - production viewer search: 열림·페이지·언어를 파싱하고 비정상값을 안전하게 보정
   ---
-  duration_ms: 0.220538
+  duration_ms: 0.571152
   type: 'test'
   ...
 # Subtest: production viewer search: 상태 변경 시 무관한 query를 보존하고 닫으면 viewer만 제거
-ok 303 - production viewer search: 상태 변경 시 무관한 query를 보존하고 닫으면 viewer만 제거
+ok 304 - production viewer search: 상태 변경 시 무관한 query를 보존하고 닫으면 viewer만 제거
   ---
-  duration_ms: 0.213865
+  duration_ms: 0.192375
   type: 'test'
   ...
 # Subtest: viewerThumbnailWindow: 현재 페이지 주변을 정렬·클램프하고 문서 양끝을 포함
-ok 304 - viewerThumbnailWindow: 현재 페이지 주변을 정렬·클램프하고 문서 양끝을 포함
+ok 305 - viewerThumbnailWindow: 현재 페이지 주변을 정렬·클램프하고 문서 양끝을 포함
   ---
-  duration_ms: 0.129445
+  duration_ms: 0.119627
   type: 'test'
   ...
 # Subtest: alignmentRect: 0..1000 bbox를 안전한 퍼센트 좌표로 변환
-ok 305 - alignmentRect: 0..1000 bbox를 안전한 퍼센트 좌표로 변환
+ok 306 - alignmentRect: 0..1000 bbox를 안전한 퍼센트 좌표로 변환
   ---
-  duration_ms: 0.136308
+  duration_ms: 0.14766
   type: 'test'
   ...
 # Subtest: normalizeAlignmentPayload: 유효 블록만 보존하고 target/source를 정규화
-ok 306 - normalizeAlignmentPayload: 유효 블록만 보존하고 target/source를 정규화
+ok 307 - normalizeAlignmentPayload: 유효 블록만 보존하고 target/source를 정규화
   ---
-  duration_ms: 0.166275
+  duration_ms: 0.154723
   type: 'test'
   ...
 # Subtest: pdfExportState: 진리표 — 잡 done ∧ 번역 done ∧ 레이아웃 있음일 때만 보임
-ok 307 - pdfExportState: 진리표 — 잡 done ∧ 번역 done ∧ 레이아웃 있음일 때만 보임
+ok 308 - pdfExportState: 진리표 — 잡 done ∧ 번역 done ∧ 레이아웃 있음일 때만 보임
   ---
-  duration_ms: 0.079771
+  duration_ms: 0.10542
   type: 'test'
   ...
 # Subtest: pdfExportState: 숨김 사유 — 잡 미완료 / 번역 없음(조용히 숨김 유지)
-ok 308 - pdfExportState: 숨김 사유 — 잡 미완료 / 번역 없음(조용히 숨김 유지)
+ok 309 - pdfExportState: 숨김 사유 — 잡 미완료 / 번역 없음(조용히 숨김 유지)
   ---
-  duration_ms: 0.074732
+  duration_ms: 0.160895
   type: 'test'
   ...
 # Subtest: translatedHtmlExportState: 번역 완료면 레이아웃 없이도 한국어 HTML 노출
-ok 309 - translatedHtmlExportState: 번역 완료면 레이아웃 없이도 한국어 HTML 노출
+ok 310 - translatedHtmlExportState: 번역 완료면 레이아웃 없이도 한국어 HTML 노출
   ---
-  duration_ms: 0.06322
+  duration_ms: 0.120388
   type: 'test'
   ...
 # Subtest: pdfReportMessage: 표 셀·재배치·원문 보존을 숫자형 리포트로 안내
-ok 310 - pdfReportMessage: 표 셀·재배치·원문 보존을 숫자형 리포트로 안내
+ok 311 - pdfReportMessage: 표 셀·재배치·원문 보존을 숫자형 리포트로 안내
   ---
-  duration_ms: 0.117703
+  duration_ms: 0.152849
   type: 'test'
   ...
 # Subtest: streamPaneTrimCount: 상한 이하에서는 아무것도 걷지 않는다
-ok 311 - streamPaneTrimCount: 상한 이하에서는 아무것도 걷지 않는다
+ok 312 - streamPaneTrimCount: 상한 이하에서는 아무것도 걷지 않는다
   ---
-  duration_ms: 0.074792
+  duration_ms: 0.120238
   type: 'test'
   ...
 # Subtest: streamPaneTrimCount: 상한을 넘으면 여유분까지 한 번에 덜어낸다
-ok 312 - streamPaneTrimCount: 상한을 넘으면 여유분까지 한 번에 덜어낸다
+ok 313 - streamPaneTrimCount: 상한을 넘으면 여유분까지 한 번에 덜어낸다
   ---
-  duration_ms: 0.079651
+  duration_ms: 0.468037
   type: 'test'
   ...
 # Subtest: streamPaneTrimCount: 잘라낸 뒤 다시 상한 아래로 내려가 매 프레임 삭제가 없다
-ok 313 - streamPaneTrimCount: 잘라낸 뒤 다시 상한 아래로 내려가 매 프레임 삭제가 없다
+ok 314 - streamPaneTrimCount: 잘라낸 뒤 다시 상한 아래로 내려가 매 프레임 삭제가 없다
   ---
-  duration_ms: 0.060475
+  duration_ms: 0.06317
   type: 'test'
   ...
 # Subtest: streamPaneTrimCount: 최소 한 노드는 남기고, 비정상 입력을 방어한다
-ok 314 - streamPaneTrimCount: 최소 한 노드는 남기고, 비정상 입력을 방어한다
+ok 315 - streamPaneTrimCount: 최소 한 노드는 남기고, 비정상 입력을 방어한다
   ---
-  duration_ms: 0.084911
+  duration_ms: 0.084189
   type: 'test'
   ...
 # Subtest: replayExtendsRaw: 이어받은 replay면 확정 페이지 캐시를 유지한다
-ok 315 - replayExtendsRaw: 이어받은 replay면 확정 페이지 캐시를 유지한다
+ok 316 - replayExtendsRaw: 이어받은 replay면 확정 페이지 캐시를 유지한다
   ---
-  duration_ms: 0.0579
+  duration_ms: 0.058481
   type: 'test'
   ...
 # Subtest: replayExtendsRaw: 원문이 어긋나면 캐시를 버린다 (잘못된 화면 방지)
-ok 316 - replayExtendsRaw: 원문이 어긋나면 캐시를 버린다 (잘못된 화면 방지)
+ok 317 - replayExtendsRaw: 원문이 어긋나면 캐시를 버린다 (잘못된 화면 방지)
   ---
-  duration_ms: 0.048382
+  duration_ms: 0.051698
   type: 'test'
   ...
 # Subtest: replayExtendsRaw: 이어받은 replay의 확정 페이지 경계는 그대로다
-ok 317 - replayExtendsRaw: 이어받은 replay의 확정 페이지 경계는 그대로다
+ok 318 - replayExtendsRaw: 이어받은 replay의 확정 페이지 경계는 그대로다
   ---
-  duration_ms: 1.141613
+  duration_ms: 0.066475
   type: 'test'
   ...
 # Subtest: pickQaProvider: 서버 기본이 설정 필요면 쓸 수 있는 공급자를 고른다
-ok 318 - pickQaProvider: 서버 기본이 설정 필요면 쓸 수 있는 공급자를 고른다
+ok 319 - pickQaProvider: 서버 기본이 설정 필요면 쓸 수 있는 공급자를 고른다
   ---
-  duration_ms: 0.192575
+  duration_ms: 0.167046
   type: 'test'
   ...
 # Subtest: pickQaProvider: 아무것도 못 쓰면 예전 순서(설정 안내가 보이는 공급자), 비정상 카탈로그 방어
-ok 319 - pickQaProvider: 아무것도 못 쓰면 예전 순서(설정 안내가 보이는 공급자), 비정상 카탈로그 방어
+ok 320 - pickQaProvider: 아무것도 못 쓰면 예전 순서(설정 안내가 보이는 공급자), 비정상 카탈로그 방어
   ---
-  duration_ms: 0.088047
+  duration_ms: 0.080112
   type: 'test'
   ...
 # Subtest: qaThinkingDefault: 고른 적 없으면 원격만 켜고 로컬은 끈다, 고른 값은 그대로
-ok 320 - qaThinkingDefault: 고른 적 없으면 원격만 켜고 로컬은 끈다, 고른 값은 그대로
+ok 321 - qaThinkingDefault: 고른 적 없으면 원격만 켜고 로컬은 끈다, 고른 값은 그대로
   ---
-  duration_ms: 0.079932
+  duration_ms: 0.080232
   type: 'test'
   ...
 # Subtest: truncateRawToPage: 페이지 N의 마커 지점에서 자른다
-ok 321 - truncateRawToPage: 페이지 N의 마커 지점에서 자른다
+ok 322 - truncateRawToPage: 페이지 N의 마커 지점에서 자른다
   ---
-  duration_ms: 0.616458
+  duration_ms: 0.620055
   type: 'test'
   ...
 # Subtest: truncateRawToPage: 받은 적 없는 페이지는 원문을 그대로 둔다
-ok 322 - truncateRawToPage: 받은 적 없는 페이지는 원문을 그대로 둔다
+ok 323 - truncateRawToPage: 받은 적 없는 페이지는 원문을 그대로 둔다
   ---
-  duration_ms: 0.284319
+  duration_ms: 0.125167
   type: 'test'
   ...
 # Subtest: truncateRawToPage: 비정상 인자는 1페이지로 강등된다
-ok 323 - truncateRawToPage: 비정상 인자는 1페이지로 강등된다
+ok 324 - truncateRawToPage: 비정상 인자는 1페이지로 강등된다
   ---
-  duration_ms: 0.086414
+  duration_ms: 0.075463
   type: 'test'
   ...
 # Subtest: reset 후 캐시 길이(from-1)는 처음부터 렌더한 것과 동등하다
-ok 324 - reset 후 캐시 길이(from-1)는 처음부터 렌더한 것과 동등하다
+ok 325 - reset 후 캐시 길이(from-1)는 처음부터 렌더한 것과 동등하다
   ---
-  duration_ms: 0.677834
+  duration_ms: 0.620756
   type: 'test'
   ...
 # Subtest: 픽스처: 재처리(reset)가 실제로 일어난 캡처다
-ok 325 - 픽스처: 재처리(reset)가 실제로 일어난 캡처다
+ok 326 - 픽스처: 재처리(reset)가 실제로 일어난 캡처다
   ---
-  duration_ms: 0.161496
+  duration_ms: 0.144393
   type: 'test'
   ...
 # Subtest: 실캡처 — progress에서만 drain: 폐기된 출력이 남지 않는다
-ok 326 - 실캡처 — progress에서만 drain: 폐기된 출력이 남지 않는다
+ok 327 - 실캡처 — progress에서만 drain: 폐기된 출력이 남지 않는다
   ---
-  duration_ms: 0.995086
+  duration_ms: 1.03973
   type: 'test'
   ...
 # Subtest: 실캡처 — progress에서만 drain: 모든 페이지가 자기 박스를 갖는다
-ok 327 - 실캡처 — progress에서만 drain: 모든 페이지가 자기 박스를 갖는다
+ok 328 - 실캡처 — progress에서만 drain: 모든 페이지가 자기 박스를 갖는다
   ---
-  duration_ms: 0.605467
+  duration_ms: 0.751835
   type: 'test'
   ...
 # Subtest: 실캡처 — 토큰마다 drain: 폐기된 출력이 남지 않는다
-ok 328 - 실캡처 — 토큰마다 drain: 폐기된 출력이 남지 않는다
+ok 329 - 실캡처 — 토큰마다 drain: 폐기된 출력이 남지 않는다
   ---
-  duration_ms: 2.388852
+  duration_ms: 1.880644
   type: 'test'
   ...
 # Subtest: 실캡처 — 토큰마다 drain: 모든 페이지가 자기 박스를 갖는다
-ok 329 - 실캡처 — 토큰마다 drain: 모든 페이지가 자기 박스를 갖는다
+ok 330 - 실캡처 — 토큰마다 drain: 모든 페이지가 자기 박스를 갖는다
   ---
-  duration_ms: 2.854799
+  duration_ms: 1.977748
   type: 'test'
   ...
 # Subtest: 실캡처: 확정 미리보기 페이지에 짝 없는 <table>이 남지 않는다
-ok 330 - 실캡처: 확정 미리보기 페이지에 짝 없는 <table>이 남지 않는다
+ok 331 - 실캡처: 확정 미리보기 페이지에 짝 없는 <table>이 남지 않는다
   ---
-  duration_ms: 1.088342
+  duration_ms: 1.373589
   type: 'test'
   ...
 # Subtest: 실캡처: 확정 페이지 조각이 한 페이지 분량을 넘지 않는다
-ok 331 - 실캡처: 확정 페이지 조각이 한 페이지 분량을 넘지 않는다
+ok 332 - 실캡처: 확정 페이지 조각이 한 페이지 분량을 넘지 않는다
   ---
-  duration_ms: 0.538059
+  duration_ms: 0.474479
   type: 'test'
   ...
 # Subtest: 실캡처: 한 세그먼트가 여러 페이지의 머리말을 담지 않는다
-ok 332 - 실캡처: 한 세그먼트가 여러 페이지의 머리말을 담지 않는다
+ok 333 - 실캡처: 한 세그먼트가 여러 페이지의 머리말을 담지 않는다
   ---
-  duration_ms: 0.461344
+  duration_ms: 0.516824
   type: 'test'
   ...
 # Subtest: 실캡처: 재처리 구간에서도 진행률이 계속 올라간다
-ok 333 - 실캡처: 재처리 구간에서도 진행률이 계속 올라간다
+ok 334 - 실캡처: 재처리 구간에서도 진행률이 계속 올라간다
   ---
-  duration_ms: 0.101883
+  duration_ms: 0.103556
   type: 'test'
   ...
 # Subtest: 마커를 받지 못한 페이지의 reset은 원문을 건드리지 않는다
-ok 334 - 마커를 받지 못한 페이지의 reset은 원문을 건드리지 않는다
+ok 335 - 마커를 받지 못한 페이지의 reset은 원문을 건드리지 않는다
   ---
-  duration_ms: 0.083809
+  duration_ms: 0.136008
   type: 'test'
   ...
 # Subtest: 게이트: 청크 중간 페이지 reset 후 다시 채우면 페이지 귀속이 유지된다
-ok 335 - 게이트: 청크 중간 페이지 reset 후 다시 채우면 페이지 귀속이 유지된다
+ok 336 - 게이트: 청크 중간 페이지 reset 후 다시 채우면 페이지 귀속이 유지된다
   ---
-  duration_ms: 0.183328
+  duration_ms: 0.209457
   type: 'test'
   ...
 # Subtest: 게이트: 재처리가 거부돼 원래 본문을 다시 넣어도 세그먼트 수는 같다
-ok 336 - 게이트: 재처리가 거부돼 원래 본문을 다시 넣어도 세그먼트 수는 같다
+ok 337 - 게이트: 재처리가 거부돼 원래 본문을 다시 넣어도 세그먼트 수는 같다
   ---
-  duration_ms: 0.127983
+  duration_ms: 0.282986
   type: 'test'
   ...
-# (node:115333) ExperimentalWarning: The MockTimers API is an experimental feature and might change at any time
+# (node:217459) ExperimentalWarning: The MockTimers API is an experimental feature and might change at any time
 # (Use `node --trace-warnings ...` to show where the warning was created)
 # Subtest: 첫 연결이 비-200(CLOSED)이면 error 1회만으로 즉시 폴링 강등 + 재승격 예약
-ok 337 - 첫 연결이 비-200(CLOSED)이면 error 1회만으로 즉시 폴링 강등 + 재승격 예약
+ok 338 - 첫 연결이 비-200(CLOSED)이면 error 1회만으로 즉시 폴링 강등 + 재승격 예약
   ---
-  duration_ms: 3.305133
+  duration_ms: 2.714644
   type: 'test'
   ...
 # Subtest: 연결 도중 끊김(CONNECTING)은 2회째에 강등한다 — 브라우저 자동 재접속을 존중
-ok 338 - 연결 도중 끊김(CONNECTING)은 2회째에 강등한다 — 브라우저 자동 재접속을 존중
+ok 339 - 연결 도중 끊김(CONNECTING)은 2회째에 강등한다 — 브라우저 자동 재접속을 존중
   ---
-  duration_ms: 0.915745
+  duration_ms: 0.767404
   type: 'test'
   ...
 # Subtest: 재승격: 백오프 뒤 다시 연결하고 open이면 폴링을 풀고 백오프를 리셋한다
-ok 339 - 재승격: 백오프 뒤 다시 연결하고 open이면 폴링을 풀고 백오프를 리셋한다
+ok 340 - 재승격: 백오프 뒤 다시 연결하고 open이면 폴링을 풀고 백오프를 리셋한다
   ---
-  duration_ms: 1.783149
+  duration_ms: 1.584613
   type: 'test'
   ...
 # Subtest: 재승격 시도가 실패하면 폴링은 유지하고 다음 백오프로 다시 예약한다
-ok 340 - 재승격 시도가 실패하면 폴링은 유지하고 다음 백오프로 다시 예약한다
+ok 341 - 재승격 시도가 실패하면 폴링은 유지하고 다음 백오프로 다시 예약한다
   ---
-  duration_ms: 1.36144
+  duration_ms: 1.246622
   type: 'test'
   ...
 # Subtest: 폴링은 한 번에 한 요청 — 느린 응답 동안 1초 틱이 겹쳐 보내지 않는다
-ok 341 - 폴링은 한 번에 한 요청 — 느린 응답 동안 1초 틱이 겹쳐 보내지 않는다
+ok 342 - 폴링은 한 번에 한 요청 — 느린 응답 동안 1초 틱이 겹쳐 보내지 않는다
   ---
-  duration_ms: 5.458323
+  duration_ms: 7.184299
   type: 'test'
   ...
 # Subtest: 폴링 응답 도중 SSE가 재승격되면 낡은 스냅샷(진행·터미널 모두)을 적용하지 않는다
-ok 342 - 폴링 응답 도중 SSE가 재승격되면 낡은 스냅샷(진행·터미널 모두)을 적용하지 않는다
+ok 343 - 폴링 응답 도중 SSE가 재승격되면 낡은 스냅샷(진행·터미널 모두)을 적용하지 않는다
   ---
-  duration_ms: 2.808673
+  duration_ms: 2.689076
   type: 'test'
   ...
 # Subtest: 폴링 404 → 잡을 목록에서 지우고 빈 화면으로
-ok 343 - 폴링 404 → 잡을 목록에서 지우고 빈 화면으로
+ok 344 - 폴링 404 → 잡을 목록에서 지우고 빈 화면으로
   ---
-  duration_ms: 3.801664
+  duration_ms: 2.35316
   type: 'test'
   ...
 # Subtest: 폴링이 터미널(error)을 보면 폴링·재승격을 정리하고 결과를 렌더한다
-ok 344 - 폴링이 터미널(error)을 보면 폴링·재승격을 정리하고 결과를 렌더한다
+ok 345 - 폴링이 터미널(error)을 보면 폴링·재승격을 정리하고 결과를 렌더한다
   ---
-  duration_ms: 2.76243
+  duration_ms: 4.196798
   type: 'test'
   ...
 # Subtest: teardownConnections: es와 폴링·재승격 타이머를 모두 정리한다
-ok 345 - teardownConnections: es와 폴링·재승격 타이머를 모두 정리한다
+ok 346 - teardownConnections: es와 폴링·재승격 타이머를 모두 정리한다
   ---
-  duration_ms: 0.708082
+  duration_ms: 1.146323
   type: 'test'
   ...
 # Subtest: 교체된 옛 연결의 늦은 오류는 새 연결의 카운트를 올리지 않는다
-ok 346 - 교체된 옛 연결의 늦은 오류는 새 연결의 카운트를 올리지 않는다
+ok 347 - 교체된 옛 연결의 늦은 오류는 새 연결의 카운트를 올리지 않는다
   ---
-  duration_ms: 0.473948
+  duration_ms: 0.981059
   type: 'test'
   ...
 # Subtest: 번역 SSE도 첫 연결이 CLOSED면 즉시 상태 폴링으로 전환한다
-ok 347 - 번역 SSE도 첫 연결이 CLOSED면 즉시 상태 폴링으로 전환한다
+ok 348 - 번역 SSE도 첫 연결이 CLOSED면 즉시 상태 폴링으로 전환한다
   ---
-  duration_ms: 0.475822
+  duration_ms: 0.871602
   type: 'test'
   ...
 # Subtest: DELETE의 종료 SSE {deleted:true}는 취소 화면 대신 잡을 닫고 로컬 흔적을 지운다
-ok 348 - DELETE의 종료 SSE {deleted:true}는 취소 화면 대신 잡을 닫고 로컬 흔적을 지운다
+ok 349 - DELETE의 종료 SSE {deleted:true}는 취소 화면 대신 잡을 닫고 로컬 흔적을 지운다
   ---
-  duration_ms: 4.07846
+  duration_ms: 5.884937
   type: 'test'
   ...
 # Subtest: 이 탭이 지운 잡의 {deleted:true}가 DELETE 응답보다 먼저 와도 "삭제됨" 안내는 띄우지 않는다
-ok 349 - 이 탭이 지운 잡의 {deleted:true}가 DELETE 응답보다 먼저 와도 "삭제됨" 안내는 띄우지 않는다
+ok 350 - 이 탭이 지운 잡의 {deleted:true}가 DELETE 응답보다 먼저 와도 "삭제됨" 안내는 띄우지 않는다
   ---
-  duration_ms: 2.509355
+  duration_ms: 2.673316
   type: 'test'
   ...
 # Subtest: POST /cancel 202 {status:canceled}(대기 잡 즉시 마감)는 종료 이벤트 없이 바로 취소 화면
-ok 350 - POST /cancel 202 {status:canceled}(대기 잡 즉시 마감)는 종료 이벤트 없이 바로 취소 화면
+ok 351 - POST /cancel 202 {status:canceled}(대기 잡 즉시 마감)는 종료 이벤트 없이 바로 취소 화면
   ---
-  duration_ms: 2.034029
+  duration_ms: 2.400249
   type: 'test'
   ...
 # Subtest: POST /cancel 202 {status:canceling}(실행 중)은 러너의 종료 이벤트를 기다린다
-ok 351 - POST /cancel 202 {status:canceling}(실행 중)은 러너의 종료 이벤트를 기다린다
+ok 352 - POST /cancel 202 {status:canceling}(실행 중)은 러너의 종료 이벤트를 기다린다
   ---
-  duration_ms: 0.542057
+  duration_ms: 1.692627
   type: 'test'
   ...
 # Subtest: 종료 SSE가 cancel 응답보다 먼저 마감했으면 다시 그리지 않는다
-ok 352 - 종료 SSE가 cancel 응답보다 먼저 마감했으면 다시 그리지 않는다
+ok 353 - 종료 SSE가 cancel 응답보다 먼저 마감했으면 다시 그리지 않는다
   ---
-  duration_ms: 0.752395
+  duration_ms: 1.173233
   type: 'test'
   ...
 # Subtest: SSE가 없는 완료 잡이 전체 목록에서 사라지면 상세 404를 확인하고 화면을 닫는다
-ok 353 - SSE가 없는 완료 잡이 전체 목록에서 사라지면 상세 404를 확인하고 화면을 닫는다
+ok 354 - SSE가 없는 완료 잡이 전체 목록에서 사라지면 상세 404를 확인하고 화면을 닫는다
   ---
-  duration_ms: 3.814689
+  duration_ms: 6.143706
   type: 'test'
   ...
 # Subtest: 목록 창 밖(has_more)이거나 상세가 살아 있으면 열린 잡을 닫지 않는다
-ok 354 - 목록 창 밖(has_more)이거나 상세가 살아 있으면 열린 잡을 닫지 않는다
+ok 355 - 목록 창 밖(has_more)이거나 상세가 살아 있으면 열린 잡을 닫지 않는다
   ---
-  duration_ms: 1.025152
+  duration_ms: 1.272051
   type: 'test'
   ...
 # Subtest: Markdown done event keeps original export when final snapshot fails
-ok 355 - Markdown done event keeps original export when final snapshot fails
+ok 356 - Markdown done event keeps original export when final snapshot fails
   ---
-  duration_ms: 3.204482
+  duration_ms: 2.818792
   type: 'test'
   ...
 # Subtest: Markdown cancellation preserves compact service and disables ZIP
-ok 356 - Markdown cancellation preserves compact service and disables ZIP
+ok 357 - Markdown cancellation preserves compact service and disables ZIP
   ---
-  duration_ms: 0.938699
+  duration_ms: 0.865781
   type: 'test'
   ...
 # Subtest: translateKeptSummary: 원문 유지 개수와 사유를 함께 보여 준다
-ok 357 - translateKeptSummary: 원문 유지 개수와 사유를 함께 보여 준다
+ok 358 - translateKeptSummary: 원문 유지 개수와 사유를 함께 보여 준다
   ---
-  duration_ms: 1.263464
+  duration_ms: 0.7601
   type: 'test'
   ...
 # Subtest: translateKeptSummary: SSE done의 counts만으로도 개수를 낸다
-ok 358 - translateKeptSummary: SSE done의 counts만으로도 개수를 낸다
+ok 359 - translateKeptSummary: SSE done의 counts만으로도 개수를 낸다
   ---
-  duration_ms: 0.16359
+  duration_ms: 0.096262
   type: 'test'
   ...
 # Subtest: translateKeptSummary: counts와 사유별 집계 중 큰 쪽을 쓴다 (개수를 잃지 않는다)
-ok 359 - translateKeptSummary: counts와 사유별 집계 중 큰 쪽을 쓴다 (개수를 잃지 않는다)
+ok 360 - translateKeptSummary: counts와 사유별 집계 중 큰 쪽을 쓴다 (개수를 잃지 않는다)
   ---
-  duration_ms: 0.23751
+  duration_ms: 0.135486
   type: 'test'
   ...
 # Subtest: translateKeptSummary: 건너뜀만 있으면 경고 톤이 아니다 (참고문헌 등은 정상)
-ok 360 - translateKeptSummary: 건너뜀만 있으면 경고 톤이 아니다 (참고문헌 등은 정상)
+ok 361 - translateKeptSummary: 건너뜀만 있으면 경고 톤이 아니다 (참고문헌 등은 정상)
   ---
-  duration_ms: 0.165293
+  duration_ms: 0.092775
   type: 'test'
   ...
 # Subtest: translateKeptSummary: 전부 번역됐으면 그렇게 말한다
-ok 361 - translateKeptSummary: 전부 번역됐으면 그렇게 말한다
+ok 362 - translateKeptSummary: 전부 번역됐으면 그렇게 말한다
   ---
-  duration_ms: 0.212323
+  duration_ms: 0.125287
   type: 'test'
   ...
 # Subtest: translateKeptSummary: 미지의 사유 키도 개수를 잃지 않고 그대로 노출
-ok 362 - translateKeptSummary: 미지의 사유 키도 개수를 잃지 않고 그대로 노출
+ok 363 - translateKeptSummary: 미지의 사유 키도 개수를 잃지 않고 그대로 노출
   ---
-  duration_ms: 0.210769
+  duration_ms: 0.12167
   type: 'test'
   ...
 # Subtest: translateKeptSummary: 근거가 없으면 null — 거짓 안심을 주지 않는다
-ok 363 - translateKeptSummary: 근거가 없으면 null — 거짓 안심을 주지 않는다
+ok 364 - translateKeptSummary: 근거가 없으면 null — 거짓 안심을 주지 않는다
   ---
-  duration_ms: 0.130527
+  duration_ms: 0.070834
   type: 'test'
   ...
 # Subtest: translateKeptSummary: 비정상 값(음수·문자열·NaN)은 0으로 방어
-ok 364 - translateKeptSummary: 비정상 값(음수·문자열·NaN)은 0으로 방어
+ok 365 - translateKeptSummary: 비정상 값(음수·문자열·NaN)은 0으로 방어
   ---
-  duration_ms: 0.158089
+  duration_ms: 0.087336
   type: 'test'
   ...
 # Subtest: translation start stays locked during health refresh and rejects duplicate starts
-ok 365 - translation start stays locked during health refresh and rejects duplicate starts
+ok 366 - translation start stays locked during health refresh and rejects duplicate starts
   ---
-  duration_ms: 1.41963
+  duration_ms: 1.356822
   type: 'test'
   ...
 # Subtest: old translation POST cannot unlock a new request after A to B to A
-ok 366 - old translation POST cannot unlock a new request after A to B to A
+ok 367 - old translation POST cannot unlock a new request after A to B to A
   ---
-  duration_ms: 0.389238
+  duration_ms: 0.375601
   type: 'test'
   ...
 # Subtest: obsolete translation state response cannot overwrite a reopened job
-ok 367 - obsolete translation state response cannot overwrite a reopened job
+ok 368 - obsolete translation state response cannot overwrite a reopened job
   ---
-  duration_ms: 0.39055
+  duration_ms: 0.38004
   type: 'test'
   ...
 # Subtest: replaced translation EventSource cannot send progress into its replacement
-ok 368 - replaced translation EventSource cannot send progress into its replacement
+ok 369 - replaced translation EventSource cannot send progress into its replacement
   ---
-  duration_ms: 0.597412
+  duration_ms: 0.586502
   type: 'test'
   ...
 # Subtest: translation polls do not overlap and old polls cannot stop a replacement timer
-ok 369 - translation polls do not overlap and old polls cannot stop a replacement timer
+ok 370 - translation polls do not overlap and old polls cannot stop a replacement timer
   ---
-  duration_ms: 0.897781
+  duration_ms: 0.916637
   type: 'test'
   ...
 # Subtest: polling a missing translation restores an available start button
-ok 370 - polling a missing translation restores an available start button
+ok 371 - polling a missing translation restores an available start button
   ---
-  duration_ms: 0.421759
+  duration_ms: 0.355103
   type: 'test'
   ...
 # Subtest: translateWarnings: 필드 부재·비정상 값은 빈 목록, 문자열만 중복 없이
-ok 371 - translateWarnings: 필드 부재·비정상 값은 빈 목록, 문자열만 중복 없이
+ok 372 - translateWarnings: 필드 부재·비정상 값은 빈 목록, 문자열만 중복 없이
   ---
-  duration_ms: 0.947125
+  duration_ms: 1.33467
   type: 'test'
   ...
 # Subtest: translateKeptSummary: 참고 사항은 상세에 개수만 더한다
-ok 372 - translateKeptSummary: 참고 사항은 상세에 개수만 더한다
+ok 373 - translateKeptSummary: 참고 사항은 상세에 개수만 더한다
   ---
-  duration_ms: 0.317642
+  duration_ms: 0.466143
   type: 'test'
   ...
 # Subtest: 번역 요약 아래 참고 사항 목록 — 있으면 보이고, done 이벤트·잡 전환에서는 비운다
-ok 373 - 번역 요약 아래 참고 사항 목록 — 있으면 보이고, done 이벤트·잡 전환에서는 비운다
+ok 374 - 번역 요약 아래 참고 사항 목록 — 있으면 보이고, done 이벤트·잡 전환에서는 비운다
   ---
-  duration_ms: 1.780564
+  duration_ms: 1.807716
   type: 'test'
   ...
 # Subtest: 구버전 서버(warnings 없음)에는 빈 목록 상자를 보이지 않는다
-ok 374 - 구버전 서버(warnings 없음)에는 빈 목록 상자를 보이지 않는다
+ok 375 - 구버전 서버(warnings 없음)에는 빈 목록 상자를 보이지 않는다
   ---
-  duration_ms: 1.140842
+  duration_ms: 1.158185
   type: 'test'
   ...
 # Subtest: 번역이 끝난 잡을 열면 translate/state의 warnings가 목록으로 보인다
-ok 375 - 번역이 끝난 잡을 열면 translate/state의 warnings가 목록으로 보인다
+ok 376 - 번역이 끝난 잡을 열면 translate/state의 warnings가 목록으로 보인다
   ---
-  duration_ms: 1.02339
+  duration_ms: 1.098221
   type: 'test'
   ...
 # Subtest: 뷰어가 열리면 뷰어 밖의 모든 영역이 inert·aria-hidden — 결과 아래 details 포함
-ok 376 - 뷰어가 열리면 뷰어 밖의 모든 영역이 inert·aria-hidden — 결과 아래 details 포함
+ok 377 - 뷰어가 열리면 뷰어 밖의 모든 영역이 inert·aria-hidden — 결과 아래 details 포함
   ---
-  duration_ms: 3.477471
+  duration_ms: 3.393891
   type: 'test'
   ...
 # Subtest: 닫으면 이 함수가 단 표시만 걷고, 원래 aria-hidden이던 영역은 그대로 둔다
-ok 377 - 닫으면 이 함수가 단 표시만 걷고, 원래 aria-hidden이던 영역은 그대로 둔다
+ok 378 - 닫으면 이 함수가 단 표시만 걷고, 원래 aria-hidden이던 영역은 그대로 둔다
   ---
-  duration_ms: 2.080127
+  duration_ms: 1.132887
   type: 'test'
   ...
 # Subtest: compact result resets service visibility when reopening a legacy reader job
-ok 378 - compact result resets service visibility when reopening a legacy reader job
+ok 379 - compact result resets service visibility when reopening a legacy reader job
   ---
-  duration_ms: 1.977948
+  duration_ms: 1.718296
   type: 'test'
   ...
 # Subtest: Markdown service rejects translation and fullscreen viewer actions without requests
-ok 379 - Markdown service rejects translation and fullscreen viewer actions without requests
+ok 380 - Markdown service rejects translation and fullscreen viewer actions without requests
   ---
-  duration_ms: 0.532328
+  duration_ms: 0.495619
   type: 'test'
   ...
 # Subtest: upload workflow comes from selection and defaults to existing reader service
-ok 380 - upload workflow comes from selection and defaults to existing reader service
+ok 381 - upload workflow comes from selection and defaults to existing reader service
   ---
-  duration_ms: 0.270773
+  duration_ms: 0.258069
   type: 'test'
   ...
 # Subtest: service selection updates upload and empty state while active job stays independent
-ok 381 - service selection updates upload and empty state while active job stays independent
+ok 382 - service selection updates upload and empty state while active job stays independent
   ---
-  duration_ms: 0.676842
+  duration_ms: 0.694587
   type: 'test'
   ...
-1..381
-# tests 381
+1..382
+# tests 382
 # suites 0
-# pass 379
-# fail 2
+# pass 382
+# fail 0
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 3987.801077
+# duration_ms 3978.862779

@@ -1,11 +1,11 @@
 {
   "backend": {
-    "passed": 2309,
+    "passed": 2338,
     "skipped": 34,
     "failed": 0
   },
   "frontend": {
-    "passed": 381,
+    "passed": 382,
     "failed": 0
   },
   "real_ocr_mock_provider_browser": "passed",
@@ -29,5 +29,15 @@
     "apple_gpu": "user verification"
   },
   "metal_gpu": "user verification",
-  "synthetic_quality_non_regression": "passed on recorded diagnostics; clean Korean formula transcription remains incorrect in both models"
+  "synthetic_quality_non_regression": "passed on recorded diagnostics; clean Korean formula transcription remains incorrect in both models",
+  "dependency_audit": {
+    "status": "passed",
+    "new_unaccepted_advisories": 0,
+    "backend_existing_accepted_records": 12,
+    "sidecar_accepted_alias_records": 2,
+    "unfixed_advisory": "DiskCache5.6.3/CVE-2025-69872",
+    "mitigation": "disabled optional grammar and disk cache, owner-only fresh cache directory",
+    "exception_expires": "2026-11-30",
+    "custom_wheel_hash_metadata_exact_version_audited": true
+  }
 }

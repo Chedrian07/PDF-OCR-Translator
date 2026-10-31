@@ -28,7 +28,10 @@ MUPDF_FIXED = "1.28.0"
 # (배포 이름, 하한, 근거 권고) — 하한 = 권고가 고쳐진 첫 버전
 SECURITY_FLOORS = [
     ("pymupdf", MUPDF_FIXED, "CVE-2026-3308 — MuPDF 1.28.0을 동봉한 첫 PyMuPDF"),
-    ("pillow", "12.3.0", "crop/paste 좌표 오버플로 OOB 쓰기 등 12.2.0·12.3.0 HIGH 권고"),
+    ("pillow", "13.0.0", "GHSA-v9pv-5gc8-w2m6(native storage)·GHSA-5x8w-8jj5-q52h(JPEG OOB 쓰기)"),
+    ("certifi", "2026.10.18", "PYSEC-2026-4320 — emSign 루트 인증서 제거"),
+    ("filelock", "4.2.1", "CVE-2026-112940·CVE-2026-112913 등 로컬 잠금 경로 보호"),
+    ("setuptools", "84.1.0", "GHSA-xmj3-9gf7-h52w — wheel namespace 경로 탈출"),
     ("urllib3", "2.8.0", "CVE-2026-97689(chunked 무제한 버퍼링)·CVE-2026-97688·CVE-2026-97687"),
     ("anyio", "4.14.2", "CVE-2026-63374·CVE-2026-64847·CVE-2026-63349"),
 ]

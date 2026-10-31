@@ -1,0 +1,13 @@
+== backend (uv.lock · cpu extra)
+WARNING:pip_audit._cli:--no-deps is supported, but users are encouraged to fully hash their pinned dependencies
+WARNING:pip_audit._cli:Consider using a tool like `pip-compile`: https://pip-tools.readthedocs.io/en/latest/#using-hashes
+No known vulnerabilities found, 12 ignored
+== services/unlimited_ocr2
+DiskCache 5.6.3 acceptance expires 2026-11-30: No patched upstream release. The pinned OCR-only launcher enforces grammar-backend none and disable-outlines-disk-cache, rejects arbitrary/config/abbreviated overrides, and assigns a fresh owner-only cache directory. In this wheel the only Outlines imports are lazy optional grammar paths; none rejects constrained requests before those paths. The model service has no published Compose port and accepts trusted fixed OCR requests from the adapter. This acceptance does not cover exposing SGLang directly or administrator/same-UID compromise.
+WARNING:pip_audit._cli:--no-deps is supported, but users are encouraged to fully hash their pinned dependencies
+WARNING:pip_audit._cli:Consider using a tool like `pip-compile`: https://pip-tools.readthedocs.io/en/latest/#using-hashes
+No known vulnerabilities found, 2 ignored
+Auditing hash-verified custom wheel: sglang==0.5.20.dev13+g75b9b06b02 (OSV)
+WARNING:pip_audit._cli:--no-deps is supported, but users are encouraged to fully hash their pinned dependencies
+WARNING:pip_audit._cli:Consider using a tool like `pip-compile`: https://pip-tools.readthedocs.io/en/latest/#using-hashes
+No known vulnerabilities found

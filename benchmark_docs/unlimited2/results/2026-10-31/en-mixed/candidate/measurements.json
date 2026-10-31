@@ -30,48 +30,60 @@
     {
       "run": 0,
       "warmup": true,
-      "seconds": 1.335503078000329,
-      "first_text_s": 0.2585858599995845,
-      "pages_per_s": 1.4975630029955702,
+      "seconds": 1.3446306969999569,
+      "first_text_s": 0.26304429300034826,
+      "pages_per_s": 1.4873972492687069,
       "page_markers": 2,
       "figures": 2,
       "warnings": [],
-      "peak_vram_mib": 11405
+      "peak_vram_mib": 11458
     },
     {
       "run": 1,
       "warmup": false,
-      "seconds": 1.3283531730003233,
-      "first_text_s": 0.26090755600034754,
-      "pages_per_s": 1.5056236855162863,
+      "seconds": 1.3531385900005262,
+      "first_text_s": 0.2815848869995534,
+      "pages_per_s": 1.478045201562999,
       "page_markers": 2,
       "figures": 2,
       "warnings": [],
-      "peak_vram_mib": 11405
+      "peak_vram_mib": 11458
     },
     {
       "run": 2,
       "warmup": false,
-      "seconds": 1.3368987780004318,
-      "first_text_s": 0.2675586640007168,
-      "pages_per_s": 1.495999572227415,
+      "seconds": 1.3381973710002057,
+      "first_text_s": 0.2701718059997802,
+      "pages_per_s": 1.49454784723209,
       "page_markers": 2,
       "figures": 2,
       "warnings": [],
-      "peak_vram_mib": 11405
+      "peak_vram_mib": 11458
     },
     {
       "run": 3,
       "warmup": false,
-      "seconds": 1.3365207309998368,
-      "first_text_s": 0.2636689969995132,
-      "pages_per_s": 1.4964227292634822,
+      "seconds": 1.3493873229999735,
+      "first_text_s": 0.2699913190008374,
+      "pages_per_s": 1.4821541346287268,
       "page_markers": 2,
       "figures": 2,
       "warnings": [],
-      "peak_vram_mib": 11405
+      "peak_vram_mib": 11458
     }
   ],
   "gpu": "NVIDIA GeForce RTX 5070 Ti",
-  "median_ocr_s": 1.3365207309998368
+  "median_ocr_s": 1.3493873229999735,
+  "client_dependencies": {
+    "pillow": "12.1.1",
+    "certifi": "2026.1.4",
+    "filelock": "3.20.3",
+    "setuptools": "78.1.1",
+    "torch": "2.13.0",
+    "transformers": "5.15.0"
+  },
+  "runtime_mitigations": {
+    "grammar_backend": "none",
+    "disable_outlines_disk_cache": true
+  }
 }

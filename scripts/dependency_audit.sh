@@ -4,7 +4,7 @@
 #
 #   1) backend uv.lock — 배포 이미지와 같은 cpu extra 집합을 pip-audit --strict로
 #   2) sidecar 잠금(services/*/requirements.lock)
-#   3) paddlepaddle-gpu CDN 휠 — 같은 버전의 CPU 패키지 이름(paddlepaddle)으로 OSV 조회
+#      커스텀 SGLang 휠은 SHA-256·METADATA를 검증하고 정확한 버전으로 OSV 조회
 #
 # 수용한 권고(IGNORES)와 재검토 기한(DEADLINE)은 CI 잡과 **같은 목록**이어야 한다 —
 # backend/tests/test_ci_ops_contracts.py가 두 곳의 일치를 강제한다. 바꿀 때는 ci.yml과
@@ -47,7 +47,5 @@ echo "== backend (uv.lock · cpu extra)"
 sed -E 's/^([A-Za-z0-9._-]+==[^ ;+]+)\+[A-Za-z0-9._]+/\1/' "$tmp/req.raw.txt" > "$tmp/req.txt"
 uvx "$PIP_AUDIT" -r "$tmp/req.txt" --disable-pip --no-deps --strict "${args[@]}"
 
-for svc in unlimited_ocr2; do
-  echo "== services/$svc"
-  uvx "$PIP_AUDIT" -r "$REPO/services/$svc/requirements.lock" --disable-pip --no-deps
-done
+echo "== services/unlimited_ocr2"
+python3 "$REPO/scripts/audit_unlimited_ocr2.py"

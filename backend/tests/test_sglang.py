@@ -143,7 +143,14 @@ def sglang_service(monkeypatch):
                 + settings.model_revision,
             },
         ),
-        "/server_info": (200, {"version": "0.5.20.dev13+g75b9b06b02"}),
+        "/server_info": (
+            200,
+            {
+                "version": "0.5.20.dev13+g75b9b06b02",
+                "grammar_backend": "none",
+                "disable_outlines_disk_cache": True,
+            },
+        ),
     }
     calls = []
 
@@ -167,6 +174,27 @@ def test_repeated_readiness_checks_do_not_generate_tokens(sglang_service):
     assert engine.provider_health()["status"] == "ready"
     assert engine.loaded
     assert calls == ["/ready", "/model_info", "/server_info"] * 2
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"grammar_backend": "outlines"},
+        {"grammar_backend": "xgrammar"},
+        {"disable_outlines_disk_cache": False},
+        {"disable_outlines_disk_cache": "true"},
+    ],
+)
+def test_runtime_optional_grammar_cache_configuration_is_verified(
+    sglang_service, changes
+):
+    engine, routes, _ = sglang_service
+    engine.load()
+    runtime = {**routes["/server_info"][1], **changes}
+    routes["/server_info"] = (200, runtime)
+    with pytest.raises(EngineError, match="optional grammar/cache must be disabled"):
+        engine.load()
+    assert not engine.loaded
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,22 @@
+[
+  {
+    "document": "en-mixed",
+    "model_pixels_identical_to_recorded_pillow12_run": true
+  },
+  {
+    "document": "ko-report",
+    "model_pixels_identical_to_recorded_pillow12_run": true
+  },
+  {
+    "document": "scan",
+    "model_pixels_identical_to_recorded_pillow12_run": true
+  },
+  {
+    "document": "columns",
+    "model_pixels_identical_to_recorded_pillow12_run": true
+  },
+  {
+    "document": "long-32",
+    "model_pixels_identical_to_recorded_pillow12_run": true
+  }
+]

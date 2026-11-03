@@ -237,6 +237,76 @@ def test_provider_health_separates_startup_from_a_lost_sidecar(sglang_service):
     assert not engine.loaded
 
 
+def _stuck_load(monkeypatch, engine):
+    """정지된 sidecar 컨테이너의 대역 — 이름 조회(getaddrinfo)가 httpx 타임아웃 밖에서 멈춘다."""
+    release, entered = threading.Event(), []
+
+    def stuck():
+        entered.append(threading.current_thread().name)
+        assert release.wait(10)
+        engine._mark_unavailable()
+        raise SGLangUnavailable("Unlimited-OCR-2 SGLang is not ready")
+
+    monkeypatch.setattr(engine, "load", stuck)
+    return release, entered
+
+
+def test_health_does_not_wait_for_a_stuck_sidecar_probe(sglang_service, monkeypatch):
+    """health는 확인을 상한까지만 기다리고 직전 결과를 낸다 — 예전에는 정지된 sidecar에서
+    매번 10초 걸렸다. 멈춘 확인 위에 확인을 쌓지 않고, 끝나면 다음 health가 그 결과를 본다."""
+    import time
+
+    import app.engine.sglang as sglang_mod
+
+    monkeypatch.setattr(sglang_mod, "HEALTH_PROBE_WAIT_S", 0.2)
+    engine, _, _ = sglang_service
+    assert engine.provider_health()["status"] == "ready"
+    release, entered = _stuck_load(monkeypatch, engine)
+    started = time.monotonic()
+    for _ in range(3):
+        assert engine.provider_health()["status"] == "ready"   # 직전 결과 — 오경보 없음
+    assert time.monotonic() - started < 2
+    assert entered == ["sglang-health-probe"]                 # 확인은 하나만 돈다
+    release.set()
+    deadline = time.monotonic() + 5
+    while engine.provider_health()["status"] != "unavailable":
+        assert time.monotonic() < deadline, "끝난 확인의 결과가 보이지 않는다"
+    assert not engine.loaded
+
+
+@pytest.mark.parametrize("preloaded, expected", [(False, "starting"), (True, "ready")])
+def test_health_before_any_probe_finished_uses_the_last_load(
+    sglang_service, monkeypatch, preloaded, expected,
+):
+    """끝난 확인이 아직 없으면 마지막 load()(프리로드·워커) 결과로 답한다 — 첫 확인이 늦다고
+    준비된 sidecar를 '연결 안 됨'으로, 기동 중인 sidecar를 장애로 보이지 않는다."""
+    import app.engine.sglang as sglang_mod
+
+    monkeypatch.setattr(sglang_mod, "HEALTH_PROBE_WAIT_S", 0.2)
+    engine, _, _ = sglang_service
+    if preloaded:
+        engine.load()
+    release, _ = _stuck_load(monkeypatch, engine)
+    try:
+        assert engine.provider_health()["status"] == expected
+    finally:
+        release.set()
+
+
+def test_health_probe_errors_still_reach_the_health_route(sglang_service, monkeypatch):
+    """확인 스레드의 예기치 못한 예외도 health 호출자에게 전달된다(api.health가 error로 낸다) —
+    삼키면 health가 직전 결과를 계속 내고, 다음 확인도 다시 시작된다."""
+    engine, _, _ = sglang_service
+
+    def broken():
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(engine, "load", broken)
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="probe exploded"):
+            engine.provider_health()
+
+
 def test_provider_health_reports_a_misconfigured_sidecar_even_before_first_ready(sglang_service):
     """대기해도 풀리지 않는 불일치는 기동 중으로 숨기지 않는다."""
     engine, routes, _ = sglang_service

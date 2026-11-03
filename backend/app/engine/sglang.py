@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import json
 import threading
 import time
@@ -42,6 +43,10 @@ NGRAM_PROCESSOR = json.dumps(
 )
 
 
+# /api/health가 sidecar 확인을 기다리는 상한(초) — 넘기면 직전 결과를 낸다 (provider_health)
+HEALTH_PROBE_WAIT_S = 1.0
+
+
 class SGLangUnavailable(EngineError):
     transient = True
     retry_same_page = False
@@ -76,6 +81,10 @@ class SGLangEngine(OCREngine):
         # 한 번이라도 준비 확인에 성공했는지 — 그 전의 미준비는 정상 기동 과정(starting),
         # 그 뒤의 미준비는 sidecar 중단·재시작(unavailable)이다 (provider_health)
         self._ever_ready = False
+        # /api/health용 sidecar 확인 — 한 번에 하나만 돌고(single-flight) 마지막 결과를 남긴다
+        self._probe_lock = threading.Lock()
+        self._probe: concurrent.futures.Future | None = None
+        self._last_probe: dict | None = None
 
     @property
     def loaded(self):
@@ -149,6 +158,47 @@ class SGLangEngine(OCREngine):
             raise
 
     def provider_health(self):
+        # /api/health는 sidecar 확인을 HEALTH_PROBE_WAIT_S까지만 기다린다. 정지된 sidecar
+        # 컨테이너는 이름 조회(getaddrinfo)가 10초 걸려 실패하는데 이 시간은 httpx 타임아웃
+        # 밖이라, 예전에는 health 응답이 매번 10초 걸렸다(컨테이너 HEALTHCHECK 타임아웃 5초도
+        # 넘는다). 확인은 데몬 스레드 하나에서만 돌고 — 동시 요청·다음 폴링은 진행 중인 확인을
+        # 함께 기다려 멈춘 확인 위에 스레드를 쌓지 않는다 — 늦으면 실패로 단정하지 않고 직전
+        # 결과를 낸다(바쁜 sidecar의 느린 응답이 '연결 안 됨' 오경보가 되지 않게). 그 대가로
+        # 상태는 최대 확인 한 번만큼 늦게 바뀐다.
+        with self._probe_lock:
+            probe = self._probe
+            if probe is None or probe.done():
+                probe = self._probe = concurrent.futures.Future()
+                threading.Thread(
+                    target=self._run_probe, args=(probe,), name="sglang-health-probe",
+                    daemon=True,  # 이름 조회에 멈춘 확인이 프로세스 종료를 붙잡지 않게
+                ).start()
+        try:
+            return probe.result(timeout=HEALTH_PROBE_WAIT_S)
+        except concurrent.futures.TimeoutError:
+            return self._previous_health()
+
+    def _previous_health(self):
+        """확인이 늦을 때 낼 직전 상태 — 끝난 확인이 아직 없으면 마지막 load() 결과로 만든다."""
+        if self._last_probe is not None:
+            return self._last_probe
+        if self._loaded:
+            return {"status": "ready", "model_revision": self._settings.model_revision}
+        return {
+            "status": "unavailable" if self._ever_ready else "starting",
+            "error": "Unlimited-OCR-2 SGLang readiness check is still running",
+        }
+
+    def _run_probe(self, probe):
+        try:
+            result = self._probe_now()
+        except Exception as exc:  # noqa: BLE001 — api.health가 받아 error 상태로 낸다
+            probe.set_exception(exc)
+        else:
+            self._last_probe = result
+            probe.set_result(result)
+
+    def _probe_now(self):
         try:
             self.load()
         except EngineError as exc:

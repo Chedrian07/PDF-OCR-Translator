@@ -525,6 +525,106 @@ def test_cancel_while_waiting_for_the_model_finishes_as_canceled(client, sample_
     assert wait_done(client, _upload(client, sample_pdf))["status"] == "done"
 
 
+# ── 프리로드의 sidecar 준비 대기 — 기동 중을 '로드 실패'로 보이지 않는다 ──────────────
+class _StartingSidecar:
+    """실제 SGLangEngine의 load() 대역 — 기동 중인 sidecar(모델 다운로드·CUDA 그래프 캡처)를
+    흉내 낸다. ready() 전까지는 load()가 일시적 미준비(SGLangUnavailable)로 실패한다.
+    프리로드(SGLangEngine.wait_until_ready의 폴링)와 health(provider_health)가 함께 부른다."""
+
+    def __init__(self, engine):
+        import threading
+
+        self.engine = engine
+        self.probed = threading.Event()
+        self._ready = threading.Event()
+
+    def ready(self):
+        self._ready.set()
+
+    def __call__(self):
+        from app.engine.sglang import SGLangUnavailable
+
+        self.probed.set()
+        if not self._ready.is_set():
+            self.engine._mark_unavailable()
+            raise SGLangUnavailable("Unlimited-OCR-2 SGLang is not ready")
+        self.engine._loaded = True
+
+
+@pytest.fixture
+def sidecar_app(settings, monkeypatch):
+    """PRELOAD_MODEL=1 + CUDA(SGLang sidecar) 앱 — 엔진의 HTTP 확인만 대역으로 바꾼다."""
+    from app.engine.sglang import SGLangEngine
+    from app.main import create_app
+
+    settings.device = "cuda"
+    settings.engine = "unlimited2"
+    settings.preload_model = True
+    app = create_app(settings)
+    assert isinstance(app.state.engine, SGLangEngine)
+    sidecar = _StartingSidecar(app.state.engine)
+    monkeypatch.setattr(app.state.engine, "load", sidecar)
+    return app, sidecar
+
+
+def _wait_health(client, predicate, timeout: float = 10.0) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        health = client.get("/api/health").json()
+        if predicate(health):
+            return health
+        time.sleep(0.05)
+    raise AssertionError(f"health가 기대 상태가 되지 않음: {client.get('/api/health').json()}")
+
+
+def _preload_thread():
+    import threading
+
+    return next((t for t in threading.enumerate() if t.name == "model-preload"), None)
+
+
+def test_preload_shows_a_starting_sidecar_as_loading_not_a_load_error(sidecar_app):
+    """기동 중인 sidecar는 '로딩 중'이다 — 예전 프리로드는 load() 1회의 'SGLang is not ready'를
+    model_load_error로 남겨, 정상 기동 창 내내 웹이 '모델을 불러오지 못했습니다'를 띄웠다."""
+    app, sidecar = sidecar_app
+    with TestClient(app) as client:
+        assert sidecar.probed.wait(5)
+        time.sleep(1.5)   # 프리로드가 미준비를 최소 한 번 더 보게 한다 (폴링 1초)
+        health = client.get("/api/health").json()
+        assert health["model_loaded"] is False
+        assert health["model_load_error"] is None
+        sidecar.ready()
+        health = _wait_health(client, lambda h: h["model_loaded"])
+        assert health["model_load_error"] is None
+        preload = _preload_thread()
+        if preload is not None:
+            preload.join(5)
+            assert not preload.is_alive()
+        assert app.state.load_state["error"] is None
+
+
+def test_preload_reports_the_error_once_the_wait_budget_runs_out(sidecar_app):
+    """대기 상한(OCR_SIDECAR_MODEL_WAIT_S)을 넘긴 미준비는 그때 실패로 드러난다 — '로딩 중'이
+    끝없이 이어지지 않게. 업로드한 잡도 워커가 같은 상한까지 기다린 뒤 실패한다."""
+    app, _sidecar = sidecar_app
+    app.state.engine._settings.sidecar_model_wait_s = 0.3
+    with TestClient(app) as client:
+        health = _wait_health(client, lambda h: h["model_load_error"] is not None)
+        assert health["model_loaded"] is False
+        assert health["model_load_error"] == "Unlimited-OCR-2 SGLang is not ready"
+
+
+def test_app_shutdown_ends_the_preload_wait_without_a_load_error(sidecar_app):
+    app, sidecar = sidecar_app
+    with TestClient(app):
+        assert sidecar.probed.wait(5)
+        preload = _preload_thread()
+        assert preload is not None and preload.is_alive()
+    preload.join(5)
+    assert not preload.is_alive(), "종료가 프리로드 대기를 끝내지 않았다"
+    assert app.state.load_state["error"] is None
+
+
 # ── 번역 라우트 수명주기 (tests-baseline-9 · tests-baseline-7) ───────────────────
 @pytest.fixture
 def translate_env(monkeypatch):

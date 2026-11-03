@@ -1335,7 +1335,7 @@ auto·cpu·cuda·metal·mlx) 후 엔진 생성. CUDA/MPS/MLX 가용성 검증은
 | `OCR_SIDECAR_MAX_RESPONSE_MB` | `20` | 응답 크기 상한 (response bomb 방어) |
 | `OCR_SIDECAR_RETRIES` | `1` | 연결 수립 실패 재시도 횟수 (그 외 재시도는 runner 몫) |
 | `OCR_REMOTE_PAGE_CONCURRENCY` | `1` | sidecar 페이지 동시 요청 수 = sidecar 엔진의 청크 크기 (16GB 단일 GPU는 1 권장) |
-| `OCR_SIDECAR_MODEL_WAIT_S` | `900` | 잡이 sidecar 모델 준비를 기다리는 상한(초) — 최초 기동 창에 업로드해도 실패 대신 대기(취소 가능). 음수는 0으로 보정 |
+| `OCR_SIDECAR_MODEL_WAIT_S` | `900` | 잡·프리로드가 sidecar 모델 준비를 기다리는 상한(초) — 최초 기동 창에 업로드해도 실패 대신 대기(취소 가능), 그동안 health는 로드 실패가 아닌 로딩 중. 음수는 0으로 보정 |
 | `MODEL_ID` | `baidu/Unlimited-OCR` | HF 모델 ID |
 | `MODEL_REVISION` | `ee63731b…` | HF revision 고정 (README의 검증 커밋) |
 | `PRELOAD_MODEL` | `1` | 기동 시 모델 로드 (0이면 첫 잡에서 lazy) |

@@ -32,7 +32,7 @@ from starlette.routing import Match, Mount
 from . import __version__
 from .api import router
 from .config import Settings
-from .engine import build_engine
+from .engine import JobCanceled, build_engine
 from .jobs import EventBroker, JobStore, Worker
 from .llm import build_router
 from .owner_lock import JobsDirLock, acquire_jobs_dir_lock
@@ -492,14 +492,23 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
     if restored:
         logger.info("재시작 전 대기 잡 %d개를 다시 대기열에 넣었습니다", len(restored))
 
+    # 앱 종료 때 프리로드의 sidecar 준비 대기를 끝낸다 (lifespan finally)
+    preload_cancel = threading.Event()
+
     def _preload() -> None:
         try:
-            engine.load()
+            # sidecar 엔진은 기동 중(모델 다운로드·가중치 로드·CUDA 그래프 캡처)인 sidecar를
+            # 워커와 같은 상한(OCR_SIDECAR_MODEL_WAIT_S)까지 기다린다. 예전에는 load() 1회의
+            # 일시적 미준비가 곧바로 model_load_error가 돼, 정상 기동 창 내내 웹이 '모델을
+            # 불러오지 못했습니다'를 띄웠다. in-process 엔진의 기본 구현은 load() 1회라 같다.
+            engine.wait_until_ready(preload_cancel)
+        except JobCanceled:
+            return  # 준비되기 전에 앱이 종료됐다 — 로드 실패가 아니다
         except Exception as e:  # noqa: BLE001 — 헬스에 노출하고 잡 제출 시 재시도
-            # 일시적 조건(sidecar가 아직 준비 중)은 정상적인 기동 과정이다 —
-            # 무서운 traceback 대신 info로 남기고, 잡 제출 시 워커가 대기한다.
+            # 일시적 조건이 대기 상한을 넘겼다 — traceback 대신 사유만 남기고, 잡 제출 시
+            # 워커가 다시 기다린다.
             if getattr(e, "transient", False):
-                logger.info("모델 프리로드 대기: %s", str(e)[:200])
+                logger.warning("모델 프리로드: 엔진이 준비되지 않았습니다 — %s", str(e)[:200])
             else:
                 logger.exception("모델 프리로드 실패")
             load_state["error"] = str(e)[:500]
@@ -539,6 +548,7 @@ def _assemble_app(settings: Settings, owner_lock: JobsDirLock) -> FastAPI:
         finally:
             # 예외로 끝난 수명에서도 워커가 새 잡을 맡지 않게 한다(아래 네이티브 정리 판단의 전제).
             worker.stop()
+            preload_cancel.set()  # 프리로드의 sidecar 준비 대기도 끝낸다
             # 신호 없이 끝나는 수명(TestClient 등)에서도 남은 스트림이 끝나게 한다.
             shutdown.requested = True
             _remove_shutdown_hooks(shutdown_hooks)

@@ -256,8 +256,12 @@ sidecar의 첫 모델 로드는 다운로드 + (Ovis) vLLM 컴파일로 수 분 
 - **하드 실패 구분**: sidecar가 `status:"error"`(예: CUDA 가드 트립, `load_error` 포함)를
   보고하면 대기하지 않고 즉시 잡 오류로 표면화한다(대기해도 안 풀리므로). 단
   `restarting:true`면 `status`와 무관하게 기다린다.
-- 프리로드(`main.create_app`)는 `transient=True` 예외를 traceback 없이 info로만
-  남긴다 — sidecar가 아직 준비 중인 것은 정상적인 기동 과정이다.
+- 프리로드(`main.create_app`)도 `wait_until_ready`로 같은 상한까지 기다린다 — sidecar가
+  아직 준비 중인 것은 정상적인 기동 과정이라, 그동안 health는 `model_loaded:false`·
+  `model_load_error:null`(웹은 '모델 로딩 중…')이다. 상한을 넘긴 `transient=True` 예외만
+  traceback 없이 경고로 남기고 `model_load_error`에 기록한다(하드 실패는 즉시 기록).
+  예전에는 `load()` 1회의 미준비가 곧바로 `model_load_error`가 돼, 정상 기동 창 내내 웹이
+  '모델을 불러오지 못했습니다'를 띄웠다.
 - 모델은 살아 있는데 `status`만 이상한 경우(임계 기반 자가 복구형 웨지 신고)는 잡을
   실패시키지 않고 **잡마다 한 번** 경고로만 남긴다. 성공한 parse 뒤 health를 한 번 다시
   확인해 신고가 풀렸는지 본다.

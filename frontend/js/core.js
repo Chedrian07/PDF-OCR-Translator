@@ -1590,11 +1590,16 @@ export function healthPollDelay(d, failed = false) {
 }
 
 // sidecar provider 장애 요약 (순수). 문제 없으면 null.
-// 메인 앱 health가 200이어도 provider가 죽어 있으면 사용자에게 알린다.
+// 메인 앱 health가 200이어도 provider가 죽어 있으면 사용자에게 알린다. sglang(Unlimited-OCR-2
+// CUDA)의 'starting'은 한 번도 준비된 적 없는 sidecar의 정상 기동(모델 다운로드·CUDA 그래프
+// 캡처)이라 장애가 아니다 — 그동안은 '모델 로딩 중…'이고, 대기 상한을 넘기면 model_load_error가
+// 된다. 예전에는 local-sidecar만 봐서 sglang sidecar가 죽어도 '로딩 중'으로만 보였다.
+const SIDECAR_PROVIDERS = new Set(['local-sidecar', 'sglang']);
+const PROVIDER_FINE = new Set(['ok', 'ready', 'starting']);
 export function providerIssue(d) {
-  if (!d || d.provider !== 'local-sidecar') return null;
+  if (!d || !SIDECAR_PROVIDERS.has(d.provider)) return null;
   const ph = d.provider_health;
-  if (!ph || typeof ph !== 'object' || ph.status === 'ok') return null;
+  if (!ph || typeof ph !== 'object' || PROVIDER_FINE.has(ph.status)) return null;
   return String(ph.error || ph.status || '알 수 없음');
 }
 

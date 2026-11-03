@@ -73,6 +73,9 @@ class SGLangEngine(OCREngine):
         self.url = settings.sidecar_url or "http://127.0.0.1:10000"
         self._loaded = False
         self._health = None
+        # 한 번이라도 준비 확인에 성공했는지 — 그 전의 미준비는 정상 기동 과정(starting),
+        # 그 뒤의 미준비는 sidecar 중단·재시작(unavailable)이다 (provider_health)
+        self._ever_ready = False
 
     @property
     def loaded(self):
@@ -136,6 +139,7 @@ class SGLangEngine(OCREngine):
                     "start services/unlimited_ocr2/launch.py"
                 )
             self._loaded = True
+            self._ever_ready = True
             self._health = {"status": "ready", "model_revision": s.model_revision}
         except (httpx.HTTPError, ValueError) as exc:
             self._mark_unavailable()
@@ -149,7 +153,15 @@ class SGLangEngine(OCREngine):
             self.load()
         except EngineError as exc:
             self._loaded = False
-            self._health = {"status": "unavailable", "error": str(exc)}
+            # 한 번도 준비된 적 없는 일시적 미준비는 모델 다운로드·CUDA 그래프 캡처 중인
+            # 정상 기동이다 — 웹은 '로딩 중'으로 두고(대기 상한을 넘기면 프리로드가
+            # model_load_error로 올린다), 준비된 뒤 끊긴 sidecar만 '연결 안 됨'으로 띄운다.
+            # 둘을 구분하지 않으면 웹은 기동 중을 장애로 띄우거나, 장애를 '로딩 중'으로 숨긴다.
+            starting = exc.transient and not self._ever_ready
+            self._health = {
+                "status": "starting" if starting else "unavailable",
+                "error": str(exc),
+            }
         return self._health
 
     def wait_until_ready(self, cancel, on_wait=None):

@@ -765,6 +765,16 @@ test('providerIssue: sidecar 다운이면 요약 반환, 정상/in-process면 nu
     'error', 'error 필드 없으면 status로 폴백');
 });
 
+test('providerIssue: sglang은 준비·기동 중이면 null, 준비된 뒤 끊기면 사유를 반환', () => {
+  const sglang = (provider_health) => ({ provider: 'sglang', provider_health });
+  assert.equal(providerIssue(sglang({ status: 'ready', model_revision: 'c14071b5' })), null);
+  assert.equal(providerIssue(sglang({ status: 'starting', error: 'Unlimited-OCR-2 SGLang is not ready' })),
+    null, '첫 기동(다운로드·CUDA 그래프 캡처)은 장애가 아니다 — 로딩 중');
+  assert.equal(providerIssue(sglang({ status: 'unavailable', error: 'Unlimited-OCR-2 SGLang is not ready' })),
+    'Unlimited-OCR-2 SGLang is not ready');
+  assert.equal(providerIssue(sglang({ status: 'unavailable' })), 'unavailable');
+});
+
 test('jobModelChip: 잡 모델 메타 → 칩 텍스트/툴팁, 구버전 잡은 null', () => {
   assert.equal(jobModelChip({ job_id: 'j', filename: 'a.pdf' }), null, '메타 없는 구버전 잡');
   assert.equal(jobModelChip(null), null);

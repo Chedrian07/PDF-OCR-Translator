@@ -641,18 +641,18 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   "llm_default_provider": "openai-responses",  // 기본 LLM 공급자 (LLM_PROVIDER)
   // ── 멀티 엔진 확장 필드 (추가만 — 기존 필드 의미 불변) ──
   "model_revision": "ee63731b…",    // 엔진이 모르는 경우 null
-  "provider": "in-process",         // in-process | local-sidecar
+  "provider": "in-process",         // in-process | sglang(CUDA Unlimited-OCR-2 sidecar)
   "capabilities": {
     "multi_page_context": true,     // 페이지 단위 엔진(ovis/paddle)은 false
     "stream_granularity": "token",  // token | page — 프론트 라이브 뷰 안내에 사용
     "layout": "full",               // full | figure_only | none — 레이아웃 탭 안내
     "figures": true
   },
-  "provider_health": null,          // sidecar 엔진만: {status, runtime, version,
-                                    //  model_loaded, gpu_total_mb, gpu_free_mb,
-                                    //  load_retry, restarting} (OCR_ENGINE_PROTOCOL.md)
-                                    //  sidecar가 죽어도 health 자체는 200 —
-                                    //  {status:"unreachable", error:"…"}로 구분
+  "provider_health": null,          // sidecar 엔진만. sglang: {status, model_revision?, error?}
+                                    //  status = ready | starting(한 번도 준비된 적 없는 정상
+                                    //  기동 — 웹은 '모델 로딩 중…') | unavailable(준비된 뒤
+                                    //  끊김·불일치 — 웹은 '엔진 서버 연결 안 됨'과 사유).
+                                    //  sidecar가 죽어도 health 자체는 200
   "config_warnings": []             // 앱이 직접 읽은 .env(로컬 uv 실행)에서 이 앱이 읽지 않는
                                     //  키의 짧은 안내(키 이름·오타 후보만, 값 없음 — §7).
                                     //  컨테이너에는 .env가 없어 Docker에서는 늘 빈 목록

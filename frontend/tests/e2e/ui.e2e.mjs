@@ -1002,6 +1002,46 @@ if (layoutCap !== 'figure_only') {
   await healthCtx.close();
 }
 
+// (e2) health: SGLang sidecar의 첫 기동(starting)은 '로딩 중', 준비된 뒤 끊김(unavailable)은
+// '엔진 서버 연결 안 됨'이다 — 예전에는 기동 중을 '로드 실패'로, 끊김을 '로딩 중'으로 보였다.
+{
+  const sidecarCtx = await freshContext({}, 'health-sidecar');
+  let providerStatus = 'starting';
+  await sidecarCtx.route((url) => url.pathname === '/api/health', (route) => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({
+      ...health, engine: 'unlimited2', provider: 'sglang', model_loaded: false,
+      model_load_error: null, worker_alive: true,
+      provider_health: { status: providerStatus, error: 'Unlimited-OCR-2 SGLang is not ready' },
+    }),
+  }));
+  const sidecarPage = await sidecarCtx.newPage();
+  const view = () => sidecarPage.evaluate(() => ({
+    badges: [...document.querySelectorAll('#health-badges .badge')].map((b) => b.textContent),
+    notice: !document.getElementById('upload-model-notice').hidden,
+    noticeError: document.getElementById('upload-model-notice').classList.contains('is-error'),
+    noticeText: document.getElementById('upload-model-notice-text').textContent,
+  }));
+  await sidecarPage.goto(BASE, { waitUntil: 'domcontentloaded' });
+  await sidecarPage.waitForSelector('#health-badges .badge', { timeout: 10_000 });
+  const starting = await view();
+  check('health: SGLang 첫 기동은 로드 실패·연결 안 됨이 아니라 로딩 중 안내',
+    starting.badges.some((b) => b.includes('로딩 중'))
+      && !starting.badges.some((b) => b.includes('로드 실패') || b.includes('연결 안 됨'))
+      && starting.notice && !starting.noticeError
+      && starting.noticeText.includes('모델을 불러오는 중'), JSON.stringify(starting));
+  providerStatus = 'unavailable';
+  await sidecarPage.evaluate(async () => { const { loadHealth } = await import('/js/health.js'); await loadHealth(); });
+  const lost = await view();
+  await sidecarPage.screenshot({ path: path.join(OUT, 'health-sidecar-lost.png') });
+  check('health: 준비된 뒤 끊긴 SGLang은 연결 안 됨 배지와 사유가 담긴 업로드 안내(로딩 중 아님)',
+    lost.badges.includes('엔진 서버 연결 안 됨') && !lost.badges.some((b) => b.includes('로딩 중'))
+      && lost.notice && lost.noticeError
+      && lost.noticeText.includes('엔진 서버에 연결할 수 없습니다 (Unlimited-OCR-2 SGLang is not ready)'),
+    JSON.stringify(lost));
+  await sidecarCtx.close();
+}
+
 // (f) SSE 첫 연결이 비-200(프록시 502)이면 기다리지 않고 바로 상태 폴링으로 강등한다(frontend-1).
 //     새 PDF를 하나 더 변환하므로 즉시 끝나는 FakeEngine 하네스에서만 돈다(실 모델은 수 분).
 if (health.engine === 'fake') {

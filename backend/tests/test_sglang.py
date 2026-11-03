@@ -222,6 +222,30 @@ def test_readiness_failure_invalidates_previous_success(
     assert engine.provider_health()["status"] == "unavailable"
 
 
+def test_provider_health_separates_startup_from_a_lost_sidecar(sglang_service):
+    """준비된 적 없는 미준비는 starting(정상 기동 — 웹은 '로딩 중'), 준비된 뒤의 미준비는
+    unavailable(웹의 '엔진 서버 연결 안 됨')이다 — 예전에는 둘 다 unavailable이었다."""
+    engine, routes, _ = sglang_service
+    routes["/ready"] = (503, None)
+    health = engine.provider_health()
+    assert health["status"] == "starting"
+    assert health["error"] == "Unlimited-OCR-2 SGLang is not ready"
+    routes["/ready"] = (200, None)
+    assert engine.provider_health()["status"] == "ready"
+    routes["/ready"] = (503, None)
+    assert engine.provider_health()["status"] == "unavailable"
+    assert not engine.loaded
+
+
+def test_provider_health_reports_a_misconfigured_sidecar_even_before_first_ready(sglang_service):
+    """대기해도 풀리지 않는 불일치는 기동 중으로 숨기지 않는다."""
+    engine, routes, _ = sglang_service
+    routes["/server_info"] = (200, {**routes["/server_info"][1], "version": "wrong"})
+    health = engine.provider_health()
+    assert health["status"] == "unavailable"
+    assert "version mismatch" in health["error"]
+
+
 @pytest.mark.parametrize(
     "endpoint, response, message",
     [

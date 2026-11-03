@@ -26,6 +26,7 @@ export const state = {
   layoutCapability: undefined,    // 'full' | 'figure_only' | 'none'
   modelLoaded: true,              // 모델 로드 여부 — false면 업로드 영역에 로딩 안내
   modelLoadError: '',             // 프리로드 실패 사유(model_load_error) — 있으면 '로딩 중' 대신 실패 안내
+  providerIssue: '',              // 준비됐던 엔진 서버(sidecar)가 끊긴 사유 — 있으면 '로딩 중' 대신 연결 안내
   healthInFlight: false,          // /api/health 조회 중 — 가시성 복귀·타이머가 겹쳐 보내지 않게
   currentJobEngine: undefined,    // 열린 잡의 engine 메타 (구 잡은 undefined)
   // raw stream pane

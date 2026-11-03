@@ -65,6 +65,7 @@ export function renderHealth(d) {
   state.modelLoaded = d.model_loaded === false ? false : true;
   const status = healthStatus(d);
   state.modelLoadError = status.loadError;
+  state.providerIssue = providerIssue(d) || '';
   applyTranslateAvailability(); // 잡 뷰가 열려 있는 동안의 health 갱신도 버튼에 반영
   applyModelLoadingNotice();    // 모델 로딩 중(또는 로드 실패)이면 업로드 영역에 안내
 
@@ -136,7 +137,8 @@ function healthBadgeSpecs(d, status) {
       key: 'load', cls: 'badge badge-error', lead: '', text: '모델 로드 실패',
       title: `모델을 불러오지 못했습니다: ${status.loadError}\n작업을 올리면 변환 시작 때 다시 시도하지만 같은 이유로 실패할 수 있습니다.`,
     });
-  } else if (status.loading) {
+  } else if (status.loading && !pIssue) {
+    // 끊긴 엔진 서버는 위의 '연결 안 됨' 배지가 알린다 — '로딩 중'을 겹쳐 띄우면 장애가 가려진다
     specs.push({
       key: 'load', cls: 'badge badge-loading', lead: 'spinner', text: '모델 로딩 중…',
       title: '모델을 메모리에 로딩하는 중입니다. 첫 작업에서 시간이 걸릴 수 있습니다.',
@@ -209,6 +211,7 @@ export function applyStreamModeChip() {
 
 // 모델 로딩 중이면 업로드 영역에 안내 배너 — 업로드가 "실패"가 아니라 "대기"임을 알린다.
 // 프리로드가 실패했으면 같은 자리에 사유를 보인다 — '로딩이 끝나는 대로'는 거짓 안내다.
+// 준비됐던 엔진 서버가 끊겼으면 그 사유를 보인다 — 워커는 서버가 돌아오기를 상한까지 기다린다.
 // 값이 바뀔 때만 쓴다 — 실패 상태의 안내는 role=alert(assertive)라, 매 폴링(10초)마다 같은
 // 문구를 다시 쓰면 스크린리더가 그때마다 읽던 내용을 끊고 경고를 되풀이했다(frontend-2).
 export function applyModelLoadingNotice() {
@@ -217,15 +220,19 @@ export function applyModelLoadingNotice() {
   const hidden = state.modelLoaded !== false;
   if (notice.hidden !== hidden) notice.hidden = hidden;
   const failed = !!state.modelLoadError;
-  notice.classList.toggle('is-error', failed); // force 토글은 상태가 같으면 바꾸지 않는다
-  const role = failed ? 'alert' : 'status';
+  const disconnected = !failed && !!state.providerIssue;
+  const alarming = failed || disconnected;
+  notice.classList.toggle('is-error', alarming); // force 토글은 상태가 같으면 바꾸지 않는다
+  const role = alarming ? 'alert' : 'status';
   if (notice.getAttribute('role') !== role) notice.setAttribute('role', role);
   const spinner = el.uploadModelNoticeSpinner;
-  if (spinner && spinner.hidden !== failed) spinner.hidden = failed;
+  if (spinner && spinner.hidden !== alarming) spinner.hidden = alarming;
   if (el.uploadModelNoticeText) {
     const text = failed
       ? `모델을 불러오지 못했습니다 (${state.modelLoadError}). 업로드하면 변환 시작 때 다시 시도하지만 같은 이유로 실패할 수 있습니다 — 서버 로그를 확인해 주세요.`
-      : '모델을 불러오는 중입니다. 지금 업로드하면 로딩이 끝나는 대로 자동으로 변환됩니다.';
+      : disconnected
+        ? `엔진 서버에 연결할 수 없습니다 (${state.providerIssue}). 서버가 다시 준비되면 업로드한 작업을 자동으로 변환하지만, 계속되면 서버 로그를 확인해 주세요.`
+        : '모델을 불러오는 중입니다. 지금 업로드하면 로딩이 끝나는 대로 자동으로 변환됩니다.';
     if (el.uploadModelNoticeText.textContent !== text) el.uploadModelNoticeText.textContent = text;
   }
 }

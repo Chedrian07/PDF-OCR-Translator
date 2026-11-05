@@ -107,3 +107,9 @@ test('translateKeptSummary: 비정상 값(음수·문자열·NaN)은 0으로 방
   assert.equal(s.text, '전부 번역됨');
   assert.ok(!s.detail.includes('총 0개'), s.detail);
 });
+
+test('translateKeptSummary: 안전 필터 거부로 남은 문단은 그 이유를 말한다', () => {
+  const s = translateKeptSummary({ ...STATE_WITH_REASONS, kept_reasons: { 'content-policy': 2 } });
+  assert.equal(s.kept, 2);
+  assert.ok(s.detail.includes('번역 API 안전 필터 거부 2'), s.detail);
+});

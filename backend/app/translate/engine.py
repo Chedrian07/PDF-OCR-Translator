@@ -53,6 +53,7 @@ from .types import (
     PROMPT_V,
     TranslateAPIError,
     TranslateConfig,
+    TranslateContentRejected,
     TranslateEmptyOutput,
     TranslateError,
     TranslateOutputTruncated,
@@ -132,6 +133,8 @@ def _rejection_reason(exc: TranslateUnitRejected) -> str:
         return "empty-output"
     if isinstance(exc, TranslateTimeout):
         return "timeout"
+    if isinstance(exc, TranslateContentRejected):
+        return "content-policy"
     return "api-rejected"
 
 
@@ -229,8 +232,8 @@ class _TranslationRun:
     kept_original: list[str] = field(default_factory=list)
     # 관측용 사유별 집계 — "왜 이 문단이 영어로 남았나"를 report.json에서 구분한다.
     skip_reasons: dict[str, int] = field(default_factory=dict)   # references / already-korean / non-linguistic / identifier / unreadable
-    # gate-rejected / placeholder-mismatch / empty-output / api-rejected / truncated /
-    # timeout / degenerate-output
+    # gate-rejected / placeholder-mismatch / empty-output / api-rejected / content-policy /
+    # truncated / timeout / degenerate-output
     kept_reasons: dict[str, int] = field(default_factory=dict)
     # 출력 게이트가 어떤 규칙으로 몇 번 거부했는가 (scaffold / refusal / repetition /
     # hangul-ratio / length-ratio). kept_reasons는 "래더까지 소진돼 영어로 남은" 최종 결과만 세므로,
@@ -558,10 +561,13 @@ class _TranslationRun:
         (재개 run에서 판정을 미루면 최악의 경우 남은 큐가 드레인되지만, 결정적 4xx는
          _RETRYABLE이 아니라 백오프 없이 즉시 실패하므로 비용은 유닛 수 × 왕복 1회
          수준이다. 반대로 즉시 전파하면 캐시 적중 순서에 따라 판정이 흔들린다.)
+
+        콘텐츠 정책 거부는 그 원문의 문제라 엔드포인트·설정 고장의 증거가 아니다 — 콜드
+        run에서도 즉시 전파하지 않고 같은 run 끝 판정에 맡긴다(모두 거부되면 그때 실패).
         """
         if self.progressed.is_set():
             return True
-        if not self.flights.prior_keys:
+        if not self.flights.prior_keys and not isinstance(exc, TranslateContentRejected):
             return False
         with self.gate_lock:
             self.unverified_rejects += 1
@@ -814,7 +820,10 @@ class _TranslationRun:
                         kr = stats.get("kept_reason") or "unknown"
                         self.kept_reasons[kr] = self.kept_reasons.get(kr, 0) + 1
                         # 식별자만 기록 — 문서 원문·번역문 내용은 로그에 남기지 않는다
-                        logger.warning("번역 유닛 원문 유지: %s (lang=%s, unit=%s)", self.job_dir.name, self.lang, u.id)
+                        logger.warning(
+                            "번역 유닛 원문 유지: %s (lang=%s, unit=%s, 사유=%s)",
+                            self.job_dir.name, self.lang, u.id, kr,
+                        )
                     self.done += 1
                     if self.progress is not None:
                         self.progress(self.done, self.total)

@@ -1282,6 +1282,9 @@ export const TRANSLATE_KEPT_LABELS = {
   'placeholder-mismatch': '수식·태그 자리표시자 불일치',
   'empty-output': '빈 응답',
   'api-rejected': 'API 거절',
+  'content-policy': '번역 API 안전 필터 거부',
+  truncated: '출력 잘림',
+  timeout: '응답 시간 초과',
   'degenerate-output': '같은 출력 반복(축퇴)',
   unknown: '원인 미상',
 };
@@ -1652,6 +1655,28 @@ export function withLangUrl(url, lang) {
 }
 
 // translate/state·POST 응답의 status → 노출할 UI (순수 — 테스트 대상).
+// 번역 실패 사유(state.json error·SSE error 메시지) → 화면용 한 줄 {text, detail}.
+// 상류 오류 본문은 파이썬 dict 미리보기가 200자에서 잘린 채 실려 읽을 수 없다 — 상태코드까지만
+// 보이고 전문은 detail(title)로 둔다. 버튼만 되돌아오면 사용자는 실패한 줄도 몰랐다.
+const TRANSLATE_ERROR_MAX = 160;
+export function translateErrorText(message) {
+  const detail = typeof message === 'string' ? message.trim() : '';
+  if (!detail) return { text: '서버가 사유를 보내지 않았습니다', detail: '' };
+  const http = /^번역 API 오류 \(HTTP (\d{3})\)/.exec(detail);
+  if (http) {
+    const code = Number(http[1]);
+    const text = code >= 500
+      ? `번역 API 서버 오류 (HTTP ${code}) — 잠시 후 다시 시도해 주세요`
+      : `번역 API가 요청을 거부했습니다 (HTTP ${code}) — 모델명·설정을 확인해 주세요`;
+    return { text, detail };
+  }
+  if (detail.length <= TRANSLATE_ERROR_MAX) return { text: detail, detail };
+  const cut = detail.slice(0, TRANSLATE_ERROR_MAX);
+  const space = cut.lastIndexOf(' ');
+  const head = space > TRANSLATE_ERROR_MAX * 0.6 ? cut.slice(0, space) : cut;
+  return { text: `${head.trimEnd()}…`, detail };
+}
+
 export function translateUiStateFor(status) {
   if (status === 'running') return 'progress';
   if (status === 'done') return 'toggle';

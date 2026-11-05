@@ -171,3 +171,89 @@ test('polling a missing translation restores an available start button', async (
   assert.equal(el.translateBtn.disabled, false);
   assert.equal(el.readerTranslateBtn.disabled, false);
 });
+
+function withFailureControls(t) {
+  setup(t);
+  for (const key of [
+    'translateError', 'viewerTranslateError', 'viewerTranslateProgress',
+    'viewerTranslateProgressLabel', 'viewerTranslateProgressTrack', 'viewerTranslateProgressFill',
+    'dlDocKo', 'dlPdf', 'viewerDlPdf',
+  ]) el[key] = element();
+  el.translateError.hidden = true;
+  el.viewerTranslateError.hidden = true;
+  el.viewerTranslateProgress.hidden = true;
+  const sources = [];
+  class MockEventSource {
+    constructor() { this.listeners = new Map(); sources.push(this); }
+    addEventListener(name, callback) { this.listeners.set(name, callback); }
+    close() {}
+    emit(name, data) { this.listeners.get(name)({ data: JSON.stringify(data) }); }
+  }
+  const savedSource = Object.getOwnPropertyDescriptor(globalThis, 'EventSource');
+  globalThis.EventSource = MockEventSource;
+  t.after(() => {
+    if (savedSource) Object.defineProperty(globalThis, 'EventSource', savedSource);
+    else delete globalThis.EventSource;
+  });
+  return sources;
+}
+
+const PROXY_500 = "번역 API 오류 (HTTP 500): {'error': {'message': \"litellm.BadRequestError: litellm.Co";
+
+test('a failed translation keeps its reason next to the restored button after the toast', async (t) => {
+  const sources = withFailureControls(t);
+  t.mock.method(globalThis, 'fetch', async () => response(202, { status: 'running' }));
+
+  await startTranslate();
+  sources[0].emit('error', { message: PROXY_500 });
+
+  assert.equal(el.translateBtn.hidden, false);
+  for (const node of [el.translateError, el.viewerTranslateError]) {
+    assert.equal(node.hidden, false);
+    assert.equal(node.textContent, '번역 실패 — 번역 API 서버 오류 (HTTP 500) — 잠시 후 다시 시도해 주세요');
+    assert.equal(node.title, PROXY_500);
+  }
+  assert.match(el.toast.textContent, /^번역 실패 — 번역 API 서버 오류 \(HTTP 500\)/);
+  assert.equal(state.translateState, 'error');
+});
+
+test('reopening a job whose last translation failed shows the stored reason', async (t) => {
+  withFailureControls(t);
+  t.mock.method(globalThis, 'fetch', async () => response(200, {
+    status: 'error', error: '번역 API 인증 실패 — OPENAI_API_KEY를 확인하세요',
+  }));
+
+  await initTranslateForJob();
+
+  assert.equal(el.translateBtn.hidden, false);
+  assert.equal(el.translateError.hidden, false);
+  assert.equal(el.translateError.textContent, '번역 실패 — 번역 API 인증 실패 — OPENAI_API_KEY를 확인하세요');
+});
+
+test('a canceled translation is not shown as a failure', async (t) => {
+  const sources = withFailureControls(t);
+  t.mock.method(globalThis, 'fetch', async () => response(202, { status: 'running' }));
+
+  await startTranslate();
+  sources[0].emit('error', { message: '번역이 취소되었습니다', canceled: true });
+
+  assert.equal(el.translateError.hidden, true);
+  assert.equal(el.toast.textContent, '번역이 취소되었습니다.');
+});
+
+test('the full-screen viewer shows translation progress and a retry clears the old failure', async (t) => {
+  const sources = withFailureControls(t);
+  t.mock.method(globalThis, 'fetch', async () => response(202, { status: 'running' }));
+  await startTranslate();
+  sources[0].emit('error', { message: PROXY_500 });
+  assert.equal(el.viewerTranslateProgress.hidden, true);
+
+  await startTranslate();
+  sources[1].emit('progress', { current: 1075, total: 2580 });
+
+  assert.equal(el.viewerTranslateProgress.hidden, false);
+  assert.equal(el.viewerTranslateProgressLabel.textContent, '번역 중 1075/2580');
+  assert.equal(el.viewerTranslateProgressFill.style.width, `${(1075 / 2580) * 100}%`);
+  assert.equal(el.translateError.hidden, true);
+  assert.equal(el.viewerTranslateError.hidden, true);
+});

@@ -180,7 +180,22 @@ class TranslateUnitRejected(TranslateAPIError):
 
     거대 병합 표·초장문 문단 하나가 모델 컨텍스트를 넘긴 경우가 대표적이다.
     엔진은 이 오류만 유닛 단위로 강등(래더 → 원문 유지)한다. 연결 실패·5xx 등
-    비결정적 오류는 종전대로 잡 전체 실패로 전파한다.
+    비결정적 오류는 종전대로 잡 전체 실패로 전파한다. 예외는 본문이 콘텐츠 정책
+    거부라고 말하는 5xx다(TranslateContentRejected).
+    """
+
+
+class TranslateContentRejected(TranslateUnitRejected):
+    """공급자의 콘텐츠 정책 필터가 이 요청(원문)을 거부했다 — 상태코드와 무관한 유닛 거부.
+
+    LiteLLM 프록시는 OpenAI 추론 모델의 'Invalid prompt: your prompt was flagged as
+    potentially violating our usage policy'를 ContentPolicyViolationError로 감싸
+    HTTP 500('type': 'internal_server_error')으로 돌려준다. 상태코드만 보면 일시 장애라
+    재시도 3회 뒤 잡 전체가 실패했다 — 116쪽 논문의 JSON 대화 예시 블록 두 개가 매번
+    같은 자리에서 2580개 유닛 번역을 통째로 죽였다. 원인은 그 원문이므로 엔진이 분할로
+    다시 보내고, 끝내 거부되면 kept_reason 'content-policy'로 원문을 유지한다.
+    엔드포인트·설정 고장의 증거가 아니라서 성공 이력 없는 콜드 run에서도 판정을 run
+    끝(_verify_endpoint_health)으로 미룬다 — 모든 요청이 거부되면 그때 잡을 실패시킨다.
     """
 
 

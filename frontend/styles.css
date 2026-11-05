@@ -979,6 +979,25 @@ button.chip { appearance: none; font-family: inherit; cursor: pointer; }
 .tp-cancel:hover { color: var(--danger); background: var(--danger-weak); }
 .tp-cancel:disabled { opacity: 0.5; cursor: default; }
 
+/* 직전 번역 실패 사유 칩 — 전문은 title (JS가 채우고 표시/숨김) */
+.translate-error {
+  display: inline-block;
+  min-width: 0;
+  max-width: 360px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--danger);
+  border-radius: 999px;
+  background: var(--danger-weak);
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 24px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 언어 세그먼트 컨트롤 [원문 | 한국어] */
 .lang-toggle {
   display: inline-flex;
@@ -2025,6 +2044,8 @@ body.viewer-mode .toast { z-index: 220; }
   overflow: hidden;
 }
 .production-viewer.is-open .viewer-only:not([hidden]) { display: inline-flex; }
+.production-viewer.is-open .translate-error.viewer-only:not([hidden]) { display: inline-block; flex: 0 1 auto; }
+.production-viewer.is-open .translate-progress.viewer-only:not([hidden]) { flex: 0 0 auto; }
 .production-viewer.is-open .viewer-toolbar {
   flex: 0 0 auto;
   min-height: 58px;

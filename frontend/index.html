@@ -281,6 +281,8 @@
 
             <!-- 한국어 번역 컨트롤 (완료된 잡에만 노출; JS가 버튼/진행/토글을 교체) -->
             <div id="translate-controls" class="translate-controls">
+              <!-- 직전 번역 실패 사유 — 버튼만 되돌아오면 실패한 줄 모른다 (JS가 표시/숨김) -->
+              <span id="translate-error" class="translate-error" role="status" hidden></span>
               <button id="translate-btn" class="btn btn-secondary btn-translate" type="button" hidden>
                 <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M4 5h7M9 3v2c0 4-2 7-5 8"/>
@@ -359,6 +361,12 @@
                 <a id="viewer-dl-html" class="btn btn-small viewer-only" download>HTML</a>
                 <a id="viewer-dl-pdf" class="btn btn-small viewer-only" download hidden>대조 PDF</a>
                 <button id="viewer-toggle-rail" class="btn btn-small viewer-only viewer-panel-toggle" type="button" aria-pressed="true" aria-controls="viewer-translation">번역문</button>
+                <!-- 전체 화면 뷰어는 결과 툴바를 덮는다 — 번역 진행·실패를 여기서도 보인다 (JS가 표시/숨김) -->
+                <div id="viewer-translate-progress" class="translate-progress viewer-only" role="status" aria-live="polite" hidden>
+                  <span id="viewer-translate-progress-label" class="tp-label">번역 중…</span>
+                  <div id="viewer-translate-progress-track" class="tp-track"><div id="viewer-translate-progress-fill" class="tp-fill"></div></div>
+                </div>
+                <span id="viewer-translate-error" class="translate-error viewer-only" role="status" hidden></span>
                 <!-- 번역 전 CTA — 기존 번역 시작 경로(startTranslate)로 위임 (JS가 표시/숨김) -->
                 <button id="reader-translate-btn" class="btn btn-primary reader-cta" type="button" hidden>한국어로 읽기</button>
               </div>

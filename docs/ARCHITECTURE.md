@@ -2030,7 +2030,7 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   `references`\|`non-linguistic`\|`already-korean`\|`identifier`)·
   `kept_reasons`(래더 소진 후 원문 유지 —
   `gate-rejected`\|`placeholder-mismatch`\|`empty-output`\|`truncated`\|`timeout`\|`api-rejected`\|
-  `degenerate-output`)·
+  `content-policy`\|`degenerate-output`)·
   `gate_reasons`(출력 측 검증 게이트가 거부한 규칙, §13.4 —
   `refusal`\|`scaffold`\|`repetition`\|`label-sentence`\|`number-mismatch`\|`hangul-ratio`\|
   `echo`\|`length-ratio`)는
@@ -2143,6 +2143,16 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
   429/408 제외)는 잡 전체를 죽이지 않고 래더로 넘긴다. 단 이 실행에서 아직 성공한
   유닛이 하나도 없으면 엔드포인트·설정 자체 문제이므로 종전대로 전파한다
   (전 유닛이 kept로 조용히 done 되는 회귀 방지).
+- **콘텐츠 정책 거부는 상태코드와 무관하게 유닛 거부**: 공급자 안전 필터가 원문을 거부하면
+  (`TranslateContentRejected` — 본문의 `ContentPolicyViolationError`·`content_policy_violation`·
+  `invalid_prompt`·`flagged as potentially violating`·Azure `content_filter` 등) 백오프 없이 같은
+  요청을 1회 다시 보내고(같은 프롬프트가 다음 요청에서 통과하기도 한다), 그래도 거부되면 유닛
+  거부로 분할 래더를 탄다. 끝내 거부되면 `content-policy` 사유로 원문을 둔다. LiteLLM 프록시가
+  OpenAI 추론 모델의 400 `invalid_prompt`를 HTTP 500(`internal_server_error`)으로 감싸 돌려주기
+  때문에 상태코드로는 판정할 수 없다 — 종전에는 일시 장애로 3회 재시도한 뒤 잡 전체가 실패해,
+  116쪽 논문의 JSON 대화 예시 블록 두 개가 2580개 유닛 번역을 매번 같은 자리에서 죽였다.
+  엔드포인트 고장의 증거가 아니므로 성공 이력 없는 콜드 실행에서도 즉시 전파하지 않고 실행 끝
+  판정에 맡긴다(모든 요청이 거부돼 성공이 0건이면 그때 잡을 실패시킨다).
 - **캐시 키 구성**: `sha256(PROMPT_V ∥ model ∥ 정렬된 용어집쌍 ∥ 마스킹된 원문
   ∥ 원문 전체 ∥ 블록 종류 ∥ 직전 문맥 ∥ temperature ∥ reasoning [∥ request_variant])`.
   `request_variant`(reasoning 전달 방식·`TRANSLATE_EXTRA_BODY`)는 요청 모양이 종전과 다를 때만
@@ -2202,7 +2212,7 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
     (사고를 답으로 세어 끊던 때는 그 구성의 콜드 런 잡이 전부 실패했다).
   - 스트림 중간 `{"error": …}` 이벤트와 `finish_reason: "error"`는 상태코드 정책을 따른다 —
     5xx·408·429·코드 없음은 5xx처럼 백오프 재시도, 400·413·422 또는 invalid_request·
-    context_length 유형은 유닛 거부, 401·403은 인증 오류. 부분 출력은 번역문으로 쓰지 않는다.
+    context_length 유형과 콘텐츠 정책 거부(코드와 무관)는 유닛 거부, 401·403은 인증 오류. 부분 출력은 번역문으로 쓰지 않는다.
   - 연결 실패 문구는 원인 요약만 담고(`번역 API 연결 실패(연결 거부) — OPENAI_BASE_URL과 …`)
     URL·호스트·쿼리는 쿼리를 가린 서버 로그에만 남긴다(원인 사슬을 끊어 `logger.exception`의
     traceback에도 requests·urllib3 예외의 쿼리가 찍히지 않는다). 엔진이 쓰는 state.json `error`는

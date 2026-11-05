@@ -1,5 +1,6 @@
 import {
-  rateLimitNotice, translateKeptSummary, translateUiStateFor, translateWarnings, withLangUrl,
+  rateLimitNotice, translateErrorText, translateKeptSummary, translateUiStateFor, translateWarnings,
+  withLangUrl,
 } from './core.js';
 import { el, state } from './state.js';
 import {
@@ -15,8 +16,9 @@ import { loadDocLayout, loadMarkdown, loadPreview } from './tabs.js';
 
 /* ============================ Translation (한국어 번역) ============================
  * 완료된 잡 결과 화면 전용. 상태 머신:
- *   none/error/canceled → [한국어 번역] 버튼 (error/canceled는 재시도 의미)
- *   running             → 진행바 + 취소(✕), EventSource 재접속
+ *   none/error/canceled → [한국어 번역] 버튼 (error/canceled는 재시도 의미).
+ *                         error면 실패 사유 칩을 버튼 옆(결과 툴바·전체 화면 뷰어)에 남긴다
+ *   running             → 진행바 + 취소(✕), EventSource 재접속 (뷰어 툴바에도 진행바)
  *   done                → [원문 | 한국어] 세그먼트 토글
  * 라이브 변환 뷰(result-section이 hidden)에는 렌더되지 않는다 — done일 때만 init.
  * ================================================================================ */
@@ -37,8 +39,10 @@ export function resetTranslateUI() {
   state.translateState = 'none';
   el.translateBtn.hidden = true;
   el.translateProgress.hidden = true;
+  setViewerProgressHidden(true);
   el.langToggle.hidden = true;
   el.viewerLangToggle.hidden = true;
+  renderTranslateError(null); // 이전 잡의 실패 사유가 새 잡에 새지 않게
   setLangSegActive('orig');
   setResultLangAttr();
   renderTranslateSummary(null);  // 이전 잡의 원문 유지 요약이 새 잡에 새지 않게
@@ -105,10 +109,31 @@ export async function refreshTranslateSummary(id) {
   renderTranslateSummary(st);
 }
 
+// 직전 번역 실패 사유 칩 — 결과 툴바와 전체 화면 뷰어 양쪽. 종전에는 3.6초 토스트 뒤 버튼만
+// 되돌아와, 자리를 비웠거나 다시 연 사용자는 번역이 실패한 줄도 몰랐다("버튼이 그대로").
+// null이면 숨긴다(번역 시작·완료·잡 전환). 빈 문자열은 사유 없는 실패로 보인다.
+export function renderTranslateError(message) {
+  const info = message == null ? null : translateErrorText(message);
+  for (const node of [el.translateError, el.viewerTranslateError]) {
+    if (!node) continue;
+    node.hidden = !info;
+    node.textContent = info ? `번역 실패 — ${info.text}` : '';
+    if (info && info.detail) node.title = info.detail;
+    else node.removeAttribute('title');
+  }
+}
+
+// 전체 화면 뷰어는 결과 툴바를 덮는다 — 뷰어에서 [한국어로 읽기]를 누르면 CTA만 사라지고
+// 진행 표시는 가려진 툴바에 있었다. 뷰어 툴바의 진행 표시를 같은 상태로 함께 움직인다.
+function setViewerProgressHidden(hidden) {
+  if (el.viewerTranslateProgress) el.viewerTranslateProgress.hidden = hidden;
+}
+
 /* ── 컨트롤 3종 교체 노출 ─────────────────────────────────────────────── */
 export function showTranslateButton() {
   el.translateBtn.hidden = false;
   el.translateProgress.hidden = true;
+  setViewerProgressHidden(true);
   el.langToggle.hidden = true;
   el.viewerLangToggle.hidden = true;
   el.translateBtn.disabled = false;
@@ -120,6 +145,8 @@ export function showTranslateButton() {
 export function showTranslateProgress(current, total) {
   el.translateBtn.hidden = true;
   el.translateProgress.hidden = false;
+  setViewerProgressHidden(false);
+  renderTranslateError(null); // 다시 시도 중 — 직전 실패 사유는 내린다
   el.langToggle.hidden = true;
   el.viewerLangToggle.hidden = true;
   el.translateCancel.disabled = false;
@@ -129,6 +156,8 @@ export function showTranslateProgress(current, total) {
 export function showLangToggle() {
   el.translateBtn.hidden = true;
   el.translateProgress.hidden = true;
+  setViewerProgressHidden(true);
+  renderTranslateError(null);
   el.langToggle.hidden = false;
   el.viewerLangToggle.hidden = false;
   applyReaderTranslateCta(); // 번역 완료 — 리더 CTA 숨김
@@ -137,12 +166,18 @@ export function showLangToggle() {
 export function updateTranslateProgress(current, total) {
   const cur = Number(current) || 0;
   const tot = Number(total) || 0;
-  el.translateProgressLabel.textContent = tot > 0 ? `번역 중 ${cur}/${tot}` : '번역 중…';
+  const label = tot > 0 ? `번역 중 ${cur}/${tot}` : '번역 중…';
   const determinate = tot > 0;
-  el.translateProgressTrack.classList.toggle('indeterminate', !determinate);
-  el.translateProgressFill.style.width = determinate
-    ? `${Math.min(100, Math.max(0, (cur / tot) * 100))}%`
-    : '';
+  const width = determinate ? `${Math.min(100, Math.max(0, (cur / tot) * 100))}%` : '';
+  for (const [labelNode, track, fill] of [
+    [el.translateProgressLabel, el.translateProgressTrack, el.translateProgressFill],
+    [el.viewerTranslateProgressLabel, el.viewerTranslateProgressTrack, el.viewerTranslateProgressFill],
+  ]) {
+    if (!labelNode || !track || !fill) continue;
+    labelNode.textContent = label;
+    track.classList.toggle('indeterminate', !determinate);
+    fill.style.width = width;
+  }
 }
 
 export function setLangSegActive(lang) {
@@ -206,6 +241,8 @@ export async function initTranslateForJob() {
     renderTranslateSummary(st); // state에 병합된 사유별 집계를 그대로 요약
   } else {
     showTranslateButton();
+    // 지난 번역이 실패한 잡을 다시 열었다 — state.json의 사유를 그대로 보인다
+    if (status === 'error') renderTranslateError((st && st.error) || '');
   }
   applyPdfExport(); // 이미 번역된 잡을 열면 이 시점에 대조 PDF 버튼이 나타난다
   if (state.viewerOpen && state.viewerIntent.lang === 'ko' && status === 'done') setLang('ko');
@@ -354,8 +391,13 @@ export function onTranslateError(id, d) {
   state.translateState = canceled ? 'canceled' : 'error';
   showTranslateButton(); // 버튼 복원(재시도 가능)
   applyPdfExport();
-  if (canceled) showToast('번역이 취소되었습니다.', 'warn');
-  else showToast((d && d.message) || '번역 중 오류가 발생했습니다.', 'error');
+  if (canceled) {
+    showToast('번역이 취소되었습니다.', 'warn');
+    return;
+  }
+  const message = (d && d.message) || '';
+  renderTranslateError(message); // 토스트가 사라져도 버튼 옆에 남는다
+  showToast(`번역 실패 — ${translateErrorText(message).text}`, 'error');
 }
 
 // 취소(✕) — 요청만 보내고, UI 확정은 error(canceled) 이벤트/폴링에 맡긴다.

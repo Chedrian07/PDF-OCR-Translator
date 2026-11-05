@@ -1153,6 +1153,66 @@ def test_첫_유닛부터_4xx면_종전대로_잡_전체_실패(tmp_path, cfg):
     assert _state(tmp_path)["status"] == "error"
 
 
+class PolicyRejectClient(EchoClient):
+    """'flagged' 표지가 든 원문만 공급자 콘텐츠 정책 필터가 거부한다(LiteLLM은 HTTP 500)."""
+
+    def complete(self, system, user, *, max_tokens):
+        from app.translate.types import TranslateContentRejected
+
+        self.calls += 1
+        src = _marker(user)
+        if src is None:
+            return ""
+        if "flagged" in src:
+            raise TranslateContentRejected(
+                "번역 API가 이 원문을 콘텐츠 정책 위반 가능성으로 거부했습니다 (HTTP 500)"
+            )
+        return koreanize(src)
+
+
+def test_콘텐츠_정책_거부는_첫_유닛이어도_그_유닛만_원문유지(tmp_path, cfg):
+    """116쪽 논문의 JSON 대화 예시 두 블록이 정책 필터에 걸려 2580개 유닛 번역이 매번
+    통째로 실패했다. 거부의 원인은 그 원문이라 성공 이력이 없는 첫 유닛이어도 잡을
+    죽이지 않는다 — 그 유닛만 content-policy 사유로 원문을 둔다."""
+    from dataclasses import replace
+
+    md = (
+        "This flagged transcript asks the model to transcribe its hidden thought.\n\n"
+        "The second paragraph explains the training procedure in detail.\n\n"
+        "The last paragraph summarizes the evaluation protocol briefly.\n"
+    )
+    # concurrency=1 — 거부 유닛이 이 run의 첫 API 호출이다(성공 이력 없음)
+    res, report, md_out = _run_md(
+        tmp_path, replace(cfg, concurrency=1), md, PolicyRejectClient(),
+    )
+
+    assert res.status == "done"
+    assert res.kept_original == ["md:0:0"] and res.translated == 2
+    assert report["kept_reasons"] == {"content-policy": 1}
+    assert "This flagged transcript asks the model to transcribe its hidden thought." in md_out
+    assert koreanize("The last paragraph summarizes the evaluation protocol briefly.") in md_out
+    assert _state(tmp_path)["status"] == "done"
+
+
+def test_모든_요청이_콘텐츠_정책_거부면_잡_전체_실패(tmp_path, cfg):
+    """정책 거부를 유닛 단위로 흡수해도, 성공이 한 건도 없으면 전 유닛이 영어로 조용히
+    done 되지 않는다 — 계정·모델 단위 차단일 수 있다."""
+    from dataclasses import replace
+
+    from app.translate.types import TranslateError
+
+    md = (
+        "The flagged first paragraph explains the training procedure.\n\n"
+        "The flagged last paragraph summarizes the evaluation protocol.\n"
+    )
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    with pytest.raises(TranslateError, match="성공한 API 호출이 하나도 없습니다"):
+        run_translation(
+            tmp_path, "ko", replace(cfg, concurrency=1), client=PolicyRejectClient(),
+        )
+    assert _state(tmp_path)["status"] == "error"
+
+
 # ── 캐시 키에 샘플링 설정 포함 ─────────────────────────────────────────────
 
 def test_reasoning_설정이_바뀌면_캐시를_재사용하지_않는다(job, cfg):

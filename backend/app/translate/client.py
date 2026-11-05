@@ -46,6 +46,7 @@ from .types import (
     TranslateAPIError,
     TranslateCancelled,
     TranslateConfig,
+    TranslateContentRejected,
     TranslateEmptyOutput,
     TranslateError,
     TranslateOutputTruncated,
@@ -136,6 +137,30 @@ def _responses_input_list_rejection(body: dict | str) -> bool:
     message = error.get("message", error.get("detail", "")) if isinstance(error, dict) else error
     return isinstance(message, str) and bool(re.search(r"\binput must be a list\b", message, re.IGNORECASE))
 
+
+
+# 공급자 콘텐츠 정책 필터의 거부 표지(소문자 비교). 상태코드로는 판정할 수 없다 — LiteLLM은
+# OpenAI 추론 모델의 400 invalid_prompt를 ContentPolicyViolationError로 감싸 500으로 준다.
+_CONTENT_POLICY_MARKERS = (
+    "contentpolicyviolation",            # LiteLLM ContentPolicyViolationError
+    "content_policy_violation",          # OpenAI code
+    "invalid_prompt",                    # OpenAI 추론 모델 프롬프트 필터 code
+    "flagged as potentially violating",  # 같은 필터의 메시지
+    "content management policy",         # Azure OpenAI 메시지
+    "responsibleaipolicyviolation",      # Azure inner code
+    "content_filter",                    # Azure code
+)
+
+
+def _content_policy_rejection(body: dict | str) -> bool:
+    """오류 본문이 콘텐츠 정책 필터의 거부인가 — 그 원문의 문제이지 엔드포인트 장애가 아니다."""
+    error = body.get("error", body) if isinstance(body, dict) else body
+    if isinstance(error, dict):
+        text = " ".join(str(error.get(key) or "") for key in ("message", "type", "code", "detail"))
+    else:
+        text = str(error or "")
+    text = text.lower()
+    return any(marker in text for marker in _CONTENT_POLICY_MARKERS)
 
 class _NeedsFallback(Exception):
     """내부용 — auto 모드에서 responses가 미지원일 때 chat 폴백을 신호."""
@@ -627,6 +652,7 @@ class OpenAICompatClient:
         timeouts = 0
         stream_probe = False  # auto 스트리밍이 거부돼 같은 요청을 비스트리밍으로 재시도 중
         store_probe = False   # store 파라미터가 거부돼 store 없이 재시도 중
+        policy_retries = 0    # 콘텐츠 정책 거부 뒤 같은 요청을 다시 보낸 횟수
         while True:
             self._raise_if_cancelled()
             try:
@@ -701,6 +727,18 @@ class OpenAICompatClient:
                 elif payload.get("stream"):
                     self._stream_ok = True
                 return result
+            if _content_policy_rejection(body):
+                # 원문이 공급자 콘텐츠 정책 필터에 걸렸다 — 상태코드(LiteLLM은 500)와 무관하게
+                # 이 유닛의 거부다. 일시 장애로 재시도하면 같은 자리에서 잡 전체가 실패했다.
+                # 같은 프롬프트가 다음 요청에서는 통과하기도 해서(실측: 통과했던 6천 자 유닛이
+                # 다음 실행에서 걸림) 백오프 없이 한 번만 다시 보낸다.
+                if policy_retries < min(1, self.cfg.max_retries):
+                    policy_retries += 1
+                    logger.warning("번역 API 콘텐츠 정책 거부(HTTP %d) — 같은 요청을 1회 다시 보냅니다", status)
+                    continue
+                raise TranslateContentRejected(
+                    f"번역 API가 이 원문을 콘텐츠 정책 위반 가능성으로 거부했습니다 (HTTP {status})"
+                )
             temperature_rejected, reasoning_active = (
                 _temperature_rejection(body) if status == 400 else (False, False)
             )
@@ -1019,11 +1057,14 @@ def _stream_error(err, credentials: tuple[str, ...] = ()) -> Exception:
     OpenRouter·LiteLLM 같은 게이트웨이는 스트림이 시작된 뒤의 공급자 장애를 HTTP 200 본문
     안의 오류 이벤트로 보낸다. 종전에는 이를 재시도 없는 API 오류로 올려, 비스트리밍이면
     502로 와 재시도됐을 일시 장애 한 번에 잡 전체가 실패했다.
+      * 콘텐츠 정책 거부(코드와 무관) → 유닛 거부(TranslateContentRejected)
       * 400·413·422 또는 invalid_request·context_length 유형 → 유닛 거부
       * 401·403 → 인증 실패(전역), 그 밖의 재시도 불가 4xx → 전역 API 오류
       * 5xx·408·429·코드 없음 → 일시 장애로 보고 백오프 재시도(_StreamErrorEvent)
     """
     detail = _body_preview({"error": err}, credentials)
+    if _content_policy_rejection({"error": err}):
+        return TranslateContentRejected("번역 API가 이 원문을 콘텐츠 정책 위반 가능성으로 거부했습니다 (스트림 오류)")
     status = None
     kind = ""
     if isinstance(err, dict):

@@ -123,7 +123,101 @@ def mask(text: str) -> tuple[str, dict[str, str]]:
                     depth[0] -= 1
         return _place(kind, original)
 
-    return _TOKEN_RE.sub(_repl, text), mapping
+    # 여러 줄 JSON·채팅 요청 리스팅은 통째로 코드 토큰 하나 — 그 사이 산문만 스캔한다.
+    # 번호는 텍스트 순서대로 이어진다(_place가 카운터를 공유).
+    parts: list[str] = []
+    last = 0
+    for start, end in _json_listing_spans(text):
+        parts.append(_TOKEN_RE.sub(_repl, text[last:start]))
+        parts.append(_place("k", text[start:end]))
+        last = end
+    parts.append(_TOKEN_RE.sub(_repl, text[last:]))
+    return "".join(parts), mapping
+
+
+# JSON 멤버 줄(`"role": "user",`)과 괄호만 있는 구조 줄(`},`). 문자열 값이 자연어여도 멤버
+# 줄은 산문이 아니다 — 논문이 실은 채팅 요청 템플릿(`"content": "I will attach a thought…"`)이
+# 산문으로 세어져 리스팅이 번역 대상이 됐다. 번역하면 실험에 쓴 프롬프트가 원문과 달라지고,
+# 116쪽 논문의 추론 추출 템플릿(Figure 35~37)은 번역 모델의 콘텐츠 정책 필터에 매번 걸렸다.
+_JSON_MEMBER = re.compile(r"""^\s*"[A-Za-z_][\w-]*"\s*:\s*(?:["\[{]|-?\d|true\b|false\b|null\b)""")
+_STRUCTURAL = re.compile(r"^[\s{}\[\](),;]+$")
+_FENCE_SPAN = re.compile(r"```.*?```", re.DOTALL)
+# 리스팅을 이루는 줄 — 괄호로 시작, `"키":`, 템플릿 자리표시(`@thought`), `//` 주석. 이런 줄이
+# 아니면(산문·캡션) 리스팅은 거기서 끝난다 — 캡션을 코드로 삼켜 번역에서 빼지 않게.
+_LISTING_LINE = re.compile(r"""^\s*(?:[{}\[\]]|"[^"\n]*"\s*:|@\w|//)""")
+_LISTING_MAX_LINES = 400
+
+
+def _bracket_delta(line: str) -> int:
+    """줄 안 `{[`·`]}`의 순증감 — 큰따옴표 문자열 안 괄호(`"{first 40 tokens}"`)는 세지 않는다."""
+    delta = 0
+    in_string = escaped = False
+    for ch in line:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            delta += 1
+        elif ch in "}]":
+            delta -= 1
+    return delta
+
+
+def _json_listing_spans(text: str) -> list[tuple[int, int]]:
+    """여러 줄 JSON·채팅 요청 리스팅의 (시작, 끝) 오프셋 — 산문 문단 안에 섞인 것까지.
+
+    OCR은 리스팅의 코드 펜스를 잃고 앞뒤 산문·캡션과 한 문단으로 합친다. 괄호가 열린 채
+    끝나는 `{`/`[` 줄에서 시작해 리스팅 줄(_LISTING_LINE)이 이어지는 동안 묶고, 문자열 밖
+    괄호 깊이가 0으로 돌아오거나 산문 줄을 만나면 끝낸다. OCR이 닫는 괄호를 잃어도
+    (실측 Gemini 템플릿) 산문 앞에서 끊기므로 캡션을 삼키지 않는다. 멤버 줄이 둘 이상이어야
+    하고(수식·참조 오탐 방지), 펜스 코드 안이면 묶지 않는다(k1 토큰이 통째로 보호한다).
+    """
+    if "{" not in text and "[" not in text:
+        return []
+    fences = [m.span() for m in _FENCE_SPAN.finditer(text)]
+    lines = text.splitlines(keepends=True)
+    starts = []
+    pos = 0
+    for line in lines:
+        starts.append(pos)
+        pos += len(line)
+    spans: list[tuple[int, int]] = []
+    i = 0
+    while i < len(lines):
+        head = lines[i].lstrip()
+        if head[:1] not in ("{", "[") or _bracket_delta(lines[i]) <= 0 or any(
+            a <= starts[i] < b for a, b in fences
+        ):
+            i += 1
+            continue
+        depth = members = 0
+        last = i
+        for j in range(i, min(len(lines), i + _LISTING_MAX_LINES)):
+            line = lines[j]
+            if not line.strip():
+                if depth > 0:
+                    continue  # 리스팅 안의 빈 줄
+                break
+            if not _LISTING_LINE.match(line):
+                break  # 산문·캡션 — 리스팅은 여기서 끝난다
+            depth += _bracket_delta(line)
+            members += bool(_JSON_MEMBER.match(line))
+            last = j
+            if depth <= 0:
+                break
+        if members < 2:
+            i += 1
+            continue
+        stop = starts[last] + len(lines[last].rstrip("\r\n"))
+        spans.append((starts[i], stop))
+        i = last + 1
+    return spans
 
 
 def _lenient_re(pid: str) -> re.Pattern:
@@ -591,7 +685,8 @@ def _code_line(line: str) -> bool:
     if not s:
         return False
     if (_SHELL_PROMPT.match(s) or _STEP_MARKER.match(s) or _LS_LONG.match(s)
-            or _JSONISH.match(s) or _SHELL_OUTPUT.match(s)):
+            or _JSONISH.match(s) or _SHELL_OUTPUT.match(s)
+            or _JSON_MEMBER.match(s) or _STRUCTURAL.match(s)):
         return True
     if _DECL_KEYWORD.match(s) and not _SENTENCE_END.search(s):
         return True
@@ -614,7 +709,7 @@ def _prose_line(line: str) -> bool:
     """
     s = line.strip()
     if (not s or _LS_LONG.match(s) or _JSONISH.match(s) or _STEP_MARKER.match(s)
-            or _SHELL_OUTPUT.match(s)):
+            or _SHELL_OUTPUT.match(s) or _JSON_MEMBER.match(s)):
         return False
     body = _PROMPT_OR_COMMENT.sub("", s)
     words = [w.lower() for w in _WORD.findall(body)]

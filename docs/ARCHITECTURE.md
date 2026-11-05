@@ -2027,7 +2027,8 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
 }
 ```
 - `skip_reasons`(입력 측 `should_skip`·segment의 references 표시 —
-  `references`\|`non-linguistic`\|`already-korean`\|`identifier`)·
+  `references`\|`non-linguistic`\|`already-korean`\|`identifier`\|`code`\|`identifier-list`\|
+  `unreadable`)·
   `kept_reasons`(래더 소진 후 원문 유지 —
   `gate-rejected`\|`placeholder-mismatch`\|`empty-output`\|`truncated`\|`timeout`\|`api-rejected`\|
   `content-policy`\|`degenerate-output`)·
@@ -2093,6 +2094,15 @@ layout.{lang}.json                 blocks[].content만 교체된 layout.json (�
 
 ### 13.4 불변식
 
+- **JSON·채팅 요청 리스팅은 코드다**: OCR이 펜스를 잃은 여러 줄 JSON 리스팅(논문이 실은 채팅
+  요청 템플릿 등)은 번역하지 않는다. `"role": "user",` 같은 멤버 줄과 `},` 같은 괄호 줄은 문자열
+  값이 자연어여도 산문이 아니라 코드 줄이다 — 리스팅뿐인 유닛은 `code`로 건너뛴다. 산문 문단 안에
+  섞인 리스팅은 `{`/`[` 줄부터 리스팅 줄(괄호·`"키":`·`@자리표시`·`//`)이 이어지는 동안을 코드
+  플레이스홀더 하나(`k`)로 묶는다. 문자열 밖 괄호가 닫히거나 산문 줄을 만나면 끝나므로, OCR이
+  닫는 괄호를 잃어도 캡션을 삼키지 않는다(멤버 줄 2개 이상 필요, 펜스 안은 k1이 그대로 보호).
+  플레이스홀더 미리보기는 12자라 템플릿 본문은 요청에 실리지 않는다. 실험에 쓴 프롬프트를 번역하면
+  원문과 달라지고, 116쪽 논문의 추론 추출 템플릿(Figure 33~39)은 번역 모델의 콘텐츠 정책 필터에
+  매번 걸렸다 — 이 규칙 뒤로는 템플릿이 아예 전송되지 않고 앞뒤 산문·캡션만 번역된다.
 - **플레이스홀더 100% 복원**: 수식·이미지·표 등은 `<m1 v="…"/>`로 마스킹 후 번역, 복원한다.
 - **출력 측 검증 게이트**: 유닛 채택 조건은 "플레이스홀더 정합(missing/dup 없음) +
   비어 있지 않음 + `masking.looks_untranslated(src, out, mapping)`가 False"다.

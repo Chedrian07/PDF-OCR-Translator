@@ -163,6 +163,9 @@ def assemble_markdown(md_text: str, page_separator: str, translations: dict[str,
     return result
 
 
+_LAYOUT_SKIP = {"ref_text": "references", "unreadable": "unreadable"}
+
+
 def layout_units(pages: list) -> list[Unit]:
     """layout.json 페이지들에서 번역 대상 블록 유닛만 (content 있고 image 키 없음)."""
     units: list[Unit] = []
@@ -183,7 +186,9 @@ def layout_units(pages: list) -> list[Unit]:
                     src=content,
                     # 서지 항목은 저자명·학술지명·URL의 원문 표기를 유지한다.
                     # Markdown references 정책 및 PDF 내보내기 정책과 동일한 계약이다.
-                    skip_reason="references" if kind == "ref_text" else "",
+                    # 영역 재처리가 남긴 '인식 불가' 줄 안내도 번역하지 않는다
+                    # (engine.region_rescue.UNREADABLE_LABEL — PDF 내보내기는 원문 줄을 둔다).
+                    skip_reason=_LAYOUT_SKIP.get(kind, ""),
                 )
             )
     return units

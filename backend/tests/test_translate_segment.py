@@ -158,6 +158,15 @@ def test_layout_reference_unit은_원문_유지():
     assert unit.skip_reason == "references"
 
 
+def test_layout_unreadable_marker는_번역하지_않는다():
+    # 영역 재처리가 남긴 '인식 불가' 줄 안내 — LLM에 보내지 않고 사유로 집계한다
+    from app.engine.region_rescue import UNREADABLE_LABEL, UNREADABLE_TEXT
+
+    pages = [{"page": 1, "blocks": [{"type": UNREADABLE_LABEL, "content": UNREADABLE_TEXT}]}]
+    unit = layout_units(pages)[0]
+    assert unit.skip_reason == "unreadable"
+
+
 def test_apply_layout_content외_필드_불변():
     pages = [{
         "page": 1, "width": 612, "height": 792, "fonts_v": "2", "blocks": [

@@ -20,6 +20,7 @@ from ..engine.base import (
     RepetitiveOutputError,
 )
 from ..engine.objc_pool import autorelease_pool
+from ..engine.region_rescue import RescueFailed
 from .fidelity import PageFidelity, evaluate_layout_pages, evaluate_raw_page
 from .layout import blocks_to_raw
 from .merge import (
@@ -29,6 +30,7 @@ from .merge import (
     keep_leading_pages,
     split_pages,
 )
+from . import pdf_worker
 from .pdf import render_pdf_pages
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -342,6 +344,12 @@ def chunk_length_budget_note(settings: "Settings", engine: OCREngine) -> str | N
 
 
 _FAILED_PAGE_MD = "> ⚠️ 이 페이지는 변환에 실패했습니다"
+# 영역 재처리(engine.run_single_rescue)용 렌더 해상도 — 공식 README의 PDF 변환 값이다.
+# 실측: 200 DPI에서 반복 생성으로 실패한 16쪽 중 6쪽은 300 DPI 한 장 읽기만으로 돌아왔다.
+RESCUE_DPI = 300
+# 텍스트 레이어가 없어 충실도로 판정할 수 없는 페이지는, 인식 불가로 남긴 줄의 높이가
+# 페이지 높이의 이 비율 이하일 때만 영역 재처리 결과를 채택한다.
+_RESCUE_MAX_UNREADABLE_SHARE = 0.10
 
 
 def _empty_device_cache() -> None:
@@ -431,6 +439,7 @@ def _add_failed_chunk(
     single: bool,
     err: Exception,
     sink: "BrokerSink | None" = None,
+    detail: str = "",
 ) -> None:
     """재시도까지 실패한 청크를 기대 페이지 수만큼의 플레이스홀더로 보정.
 
@@ -448,8 +457,9 @@ def _add_failed_chunk(
         for offset in range(1 if single else num_pages):
             sink.emit_page(start_page + offset, _FAILED_PAGE_MD)
     span = _page_span(start_page, num_pages)
+    extra = f"; {detail}" if detail else ""
     merger.warnings.append(
-        f"{span}: {_failure_reason(err)}로 플레이스홀더 삽입 ({_error_summary(err)})"
+        f"{span}: {_failure_reason(err)}로 플레이스홀더 삽입 ({_error_summary(err)}{extra})"
     )
 
 
@@ -547,6 +557,145 @@ def execute_job(
                         return restored
                     break
             return merger.pages_md[page_number - 1]
+
+        # 영역 재처리 예산(쪽) — 페이지별 single까지 반복 생성으로 실패한 페이지만 대상이고, 한
+        # 페이지가 영역을 여러 번 부르므로(엔진 상한 RESCUE_MAX_CALLS) 병적인 문서의 런타임이
+        # 폭발하지 않게 충실도 재처리와 같은 비율로 막는다. 짧은 문서도 몇 쪽은 살리게 최소 4쪽.
+        rescue_budget = [
+            max(4, int(total * max(0.0, settings.ocr_fidelity_max_retry_ratio)))
+        ]
+
+        def _rescue_render(page_number: int, out_dir: Path) -> Path | None:
+            """영역 재처리용 RESCUE_DPI 렌더(PDF 워커 — 시간 상한·취소 포함). 못 하면 None."""
+            source = job.dir / "source.pdf"
+            if job.dpi >= RESCUE_DPI or not source.is_file():
+                return None
+            out_dir.mkdir(parents=True, exist_ok=True)
+            path = out_dir / f"page_{page_number:04d}.png"
+            try:
+                pdf_worker.run_page(
+                    "app.pipeline.pdf:render_page_local", source, page_number - 1,
+                    (path, RESCUE_DPI, total), pool=pdf_worker.current_pool(),
+                    cancel=cancel.is_set,
+                )
+            except pdf_worker.PdfWorkerCanceled:
+                raise JobCanceled() from None
+            except Exception as error:  # noqa: BLE001 — 없으면 저장 페이지로 읽는다
+                logger.warning(
+                    "%d페이지 %d DPI 렌더 실패 (%s) — 저장 페이지로 영역 재처리",
+                    page_number, RESCUE_DPI, _error_summary(error),
+                )
+                return None
+            return path if path.is_file() else None
+
+        def _rescue_line_text(page_number: int):
+            """끝내 못 읽은 줄의 원본 텍스트 조회(PDF 워커) — 원본이 없거나 실패하면 채우지 않는다."""
+            source = job.dir / "source.pdf"
+            if not source.is_file():
+                return None
+
+            def line_text(boxes: list) -> list[str]:
+                try:
+                    return pdf_worker.run_page(
+                        "app.pipeline.text_reference:line_texts_local", source, page_number - 1,
+                        (boxes,), pool=pdf_worker.current_pool(), cancel=cancel.is_set,
+                    )
+                except pdf_worker.PdfWorkerCanceled:
+                    raise JobCanceled() from None
+                except Exception as error:  # noqa: BLE001 — 못 채우면 원본 줄 이미지만 남는다
+                    logger.warning(
+                        "%d페이지 인식 불가 줄 텍스트 조회 실패 (%s)",
+                        page_number, _error_summary(error),
+                    )
+                    return []
+
+            return line_text
+
+        def _try_region_rescue(
+            page_number: int, image_path: Path, page_dir: Path, page_error: Exception,
+        ) -> tuple[bool, str]:
+            """페이지별 single까지 반복·출력 상한으로 실패한 페이지를 영역 단위로 다시 읽는다.
+
+            (True, "")면 병합까지 끝났다. (False, 사유)면 호출자가 자리표시자를 넣고 사유를
+            경고에 덧붙인다. 채택은 원본 텍스트 레이어 대조(OCR_FIDELITY_THRESHOLD)로 판정한다 —
+            루프가 없다는 것만으로는 내용이 맞다는 보장이 없다(실측: 루프 없이 0.22). 텍스트
+            레이어가 없는 페이지는 인식 불가로 남긴 줄의 비율로만 막는다."""
+            if not engine.supports_region_rescue or not isinstance(
+                page_error, RepetitiveOutputError
+            ):
+                return False, ""
+            if rescue_budget[0] <= 0:
+                return False, "영역 재처리 예산 소진"
+            rescue_budget[0] -= 1
+            if cancel.is_set():
+                raise JobCanceled()
+            shutil.rmtree(page_dir, ignore_errors=True)
+            page_dir.mkdir(parents=True, exist_ok=True)
+            hires_dir = page_dir.parent / f"{page_dir.name}_hires"
+            model_image = _rescue_render(page_number, hires_dir) or image_path
+            sink.set_chunk(page_number, expect_markers=False)
+
+            def _on_region(calls: int) -> None:
+                # 영역 호출 사이에는 토큰을 흘리지 않는다 — 진행 알림이 라이브 안내와 워커 생존
+                # 신호(worker_progress_age_s)를 함께 맡는다
+                broker.publish(job.id, "progress", {
+                    **job.progress, "status": job.status,
+                    "note": f"{page_number}페이지: 반복 생성 구간을 나눠 다시 읽는 중 (영역 {calls})",
+                })
+
+            failure = ""
+            try:
+                result = engine.run_single_rescue(
+                    model_image, image_path, page_dir, sink, cancel, on_region=_on_region,
+                    line_text=_rescue_line_text(page_number),
+                )
+            except JobCanceled:
+                raise
+            except RescueFailed as error:
+                failure = f"영역 재처리 실패: {error}"
+            except Exception as error:  # noqa: BLE001 — 페이지 단위 격리
+                if cancel.is_set():
+                    raise JobCanceled() from None
+                logger.warning("%d페이지 영역 재처리 실패 (%s)", page_number, _error_summary(error))
+                failure = f"영역 재처리 실패: {_error_summary(error)}"
+            finally:
+                shutil.rmtree(hires_dir, ignore_errors=True)
+            if not failure:
+                threshold = settings.ocr_fidelity_threshold
+                source = job.dir / "source.pdf"
+                fidelity = (
+                    _retry_fidelity(source, page_dir, page_number, cancel.is_set)
+                    if threshold > 0 and source.is_file() else None
+                )
+                score = fidelity.score if fidelity is not None else None
+                if score is not None and score < threshold:
+                    failure = f"영역 재처리 충실도 {score:.2f} < {threshold:.2f}"
+                elif score is None and result.unreadable_share > _RESCUE_MAX_UNREADABLE_SHARE:
+                    failure = f"영역 재처리 후에도 인식하지 못한 줄이 많음 ({result.unreadable}줄)"
+            if failure:
+                shutil.rmtree(page_dir, ignore_errors=True)
+                sink.rewind_to(page_number, "영역 재처리 실패")
+                return False, failure
+            sink.finish_chunk()
+            merger.add_chunk(ChunkResult(page_dir, page_number, 1, result.markdown, single=True))
+            how = f"영역 {result.calls}회" + (f", 충실도 {score:.2f}" if score is not None else "")
+            recovered = f"{page_number}페이지: 반복 생성으로 실패해 영역을 나눠 다시 읽어 복구했습니다"
+            image_only = result.unreadable - result.filled
+            if image_only > 0:
+                # 텍스트가 없는 줄이 있다 — 보이기는 하지만 검색·복사·번역이 안 된다
+                filled = f", {result.filled}줄은 원본 PDF 텍스트도 함께" if result.filled else ""
+                merger.warnings.append(
+                    f"{recovered} — 끝내 읽지 못한 {result.unreadable}줄은 원본 줄 이미지로 "
+                    f"넣었습니다(텍스트 없음 {image_only}줄{filled}) ({how})"
+                )
+            elif result.unreadable:
+                merger.notices.append(
+                    f"{recovered} — 끝내 읽지 못한 {result.unreadable}줄은 원본 줄 이미지와 "
+                    f"원본 PDF 텍스트로 채웠습니다 ({how})"
+                )
+            else:
+                merger.notices.append(f"{recovered} ({how})")
+            return True, ""
 
         done_pages = 0
         failed_chunks = 0
@@ -968,11 +1117,17 @@ def execute_job(
                         if cancel.is_set():
                             raise JobCanceled()
                         shutil.rmtree(page_dir, ignore_errors=True)
-                        failed_pages += 1
                         sink.rewind_to(global_page, "페이지 변환 실패")
-                        _add_failed_chunk(
-                            merger, page_dir, global_page, 1, True, page_error, sink
+                        # 자리표시자 전에 반복 생성 페이지는 영역 단위로 한 번 더 읽는다
+                        rescued, detail = _try_region_rescue(
+                            global_page, image_path, page_dir, page_error
                         )
+                        if not rescued:
+                            failed_pages += 1
+                            _add_failed_chunk(
+                                merger, page_dir, global_page, 1, True, page_error, sink,
+                                detail=detail,
+                            )
                     else:
                         if cancel.is_set():
                             # 엔진은 취소돼도 그때까지의 부분 출력을 정상 반환한다 — 메인 경로처럼
@@ -998,18 +1153,25 @@ def execute_job(
                 return keep == 0 and failed_pages == len(chunk), last_error
 
             def _recover_single_page_chunk(page_error: Exception) -> bool:
-                """Keep a failed page in place without substituting embedded text."""
+                """Keep a failed page in place without substituting embedded text.
+
+                반복 생성 페이지는 자리표시자 전에 영역 단위로 한 번 더 읽는다(살리면 True)."""
                 if cancel.is_set():
                     raise JobCanceled()
+                shutil.rmtree(work_dir, ignore_errors=True)
+                sink.rewind_to(start_page, f"{_failure_reason(page_error)} — 페이지 변환 실패")
+                detail = ""
+                if len(chunk) == 1:
+                    rescued, detail = _try_region_rescue(start_page, chunk[0], work_dir, page_error)
+                    if rescued:
+                        return True
                 logger.warning(
                     "청크 %d/%d 최종 실패 (%s) — 플레이스홀더로 보정 후 계속",
                     ci + 1, len(chunks), _error_summary(page_error),
                 )
-                shutil.rmtree(work_dir, ignore_errors=True)
-                sink.rewind_to(start_page, f"{_failure_reason(page_error)} — 페이지 변환 실패")
                 _add_failed_chunk(
                     merger, work_dir, start_page, len(chunk), job.mode == "per_page",
-                    page_error, sink,
+                    page_error, sink, detail=detail,
                 )
                 return False
 

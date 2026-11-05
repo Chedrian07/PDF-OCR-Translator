@@ -117,6 +117,9 @@ class OCREngine(abc.ABC):
     # True면 runner의 충실도 게이트가 단독 재처리를 하지 않는다 — 같은 호출을 반복해
     # 시간만 쓰고 거짓 '충실도 미달' 경고를 남긴다. 생성 모델 엔진은 False(기본).
     deterministic_rerun: bool = False
+    # 반복 생성으로 실패한 페이지를 영역 단위로 다시 읽는 run_single_rescue를 지원하는가.
+    # runner는 페이지별 single까지 반복·출력 상한으로 실패한 페이지에만 이를 부른다.
+    supports_region_rescue: bool = False
 
     @property
     @abc.abstractmethod
@@ -183,6 +186,25 @@ class OCREngine(abc.ABC):
         sink: StreamSink,
         cancel: threading.Event,
     ) -> str: ...
+
+    def run_single_rescue(
+        self,
+        model_image: Path,
+        page_image: Path,
+        out_dir: Path,
+        sink: StreamSink,
+        cancel: threading.Event,
+        on_region: "Callable[[int], None] | None" = None,
+        line_text: "Callable[[list], list[str]] | None" = None,
+    ):
+        """반복 생성으로 실패한 한 페이지를 영역 단위로 다시 읽는다(supports_region_rescue).
+
+        model_image는 모델에 보낼 렌더(보통 고해상도), page_image는 산출물(그림 크롭·박스
+        이미지)을 만들 저장 페이지다 — 좌표는 0~999 정규화라 해상도가 달라도 맞는다.
+        on_region(호출 수)은 영역 호출마다 불린다(라이브 진행·워커 생존 신호).
+        line_text(상자들)는 끝내 못 읽은 줄의 원본 텍스트를 준다(region_rescue.fill_unreadable).
+        살리면 region_rescue.RescueResult(markdown 포함), 못 살리면 RescueFailed."""
+        raise NotImplementedError
 
     def gpu_name(self) -> str | None:
         return None

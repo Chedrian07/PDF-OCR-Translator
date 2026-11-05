@@ -1280,3 +1280,26 @@ def test_ToUnicode_공백_복원은_같은_글리프인_폰트에서만_한_줄�
     # bfrange는 건드리지 않는다(다른 글리프의 실제 NBSP 매핑일 수 있다).
     assert b"<0100> <0101> <00a0>" in fixed
     doc.close()
+
+
+def test_build_keeps_the_original_line_under_an_unreadable_marker(tmp_path):
+    """영역 재처리가 '인식 불가'로 남긴 줄은 번역 PDF에서 원문 그대로다 — text로 두면
+    원문 줄을 지우고 안내문(의 번역)을 그 자리에 조판해, 블록이 없던 페이지 자리표시자보다
+    오히려 원문을 잃는다."""
+    from app.engine.region_rescue import UNREADABLE_LABEL, UNREADABLE_TEXT
+
+    job_dir = _unit_job(
+        tmp_path, block_type=UNREADABLE_LABEL,
+        src_text="C'D''^2 = 7^2 + 13^2 - 2 * 7 * 13 * (-13/14)",
+    )
+    translated = json.loads((job_dir / "layout.ko.json").read_text(encoding="utf-8"))
+    translated[0]["blocks"][0]["content"] = "This line could not be recognized"
+    (job_dir / "layout.ko.json").write_text(
+        json.dumps(translated, ensure_ascii=False), encoding="utf-8",
+    )
+
+    result = build_translated_pdf(job_dir, "ko")
+    text = _pdf_text(result.path.read_bytes())
+    assert result.replaced == 0
+    assert "13^2" in text
+    assert "could not be recognized" not in text and UNREADABLE_TEXT not in text

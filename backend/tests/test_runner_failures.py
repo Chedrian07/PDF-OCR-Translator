@@ -958,3 +958,212 @@ def test_retry_and_rerun_policies_are_declared_on_the_base_contracts(tmp_path):
     assert job.status == "done"
     assert engine.multi_calls == 2                 # 1쪽(실패, 재시도 없음) + 2쪽
     assert engine.single_calls == {}
+
+
+# ── 영역 재처리: 페이지별 single까지 반복 생성인 페이지 (engine.run_single_rescue) ──────────
+_PARAGRAPH = "The quick brown fox jumps over the lazy dog while counting rescued regions. " * 6
+
+
+def _page_truth(page: int) -> str:
+    return f"Rescue page {page}. {_PARAGRAPH}"
+
+
+class RescueEngine(LoopFallbackEngine):
+    """single에서 반복 생성인 페이지를 영역 재처리로 살리거나(텍스트) 못 살리는(예외) 가짜 엔진."""
+
+    supports_region_rescue = True
+
+    # 인식 불가로 남긴 줄의 상자(페이지 대비 0~999) — _run_text_job 텍스트 레이어의 첫 줄을 덮는다
+    UNREADABLE_BOX = (90, 72, 900, 88)
+
+    def __init__(self, *, rescue=None, **kwargs):
+        super().__init__(**kwargs)
+        self.rescue = rescue or (lambda page: (_page_truth(page), 0, 0.0))
+        self.rescue_calls: list[tuple[int, tuple[int, int]]] = []
+        self.line_texts: list[str] | None = None
+
+    def run_single_rescue(
+        self, model_image, page_image, out_dir, sink, cancel, on_region=None, line_text=None,
+    ):
+        from PIL import Image
+
+        from app.engine.region_rescue import RescueResult
+
+        page = self._page_number(page_image)
+        with Image.open(model_image) as image:
+            self.rescue_calls.append((page, image.size))
+        outcome = self.rescue(page)
+        if isinstance(outcome, Exception):
+            raise outcome
+        text, unreadable, share = outcome
+        if on_region is not None:
+            on_region(1)
+        filled = 0
+        if unreadable and line_text is not None:
+            self.line_texts = line_text([self.UNREADABLE_BOX] * unreadable)
+            filled = sum(1 for t in self.line_texts if t)
+        (out_dir / "images").mkdir(parents=True, exist_ok=True)
+        raw = f"<|ref|>text<|/ref|><|det|>[[80, 80, 920, 400]]<|/det|>\n{text}"
+        self._write_raw_pages(out_dir, [raw])
+        sink.on_text(raw)
+        return RescueResult(
+            raw=raw, unreadable=unreadable, calls=2, markdown=text, unreadable_share=share,
+            filled=filled,
+        )
+
+
+def _run_text_job(tmp_path, engine, *, pages=2, mode="multi", pages_per_chunk=2, text_layer=True):
+    """페이지마다 충실도 판정에 충분한(200자 이상) 텍스트 레이어가 있는 PDF로 잡을 돌린다."""
+    import fitz
+
+    store = JobStore(tmp_path / "jobs")
+    job = store.create("doc.pdf", mode, dpi=72)
+    doc = fitz.open()
+    for page in range(1, pages + 1):
+        pdf_page = doc.new_page(width=595, height=842)
+        if text_layer:
+            pdf_page.insert_textbox(fitz.Rect(60, 60, 535, 780), _page_truth(page), fontsize=11)
+    (job.dir / "source.pdf").write_bytes(doc.tobytes())
+    doc.close()
+    settings = Settings(
+        engine="fake", device="cpu", data_dir=tmp_path / "data",
+        preload_model=False, fake_delay=0.0, pages_per_chunk=pages_per_chunk,
+    )
+    engine.load()
+    execute_job(job, store, EventBroker(), engine, settings, threading.Event())
+    return job
+
+
+def test_a_looping_page_is_rescued_by_regions_instead_of_a_placeholder(tmp_path):
+    engine = RescueEngine(loop_single_pages={2})
+    job = _run_text_job(tmp_path, engine)
+
+    assert job.status == "done"
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert FAILED_MARK not in md
+    assert "Rescue page 2." in md
+    # 영역 재처리는 공식 README의 300 DPI 렌더로 읽는다(잡 렌더는 72 DPI)
+    assert [page for page, _ in engine.rescue_calls] == [2]
+    assert engine.rescue_calls[0][1][0] >= 2400
+    assert job.warnings == []  # 충실도 기준을 넘긴 복구 — 남은 품질 저하 없음
+    assert any("2페이지: 반복 생성으로 실패해 영역을 나눠 다시 읽어 복구" in n for n in job.notices)
+
+
+def test_a_rescue_below_the_fidelity_threshold_keeps_the_placeholder(tmp_path):
+    # 루프는 없지만 내용이 틀린 결과(실측 repetition_penalty 0.22)를 살렸다고 하지 않는다
+    engine = RescueEngine(loop_single_pages={2}, rescue=lambda page: ("zzz qqq www", 0, 0.0))
+    job = _run_text_job(tmp_path, engine)
+
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert FAILED_MARK in md and "zzz qqq" not in md
+    assert any("플레이스홀더 삽입" in w and "영역 재처리 충실도" in w for w in job.warnings)
+
+
+def test_unreadable_lines_filled_from_the_source_text_are_a_notice(tmp_path):
+    from app.engine.region_rescue import UNREADABLE_TEXT
+
+    engine = RescueEngine(
+        loop_single_pages={2},
+        rescue=lambda page: (_page_truth(page) + "\n" + UNREADABLE_TEXT, 1, 0.01),
+    )
+    job = _run_text_job(tmp_path, engine)
+
+    # 그 줄 상자 안의 원본 텍스트 레이어 줄만(PDF 워커) — 다음 줄은 섞이지 않는다
+    assert engine.line_texts == [
+        "Rescue page 2. The quick brown fox jumps over the lazy dog while counting rescued regions."
+    ]
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert "Rescue page 2." in md and FAILED_MARK not in md
+    assert job.warnings == []  # 원본 줄 이미지 + 텍스트로 채워 잃은 내용이 없다
+    assert any(
+        "끝내 읽지 못한 1줄은 원본 줄 이미지와 원본 PDF 텍스트로 채웠습니다" in n
+        for n in job.notices
+    )
+
+
+def test_unreadable_lines_without_source_text_are_a_quality_warning(tmp_path):
+    from app.engine.region_rescue import UNREADABLE_TEXT
+
+    engine = RescueEngine(
+        loop_single_pages={2}, rescue=lambda page: ("scan text\n" + UNREADABLE_TEXT, 1, 0.01),
+    )
+    job = _run_text_job(tmp_path, engine, text_layer=False)
+
+    assert engine.line_texts == [""]  # 텍스트 레이어가 없다 — 원본 줄 이미지만 남는다
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert UNREADABLE_TEXT in md and FAILED_MARK not in md
+    assert any(
+        "끝내 읽지 못한 1줄은 원본 줄 이미지로 넣었습니다(텍스트 없음 1줄)" in w
+        for w in job.warnings
+    )
+
+
+def test_without_a_text_layer_only_a_small_unreadable_share_is_accepted(tmp_path):
+    small = RescueEngine(loop_single_pages={2}, rescue=lambda page: ("scan text", 1, 0.05))
+    job = _run_text_job(tmp_path / "small", small, text_layer=False)
+    assert FAILED_MARK not in (job.dir / "result.md").read_text(encoding="utf-8")
+
+    large = RescueEngine(loop_single_pages={2}, rescue=lambda page: ("scan text", 6, 0.3))
+    job = _run_text_job(tmp_path / "large", large, text_layer=False)
+    assert FAILED_MARK in (job.dir / "result.md").read_text(encoding="utf-8")
+    assert any("인식하지 못한 줄이 많음" in w for w in job.warnings)
+
+
+def test_a_failed_rescue_is_named_in_the_placeholder_warning(tmp_path):
+    from app.engine.region_rescue import RescueFailed
+
+    engine = RescueEngine(
+        loop_single_pages={2}, rescue=lambda page: RescueFailed("영역 재처리 예산 초과"),
+    )
+    job = _run_text_job(tmp_path, engine)
+
+    assert FAILED_MARK in (job.dir / "result.md").read_text(encoding="utf-8")
+    assert any("영역 재처리 실패: 영역 재처리 예산 초과" in w for w in job.warnings)
+
+
+def test_non_repetition_failures_are_not_rescued(tmp_path):
+    engine = RescueEngine(fail_single_pages={2})
+    job = _run_text_job(tmp_path, engine)
+
+    assert engine.rescue_calls == []
+    assert FAILED_MARK in (job.dir / "result.md").read_text(encoding="utf-8")
+
+
+def test_the_rescue_budget_is_bounded_per_job(tmp_path):
+    # 6쪽 전부 반복 생성(per_page라 모든 쪽이 single) — 예산은 max(4, 6×0.2)=4쪽,
+    # 나머지는 사유가 붙은 자리표시자
+    engine = RescueEngine(loop_single_pages=set(range(1, 7)))
+    job = _run_text_job(tmp_path, engine, pages=6, mode="per_page", pages_per_chunk=1)
+
+    assert len(engine.rescue_calls) == 4
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert md.count(FAILED_MARK) == 2
+    assert sum("영역 재처리 예산 소진" in w for w in job.warnings) == 2
+
+
+def test_per_page_mode_loops_are_rescued_too(tmp_path):
+    engine = RescueEngine(loop_single_pages={1})
+    job = _run_text_job(tmp_path, engine, mode="per_page", pages_per_chunk=1)
+
+    assert [page for page, _ in engine.rescue_calls] == [1]
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert FAILED_MARK not in md and "Rescue page 1." in md
+
+
+def test_cancel_during_a_rescue_is_not_swallowed(tmp_path):
+    from app.engine.base import JobCanceled as Canceled
+
+    class CancelingRescue(RescueEngine):
+        def run_single_rescue(self, model_image, page_image, out_dir, sink, cancel, **_):
+            self.rescue_calls.append((self._page_number(page_image), (0, 0)))
+            self.seen_hires = Path(model_image).parent
+            cancel.set()
+            raise Canceled()
+
+    engine = CancelingRescue(loop_single_pages={2})
+    job = _run_text_job(tmp_path, engine)
+
+    assert job.status == "canceled"
+    assert [page for page, _ in engine.rescue_calls] == [2]
+    assert not engine.seen_hires.exists()  # 300 DPI 렌더 임시 디렉터리도 치운다
+    assert not any("영역을 나눠 다시 읽어 복구" in n for n in job.notices)

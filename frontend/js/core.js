@@ -1290,6 +1290,7 @@ export const TRANSLATE_SKIP_LABELS = {
   'already-korean': '이미 한국어',
   'non-linguistic': '수식·기호만',
   identifier: '식별자·코드',
+  unreadable: '인식 못 한 줄',
 };
 
 // {사유: 개수} → [[사유, 개수]] 내림차순. 비정상 값·0은 버린다.

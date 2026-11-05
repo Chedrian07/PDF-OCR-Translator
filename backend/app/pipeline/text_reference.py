@@ -171,3 +171,80 @@ def native_page_local(source_pdf: Path, page_index: int) -> dict:
     finally:
         _drain_mupdf("textlayer 페이지 검사")
     return result
+
+
+def _row_text(pieces: list) -> str:
+    """같은 시각 행의 텍스트 레이어 줄 조각들을 왼→오른으로 잇는다(위첨자 조각 포함)."""
+    pieces.sort(key=lambda piece: piece[0].x0)
+    out, last = "", None
+    for rect, text in pieces:
+        if last is not None and rect.x0 - last.x1 > 0.25 * max(rect.height, last.height):
+            out += " "
+        out += text
+        last = rect
+    return out
+
+
+def page_line_texts(fitz, page, boxes: list) -> list[str]:
+    """페이지 대비 0~999 상자(렌더 공간)마다 그 안의 텍스트 레이어 줄을 읽기 순서로 한 줄에 잇는다.
+
+    줄은 **중심이 상자 안에 있으면** 고른다 — 잉크에 맞춘 상자는 글꼴 ascent/descent까지 든
+    줄 상자보다 작아 면적 비율로는 놓치고, 이웃 줄의 중심은 줄 사이 빈 행 너머에 있다. 회전
+    페이지도 같은 규칙이다(비회전 좌표에서 비교). 페이지 텍스트 레이어가 깨진 글리프·기호
+    위주면(fidelity 정답과 같은 기준) 전부 "", 깨진 글리프가 든 줄도 ""."""
+    from .fidelity import _block_rect, _broken_glyph, _untrusted_truth, normalize
+
+    lines = []
+    for block in page.get_text("dict").get("blocks", []):
+        for line in block.get("lines", []):
+            bbox = line.get("bbox")
+            text = "".join(span.get("text") or "" for span in line.get("spans", []))
+            if bbox and text.strip():
+                lines.append((fitz.Rect(bbox), text))
+    page_text = " ".join(text for _, text in lines)
+    if not page_text.strip() or _untrusted_truth(page_text, normalize(page_text)):
+        return ["" for _ in boxes]
+    out = []
+    for box in boxes:
+        rect = _block_rect(fitz, page, {"bbox": list(box)})
+        picked = [] if rect is None else [
+            (line_rect * page.rotation_matrix, text) for line_rect, text in lines
+            if rect.contains(fitz.Point((line_rect.x0 + line_rect.x1) / 2,
+                                        (line_rect.y0 + line_rect.y1) / 2))
+        ]
+        picked.sort(key=lambda piece: piece[0].y0)
+        # 세로로 충분히 겹치는 조각은 한 시각 행이다 — 위·아래첨자는 별도 줄로 추출된다
+        rows: list[tuple[list, float, float]] = []
+        for piece in picked:
+            r = piece[0]
+            if rows:
+                items, top, bottom = rows[-1]
+                if min(r.y1, bottom) - max(r.y0, top) > 0.3 * min(r.height, bottom - top):
+                    items.append(piece)
+                    rows[-1] = (items, min(top, r.y0), max(bottom, r.y1))
+                    continue
+            rows.append(([piece], r.y0, r.y1))
+        text = sanitize_text(" ".join(_row_text(items) for items, _, _ in rows)).strip()
+        out.append("" if any(_broken_glyph(c) for c in text if not c.isspace()) else text)
+    return out
+
+
+def line_texts_local(source_pdf: Path, page_index: int, boxes: list) -> list[str]:
+    """(PDF 워커) 원본 페이지 하나에서 상자마다 텍스트 레이어 줄(page_line_texts).
+
+    영역 재처리로도 모델이 끝내 읽지 못한 줄(engine.region_rescue.fill_unreadable)에만 쓴다 —
+    OCR 결과를 대체하지 않는다. 열 수 없거나 추출에 실패하면 전부 ""(이미지만 남는다)."""
+    from ..pipeline import pdf_worker
+
+    empty = ["" for _ in boxes]
+    try:
+        with pdf_worker.open_document(source_pdf) as doc:
+            if doc.needs_pass or not 0 <= page_index < doc.page_count:
+                return empty
+            return page_line_texts(_fitz(), doc[page_index], boxes)
+    except Exception as e:  # noqa: BLE001 — 채우지 못하면 원본 줄 이미지만 남는다
+        logger.warning("%d페이지 인식 불가 줄 텍스트 추출 실패 (%s: %s)",
+                       page_index + 1, e.__class__.__name__, str(e)[:200])
+        return empty
+    finally:
+        _drain_mupdf("인식 불가 줄 텍스트")

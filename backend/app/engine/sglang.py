@@ -6,6 +6,7 @@ import asyncio
 import base64
 import concurrent.futures
 import json
+import shutil
 import threading
 import time
 import uuid
@@ -19,6 +20,7 @@ from .base import (
     EngineCapabilities,
     EngineError,
     JobCanceled,
+    NullSink,
     OCREngine,
     OutputLimitError,
     RepetitiveOutputError,
@@ -29,6 +31,7 @@ from .postprocess import (
     save_results_multi,
     save_results_single,
 )
+from .region_rescue import RegionOutput, rescue_page
 from .repetition import SemanticRepetitionDetector
 from .image_input import normalize_model_image
 
@@ -45,6 +48,14 @@ NGRAM_PROCESSOR = json.dumps(
 
 # /api/health가 sidecar 확인을 기다리는 상한(초) — 넘기면 직전 결과를 낸다 (provider_health)
 HEALTH_PROBE_WAIT_S = 1.0
+# 영역 재처리(run_single_rescue) 예산 — 페이지 한 장당 영역 호출 수·시간 상한. 실측 116쪽 논문의
+# 최악 페이지가 29회·114초였다(24회 상한에서는 줄 6개를 비운 채 0.387로 게이트에 걸렸다).
+RESCUE_MAX_CALLS = 40
+RESCUE_MAX_SECONDS = 240.0
+# 영역 상한은 높이에 비례해 줄인다(+50% 여유) — 상한 루프가 작은 영역에서도 페이지 상한(6,144토큰
+# ≈25초)까지 돌지 않게. 한 줄 영역도 이 아래로는 줄이지 않는다.
+REGION_MIN_TOKENS = 768
+REGION_MIN_CHARS = 2_048
 
 
 class SGLangUnavailable(EngineError):
@@ -228,7 +239,7 @@ class SGLangEngine(OCREngine):
                 cancel.wait(1)
         raise JobCanceled()
 
-    def payload(self, paths, *, single, rid):
+    def payload(self, paths, *, single, rid, max_page_tokens=None):
         content = []
         for path in paths:
             mime = (
@@ -277,13 +288,19 @@ class SGLangEngine(OCREngine):
                 "window_size": 128 if single else 1024,
                 "page_token_id": 128827,
                 "eos_token_id": 1,
-                "max_page_tokens": self._settings.max_page_output_tokens or 20000,
+                "max_page_tokens": max_page_tokens
+                or self._settings.max_page_output_tokens
+                or 20000,
             },
             "stream": True,
         }
 
-    async def _stream(self, payload, sink, cancel, repetition):
+    async def _stream(self, payload, sink, cancel, repetition, page_cap=None):
         s = self._settings
+        # 서버 page guard(custom_params.max_page_tokens)와 같은 상한으로 잘림을 판정한다 —
+        # 영역 재처리가 상한을 줄였는데 여기서 전역 상한을 보면, 서버가 끊은 영역이 정상
+        # 종료(stop)로 보여 잘린 출력이 조용히 채택된다.
+        cap = page_cap or s.max_page_output_tokens or 20000
         timeout = httpx.Timeout(
             s.sidecar_read_timeout_s, connect=s.sidecar_connect_timeout_s
         )
@@ -317,7 +334,6 @@ class SGLangEngine(OCREngine):
                                 continue
                             event = json.loads(data)
                             ids = (event.get("sglext") or {}).get("output_ids") or []
-                            cap = s.max_page_output_tokens or 20000
                             if any(page_budget_reached(row, cap) for row in ids):
                                 page_capped = True
                             if "error" in event:
@@ -327,7 +343,11 @@ class SGLangEngine(OCREngine):
                                 if delta:
                                     chunks.append(delta)
                                     if repetition.feed(delta):
-                                        raise RepetitiveOutputError(repetition.message)
+                                        error = RepetitiveOutputError(repetition.message)
+                                        # 영역 재처리는 루프 직전까지 끝낸 블록과 루프 블록의
+                                        # 좌표를 이어 읽기에 쓴다(문서 내용이라 메시지엔 없다)
+                                        error.partial_text = "".join(chunks)
+                                        raise error
                                     sink.on_text(delta)
                                 finish = choice.get("finish_reason") or finish
                 if not seen_done or finish not in ("stop", "length"):
@@ -414,3 +434,87 @@ class SGLangEngine(OCREngine):
         self, image_path: Path, out_dir: Path, sink, cancel: threading.Event
     ):
         return self._run([image_path], out_dir, sink, cancel, single=True)
+
+    supports_region_rescue = True
+
+    def run_single_rescue(
+        self, model_image, page_image, out_dir, sink, cancel, on_region=None, line_text=None
+    ):
+        """반복 생성으로 실패한 페이지를 영역 단위로 다시 읽는다 — 알고리즘은 region_rescue 참조.
+
+        영역 호출은 라이브로 흘리지 않는다: 크롭 좌표의 박스가 라이브 레이아웃에 잘못 그려진다.
+        다 읽은 뒤 페이지 좌표로 합친 출력을 한 번에 sink에 넣는다."""
+        if cancel.is_set():
+            raise JobCanceled()
+        self.load()
+        s = self._settings
+        page_cap = s.max_page_output_tokens or 20000
+        work = Path(out_dir) / "regions"
+        work.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+        with Image.open(model_image) as source:
+            image = source.convert("RGB")
+        calls = 0
+
+        def read_region(crop, rect, _pad):
+            nonlocal calls
+            if cancel.is_set():
+                raise JobCanceled()
+            share = min(1.0, rect.height / image.height)
+            cap = min(page_cap, max(REGION_MIN_TOKENS, int(page_cap * 1.5 * share)))
+            chars = s.max_page_output_chars
+            if chars is not None:
+                chars = min(chars, max(REGION_MIN_CHARS, int(chars * 1.5 * share)))
+            path = work / f"region_{rect.x0}_{rect.y0}_{rect.x1}_{rect.y1}.png"
+            crop.save(path, format="PNG", compress_level=1)
+            payload = self.payload(
+                [path], single=True, rid=uuid.uuid4().hex, max_page_tokens=cap
+            )
+            repetition = SemanticRepetitionDetector(
+                max_page_chars=chars, max_page_tokens=None, expected_pages=1
+            )
+            try:
+                raw, finish = asyncio.run(
+                    self._stream(payload, NullSink(), cancel, repetition, page_cap=cap)
+                )
+                output = RegionOutput(
+                    finish not in ("page_limit", "length"), raw,
+                    {"page_limit": "cap", "length": "length"}.get(finish, "ok"),
+                )
+            except RepetitiveOutputError as exc:
+                output = RegionOutput(False, getattr(exc, "partial_text", ""), "loop")
+            except SGLangUnavailable:
+                self._mark_unavailable()
+                raise
+            except (httpx.HTTPError, ValueError) as exc:
+                self._mark_unavailable()
+                raise SGLangUnavailable("SGLang OCR connection/stream failed") from exc
+            finally:
+                path.unlink(missing_ok=True)
+            if cancel.is_set():
+                raise JobCanceled()
+            calls += 1
+            if on_region is not None:
+                on_region(calls)
+            return output
+
+        try:
+            result = rescue_page(
+                image, read_region, max_calls=RESCUE_MAX_CALLS,
+                deadline=lambda: time.monotonic() - started > RESCUE_MAX_SECONDS,
+                line_text=line_text,
+            )
+        finally:
+            image.close()
+            shutil.rmtree(work, ignore_errors=True)
+        body = "\n".join(_split_multi_pages(result.raw))
+        with Image.open(page_image) as page:
+            stored = page.convert("RGB")
+        try:
+            result.markdown = save_results_single(body, stored, str(out_dir))
+        finally:
+            stored.close()
+        stream = BlockStream(sink)
+        stream.on_text(result.raw)
+        stream.end()
+        return result

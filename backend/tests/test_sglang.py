@@ -7,7 +7,9 @@ import pytest
 from PIL import Image
 
 from app.config import Settings
-from app.engine.base import EngineError, JobCanceled, NullSink, OutputLimitError
+from app.engine.base import (
+    EngineError, JobCanceled, NullSink, OutputLimitError, RepetitiveOutputError,
+)
 from app.engine.postprocess import BlockStream, normalize_blocks
 from app.engine.sglang import SGLangEngine, SGLangUnavailable
 
@@ -387,3 +389,219 @@ def test_payload_normalizes_only_model_pixels_and_keeps_source(tmp_path):
         assert prepared.getpixel((1, 1)) == (0, 0, 0)
         assert prepared.getpixel((50, 50)) == (255, 255, 255)
     assert path.read_bytes() == original
+
+
+# ── 영역 재처리(run_single_rescue)를 받치는 스트림 계약 ─────────────────────────────
+def _mock_sse(monkeypatch, events):
+    class Bytes(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for event in events:
+                yield b"data: " + json.dumps(event).encode() + b"\n\n"
+            yield b"data: [DONE]\n\n"
+
+    def handle(request):
+        if request.url.path == "/abort_request":
+            return httpx.Response(200)
+        return httpx.Response(200, stream=Bytes())
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx, "AsyncClient",
+        lambda **kw: original(transport=httpx.MockTransport(handle), **kw),
+    )
+
+
+def test_a_detected_loop_keeps_the_partial_output(monkeypatch):
+    """루프를 감지해 멈출 때 그때까지의 출력을 예외에 싣는다 — 영역 재처리는 끝낸 블록과
+    루프 블록의 좌표로 이어 읽는다(메시지에는 문서 내용을 넣지 않는다)."""
+    from app.engine.repetition import SemanticRepetitionDetector
+
+    head = "<PAGE><BLOCK>text[0, 0, 999, 10]<FORK>first\n<BLOCK>text[0, 20, 999, 30]<FORK>"
+    events = [{"choices": [{"delta": {"content": head}}]}]
+    events += [{"choices": [{"delta": {"content": "and $X$ " * 20}}]} for _ in range(60)]
+    _mock_sse(monkeypatch, events)
+    engine = SGLangEngine(Settings())
+    with pytest.raises(RepetitiveOutputError) as error:
+        asyncio.run(engine._stream(
+            {"rid": "r"}, NullSink(), threading.Event(), SemanticRepetitionDetector(),
+        ))
+    assert error.value.partial_text.startswith(head)
+    assert "first" not in str(error.value)
+
+
+@pytest.mark.parametrize("page_cap, finish", [(768, "page_limit"), (None, "stop")])
+def test_a_region_cap_is_judged_with_the_same_cap_the_server_guard_used(
+    monkeypatch, page_cap, finish,
+):
+    """영역 상한을 줄였으면 잘림 판정도 그 상한으로 — 전역 상한(6,144)으로 보면 서버가 끊은
+    영역이 정상 종료(stop)처럼 보여 잘린 출력이 조용히 채택된다."""
+    from app.engine.repetition import SemanticRepetitionDetector
+
+    events = [{
+        "choices": [{"delta": {"content": "abc"}, "finish_reason": "stop"}],
+        "sglext": {"output_ids": [[5] * 800]},
+    }]
+    _mock_sse(monkeypatch, events)
+    engine = SGLangEngine(Settings())
+    raw, reason = asyncio.run(engine._stream(
+        {"rid": "r"}, NullSink(), threading.Event(), SemanticRepetitionDetector(),
+        page_cap=page_cap,
+    ))
+    assert raw == "abc" and reason == finish
+
+
+def test_payload_carries_a_region_cap_to_the_server_page_guard(tmp_path):
+    p = tmp_path / "p.png"
+    Image.new("RGB", (2, 2)).save(p)
+    engine = SGLangEngine(Settings())
+    assert engine.payload([p], single=True, rid="r")["custom_params"]["max_page_tokens"] == 6144
+    assert engine.payload(
+        [p], single=True, rid="r", max_page_tokens=900
+    )["custom_params"]["max_page_tokens"] == 900
+
+
+class _TextSink:
+    def __init__(self):
+        self.text = ""
+
+    def on_text(self, text):
+        self.text += text
+
+
+def test_run_single_rescue_reads_regions_and_merges_one_page(tmp_path, monkeypatch):
+    """루프 → 루프 블록 단독 → 그 아래 이어 읽기. 영역마다 줄인 상한을 서버·클라이언트가
+    같이 쓰고, 산출물·라이브 출력은 페이지 좌표의 한 페이지로 합쳐진다."""
+    from PIL import ImageDraw
+
+    width, height = 1000, 1400
+    page = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(page)
+    for i in range(20):
+        draw.rectangle((80, 100 + i * 60, 920, 120 + i * 60), fill="black")
+    page_path = tmp_path / "page.png"
+    page.save(page_path)
+
+    def norm(y):
+        return int(y / height * 999)
+
+    done = "".join(
+        f"<BLOCK>text[79, {norm(100 + i * 60)}, 919, {norm(120 + i * 60)}]<FORK>line{i}\n"
+        for i in range(5)
+    )
+    trap = f"<BLOCK>text[79, {norm(400)}, 919, {norm(420)}]<FORK>loop loop"
+    outputs = [
+        "<PAGE>" + done + trap,
+        "<PAGE><BLOCK>text[50, 300, 950, 700]<FORK>trap line",
+        "<PAGE><BLOCK>text[50, 10, 950, 990]<FORK>rest of page",
+    ]
+    seen = []
+
+    async def stream(payload, sink, cancel, repetition, page_cap=None):
+        seen.append((payload["custom_params"]["max_page_tokens"], page_cap))
+        raw = outputs[len(seen) - 1]
+        if len(seen) == 1:
+            error = RepetitiveOutputError("loop")
+            error.partial_text = raw
+            raise error
+        return raw, "stop"
+
+    engine = SGLangEngine(Settings())
+    monkeypatch.setattr(engine, "load", lambda: None)
+    monkeypatch.setattr(engine, "_stream", stream)
+    regions = []
+    sink = _TextSink()
+    out = tmp_path / "out"
+    result = engine.run_single_rescue(
+        page_path, page_path, out, sink, threading.Event(), on_region=regions.append,
+    )
+    assert regions == [1, 2, 3]
+    assert all(payload_cap == stream_cap for payload_cap, stream_cap in seen)
+    # 전체 페이지는 페이지 상한, 한 줄 영역은 최저 상한, 큰 나머지 영역은 높이 비례(최대 페이지 상한)
+    assert seen[0][0] == 6144 and seen[1][0] == 768 and seen[2][0] <= 6144
+    md = result.markdown
+    order = [md.index(f"line{i}") for i in range(5)] + [md.index("trap line"), md.index("rest of page")]
+    assert order == sorted(order)
+    assert result.unreadable == 0 and result.calls == 3
+    assert (out / "raw_pages.json").is_file() and (out / "result.md").is_file()
+    assert not (out / "regions").exists()
+    assert "trap line" in sink.text and "<FORK>" not in sink.text  # 라이브도 정규화된 한 페이지
+
+
+def test_an_unreadable_line_becomes_its_cropped_image_and_the_source_text(tmp_path, monkeypatch):
+    """끝내 루프인 한 줄 → 저장 페이지에서 자른 그 줄 이미지 + 원본 텍스트를 실은 안내 블록."""
+    import json
+
+    from PIL import ImageDraw
+
+    from app.engine.region_rescue import UNREADABLE_FILLED
+
+    width, height = 1000, 1400
+    page = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(page)
+    for i in range(3):
+        draw.rectangle((80, 100 + i * 60, 920, 120 + i * 60), fill="black")
+    model_path, stored_path = tmp_path / "hires.png", tmp_path / "page.png"
+    page.save(model_path)
+    page.resize((width // 2, height // 2)).save(stored_path)  # 모델 렌더와 해상도가 다른 저장 페이지
+
+    def norm(y):
+        return int(y / height * 999)
+
+    calls = []
+
+    async def stream(payload, sink, cancel, repetition, page_cap=None):
+        calls.append(payload)
+        if len(calls) <= 2:  # 전체 페이지, 그리고 둘째 줄 단독까지 루프
+            error = RepetitiveOutputError("loop")
+            error.partial_text = (
+                f"<PAGE><BLOCK>text[79, {norm(100)}, 919, {norm(120)}]<FORK>line0\n"
+                f"<BLOCK>text[79, {norm(160)}, 919, {norm(180)}]<FORK>x x x"
+                if len(calls) == 1 else "<PAGE><BLOCK>text[50, 300, 950, 700]<FORK>x x x"
+            )
+            raise error
+        return "<PAGE><BLOCK>text[50, 300, 950, 700]<FORK>line2", "stop"
+
+    engine = SGLangEngine(Settings())
+    monkeypatch.setattr(engine, "load", lambda: None)
+    monkeypatch.setattr(engine, "_stream", stream)
+    asked = []
+
+    def line_text(boxes):
+        asked.append(boxes)
+        return ["the second source line"]
+
+    out = tmp_path / "out"
+    result = engine.run_single_rescue(
+        model_path, stored_path, out, NullSink(), threading.Event(), line_text=line_text,
+    )
+    assert result.unreadable == 1 and result.filled == 1 and len(asked) == 1
+    md = result.markdown
+    crop_ref = "![](images/0.jpg)"
+    note = UNREADABLE_FILLED + "the second source line"
+    assert md.index("line0") < md.index(crop_ref) < md.index(note) < md.index("line2")
+    # 저장 페이지(절반 해상도)에서 그 줄만 여백과 함께 잘랐다 — 이웃 줄은 들지 않는다
+    with Image.open(out / "images" / "0.jpg") as crop:
+        assert 420 <= crop.width <= 470 and 12 <= crop.height <= 25
+        gray = crop.convert("L")
+        assert gray.getpixel((crop.width // 2, crop.height // 2)) < 60
+        assert gray.getpixel((crop.width // 2, 0)) > 200 and gray.getpixel((crop.width // 2, crop.height - 1)) > 200
+    raw = json.loads((out / "raw_pages.json").read_text(encoding="utf-8"))["pages"][0]
+    assert "<|ref|>image<|/ref|>" in raw and "<|ref|>unreadable<|/ref|>" in raw
+
+
+def test_run_single_rescue_surfaces_an_unrescuable_page(tmp_path, monkeypatch):
+    from app.engine.region_rescue import RescueFailed
+
+    page_path = tmp_path / "page.png"
+    Image.new("RGB", (400, 400), "black").save(page_path)  # 자를 빈 행이 없는 한 덩어리
+
+    async def stream(payload, sink, cancel, repetition, page_cap=None):
+        error = RepetitiveOutputError("loop")
+        error.partial_text = "<PAGE><BLOCK>text[0, 0, 999, 999]<FORK>x x x"
+        raise error
+
+    engine = SGLangEngine(Settings())
+    monkeypatch.setattr(engine, "load", lambda: None)
+    monkeypatch.setattr(engine, "_stream", stream)
+    with pytest.raises(RescueFailed):
+        engine.run_single_rescue(page_path, page_path, tmp_path / "out", NullSink(), threading.Event())

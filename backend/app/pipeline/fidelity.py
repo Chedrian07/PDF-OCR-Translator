@@ -135,6 +135,10 @@ _EQUATION_TYPES = frozenset({
 # 수식 블록이 페이지를 이만큼 넘게 덮으면 분류를 믿지 않는다 — 그림과 같은 이유로
 # (놓친 페이지를 통째로 한 블록으로 부르는 경우) 정답이 사라지는 것을 막는다.
 _EQUATION_MAX_COVER = 0.5
+# 영역 재처리로도 모델이 끝내 못 읽은 줄의 안내 블록(engine.region_rescue.UNREADABLE_LABEL).
+# 원본 PDF 텍스트를 실을 수 있어 **후보에서만** 뺀다 — 넣으면 채택 게이트가 정답을 정답과
+# 비교해 모델을 재지 못한다. 정답에는 그 줄이 남으므로 못 읽은 만큼 점수가 깎인다.
+_UNREADABLE_TYPE = "unreadable"
 
 
 def normalize(text: str) -> str:
@@ -284,11 +288,19 @@ def _trusted_figures(
     이유인 바로 그 실패에서 침묵한다.** 원본 PDF가 거기에 아무것도 그리지 않았다면
     그 분류는 틀린 것이므로 무시한다.
     """
+    # 인식 불가 줄의 원본 이미지(안내 블록과 같은 상자)는 모델이 분류한 그림이 아니다 — 그 줄은
+    # 정답에 남아 못 읽은 만큼 깎여야 한다(옅은 배경 상자가 그려진 줄이면 '그림'으로 믿게 된다)
+    line_crops = {
+        tuple(b.get("bbox") or ()) for b in blocks
+        if isinstance(b, dict) and str(b.get("type") or "") == _UNREADABLE_TYPE
+    }
     candidates = []
     for i, b in enumerate(blocks):
         if not isinstance(b, dict):
             continue
         if str(b.get("type") or "") not in _FIGURE_TYPES and not b.get("image"):
+            continue
+        if line_crops and tuple(b.get("bbox") or ()) in line_crops:
             continue
         rect = _block_rect(fitz, page, b)
         if rect is not None and rect.get_area() > 0:
@@ -335,16 +347,18 @@ def ocr_text(blocks: list[dict], excluded: set[int] | None = None) -> str:
     '수식')의 블록 내용은 후보에도 남겨야 한다 — 예전에는 타입만 보고 늘 빼서, 수식
     분류를 불신한 페이지가 정답에만 수식이 남아 열화로 보였다.
     excluded가 None이면 타입만 보고 그림·수식 블록을 뺀다(영역 검증 없는 호출용).
+    인식 불가 안내 블록(_UNREADABLE_TYPE)은 어느 쪽이든 후보에서 뺀다.
     """
     if excluded is None:
-        skip = _EQUATION_TYPES | _FIGURE_TYPES
+        skip = _EQUATION_TYPES | _FIGURE_TYPES | {_UNREADABLE_TYPE}
         return " ".join(
             str(b.get("content") or "")
             for b in blocks
             if str(b.get("type") or "") not in skip
         )
     return " ".join(
-        str(b.get("content") or "") for i, b in enumerate(blocks) if i not in excluded
+        str(b.get("content") or "") for i, b in enumerate(blocks)
+        if i not in excluded and str(b.get("type") or "") != _UNREADABLE_TYPE
     )
 
 

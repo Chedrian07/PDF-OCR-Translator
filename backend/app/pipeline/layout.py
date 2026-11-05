@@ -325,6 +325,10 @@ def render_layout_html(
             btype = b.get("type") or "text"
             if not _SAFE_TYPE.match(btype):
                 btype = "text"
+            if btype == "unreadable":
+                # 영역 재처리로도 못 읽은 줄의 안내 — 같은 상자의 원본 줄 크롭(facsimile이면 페이지
+                # 이미지)이 이미 그 줄을 보인다. 얹으면 원본 줄 위를 안내문이 덮는다.
+                continue
             image_name = b.get("image")
             if image_name and re.fullmatch(r"[\w.-]+", str(image_name)):
                 # facsimile은 완성된 페이지 이미지가 그림·표·수식까지 이미 포함한다.

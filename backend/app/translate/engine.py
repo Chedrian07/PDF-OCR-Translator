@@ -228,7 +228,7 @@ class _TranslationRun:
     sanitized_n: int = 0  # sanitize 치환 총건수 (모든 complete 출력 경로 합산)
     kept_original: list[str] = field(default_factory=list)
     # 관측용 사유별 집계 — "왜 이 문단이 영어로 남았나"를 report.json에서 구분한다.
-    skip_reasons: dict[str, int] = field(default_factory=dict)   # references / already-korean / non-linguistic / identifier
+    skip_reasons: dict[str, int] = field(default_factory=dict)   # references / already-korean / non-linguistic / identifier / unreadable
     # gate-rejected / placeholder-mismatch / empty-output / api-rejected / truncated /
     # timeout / degenerate-output
     kept_reasons: dict[str, int] = field(default_factory=dict)

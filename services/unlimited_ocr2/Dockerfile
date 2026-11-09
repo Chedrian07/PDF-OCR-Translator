@@ -1,5 +1,5 @@
-FROM ghcr.io/astral-sh/uv:0.12.23@sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21 AS uv
-FROM python:3.12-slim-bookworm@sha256:54c85f3c47607a77f32adec749d3c81d1348bf25833671f512b26a9b6d778cb3
+FROM ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 AS uv
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df
 COPY --from=uv /uv /bin/uv
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends libnuma1 libgomp1 build-essential && rm -rf /var/lib/apt/lists/*
 COPY services/unlimited_ocr2/requirements.lock /srv/requirements.lock
